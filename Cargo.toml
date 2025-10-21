@@ -1,0 +1,44 @@
+[package]
+    description = "Lightbulb: modern ML inference/training runner on Candle"
+    edition     = "2024"
+    license     = "MIT OR Apache-2.0"
+    name        = "lightbulb"
+    repository  = "https://github.com/ciresnave/lightbulb"
+    version     = "0.1.0"
+
+[features]
+    cuda = ["candle-core/cuda", "candle-nn/cuda", "candle-transformers/cuda"]
+    default = []
+    flash-attn = ["candle-transformers/flash-attn"]
+    metal = [
+        "candle-core/metal",
+        "candle-nn/metal",
+        "candle-transformers/metal",
+    ]
+
+[dependencies]
+    anyhow             = "1"
+    clap               = { version = "4", features = ["derive"] }
+    parking_lot        = "0.12"
+    rand               = "0.8"
+    rayon              = "1.10"
+    serde              = { version = "1", features = ["derive"] }
+    serde_json         = "1"
+    thiserror          = "1"
+    tokenizers         = "0.21"
+    tokio              = { version = "1", features = ["macros", "rt-multi-thread"] }
+    tracing            = "0.1"
+    tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+    # Configuration management
+    distributed-config = { workspace = true }
+
+    # Model Context Protocol implementation
+    mocopr = { workspace = true }
+
+    # Upstream Candle crates (pin to a released version; adjust as needed)
+    candle-core         = { git = "https://github.com/huggingface/candle", package = "candle-core", rev = "9fe623237a515f95f70d117c0a6da610c28a5ecd" }
+    candle-nn           = { git = "https://github.com/huggingface/candle", package = "candle-nn", rev = "9fe623237a515f95f70d117c0a6da610c28a5ecd" }
+    candle-transformers = { git = "https://github.com/huggingface/candle", package = "candle-transformers", rev = "9fe623237a515f95f70d117c0a6da610c28a5ecd" }
+    # Optional; enable behind feature if/when needed
+    # candle-flash-attn = { git = "https://github.com/huggingface/candle", package = "candle-flash-attn", optional = true }
