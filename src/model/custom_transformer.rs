@@ -382,9 +382,18 @@ impl BatchedTransformer {
         }
 
         // Pass through all transformer blocks
-        // TEMPORARY: Hardcode index_pos to 0 until we figure out the correct RoPE position logic
-        // The issue is that changing this from 0 causes immediate divergence at step 0
-        let index_pos = 0;
+        // For RoPE position:
+        // - During prefill: use 0 (processing first token(s) of prompt)
+        // - During decode: use context_lens (position in sequence)
+        // Each request may be at a different position, but for single-request batches
+        // or when all requests are at the same position, we can use the first one
+        let index_pos = if metadata.is_prefill {
+            0
+        } else {
+            // During decode, the position is how many tokens we've already processed
+            // context_lens tells us this
+            metadata.context_lens.get(0).copied().unwrap_or(0)
+        };
 
         for (layer_idx, block) in self.blocks.iter().enumerate() {
             hidden_states = block.forward(
