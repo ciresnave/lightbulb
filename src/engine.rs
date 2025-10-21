@@ -440,6 +440,7 @@ impl BatchExecutor {
     /// Clear the cached IndicesAndMask at the start of a new forward pass
     /// This should be called before processing a new token
     pub fn clear_iam_cache(&mut self) {
+        eprintln!("DEBUG: Clearing IAM cache for new forward pass");
         self.cached_iam = None;
     }
     /// Append key-value tensors to cache for a specific layer

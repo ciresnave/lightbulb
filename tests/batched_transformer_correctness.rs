@@ -106,7 +106,7 @@ fn tensors_close(a: &Tensor, b: &Tensor, rtol: f32, atol: f32) -> Result<bool> {
 }
 
 #[test]
-#[ignore] // Requires model files
+#[ignore]// Requires model files
 fn test_single_token_forward() -> Result<()> {
     println!("\n=== Test: Single Token Forward Pass ===\n");
 
@@ -307,7 +307,7 @@ fn test_single_token_forward() -> Result<()> {
 }
 
 #[test]
-#[ignore] // Requires model files
+#[ignore]// Requires model files
 fn test_batch_forward() -> Result<()> {
     println!("\n=== Test: Batch Forward Pass ===\n");
 
@@ -509,7 +509,15 @@ fn test_multi_step_generation() -> Result<()> {
         let next_token = logits.squeeze(0)?.argmax(0)?.to_scalar::<u32>()?;
 
         sequential_tokens.push(next_token);
-        println!("  Step {}: token {}", step, next_token);
+        
+        // Debug: Show top-5 logits
+        let logits_vec = logits.flatten_all()?.to_vec1::<f32>()?;
+        let mut indexed: Vec<(usize, f32)> = logits_vec.iter().enumerate().map(|(i, &v)| (i, v)).collect();
+        indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+        println!("  Step {} (seq): token {} (logit={:.2}), top-5: {:?}", 
+            step, next_token, indexed[0].1,
+            &indexed[0..5].iter().map(|(idx, val)| format!("{}:{:.1}", idx, val)).collect::<Vec<_>>()
+        );
     }
 
     // Batched generation
@@ -545,13 +553,22 @@ fn test_multi_step_generation() -> Result<()> {
             context_lens: vec![step],
         };
 
+        println!("\n  Batched Step {}: slot_offset={}, context_len={}", step, step, step);
         let logits = batched_model.forward(&input, &mut batch_executor, &metadata)?;
 
         // Get next token (argmax)
         let next_token = logits.squeeze(0)?.argmax(0)?.to_scalar::<u32>()?;
 
         batched_tokens.push(next_token);
-        println!("  Step {}: token {}", step, next_token);
+        
+        // Debug: Show top-5 logits and compare with sequential
+        let logits_vec = logits.flatten_all()?.to_vec1::<f32>()?;
+        let mut indexed: Vec<(usize, f32)> = logits_vec.iter().enumerate().map(|(i, &v)| (i, v)).collect();
+        indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+        println!("  Step {} (bat): token {} (logit={:.2}), top-5: {:?}", 
+            step, next_token, indexed[0].1,
+            &indexed[0..5].iter().map(|(idx, val)| format!("{}:{:.1}", idx, val)).collect::<Vec<_>>()
+        );
     }
 
     // Compare generated sequences

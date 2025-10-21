@@ -220,16 +220,35 @@ impl BatchedAttention {
             .append_kv(layer_idx, &k, &v, &iam)
             .map_err(|e| candle_core::Error::Msg(format!("Failed to append KV: {}", e)))?;
 
-        // === Step 4.3: Use full KV cache ===
-        // ScatteredKvCache uses masks to control which positions each batch element can see
-        // We don't narrow because each batch element has its data at different positions
-        // The attention mask from IndicesAndMask handles the visibility correctly
+        // === Step 4.3: Narrow KV cache to valid sequence length ===
+        // The cache returns the full buffer (e.g., 512 positions), but we only want
+        // the valid portion that's been filled so far
+        // For single-sequence case: valid_len = context_len + current_seq_len
+        // For multi-sequence: each sequence may have different valid lengths
+        let max_valid_len = metadata
+            .context_lens
+            .iter()
+            .zip(metadata.sequence_lengths.iter())
+            .map(|(ctx, seq)| ctx + seq)
+            .max()
+            .unwrap_or(1);
+
+        let k_full = k_full.narrow(2, 0, max_valid_len)?;
+        let v_full = v_full.narrow(2, 0, max_valid_len)?;
+
+        if layer_idx == 0 {
+            eprintln!(
+                "DEBUG Layer 0: Narrowed cache to {} positions (context_lens={:?}, seq_lens={:?})",
+                max_valid_len, metadata.context_lens, metadata.sequence_lengths
+            );
+        }
 
         // === Step 4.5: Expand KV heads for GQA ===
         // If using Grouped Query Attention, repeat KV heads to match Q heads
-        // This needs to be done AFTER retrieving from cache
+        // This needs to be done AFTER narrowing the cache
         let (k_full, v_full) = if self.num_heads != self.num_kv_heads {
             let repeat_factor = self.num_heads / self.num_kv_heads;
+            // Get dimensions AFTER narrowing
             let (_batch, _num_kv_heads, total_seq_len, _head_dim) = k_full.dims4()?;
 
             if layer_idx == 0 {
@@ -278,6 +297,15 @@ impl BatchedAttention {
         // k_full, v_full shape: [batch, num_heads, total_seq_len, head_dim]
         // where total_seq_len = historical_tokens + seq_len
 
+        if layer_idx == 0 {
+            eprintln!(
+                "DEBUG Layer 0 Attention: q shape={:?}, k_full shape={:?}, v_full shape={:?}",
+                q.dims(),
+                k_full.dims(),
+                v_full.dims()
+            );
+        }
+
         if layer_idx <= 1 {
             eprintln!(
                 "DEBUG Layer {} attention inputs: Q: {:?}, K: {:?}, V: {:?}",
@@ -311,7 +339,10 @@ impl BatchedAttention {
             );
         }
 
-        let attn_output = self.compute_attention(&q, &k_full, &v_full, Some(iam.mask()))?;
+        // Since we've narrowed K/V to only valid positions, we don't need the ScatteredCache mask
+        // The mask was designed for the full 512-position buffer, but would cause shape mismatch
+        // after narrowing. The causal mask (applied inside compute_attention) is sufficient.
+        let attn_output = self.compute_attention(&q, &k_full, &v_full, None)?;
 
         if layer_idx == 0 {
             let attn_vec = attn_output.flatten_all()?.to_vec1::<f32>()?;
@@ -432,6 +463,11 @@ impl BatchedAttention {
         // === Apply ScatteredCache Mask ===
         // This mask prevents batch elements from attending to each other's cache positions
         let attn_weights = if let Some(cache_mask) = mask {
+            eprintln!(
+                "DEBUG: Before mask - attn_weights shape={:?}, cache_mask shape={:?}",
+                attn_weights.dims(),
+                cache_mask.dims()
+            );
             // cache_mask shape: [batch, 1, seq_q, context]
             // attn_weights shape: [batch, heads, seq_q, seq_k]
             // The mask should broadcast across heads
