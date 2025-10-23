@@ -421,8 +421,10 @@ mod tests {
 
     fn create_dummy_cos_sin(max_seq_len: usize, head_dim: usize) -> (Tensor, Tensor) {
         let device = Device::Cpu;
-        let cos = Tensor::ones((max_seq_len, head_dim), candle_core::DType::F32, &device).unwrap();
-        let sin = Tensor::zeros((max_seq_len, head_dim), candle_core::DType::F32, &device).unwrap();
+        // RoPE cos/sin are generated at half the head dimension (freqs for pairs)
+        let half_dim = head_dim / 2;
+        let cos = Tensor::ones((max_seq_len, half_dim), candle_core::DType::F32, &device).unwrap();
+        let sin = Tensor::zeros((max_seq_len, half_dim), candle_core::DType::F32, &device).unwrap();
         (cos, sin)
     }
 
@@ -437,7 +439,7 @@ mod tests {
         let intermediate_size = 128;
         let rms_norm_eps = 1e-5;
         let batch_size = 2;
-        let seq_len = 4;
+        let seq_len = 1; // Decode mode: single token per request
         let max_seq_len = 16;
         let num_layers = 2;
 
@@ -457,7 +459,7 @@ mod tests {
         )
         .unwrap();
 
-        // Create test inputs
+        // Create test inputs - decode mode expects [batch_size, 1, hidden_size]
         let input = Tensor::randn(0f32, 1f32, (batch_size, seq_len, hidden_size), &device).unwrap();
         let (cos, sin) = create_dummy_cos_sin(max_seq_len, head_dim);
 
@@ -467,7 +469,8 @@ mod tests {
 
         let request_ids: Vec<usize> = (0..batch_size).collect();
         let positions: Vec<usize> = vec![0; batch_size];
-        let metadata = BatchMetadata::from_decode_batch(request_ids.clone(), positions);
+        let metadata =
+            BatchMetadata::from_decode_batch(request_ids.clone(), positions.clone(), positions);
 
         // Prepare batch (assign cache indices)
         let mut contexts: Vec<RequestContext> = request_ids
@@ -529,7 +532,8 @@ mod tests {
 
         let request_ids = vec![0];
         let positions = vec![0];
-        let metadata = BatchMetadata::from_decode_batch(request_ids.clone(), positions);
+        let metadata =
+            BatchMetadata::from_decode_batch(request_ids.clone(), positions.clone(), positions);
 
         let mut contexts = vec![{
             let mut ctx = RequestContext::new(crate::engine::Request {
@@ -615,7 +619,8 @@ mod tests {
 
         let request_ids = vec![0, 1];
         let positions = vec![0, 0];
-        let metadata = BatchMetadata::from_decode_batch(request_ids.clone(), positions);
+        let metadata =
+            BatchMetadata::from_decode_batch(request_ids.clone(), positions.clone(), positions);
 
         let mut contexts: Vec<RequestContext> = request_ids
             .iter()

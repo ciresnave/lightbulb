@@ -99,7 +99,7 @@ impl BatchedLlamaWrapper {
         // Sequential processing (simpler, more predictable)
         // Note: Parallel version with Arc<Mutex<>> showed mutex contention
         for batch_idx in 0..metadata.batch_size {
-            let position = metadata.slot_offsets[batch_idx];
+            let position = metadata.slot_offsets()[batch_idx];
 
             // Extract token for this request (use tensor indexing, not get)
             let token = tokens.i(batch_idx)?.unsqueeze(0)?; // [1, 1]

@@ -82,10 +82,12 @@ where
         // Process each request sequentially
         // TODO: Explore true batched forward pass for 6x speedup
         for batch_idx in 0..metadata.batch_size {
-            let position = metadata.slot_offsets[batch_idx];
+            let position = metadata.slot_offsets()[batch_idx];
 
             // Extract single token for this request
-            let token = tokens.i(batch_idx)?.unsqueeze(0)?.unsqueeze(0)?; // [1, 1]
+            // Input tokens is [batch_size, 1], so i(batch_idx) gives us [1]
+            // We need to reshape to [1, 1] for model forward pass
+            let token = tokens.i(batch_idx)?.reshape(&[1, 1])?; // [1, 1]
 
             // Model-agnostic forward pass
             let logits =

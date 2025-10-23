@@ -2,8 +2,8 @@
 ///
 /// This implementation provides a unified architecture that can be configured to support
 /// various transformer-based language models through different configuration constructors.
-use candle_core::{D, DType, Device, IndexOp, Module, Result, Tensor};
-use candle_nn::{Embedding, Linear, RmsNorm, VarBuilder, embedding};
+use candle_core::{DType, Device, IndexOp, Module, Result, Tensor};
+use candle_nn::{Embedding, Linear, RmsNorm, VarBuilder};
 use std::collections::HashMap;
 
 use crate::engine::BatchExecutor;
@@ -395,6 +395,11 @@ impl BatchedTransformer {
             metadata.context_lens.get(0).copied().unwrap_or(0)
         };
 
+        eprintln!(
+            "DEBUG TRANSFORMER: is_prefill={}, index_pos={}, context_lens={:?}",
+            metadata.is_prefill, index_pos, metadata.context_lens
+        );
+
         for (layer_idx, block) in self.blocks.iter().enumerate() {
             hidden_states = block.forward(
                 &hidden_states,
@@ -439,13 +444,26 @@ impl BatchedTransformer {
             &hs_vec[0..3.min(hs_vec.len())]
         );
 
-        // Extract last token's hidden state (same as Candle's Llama)
-        // For prefill: [1, seq_len, hidden] -> [1, hidden]
+        // Extract last token's hidden state for each sequence
+        // For prefill: [1, seq_len, hidden] -> [batch_size, hidden] (one last token per sequence)
         // For decode: [batch, 1, hidden] -> [batch, hidden]
-        let (dim0, dim1, _) = hidden_states.dims3()?;
+        let (dim0, dim1, hidden_dim) = hidden_states.dims3()?;
         let last_hidden = if metadata.is_prefill {
-            // Prefill: batch=1, seq=seq_len, extract last token
-            hidden_states.i((.., dim1 - 1, ..))?.contiguous()?
+            // Prefill: extract last token for each sequence using SequenceInfo
+            // For padded sequences, the last real token is at start_pos + actual_length - 1
+            let batch_size = metadata.batch_size;
+            let mut last_tokens = Vec::with_capacity(batch_size);
+
+            for i in 0..batch_size {
+                // Use SequenceInfo to get the correct position in the padded tensor
+                let seq_info = &metadata.sequences[i];
+                let last_pos = seq_info.start_pos + seq_info.actual_length - 1;
+                let token_hidden = hidden_states.i((.., last_pos, ..))?.contiguous()?;
+                last_tokens.push(token_hidden);
+            }
+
+            // Stack into [batch_size, hidden]
+            Tensor::cat(&last_tokens, 0)?
         } else {
             // Decode: batch=batch, seq=1, extract the single token
             hidden_states.i((.., 0, ..))?.contiguous()?
@@ -585,9 +603,9 @@ mod tests {
             DType::F32,
         )?;
 
-        // Check shapes
-        assert_eq!(cos.dims(), &[max_seq_len, head_dim]);
-        assert_eq!(sin.dims(), &[max_seq_len, head_dim]);
+        // Check shapes - RoPE frequencies are half dimension for Llama
+        assert_eq!(cos.dims(), &[max_seq_len, head_dim / 2]);
+        assert_eq!(sin.dims(), &[max_seq_len, head_dim / 2]);
 
         // Check that cos^2 + sin^2 ≈ 1 (approximately, due to duplication)
         let cos_sq = cos.sqr()?;
@@ -618,9 +636,9 @@ mod tests {
             DType::F32,
         )?;
 
-        // Verify dimensions are correct
-        assert_eq!(cos.dims(), &[max_seq_len, head_dim]);
-        assert_eq!(sin.dims(), &[max_seq_len, head_dim]);
+        // Verify dimensions are correct - RoPE uses half dimension for Llama
+        assert_eq!(cos.dims(), &[max_seq_len, head_dim / 2]);
+        assert_eq!(sin.dims(), &[max_seq_len, head_dim / 2]);
 
         // Verify values are in valid range [-1, 1]
         let cos_vals: Vec<Vec<f32>> = to_vec2_round(&cos, 4)?;
@@ -639,5 +657,155 @@ mod tests {
         }
 
         Ok(())
+    }
+
+    // ===== RoPE Position Calculation Tests =====
+
+    #[test]
+    fn test_rope_position_prefill_mode() {
+        // In prefill mode, index_pos should always be 0
+        let metadata =
+            crate::model::batch_metadata::BatchMetadata::from_prefill_batch(vec![0], vec![5]);
+
+        // Simulate the logic from custom_transformer.rs
+        let index_pos = if metadata.is_prefill {
+            0
+        } else {
+            metadata.context_lens.get(0).copied().unwrap_or(0)
+        };
+
+        assert_eq!(index_pos, 0, "Prefill mode should always use position 0");
+    }
+
+    #[test]
+    fn test_rope_position_decode_mode_various_positions() {
+        // Test decode mode at different positions
+        let positions = vec![0, 1, 5, 10, 100, 511];
+
+        for pos in positions {
+            let metadata = crate::model::batch_metadata::BatchMetadata::from_decode_batch(
+                vec![0],
+                vec![pos],
+                vec![pos],
+            );
+
+            let index_pos = if metadata.is_prefill {
+                0
+            } else {
+                metadata.context_lens.get(0).copied().unwrap_or(0)
+            };
+
+            assert_eq!(
+                index_pos, pos,
+                "Decode mode should use context_lens[0] = {}",
+                pos
+            );
+        }
+    }
+
+    #[test]
+    fn test_rope_position_decode_empty_context_lens() {
+        // Edge case: empty context_lens array
+        let metadata =
+            crate::model::batch_metadata::BatchMetadata::from_decode_batch(vec![], vec![], vec![]);
+
+        let index_pos = if metadata.is_prefill {
+            0
+        } else {
+            metadata.context_lens.get(0).copied().unwrap_or(0)
+        };
+
+        assert_eq!(index_pos, 0, "Empty context_lens should default to 0");
+    }
+
+    #[test]
+    fn test_rope_position_max_position_embedding() {
+        // Test at max position (edge case near limit)
+        let max_pos = 8191; // Just below 8192 limit for Llama 3
+
+        let metadata = crate::model::batch_metadata::BatchMetadata::from_decode_batch(
+            vec![0],
+            vec![max_pos],
+            vec![max_pos],
+        );
+
+        let index_pos = if metadata.is_prefill {
+            0
+        } else {
+            metadata.context_lens.get(0).copied().unwrap_or(0)
+        };
+
+        assert_eq!(index_pos, max_pos, "Should handle max position correctly");
+    }
+
+    #[test]
+    fn test_rope_position_multi_token_prefill() {
+        // Prefill with multiple tokens (prompt)
+        let metadata =
+            crate::model::batch_metadata::BatchMetadata::from_prefill_batch(vec![0], vec![10]);
+
+        let index_pos = if metadata.is_prefill {
+            0
+        } else {
+            metadata.context_lens.get(0).copied().unwrap_or(0)
+        };
+
+        assert_eq!(
+            index_pos, 0,
+            "Multi-token prefill should still use position 0 for first token"
+        );
+    }
+
+    #[test]
+    fn test_rope_position_increments_across_decode_steps() {
+        // Simulate autoregressive generation
+        for step in 0..10 {
+            let metadata = if step == 0 {
+                crate::model::batch_metadata::BatchMetadata::from_prefill_batch(vec![0], vec![1])
+            } else {
+                crate::model::batch_metadata::BatchMetadata::from_decode_batch(
+                    vec![0],
+                    vec![step],
+                    vec![step],
+                )
+            };
+
+            let index_pos = if metadata.is_prefill {
+                0
+            } else {
+                metadata.context_lens.get(0).copied().unwrap_or(0)
+            };
+
+            if step == 0 {
+                assert_eq!(index_pos, 0, "First step (prefill) should be 0");
+            } else {
+                assert_eq!(
+                    index_pos, step,
+                    "Decode step {} should use position {}",
+                    step, step
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_rope_position_batch_uses_first_element() {
+        // With batching, we use context_lens[0]
+        let metadata = crate::model::batch_metadata::BatchMetadata::from_decode_batch(
+            vec![0, 1, 2],   // Request IDs
+            vec![5, 10, 15], // Different positions
+            vec![5, 10, 15], // Context lens
+        );
+
+        let index_pos = if metadata.is_prefill {
+            0
+        } else {
+            metadata.context_lens.get(0).copied().unwrap_or(0)
+        };
+
+        assert_eq!(
+            index_pos, 5,
+            "Should use first element of context_lens in batch scenario"
+        );
     }
 }

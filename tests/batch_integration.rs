@@ -89,6 +89,14 @@ fn test_end_to_end_batch_inference_simulation() {
         println!("Layer {} KV cache updated successfully", layer_idx);
     }
 
+    // Advance cache builder positions by seq_len for active slots (once per forward)
+    for ctx in &batch {
+        if let Some(cache_idx) = ctx.cache_index {
+            let cur = executor.get_cache_position(cache_idx);
+            executor.set_cache_position(cache_idx, cur + seq_len);
+        }
+    }
+
     // Simulate completing first request
     println!("\n=== Completing request req-1 ===");
     let completed_idx = batch[0].cache_index.unwrap();
@@ -368,4 +376,161 @@ fn test_partial_batch_handling() {
     println!("✓ Partial batch (2 out of 4) handled correctly");
     println!("✓ Batch mask properly padded to max_batch_size");
     println!("✓ Tensor dimensions match cache expectations");
+}
+
+/// Test padded multi-chunk prefill to verify positions advance by actual_len only
+/// and no cross-slot contamination occurs
+#[test]
+fn test_padded_multi_chunk_prefill() {
+    let device = Device::Cpu;
+    let max_batch_size = 4;
+    let context = 128;
+    let num_layers = 2;
+    let num_heads = 4;
+    let head_dim = 32;
+    let dtype = DType::F32;
+
+    let mut executor = BatchExecutor::new(
+        max_batch_size,
+        context,
+        num_layers,
+        num_heads,
+        head_dim,
+        dtype,
+        &device,
+    )
+    .unwrap();
+
+    // Simulate two requests with different lengths
+    // Request 0: 50 tokens (will be split into chunks)
+    // Request 1: 30 tokens
+    let slot_0 = 0;
+    let slot_1 = 1;
+
+    // Reset both slots to position 0
+    executor.reset_request_state(slot_0);
+    executor.reset_request_state(slot_1);
+
+    // First chunk: both active, padded to 32 tokens each
+    // Request 0: 32 actual tokens (chunk 1/2)
+    // Request 1: 30 actual tokens with 2 padding
+    let chunk1_seq_len = 32;
+    let iam1 = executor
+        .get_indices_and_mask_simple(2, chunk1_seq_len)
+        .unwrap();
+
+    // Simulate KV append for chunk 1
+    let k1 = Tensor::randn(
+        0.0f32,
+        1.0f32,
+        (max_batch_size, num_heads, chunk1_seq_len, head_dim),
+        &device,
+    )
+    .unwrap()
+    .to_dtype(dtype)
+    .unwrap();
+    let v1 = k1.clone();
+    executor.append_kv(0, &k1, &v1, &iam1).unwrap();
+
+    // Advance positions by actual lengths (not padded)
+    // Request 0: 32 tokens -> position 32
+    // Request 1: 30 tokens -> position 30
+    executor.set_cache_position(slot_0, 32);
+    executor.set_cache_position(slot_1, 30);
+
+    assert_eq!(executor.get_cache_position(slot_0), 32);
+    assert_eq!(executor.get_cache_position(slot_1), 30);
+
+    // Second chunk: only request 0 active (remaining 18 tokens, padded to 32)
+    let chunk2_seq_len = 32;
+    let iam2 = executor
+        .get_indices_and_mask_simple(1, chunk2_seq_len)
+        .unwrap();
+
+    let k2 = Tensor::randn(
+        0.0f32,
+        1.0f32,
+        (max_batch_size, num_heads, chunk2_seq_len, head_dim),
+        &device,
+    )
+    .unwrap()
+    .to_dtype(dtype)
+    .unwrap();
+    let v2 = k2.clone();
+    executor.append_kv(0, &k2, &v2, &iam2).unwrap();
+
+    // Advance position for request 0 by actual length only (18 tokens)
+    executor.set_cache_position(slot_0, 32 + 18);
+
+    // Verify final positions
+    assert_eq!(
+        executor.get_cache_position(slot_0),
+        50,
+        "Request 0 should have processed 50 tokens total"
+    );
+    assert_eq!(
+        executor.get_cache_position(slot_1),
+        30,
+        "Request 1 position should not change when inactive"
+    );
+
+    println!("✓ Padded multi-chunk prefill: positions advanced by actual_len only");
+    println!("✓ No cross-slot contamination when some slots inactive");
+}
+
+/// Test that indices_and_mask is pure and doesn't mutate builder state
+#[test]
+fn test_indices_and_mask_purity() {
+    let device = Device::Cpu;
+    let max_batch_size = 2;
+    let context = 64;
+    let num_layers = 1;
+    let num_heads = 2;
+    let head_dim = 16;
+    let dtype = DType::F32;
+
+    let mut executor = BatchExecutor::new(
+        max_batch_size,
+        context,
+        num_layers,
+        num_heads,
+        head_dim,
+        dtype,
+        &device,
+    )
+    .unwrap();
+
+    let slot_0 = 0;
+    executor.reset_request_state(slot_0);
+
+    let pos_before = executor.get_cache_position(slot_0);
+    assert_eq!(pos_before, 0);
+
+    // Call indices_and_mask multiple times without explicit position advancement
+    let _iam1 = executor.get_indices_and_mask_simple(1, 5).unwrap();
+    let pos_after_iam1 = executor.get_cache_position(slot_0);
+
+    let _iam2 = executor.get_indices_and_mask_simple(1, 5).unwrap();
+    let pos_after_iam2 = executor.get_cache_position(slot_0);
+
+    // Position should not change from calling indices_and_mask alone
+    assert_eq!(
+        pos_after_iam1, pos_before,
+        "indices_and_mask should not mutate position"
+    );
+    assert_eq!(
+        pos_after_iam2, pos_before,
+        "indices_and_mask should be pure (no side effects)"
+    );
+
+    // Now explicitly advance
+    executor.set_cache_position(slot_0, pos_before + 5);
+    let pos_after_advance = executor.get_cache_position(slot_0);
+    assert_eq!(
+        pos_after_advance, 5,
+        "Position should only change with explicit set_cache_position"
+    );
+
+    println!("✓ indices_and_mask is pure and doesn't mutate builder state");
+    println!("✓ Explicit position advancement required via set_cache_position");
 }

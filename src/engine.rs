@@ -1,11 +1,12 @@
 //! Engine: minimal single-request scheduler and request/state management
 
 use anyhow::Result;
-use candle_core::{DType, Device, Tensor};
-use candle_nn::kv_cache::{IndicesAndMask, ScatteredCacheBuilder, ScatteredKvCache};
+use candle_core::{DType, Device, IndexOp, Tensor};
 use parking_lot::Mutex;
 use std::collections::VecDeque;
 use std::sync::Arc;
+
+use crate::cache::parallel_cache_builder::{IndicesAndMask, ParallelCacheBuilder};
 
 #[derive(Debug, Clone)]
 pub struct Request {
@@ -71,7 +72,9 @@ impl RequestContext {
 
     /// Check if should continue generating
     pub fn should_continue(&self) -> bool {
-        self.state == RequestState::Decoding && self.tokens_generated < self.request.max_new_tokens
+        // Only continue when actively decoding. Pending requests are not yet started.
+        (self.state == RequestState::Decoding)
+            && self.tokens_generated < self.request.max_new_tokens
     }
 }
 
@@ -314,12 +317,12 @@ impl Default for BatchManager {
     }
 }
 
-/// Batch executor that coordinates with Candle's ScatteredKvCache
+/// Batch executor that coordinates with ParallelCacheBuilder
 /// Manages per-layer caches and executes batched forward passes
 pub struct BatchExecutor {
-    cache_builder: ScatteredCacheBuilder, // Persistent: tracks positions across forward passes
-    cached_iam: Option<IndicesAndMask>,   // Cached within a single forward pass
-    caches: Vec<ScatteredKvCache>,
+    cache_builder: ParallelCacheBuilder, // Persistent: tracks positions across forward passes
+    cached_iam: Option<IndicesAndMask>,  // Cached within a single forward pass
+    caches: Vec<crate::cache::parallel_cache_builder::ParallelKvCache>,
     batch_manager: BatchManager,
     max_batch_size: usize,
     batch_size: usize,
@@ -349,13 +352,13 @@ impl BatchExecutor {
         device: &Device,
     ) -> Result<Self> {
         // Create one persistent cache builder for tracking positions across steps
-        let cache_builder = ScatteredCacheBuilder::new(batch_size, context, dtype, device)?;
+        let cache_builder = ParallelCacheBuilder::new(batch_size, context, dtype, device)?;
 
         // Create one cache per layer, each with independent builder to avoid position offset bug
         let mut caches = Vec::with_capacity(num_layers);
         for _ in 0..num_layers {
             let layer_cache_builder =
-                ScatteredCacheBuilder::new(batch_size, context, dtype, device)?;
+                ParallelCacheBuilder::new(batch_size, context, dtype, device)?;
             caches.push(layer_cache_builder.make_cache(num_heads, head_dim)?);
         }
 
@@ -425,6 +428,13 @@ impl BatchExecutor {
             return Ok(iam.clone());
         }
 
+        crate::debug_engine!(
+            "IAM: seq_len={}, batch_size={}, builder positions={:?}",
+            seq_len,
+            batch_size,
+            self.cache_builder.positions()
+        );
+
         // First layer in this forward pass: generate new IAM
         // The persistent cache_builder tracks position across forward passes
         let mut batch_mask: Vec<bool> = vec![true; batch_size];
@@ -432,7 +442,21 @@ impl BatchExecutor {
             batch_mask.push(false);
         }
 
+        crate::debug_engine!(
+            "IAM_SIMPLE BEFORE: batch_size={}, seq_len={}, batch_mask={:?}, positions={:?}",
+            batch_size,
+            seq_len,
+            batch_mask,
+            self.cache_builder.positions()
+        );
+
         let iam = self.cache_builder.indices_and_mask(seq_len, &batch_mask)?;
+
+        crate::debug_engine!(
+            "IAM_SIMPLE AFTER: positions={:?}",
+            self.cache_builder.positions()
+        );
+
         self.cached_iam = Some(iam.clone());
         Ok(iam)
     }
@@ -440,9 +464,116 @@ impl BatchExecutor {
     /// Clear the cached IndicesAndMask at the start of a new forward pass
     /// This should be called before processing a new token
     pub fn clear_iam_cache(&mut self) {
-        eprintln!("DEBUG: Clearing IAM cache for new forward pass");
+        crate::debug_engine!("Clearing IAM cache for new forward pass");
         self.cached_iam = None;
     }
+
+    /// Get indices and mask for variable-length sequences (batched prefill)
+    ///
+    /// This version handles the case where different requests process different
+    /// numbers of tokens simultaneously (e.g., during batched prefill with
+    /// variable-length prompts).
+    ///
+    /// # Arguments
+    /// * `request_ids` - Which cache slots to use
+    /// * `seq_lengths` - Number of tokens each request is processing
+    ///
+    /// # Returns
+    /// IndicesAndMask with padded indices/masks
+    pub fn get_indices_and_mask_variable(
+        &mut self,
+        request_ids: &[usize],
+        seq_lengths: &[usize],
+    ) -> Result<IndicesAndMask> {
+        if request_ids.len() != seq_lengths.len() {
+            anyhow::bail!(
+                "request_ids and seq_lengths must have same length: got {} and {}",
+                request_ids.len(),
+                seq_lengths.len()
+            );
+        }
+
+        // Create batch mask and seq_lengths array aligned to max_batch_size
+        let mut batch_mask = vec![false; self.max_batch_size];
+        let mut batch_seq_lengths = vec![0; self.max_batch_size];
+
+        for (i, &req_id) in request_ids.iter().enumerate() {
+            if req_id < self.max_batch_size {
+                batch_mask[req_id] = true;
+                batch_seq_lengths[req_id] = seq_lengths[i];
+            } else {
+                anyhow::bail!(
+                    "Request ID {} exceeds max_batch_size {}",
+                    req_id,
+                    self.max_batch_size
+                );
+            }
+        }
+
+        crate::debug_cache!(
+            "[ENGINE] Variable IAM: request_ids={:?}, seq_lengths={:?}, positions={:?}",
+            request_ids,
+            seq_lengths,
+            self.cache_builder.positions()
+        );
+
+        let iam = self
+            .cache_builder
+            .indices_and_mask_variable(&batch_seq_lengths, &batch_mask)?;
+
+        crate::debug_cache!(
+            "[ENGINE] Generated variable IAM: indices shape={:?}, mask shape={:?}",
+            iam.indices.dims(),
+            iam.mask.dims()
+        );
+
+        Ok(iam)
+    }
+
+    /// Get indices and mask for specific request IDs (for parallel batching)
+    /// This version allows specifying exactly which cache slots to use
+    pub fn get_indices_and_mask_for_requests(
+        &mut self,
+        request_ids: &[usize],
+        seq_len: usize,
+    ) -> Result<IndicesAndMask> {
+        // If we already generated IAM for this forward pass, reuse it
+        if let Some(ref iam) = self.cached_iam {
+            return Ok(iam.clone());
+        }
+
+        // Create batch mask with true only for the specified request IDs
+        let mut batch_mask = vec![false; self.max_batch_size];
+        for &req_id in request_ids {
+            if req_id < self.max_batch_size {
+                batch_mask[req_id] = true;
+            } else {
+                anyhow::bail!(
+                    "Request ID {} exceeds max_batch_size {}",
+                    req_id,
+                    self.max_batch_size
+                );
+            }
+        }
+
+        eprintln!(
+            "DEBUG IAM BEFORE: batch_mask={:?}, seq_len={}, builder positions={:?}",
+            batch_mask,
+            seq_len,
+            self.cache_builder.positions()
+        );
+
+        let iam = self.cache_builder.indices_and_mask(seq_len, &batch_mask)?;
+
+        eprintln!(
+            "DEBUG IAM AFTER: builder positions={:?}",
+            self.cache_builder.positions()
+        );
+
+        self.cached_iam = Some(iam.clone());
+        Ok(iam)
+    }
+
     /// Append key-value tensors to cache for a specific layer
     ///
     /// # Arguments
@@ -468,6 +599,37 @@ impl BatchExecutor {
             );
         }
 
+        // Debug: log IAM indices and current builder positions to trace mapping
+        // Only print for small batches to avoid huge output
+        if iam.indices.dims().len() <= 2 {
+            if let Ok(indices_vec) = iam.indices.to_vec2::<u32>() {
+                eprintln!(
+                    "DEBUG append_kv: layer={} iam.indices.shape={:?} iam.indices={:?} iam.active={:?} positions={:?}",
+                    layer_idx,
+                    iam.indices.dims(),
+                    indices_vec,
+                    iam.active,
+                    self.cache_builder.positions()
+                );
+            } else {
+                eprintln!(
+                    "DEBUG append_kv: layer={} iam.indices.shape={:?} iam.active={:?} positions={:?}",
+                    layer_idx,
+                    iam.indices.dims(),
+                    iam.active,
+                    self.cache_builder.positions()
+                );
+            }
+        } else {
+            eprintln!(
+                "DEBUG append_kv: layer={} iam.indices.shape={:?} iam.active={:?} positions={:?}",
+                layer_idx,
+                iam.indices.dims(),
+                iam.active,
+                self.cache_builder.positions()
+            );
+        }
+
         Ok(self.caches[layer_idx].append(k, v, iam)?)
     }
 
@@ -476,6 +638,32 @@ impl BatchExecutor {
         self.batch_manager.release_cache_index(cache_index);
         // Reset the persistent cache builder's state for this batch index
         self.cache_builder.reset_batch_index(cache_index);
+    }
+
+    /// Reset cache builder state for a specific request ID (before prefill)
+    pub fn reset_request_state(&mut self, cache_index: usize) {
+        eprintln!(
+            "DEBUG: Resetting cache builder state for slot {}",
+            cache_index
+        );
+        self.cache_builder.reset_batch_index(cache_index);
+    }
+
+    /// **NEW**: Efficiently set cache position for a slot (O(1) operation)
+    ///
+    /// Replaces the old inefficient sync_cache_position that required O(n) iterations.
+    /// Uses ParallelCacheBuilder's set_position method.
+    pub fn set_cache_position(&mut self, cache_index: usize, position: usize) {
+        self.cache_builder.set_position(cache_index, position);
+        eprintln!(
+            "DEBUG: Set cache slot {} to position {} (efficient O(1))",
+            cache_index, position
+        );
+    }
+
+    /// Get current position for a cache slot
+    pub fn get_cache_position(&self, cache_index: usize) -> usize {
+        self.cache_builder.get_position(cache_index)
     }
 
     /// Get number of available batch slots
@@ -493,6 +681,52 @@ impl BatchExecutor {
     /// Get reference to device
     pub fn device(&self) -> &Device {
         &self.device
+    }
+
+    /// Get max batch size
+    pub fn max_batch_size(&self) -> usize {
+        self.max_batch_size
+    }
+
+    /// Get a Slot view for isolated operations on a specific cache slot
+    ///
+    /// This provides a convenient, type-safe way to work with individual slots
+    /// without accidentally mixing data between different requests.
+    ///
+    /// # Arguments
+    ///
+    /// * `slot_index` - Which batch slot to access (0..batch_size)
+    /// * `layer` - Which transformer layer's cache to access
+    ///
+    /// # Returns
+    ///
+    /// A `Slot` instance providing isolated access to the specified slot
+    ///
+    /// # Panics
+    ///
+    /// Panics if slot_index >= batch_size or layer >= num_layers
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Get slot 0 for layer 0
+    /// let mut slot = executor.get_slot_mut(0, 0)?;
+    /// slot.set_position(5);
+    /// slot.append(&k, &v)?;
+    /// ```
+    pub fn get_slot_mut(
+        &mut self,
+        slot_index: usize,
+        layer: usize,
+    ) -> crate::cache::parallel_cache_builder::Slot<'_> {
+        assert!(
+            layer < self.caches.len(),
+            "Layer {} out of bounds (num_layers={})",
+            layer,
+            self.caches.len()
+        );
+        self.cache_builder
+            .get_slot_mut(slot_index, &mut self.caches[layer])
     }
 }
 
@@ -1419,6 +1653,14 @@ mod tests {
         for layer_idx in 0..num_layers {
             let result = executor.append_kv(layer_idx, &k, &v, &iam);
             assert!(result.is_ok(), "Failed for layer {}", layer_idx);
+        }
+
+        // Advance cache builder positions once for this forward pass (seq_len=1)
+        for ctx in &batch {
+            if let Some(cache_idx) = ctx.cache_index {
+                let cur = executor.get_cache_position(cache_idx);
+                executor.set_cache_position(cache_idx, cur + 1);
+            }
         }
 
         // Should fail for invalid layer

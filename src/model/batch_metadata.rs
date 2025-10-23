@@ -12,6 +12,80 @@ use candle_core::{Device, Result, Tensor};
 /// their own mapping from UUIDs/strings to these numeric IDs.
 pub type RequestId = usize;
 
+/// Information about a single sequence in a batch
+///
+/// This struct is the single source of truth for a sequence's position and length,
+/// eliminating the need to keep separate arrays in sync.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SequenceInfo {
+    /// Starting position of this sequence in the concatenated tensor
+    /// For example, in a batch of 3 sequences padded to 512 tokens each:
+    /// - Sequence 0: start_pos = 0
+    /// - Sequence 1: start_pos = 512
+    /// - Sequence 2: start_pos = 1024
+    pub start_pos: usize,
+
+    /// Number of actual (non-padding) tokens in this sequence
+    /// This is the true prompt/generation length, excluding any padding
+    pub actual_length: usize,
+
+    /// Total length including padding (equals actual_length if no padding)
+    /// For padded batches, this is typically a uniform value (e.g., 512)
+    /// For unpacked batches, this equals actual_length
+    pub padded_length: usize,
+
+    /// Current position/offset in this sequence's KV cache
+    /// - For prefill: typically 0 (start of prompt)
+    /// - For decode: current generation position
+    pub cache_offset: usize,
+}
+
+impl SequenceInfo {
+    /// Create a new sequence info for prefill (no padding)
+    pub fn new_prefill(start_pos: usize, length: usize) -> Self {
+        Self {
+            start_pos,
+            actual_length: length,
+            padded_length: length,
+            cache_offset: 0,
+        }
+    }
+
+    /// Create a new sequence info for prefill with padding
+    pub fn new_prefill_padded(
+        start_pos: usize,
+        actual_length: usize,
+        padded_length: usize,
+    ) -> Self {
+        Self {
+            start_pos,
+            actual_length,
+            padded_length,
+            cache_offset: 0,
+        }
+    }
+
+    /// Create a new sequence info for decode
+    pub fn new_decode(cache_offset: usize) -> Self {
+        Self {
+            start_pos: 0,
+            actual_length: 1,
+            padded_length: 1,
+            cache_offset,
+        }
+    }
+
+    /// Get the ending position (exclusive) in the concatenated tensor
+    pub fn end_pos(&self) -> usize {
+        self.start_pos + self.padded_length
+    }
+
+    /// Check if this sequence has padding
+    pub fn has_padding(&self) -> bool {
+        self.padded_length > self.actual_length
+    }
+}
+
 /// Describes the structure and composition of a batch for batched inference
 ///
 /// This metadata is essential for processing batches with variable-length sequences,
@@ -27,10 +101,12 @@ pub type RequestId = usize;
 ///     is_prefill: false,
 ///     batch_size: 3,
 ///     request_ids: vec![id1, id2, id3],
-///     slot_offsets: vec![5, 2, 3],  // Current position in each sequence
-///     sequence_lengths: vec![1, 1, 1],  // One token each
-///     cu_seqlens: None,
-///     max_seqlen: Some(1),
+///     sequences: vec![
+///         SequenceInfo::new_decode(5),
+///         SequenceInfo::new_decode(2),
+///         SequenceInfo::new_decode(3),
+///     ],
+///     context_lens: vec![5, 2, 3],
 /// };
 /// ```
 ///
@@ -41,10 +117,12 @@ pub type RequestId = usize;
 ///     is_prefill: true,
 ///     batch_size: 3,
 ///     request_ids: vec![id1, id2, id3],
-///     slot_offsets: vec![0, 0, 0],  // All start at position 0
-///     sequence_lengths: vec![5, 2, 3],
-///     cu_seqlens: Some(vec![0, 5, 7, 10]),  // Cumulative: [0, 5, 7, 10]
-///     max_seqlen: Some(5),
+///     sequences: vec![
+///         SequenceInfo::new_prefill(0, 5),
+///         SequenceInfo::new_prefill(5, 2),
+///         SequenceInfo::new_prefill(7, 3),
+///     ],
+///     context_lens: vec![0, 0, 0],
 /// };
 /// ```
 #[derive(Debug, Clone)]
@@ -58,32 +136,9 @@ pub struct BatchMetadata {
     /// Request IDs for each sequence in the batch (for KV cache lookup)
     pub request_ids: Vec<RequestId>,
 
-    /// Current position/offset in each sequence's KV cache
-    /// - For decode: current generation position
-    /// - For prefill: typically 0 (start of prompt)
-    pub slot_offsets: Vec<usize>,
-
-    /// Length of each sequence in the batch
-    /// - For decode: typically all 1 (one token per request)
-    /// - For prefill: variable (prompt lengths)
-    pub sequence_lengths: Vec<usize>,
-
-    /// Cumulative sequence lengths for concatenated prefill batches
-    /// Format: [0, len1, len1+len2, len1+len2+len3, ...]
-    /// Used to extract individual sequences from concatenated tensor
-    /// Only Some(_) for prefill batches
-    pub cu_seqlens: Option<Vec<usize>>,
-
-    /// Maximum sequence length in this batch
-    /// Used for attention mask construction
-    pub max_seqlen: Option<usize>,
-
-    /// Query start locations for FlashAttention optimization
-    /// Marks where each query starts in concatenated tensor
-    /// Format: [0, len1, len1+len2, ...] (typically same as cu_seqlens)
-    /// Only Some(_) for prefill batches (decode doesn't need it)
-    /// Will be used when FlashAttention is enabled (M2 milestone)
-    pub query_start_loc: Option<Vec<usize>>,
+    /// Information about each sequence (position, lengths, cache offset)
+    /// This is the single source of truth - replaces cu_seqlens, sequence_lengths, and slot_offsets
+    pub sequences: Vec<SequenceInfo>,
 
     /// Context lengths: how many tokens each sequence has seen so far
     /// Used for continuous batching to track request history
@@ -98,69 +153,149 @@ impl BatchMetadata {
     /// Decode batches are the most common (90% of operations) and simplest:
     /// - Each request contributes exactly 1 token
     /// - All sequences have length 1
-    /// - Positions are the current generation position for each request
     ///
     /// # Arguments
-    /// * `request_ids` - IDs of requests in this batch
-    /// * `positions` - Current position in each request's sequence
+    /// * `request_ids` - IDs of requests to include in this batch
+    /// * `positions` - Current position in each sequence (for KV cache lookup)
+    /// * `context_lens` - How many tokens each sequence has generated so far
     ///
     /// # Returns
     /// BatchMetadata configured for decode batch processing
-    pub fn from_decode_batch(request_ids: Vec<RequestId>, positions: Vec<usize>) -> Self {
+    pub fn from_decode_batch(
+        request_ids: Vec<RequestId>,
+        positions: Vec<usize>,
+        context_lens: Vec<usize>,
+    ) -> Self {
         let batch_size = request_ids.len();
+
+        // For decode, each sequence generates 1 token
+        let sequences = positions
+            .iter()
+            .map(|&pos| SequenceInfo::new_decode(pos))
+            .collect();
 
         Self {
             is_prefill: false,
             batch_size,
             request_ids,
-            slot_offsets: positions.clone(),
-            sequence_lengths: vec![1; batch_size], // All length 1
-            cu_seqlens: None,                      // Not needed for decode
-            max_seqlen: Some(1),
-            query_start_loc: None,   // Not needed for decode
-            context_lens: positions, // Position = context length for decode
+            sequences,
+            context_lens,
         }
+    }
+
+    /// Get cumulative sequence lengths (for backward compatibility)
+    /// Returns [0, len1, len1+len2, ...]
+    pub fn cu_seqlens(&self) -> Vec<usize> {
+        let mut cu_seqlens = vec![0];
+        let mut total = 0;
+        for seq in &self.sequences {
+            total += seq.padded_length;
+            cu_seqlens.push(total);
+        }
+        cu_seqlens
+    }
+
+    /// Get sequence lengths (actual lengths, not padded)
+    pub fn sequence_lengths(&self) -> Vec<usize> {
+        self.sequences.iter().map(|s| s.actual_length).collect()
+    }
+
+    /// Get slot offsets (cache positions)
+    pub fn slot_offsets(&self) -> Vec<usize> {
+        self.sequences.iter().map(|s| s.cache_offset).collect()
+    }
+
+    /// Get maximum sequence length in this batch
+    pub fn max_seqlen(&self) -> usize {
+        self.sequences
+            .iter()
+            .map(|s| s.actual_length)
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// Get query start locations (for FlashAttention)
+    pub fn query_start_loc(&self) -> Vec<usize> {
+        self.sequences.iter().map(|s| s.start_pos).collect()
     }
 
     /// Create metadata for a prefill batch (variable-length prompts)
     ///
     /// Prefill batches handle initial prompt processing with variable lengths:
     /// - Prompts are concatenated into single tensor
-    /// - cu_seqlens tracks boundaries between prompts
+    /// - Each sequence knows its start position and length
     /// - Used ~10% of time (once per request)
     ///
     /// # Arguments
     /// * `request_ids` - IDs of requests in this batch
-    /// * `prompt_lengths` - Length of each prompt
+    /// * `prompt_lengths` - Length of each prompt (actual lengths, not padded)
     ///
     /// # Returns
     /// BatchMetadata configured for prefill batch processing
     pub fn from_prefill_batch(request_ids: Vec<RequestId>, prompt_lengths: Vec<usize>) -> Self {
         let batch_size = request_ids.len();
 
-        // Build cumulative sequence lengths: [0, len1, len1+len2, ...]
-        let mut cu_seqlens = vec![0];
-        let mut total = 0;
-        for &len in &prompt_lengths {
-            total += len;
-            cu_seqlens.push(total);
+        // Build sequences with cumulative start positions
+        let mut sequences = Vec::with_capacity(batch_size);
+        let mut start_pos = 0;
+        for &length in &prompt_lengths {
+            sequences.push(SequenceInfo::new_prefill(start_pos, length));
+            start_pos += length;
         }
-
-        let max_seqlen = prompt_lengths.iter().copied().max();
-
-        // Query start locations are the same as cu_seqlens boundaries (without the final total)
-        let query_start_loc = cu_seqlens[..batch_size].to_vec();
 
         Self {
             is_prefill: true,
             batch_size,
             request_ids,
-            slot_offsets: vec![0; batch_size], // All start at 0
-            sequence_lengths: prompt_lengths,
-            cu_seqlens: Some(cu_seqlens),
-            max_seqlen,
-            query_start_loc: Some(query_start_loc), // For FlashAttention
-            context_lens: vec![0; batch_size],      // Starting fresh
+            sequences,
+            context_lens: vec![0; batch_size], // Starting fresh
+        }
+    }
+
+    /// Create metadata for a chunked prefill batch with padding
+    ///
+    /// This handles the case where sequences are padded to uniform length for batching.
+    /// Uses SequenceInfo to track both actual and padded lengths for each sequence.
+    ///
+    /// # Arguments
+    /// * `request_ids` - IDs of requests in this batch
+    /// * `actual_lengths` - True number of tokens in each sequence (without padding)
+    /// * `padded_lengths` - Length of each sequence after padding (typically all equal)
+    ///
+    /// # Example
+    /// ```ignore
+    /// // Three prompts: [11 tokens, 6 tokens, 4 tokens], each padded to 512
+    /// // Tensor structure: [512 tokens (11 real + 501 pad), 512 tokens (6 real + 506 pad), 512 tokens (4 real + 508 pad)]
+    /// let metadata = BatchMetadata::from_chunked_prefill_batch(
+    ///     vec![id1, id2, id3],
+    ///     vec![11, 6, 4],      // actual_lengths
+    ///     vec![512, 512, 512], // padded_lengths
+    /// );
+    /// // sequences[0]: start_pos=0, actual=11, padded=512
+    /// // sequences[1]: start_pos=512, actual=6, padded=512
+    /// // sequences[2]: start_pos=1024, actual=4, padded=512
+    /// ```
+    pub fn from_chunked_prefill_batch(
+        request_ids: Vec<RequestId>,
+        actual_lengths: Vec<usize>,
+        padded_lengths: Vec<usize>,
+    ) -> Self {
+        let batch_size = request_ids.len();
+
+        // Build sequences with cumulative start positions based on PADDED lengths
+        let mut sequences = Vec::with_capacity(batch_size);
+        let mut start_pos = 0;
+        for (&actual, &padded) in actual_lengths.iter().zip(&padded_lengths) {
+            sequences.push(SequenceInfo::new_prefill_padded(start_pos, actual, padded));
+            start_pos += padded;
+        }
+
+        Self {
+            is_prefill: true,
+            batch_size,
+            request_ids,
+            sequences,
+            context_lens: vec![0; batch_size],
         }
     }
 
@@ -192,7 +327,7 @@ impl BatchMetadata {
     /// For decode batches: equals batch_size (1 token each)
     /// For prefill batches: sum of all prompt lengths
     pub fn total_tokens(&self) -> usize {
-        self.sequence_lengths.iter().sum()
+        self.sequences.iter().map(|s| s.padded_length).sum()
     }
 
     /// Get the (start, end) indices for a specific sequence in a concatenated tensor
@@ -206,20 +341,11 @@ impl BatchMetadata {
     /// (start_idx, end_idx) for slicing concatenated tensor
     ///
     /// # Panics
-    /// Panics if seq_idx >= batch_size or if cu_seqlens is None for prefill batch
+    /// Panics if seq_idx >= batch_size
     pub fn sequence_range(&self, seq_idx: usize) -> (usize, usize) {
         assert!(seq_idx < self.batch_size, "Sequence index out of bounds");
-
-        if self.is_prefill {
-            let cu_seqlens = self
-                .cu_seqlens
-                .as_ref()
-                .expect("Prefill batch must have cu_seqlens");
-            (cu_seqlens[seq_idx], cu_seqlens[seq_idx + 1])
-        } else {
-            // Decode: each sequence is 1 token
-            (seq_idx, seq_idx + 1)
-        }
+        let seq = &self.sequences[seq_idx];
+        (seq.start_pos, seq.end_pos())
     }
 
     /// Get the index of the last token for a specific sequence
@@ -232,7 +358,7 @@ impl BatchMetadata {
     /// # Returns
     /// Index of last token in the concatenated/batched tensor
     pub fn last_token_idx(&self, seq_idx: usize) -> usize {
-        let (start, end) = self.sequence_range(seq_idx);
+        let (_start, end) = self.sequence_range(seq_idx);
         end - 1
     }
 
@@ -251,15 +377,19 @@ impl BatchMetadata {
         if self.is_prefill {
             // Prefill: [0..len1, 0..len2, 0..len3, ...]
             let mut positions = Vec::new();
-            for &len in &self.sequence_lengths {
-                for i in 0..len {
+            for seq in &self.sequences {
+                for i in 0..seq.actual_length {
                     positions.push(i as u32);
                 }
             }
             Tensor::new(positions, device)
         } else {
             // Decode: [pos1, pos2, pos3, ...]
-            let positions: Vec<u32> = self.slot_offsets.iter().map(|&pos| pos as u32).collect();
+            let positions: Vec<u32> = self
+                .sequences
+                .iter()
+                .map(|s| s.cache_offset as u32)
+                .collect();
             let tensor = Tensor::new(positions, device)?;
             tensor.reshape((self.batch_size, 1))
         }
@@ -272,13 +402,14 @@ mod tests {
 
     #[test]
     fn test_decode_batch_metadata() {
-        let metadata = BatchMetadata::from_decode_batch(vec![1, 2, 3], vec![5, 2, 3]);
+        let metadata =
+            BatchMetadata::from_decode_batch(vec![1, 2, 3], vec![5, 2, 3], vec![5, 2, 3]);
 
         assert_eq!(metadata.is_prefill, false);
         assert_eq!(metadata.batch_size, 3);
         assert_eq!(metadata.total_tokens(), 3);
-        assert_eq!(metadata.max_seqlen, Some(1));
-        assert!(metadata.cu_seqlens.is_none());
+        assert_eq!(metadata.max_seqlen(), 1);
+        assert_eq!(metadata.cu_seqlens(), vec![0, 1, 2, 3]);
 
         // Check sequence ranges
         assert_eq!(metadata.sequence_range(0), (0, 1));
@@ -298,10 +429,10 @@ mod tests {
         assert_eq!(metadata.is_prefill, true);
         assert_eq!(metadata.batch_size, 3);
         assert_eq!(metadata.total_tokens(), 10);
-        assert_eq!(metadata.max_seqlen, Some(5));
+        assert_eq!(metadata.max_seqlen(), 5);
 
         // Check cumulative sequence lengths
-        assert_eq!(metadata.cu_seqlens, Some(vec![0, 5, 7, 10]));
+        assert_eq!(metadata.cu_seqlens(), vec![0, 5, 7, 10]);
 
         // Check sequence ranges
         assert_eq!(metadata.sequence_range(0), (0, 5));
@@ -318,7 +449,7 @@ mod tests {
     fn test_position_tensor_decode() {
         use candle_core::Device;
 
-        let metadata = BatchMetadata::from_decode_batch(vec![1, 2], vec![5, 2]);
+        let metadata = BatchMetadata::from_decode_batch(vec![1, 2], vec![5, 2], vec![5, 2]);
 
         let device = Device::Cpu;
         let positions = metadata.create_position_tensor(&device).unwrap();
@@ -342,5 +473,251 @@ mod tests {
         assert_eq!(positions.dims(), &[5]);
         let data = positions.to_vec1::<u32>().unwrap();
         assert_eq!(data, vec![0, 1, 2, 0, 1]);
+    }
+
+    // ===== Edge Case Tests =====
+
+    #[test]
+    fn test_empty_batch() {
+        let metadata = BatchMetadata::from_decode_batch(vec![], vec![], vec![]);
+
+        assert_eq!(metadata.batch_size, 0);
+        assert_eq!(metadata.total_tokens(), 0);
+        assert_eq!(metadata.context_lens.len(), 0);
+        assert_eq!(metadata.sequence_lengths().len(), 0);
+    }
+
+    #[test]
+    fn test_single_sequence_prefill() {
+        let metadata = BatchMetadata::from_prefill_batch(vec![0], vec![10]);
+
+        assert!(metadata.is_prefill);
+        assert_eq!(metadata.batch_size, 1);
+        assert_eq!(metadata.total_tokens(), 10);
+        assert_eq!(metadata.sequence_range(0), (0, 10));
+        assert_eq!(metadata.last_token_idx(0), 9);
+    }
+
+    #[test]
+    fn test_single_sequence_decode() {
+        let metadata = BatchMetadata::from_decode_batch(vec![0], vec![5], vec![5]);
+
+        assert!(!metadata.is_prefill);
+        assert_eq!(metadata.batch_size, 1);
+        assert_eq!(metadata.total_tokens(), 1);
+        assert_eq!(metadata.context_lens[0], 5);
+        assert_eq!(metadata.sequence_range(0), (0, 1));
+    }
+
+    #[test]
+    fn test_max_batch_size() {
+        // Test with large batch size
+        let batch_size = 128;
+        let request_ids: Vec<usize> = (0..batch_size).collect();
+        let positions: Vec<usize> = (0..batch_size).map(|i| i * 2).collect();
+
+        let metadata =
+            BatchMetadata::from_decode_batch(request_ids, positions.clone(), positions.clone());
+
+        assert_eq!(metadata.batch_size, batch_size);
+        assert_eq!(metadata.total_tokens(), batch_size);
+        assert_eq!(metadata.context_lens, positions);
+    }
+
+    #[test]
+    fn test_varying_sequence_lengths() {
+        // Prefill with very different sequence lengths
+        let sequence_lengths = vec![1, 10, 100, 5, 50];
+        let request_ids = vec![0, 1, 2, 3, 4];
+
+        let metadata = BatchMetadata::from_prefill_batch(request_ids, sequence_lengths.clone());
+
+        assert!(metadata.is_prefill);
+        assert_eq!(metadata.total_tokens(), 1 + 10 + 100 + 5 + 50);
+        assert_eq!(metadata.max_seqlen(), 100);
+
+        // Verify cumulative lengths
+        let expected_cu = vec![0, 1, 11, 111, 116, 166];
+        assert_eq!(metadata.cu_seqlens(), expected_cu);
+    }
+
+    #[test]
+    fn test_decode_varying_context_lens() {
+        // Decode batch with requests at different positions
+        let request_ids = vec![0, 1, 2, 3, 4];
+        let positions = vec![0, 5, 10, 50, 100];
+
+        let metadata =
+            BatchMetadata::from_decode_batch(request_ids, positions.clone(), positions.clone());
+
+        assert!(!metadata.is_prefill);
+        assert_eq!(metadata.context_lens, positions);
+
+        // Each sequence generates 1 token
+        for i in 0..5 {
+            assert_eq!(metadata.sequence_range(i), (i, i + 1));
+        }
+    }
+
+    #[test]
+    fn test_mismatched_lengths_edge_case() {
+        // With new design, we can't create mismatched metadata - SequenceInfo prevents it
+        // This test can be removed or updated to test SequenceInfo construction
+        let sequences = vec![
+            SequenceInfo::new_prefill(0, 5),
+            SequenceInfo::new_prefill(5, 10),
+        ];
+
+        let metadata = BatchMetadata {
+            is_prefill: true,
+            batch_size: 2,
+            request_ids: vec![0, 1],
+            context_lens: vec![0, 1, 2], // Extra element (doesn't matter for this test)
+            sequences,
+        };
+
+        // Accessing beyond bounds would panic, so keep assertions safe
+        assert_eq!(metadata.batch_size, 2);
+    }
+
+    #[test]
+    fn test_sequence_range_bounds() {
+        let metadata = BatchMetadata::from_prefill_batch(vec![0, 0, 0], vec![5, 3, 7]);
+
+        // Valid indices
+        assert_eq!(metadata.sequence_range(0), (0, 5));
+        assert_eq!(metadata.sequence_range(1), (5, 8));
+        assert_eq!(metadata.sequence_range(2), (8, 15));
+
+        // Out of bounds would panic in actual impl (not tested here)
+    }
+
+    #[test]
+    fn test_last_token_idx_bounds() {
+        let metadata = BatchMetadata::from_prefill_batch(vec![0, 0], vec![10, 20]);
+
+        assert_eq!(metadata.last_token_idx(0), 9); // First 10 tokens: 0-9
+        assert_eq!(metadata.last_token_idx(1), 29); // Next 20 tokens: 10-29
+    }
+
+    #[test]
+    fn test_zero_sequence_length() {
+        // Edge case: sequence with length 0 (shouldn't happen in practice)
+        let metadata = BatchMetadata::from_prefill_batch(vec![0, 0], vec![5, 0]);
+
+        assert_eq!(metadata.total_tokens(), 5);
+        assert_eq!(metadata.sequence_range(0), (0, 5));
+        assert_eq!(metadata.sequence_range(1), (5, 5)); // Empty range
+    }
+
+    #[test]
+    fn test_large_sequence_length() {
+        // Test with very long sequence (8k tokens)
+        let max_seq = 8192;
+        let metadata = BatchMetadata::from_prefill_batch(vec![0], vec![max_seq]);
+
+        assert_eq!(metadata.total_tokens(), max_seq);
+        assert_eq!(metadata.max_seqlen(), max_seq);
+        assert_eq!(metadata.last_token_idx(0), max_seq - 1);
+    }
+
+    #[test]
+    fn test_position_tensor_single_token() -> Result<()> {
+        use candle_core::Device;
+
+        let metadata = BatchMetadata::from_decode_batch(vec![0], vec![0], vec![0]);
+        let device = Device::Cpu;
+        let positions = metadata.create_position_tensor(&device)?;
+
+        assert_eq!(positions.dims(), &[1, 1]);
+        let data = positions.to_vec2::<u32>()?;
+        assert_eq!(data, vec![vec![0]]);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_position_tensor_max_position() -> Result<()> {
+        use candle_core::Device;
+
+        let max_pos = 8191;
+        let metadata = BatchMetadata::from_decode_batch(vec![0], vec![max_pos], vec![max_pos]);
+        let device = Device::Cpu;
+        let positions = metadata.create_position_tensor(&device)?;
+
+        let data = positions.to_vec2::<u32>()?;
+        assert_eq!(data, vec![vec![max_pos as u32]]);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_total_tokens_calculation() {
+        // Decode: total_tokens = sum of sequence_lengths (all 1 for decode)
+        let metadata =
+            BatchMetadata::from_decode_batch(vec![0, 1, 2], vec![5, 10, 15], vec![5, 10, 15]);
+        assert_eq!(metadata.total_tokens(), 3);
+
+        // Prefill: total_tokens = sum of sequence_lengths
+        let metadata = BatchMetadata::from_prefill_batch(vec![0, 1], vec![10, 20]);
+        assert_eq!(metadata.total_tokens(), 30);
+    }
+
+    #[test]
+    fn test_request_ids_assignment() {
+        let request_ids = vec![0, 1, 2];
+        let positions = vec![0, 5, 10];
+
+        let metadata =
+            BatchMetadata::from_decode_batch(request_ids.clone(), positions.clone(), positions);
+
+        // Request IDs should match what we passed
+        assert_eq!(metadata.request_ids, request_ids);
+    }
+
+    #[test]
+    fn test_slot_offsets_decode() {
+        // In decode mode, slot_offsets = positions
+        let request_ids = vec![0, 1, 2];
+        let positions = vec![3, 7, 15];
+
+        let metadata =
+            BatchMetadata::from_decode_batch(request_ids, positions.clone(), positions.clone());
+
+        assert_eq!(metadata.slot_offsets(), positions);
+    }
+
+    #[test]
+    fn test_slot_offsets_prefill() {
+        // In prefill mode, slot_offsets are all 0 (start of prompts)
+        let request_ids = vec![0, 1, 2];
+        let sequence_lengths = vec![5, 3, 7];
+
+        let metadata = BatchMetadata::from_prefill_batch(request_ids, sequence_lengths);
+
+        assert_eq!(metadata.slot_offsets(), vec![0, 0, 0]);
+    }
+
+    #[test]
+    fn test_max_seqlen_decode() {
+        let metadata = BatchMetadata::from_decode_batch(vec![0, 1], vec![5, 10], vec![5, 10]);
+
+        // In decode mode, max_seqlen = 1 since all sequences generate 1 token
+        assert_eq!(metadata.max_seqlen(), 1);
+    }
+
+    #[test]
+    fn test_max_seqlen_prefill_single() {
+        let metadata = BatchMetadata::from_prefill_batch(vec![0], vec![42]);
+
+        assert_eq!(metadata.max_seqlen(), 42);
+    }
+
+    #[test]
+    fn test_max_seqlen_prefill_batch() {
+        let metadata = BatchMetadata::from_prefill_batch(vec![0, 1, 2], vec![5, 100, 25]);
+
+        // Max of 5, 100, 25
+        assert_eq!(metadata.max_seqlen(), 100);
     }
 }

@@ -1,5 +1,7 @@
 pub mod cache;
+pub mod debug;
 pub mod engine;
+pub mod gguf;
 pub mod kernels;
 pub mod loaders;
 pub mod model;

@@ -418,7 +418,24 @@ impl ModelManager {
                 // Create batch metadata
                 // Temporary: Convert string IDs to numeric for new BatchMetadata API
                 let numeric_ids: Vec<usize> = (0..request_ids.len()).collect();
-                let metadata = BatchMetadata::from_decode_batch(numeric_ids, positions);
+                // Debug: log request ids and positions before creating metadata
+                eprintln!(
+                    "DEBUG ModelManager: decode batch numeric_ids={:?}, positions={:?}, request_ids={:?}",
+                    numeric_ids, positions, request_ids
+                );
+                let metadata = BatchMetadata::from_decode_batch(numeric_ids.clone(), positions.clone(), positions.clone());
+
+                // Debug: inspect metadata sequences and context_lens
+                eprintln!(
+                    "DEBUG ModelManager: metadata.is_prefill={} batch_size={} context_lens={:?}",
+                    metadata.is_prefill, metadata.batch_size, metadata.context_lens
+                );
+                for (i, seq) in metadata.sequences.iter().enumerate() {
+                    eprintln!(
+                        "DEBUG ModelManager: seq {} -> start_pos={}, actual_length={}, padded_length={}, cache_offset={}",
+                        i, seq.start_pos, seq.actual_length, seq.padded_length, seq.cache_offset
+                    );
+                }
 
                 // Collect caches for batch (preserve order)
                 let mut batch_caches: Vec<Cache> = Vec::with_capacity(request_ids.len());
@@ -429,6 +446,12 @@ impl ModelManager {
 
                 // **BATCHED FORWARD PASS** (Model-agnostic BatchManager)
                 let forward_start = Instant::now();
+                // Debug: log BatchExecutor cache positions before forward
+                eprintln!(
+                    "DEBUG ModelManager: BatchExecutor cache positions before forward: {:?}",
+                    self.batch_manager.batch_executor().device() // placeholder to avoid borrow issues
+                );
+
                 let logits_batch = self.batch_manager.forward_decode_batch(
                     &tokens_tensor,
                     &metadata,
@@ -436,10 +459,22 @@ impl ModelManager {
                 )?;
                 self.stats.total_forward_time_ms += forward_start.elapsed().as_secs_f64() * 1000.0;
 
-                // Restore caches
+                // CRITICAL: Advance cache positions after forward pass
+                // The BatchExecutor's indices_and_mask is now pure (doesn't mutate positions),
+                // so we must explicitly advance positions by 1 for each decode token
+                for (i, &cache_idx) in numeric_ids.iter().enumerate() {
+                    let old_pos = self.batch_manager.batch_executor_mut().get_cache_position(cache_idx);
+                    let new_pos = old_pos + 1;
+                    self.batch_manager.batch_executor_mut().set_cache_position(cache_idx, new_pos);
+                    eprintln!(
+                        "DEBUG: Advanced cache position for slot {}: {} -> {}",
+                        cache_idx, old_pos, new_pos
+                    );
+                }
+
+                // Restore caches (maintain correct request<->cache mapping)
                 for (i, req_id) in request_ids.iter().enumerate() {
-                    self.caches
-                        .insert(req_id.clone(), batch_caches.swap_remove(0));
+                    self.caches.insert(req_id.clone(), batch_caches[i].clone());
                 }
 
                 // Process results
@@ -635,13 +670,14 @@ mod tests {
     #[ignore] // Only run with actual model present
     fn test_multi_request_generation() {
         use crate::engine::Request;
+        use crate::model::ParallelModelManager;
 
         let model_path = "../models/llama-3b";
         if !Path::new(model_path).exists() {
             return;
         }
 
-        let mut model = ModelManager::load(model_path, 4, 512, Some("f32")).unwrap();
+        let mut model = ParallelModelManager::load(model_path, 4, 512, Some("f32"), None).unwrap();
 
         // Create multiple requests
         let requests = vec![
@@ -729,26 +765,12 @@ mod tests {
         println!("Total tokens generated: {}", stats.total_tokens_generated);
         println!("Average batch size: {:.2}", stats.average_batch_size());
         println!("Total forward time: {:.2} ms", stats.total_forward_time_ms);
-        println!(
-            "Average forward time: {:.2} ms",
-            stats.average_forward_time_ms()
-        );
         println!("Tokens per second: {:.2}", stats.tokens_per_second());
-        println!("Prefill requests: {}", stats.prefill_requests);
-        println!("Decode requests: {}", stats.decode_requests);
-        println!("\n=== Phase 2D: Batching Analysis ===");
+        println!("Prefill batches: {}", stats.prefill_batches);
+        println!("Decode batches: {}", stats.decode_batches);
         println!(
-            "Decode batch opportunities: {}",
-            stats.decode_batch_opportunities
-        );
-        println!("Max concurrent decodes: {}", stats.max_concurrent_decodes);
-        println!(
-            "Batching efficiency: {:.1}%",
-            stats.batching_efficiency() * 100.0
-        );
-        println!(
-            "Potential speedup with true batching: {:.2}x",
-            stats.potential_batching_speedup()
+            "Padding efficiency: {:.1}%",
+            stats.padding_efficiency() * 100.0
         );
     }
 
