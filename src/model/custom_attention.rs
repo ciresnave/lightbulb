@@ -33,8 +33,11 @@
 
 use crate::engine::BatchExecutor;
 use crate::model::BatchMetadata;
+use crate::model::quantizable_linear::QuantizableLinear;
 use candle_core::{DType, Device, IndexOp, Module, Result, Tensor};
-use candle_nn::{Linear, VarBuilder};
+use candle_nn::VarBuilder;
+use std::fs::File;
+use std::io::{Read, Seek};
 
 /// Batched Multi-Head Attention Layer
 ///
@@ -42,10 +45,10 @@ use candle_nn::{Linear, VarBuilder};
 #[derive(Debug)]
 pub struct BatchedAttention {
     // Linear projections
-    q_proj: Linear,
-    k_proj: Linear,
-    v_proj: Linear,
-    o_proj: Linear,
+    q_proj: QuantizableLinear,
+    k_proj: QuantizableLinear,
+    v_proj: QuantizableLinear,
+    o_proj: QuantizableLinear,
 
     // Model configuration
     num_heads: usize,
@@ -79,12 +82,26 @@ impl BatchedAttention {
         let scale = 1.0 / (head_dim as f64).sqrt();
 
         // Load projection layers (no bias for Llama)
-        let q_proj = candle_nn::linear_no_bias(hidden_size, num_heads * head_dim, vb.pp("q_proj"))?;
-        let k_proj =
-            candle_nn::linear_no_bias(hidden_size, num_kv_heads * head_dim, vb.pp("k_proj"))?;
-        let v_proj =
-            candle_nn::linear_no_bias(hidden_size, num_kv_heads * head_dim, vb.pp("v_proj"))?;
-        let o_proj = candle_nn::linear_no_bias(num_heads * head_dim, hidden_size, vb.pp("o_proj"))?;
+        let q_proj = QuantizableLinear::from_linear(candle_nn::linear_no_bias(
+            hidden_size,
+            num_heads * head_dim,
+            vb.pp("q_proj"),
+        )?);
+        let k_proj = QuantizableLinear::from_linear(candle_nn::linear_no_bias(
+            hidden_size,
+            num_kv_heads * head_dim,
+            vb.pp("k_proj"),
+        )?);
+        let v_proj = QuantizableLinear::from_linear(candle_nn::linear_no_bias(
+            hidden_size,
+            num_kv_heads * head_dim,
+            vb.pp("v_proj"),
+        )?);
+        let o_proj = QuantizableLinear::from_linear(candle_nn::linear_no_bias(
+            num_heads * head_dim,
+            hidden_size,
+            vb.pp("o_proj"),
+        )?);
 
         let device = vb.device().clone();
         let dtype = vb.dtype();
@@ -100,6 +117,69 @@ impl BatchedAttention {
             hidden_size,
             scale,
             device,
+            dtype,
+        })
+    }
+
+    /// Create a new BatchedAttention from GGUF quantized weights
+    ///
+    /// # Arguments
+    /// * `hidden_size` - Model hidden dimension
+    /// * `num_heads` - Number of attention heads
+    /// * `num_kv_heads` - Number of key/value heads (for GQA)
+    /// * `gguf_content` - GGUF file content with metadata and tensor info
+    /// * `file` - Open file handle for reading tensor data
+    /// * `device` - Device to load tensors on
+    /// * `layer_idx` - Layer index for tensor naming (e.g., blk.0, blk.1, ...)
+    pub fn from_gguf<R: Read + Seek>(
+        hidden_size: usize,
+        num_heads: usize,
+        num_kv_heads: usize,
+        gguf_content: &crate::gguf::Content,
+        file: &mut R,
+        device: &Device,
+        layer_idx: usize,
+    ) -> Result<Self> {
+        let head_dim = hidden_size / num_heads;
+        let scale = 1.0 / (head_dim as f64).sqrt();
+
+        let prefix = format!("blk.{}", layer_idx);
+
+        // Load quantized projection tensors
+        let q_tensor = gguf_content.tensor(file, &format!("{}.attn_q.weight", prefix), device)?;
+        let k_tensor = gguf_content.tensor(file, &format!("{}.attn_k.weight", prefix), device)?;
+        let v_tensor = gguf_content.tensor(file, &format!("{}.attn_v.weight", prefix), device)?;
+        let o_tensor =
+            gguf_content.tensor(file, &format!("{}.attn_output.weight", prefix), device)?;
+
+        // Convert QTensor to QMatMul and wrap in QuantizableLinear
+        let q_proj = QuantizableLinear::from_qmatmul(
+            candle_core::quantized::QMatMul::from_qtensor(q_tensor)?,
+        );
+        let k_proj = QuantizableLinear::from_qmatmul(
+            candle_core::quantized::QMatMul::from_qtensor(k_tensor)?,
+        );
+        let v_proj = QuantizableLinear::from_qmatmul(
+            candle_core::quantized::QMatMul::from_qtensor(v_tensor)?,
+        );
+        let o_proj = QuantizableLinear::from_qmatmul(
+            candle_core::quantized::QMatMul::from_qtensor(o_tensor)?,
+        );
+
+        // Use F32 for quantized models (QMatMul handles the actual precision)
+        let dtype = DType::F32;
+
+        Ok(Self {
+            q_proj,
+            k_proj,
+            v_proj,
+            o_proj,
+            num_heads,
+            num_kv_heads,
+            head_dim,
+            hidden_size,
+            scale,
+            device: device.clone(),
             dtype,
         })
     }
@@ -164,29 +244,10 @@ impl BatchedAttention {
             let k_vec = k.flatten_all()?.to_vec1::<f32>()?;
             let cos_vec = cos.flatten_all()?.to_vec1::<f32>()?;
             let sin_vec = sin.flatten_all()?.to_vec1::<f32>()?;
-            eprintln!(
-                "DEBUG RoPE BEFORE - Q: shape={:?}, mean={:.6}, sample[0:3]={:?}",
-                q.dims(),
-                q_vec.iter().sum::<f32>() / q_vec.len() as f32,
-                &q_vec[0..3.min(q_vec.len())]
-            );
-            eprintln!(
-                "DEBUG RoPE BEFORE - K: shape={:?}, mean={:.6}, sample[0:3]={:?}",
-                k.dims(),
-                k_vec.iter().sum::<f32>() / k_vec.len() as f32,
-                &k_vec[0..3.min(k_vec.len())]
-            );
-            eprintln!("DEBUG RoPE - index_pos={}, seq_len={}", index_pos, seq_len);
-            eprintln!(
-                "DEBUG RoPE - cos shape={:?}, sample[0:3]={:?}",
-                cos.dims(),
-                &cos_vec[0..3.min(cos_vec.len())]
-            );
-            eprintln!(
-                "DEBUG RoPE - sin shape={:?}, sample[0:3]={:?}",
-                sin.dims(),
-                &sin_vec[0..3.min(sin_vec.len())]
-            );
+            // DEBUG output removed
+            // DEBUG output removed
+            // DEBUG output removed
+            // DEBUG output removed
         }
 
         // Apply RoPE. For batched prefill we must apply RoPE per-sequence (positions start at 0
@@ -205,16 +266,8 @@ impl BatchedAttention {
         if layer_idx == 0 {
             let q_vec = q.flatten_all()?.to_vec1::<f32>()?;
             let k_vec = k.flatten_all()?.to_vec1::<f32>()?;
-            eprintln!(
-                "DEBUG RoPE AFTER - Q: mean={:.6}, sample[0:3]={:?}",
-                q_vec.iter().sum::<f32>() / q_vec.len() as f32,
-                &q_vec[0..3.min(q_vec.len())]
-            );
-            eprintln!(
-                "DEBUG RoPE AFTER - K: mean={:.6}, sample[0:3]={:?}",
-                k_vec.iter().sum::<f32>() / k_vec.len() as f32,
-                &k_vec[0..3.min(k_vec.len())]
-            );
+            // DEBUG output removed
+            // DEBUG output removed
         }
 
         // === Step 3.5: Restructure for Batched Prefill ===
@@ -380,11 +433,7 @@ impl BatchedAttention {
             .map_err(|e| candle_core::Error::Msg(format!("Failed to wrap V tensor: {}", e)))?;
 
             if layer_idx == 0 {
-                eprintln!(
-                    "DEBUG Layer 0 BEFORE append_kv: k_wrapped shape={:?}, v_wrapped shape={:?}",
-                    k_wrapped.as_full().dims(),
-                    v_wrapped.as_full().dims()
-                );
+                // DEBUG output removed
             }
 
             let (k_full, v_full) = batch_executor
@@ -392,11 +441,7 @@ impl BatchedAttention {
                 .map_err(|e| candle_core::Error::Msg(format!("Failed to append KV: {}", e)))?;
 
             if layer_idx == 0 {
-                eprintln!(
-                    "DEBUG Layer 0 AFTER append_kv: k_full shape={:?}, v_full shape={:?}",
-                    k_full.dims(),
-                    v_full.dims()
-                );
+                // DEBUG output removed
             }
 
             (k_full, v_full)
@@ -434,17 +479,9 @@ impl BatchedAttention {
             .transpose()?;
 
         if layer_idx == 0 {
-            eprintln!(
-                "DEBUG Layer 0: Narrowed cache to {} positions (context_lens={:?}, seq_lens={:?})",
-                max_valid_len,
-                metadata.context_lens,
-                metadata.sequence_lengths()
-            );
+            // DEBUG output removed
             if let Some(ref mask) = attention_mask {
-                eprintln!(
-                    "DEBUG Layer 0: Attention mask shape after narrowing: {:?}",
-                    mask.dims()
-                );
+                // DEBUG output removed
             }
         }
 
@@ -457,11 +494,7 @@ impl BatchedAttention {
             let (_batch, _num_kv_heads, total_seq_len, _head_dim) = k_full.dims4()?;
 
             if layer_idx == 0 {
-                eprintln!(
-                    "DEBUG GQA: k_full before expand: {:?}, repeat_factor={}",
-                    k_full.dims(),
-                    repeat_factor
-                );
+                // DEBUG output removed
             }
 
             // K/V shape from cache: [max_batch_size, num_kv_heads, total_seq, dim]
@@ -502,10 +535,6 @@ impl BatchedAttention {
                     self.head_dim,
                 ))?;
 
-            if layer_idx == 0 {
-                eprintln!("DEBUG GQA: k_expanded: {:?}", k_expanded.dims());
-            }
-
             (k_expanded, v_expanded)
         } else {
             (k_full, v_full)
@@ -524,56 +553,26 @@ impl BatchedAttention {
         let actual_batch_size = q_batched.dim(0)?;
 
         if layer_idx == 0 {
-            eprintln!(
-                "DEBUG Layer 0 BEFORE narrowing: k_full shape={:?}, actual_batch_size={}",
-                k_full.dims(),
-                actual_batch_size
-            );
+            // DEBUG output removed
         }
 
         let k_for_attn = k_full.narrow(0, 0, actual_batch_size)?;
         let v_for_attn = v_full.narrow(0, 0, actual_batch_size)?;
 
         if layer_idx == 0 {
-            eprintln!(
-                "DEBUG Layer 0 AFTER narrowing: q_batched shape={:?}, k shape={:?}, v shape={:?}",
-                q_batched.dims(),
-                k_for_attn.dims(),
-                v_for_attn.dims()
-            );
+            // DEBUG output removed
         }
 
         if layer_idx <= 1 {
-            eprintln!(
-                "DEBUG Layer {} attention inputs: Q: {:?}, K: {:?}, V: {:?}",
-                layer_idx,
-                q_batched.dims(),
-                k_for_attn.dims(),
-                v_for_attn.dims()
-            );
+            // DEBUG output removed
 
             // Print actual Q, K, V values
             let q_vec = q_batched.flatten_all()?.to_vec1::<f32>()?;
             let k_vec = k_for_attn.flatten_all()?.to_vec1::<f32>()?;
             let v_vec = v_for_attn.flatten_all()?.to_vec1::<f32>()?;
-            eprintln!(
-                "DEBUG Layer {} Q: mean={:.6}, sample[0:5]={:?}",
-                layer_idx,
-                q_vec.iter().sum::<f32>() / q_vec.len() as f32,
-                &q_vec[0..5.min(q_vec.len())]
-            );
-            eprintln!(
-                "DEBUG Layer {} K: mean={:.6}, sample[0:5]={:?}",
-                layer_idx,
-                k_vec.iter().sum::<f32>() / k_vec.len() as f32,
-                &k_vec[0..5.min(k_vec.len())]
-            );
-            eprintln!(
-                "DEBUG Layer {} V: mean={:.6}, sample[0:5]={:?}",
-                layer_idx,
-                v_vec.iter().sum::<f32>() / v_vec.len() as f32,
-                &v_vec[0..5.min(v_vec.len())]
-            );
+            // DEBUG output removed
+            // DEBUG output removed
+            // DEBUG output removed
         }
 
         // Pass attention mask for batched prefill to handle padding
@@ -588,11 +587,7 @@ impl BatchedAttention {
 
         if layer_idx == 0 {
             let attn_vec = attn_output.flatten_all()?.to_vec1::<f32>()?;
-            eprintln!(
-                "DEBUG Layer 0 attn_output BEFORE o_proj: mean={:.6}, sample[0:5]={:?}",
-                attn_vec.iter().sum::<f32>() / attn_vec.len() as f32,
-                &attn_vec[0..5.min(attn_vec.len())]
-            );
+            // DEBUG output removed
         }
 
         // === Step 6: Reshape and Output Projection ===
@@ -634,11 +629,7 @@ impl BatchedAttention {
 
         if layer_idx == 0 {
             let output_vec = output.flatten_all()?.to_vec1::<f32>()?;
-            eprintln!(
-                "DEBUG Layer 0 AFTER o_proj: mean={:.6}, sample[0:5]={:?}",
-                output_vec.iter().sum::<f32>() / output_vec.len() as f32,
-                &output_vec[0..5.min(output_vec.len())]
-            );
+            // DEBUG output removed
         }
 
         Ok(output)
@@ -668,12 +659,7 @@ impl BatchedAttention {
         let sin_slice = sin.narrow(0, index_pos, seq_len)?;
 
         if index_pos == 0 {
-            eprintln!(
-                "DEBUG RoPE - cos_slice shape={:?}, sin_slice shape={:?}",
-                cos_slice.dims(),
-                sin_slice.dims()
-            );
-            eprintln!("DEBUG RoPE - x shape={:?}", x.dims());
+            // DEBUG output removed
         }
 
         // Input x is [batch, num_heads, seq, head_dim]
@@ -738,32 +724,19 @@ impl BatchedAttention {
 
         // DEBUG: Check raw attention scores
         let attn_w_vec = attn_weights.flatten_all()?.to_vec1::<f32>()?;
-        eprintln!(
-            "DEBUG compute_attention: raw Q@K^T mean={:.6}, sample[0:5]={:?}",
-            attn_w_vec.iter().sum::<f32>() / attn_w_vec.len() as f32,
-            &attn_w_vec[0..5.min(attn_w_vec.len())]
-        );
+        // DEBUG output removed
 
         // Scale by 1/sqrt(head_dim)
         let attn_weights = (attn_weights * self.scale)?;
 
         // DEBUG: Check scaled attention scores
         let scaled_vec = attn_weights.flatten_all()?.to_vec1::<f32>()?;
-        eprintln!(
-            "DEBUG compute_attention: scaled scores (scale={:.6}) mean={:.6}, sample[0:5]={:?}",
-            self.scale,
-            scaled_vec.iter().sum::<f32>() / scaled_vec.len() as f32,
-            &scaled_vec[0..5.min(scaled_vec.len())]
-        );
+        // DEBUG output removed
 
         // === Apply ScatteredCache Mask ===
         // This mask prevents batch elements from attending to each other's cache positions
         let attn_weights = if let Some(cache_mask) = mask {
-            eprintln!(
-                "DEBUG: Before mask - attn_weights shape={:?}, cache_mask shape={:?}",
-                attn_weights.dims(),
-                cache_mask.dims()
-            );
+            // DEBUG output removed
             // cache_mask shape: [batch, 1, seq_q, context]
             // attn_weights shape: [batch, heads, seq_q, seq_k]
             // The mask should broadcast across heads
@@ -793,11 +766,7 @@ impl BatchedAttention {
 
         // DEBUG: Check softmax probabilities
         let probs_vec = attn_probs.flatten_all()?.to_vec1::<f32>()?;
-        eprintln!(
-            "DEBUG compute_attention: softmax probs mean={:.6}, sample[0:5]={:?}",
-            probs_vec.iter().sum::<f32>() / probs_vec.len() as f32,
-            &probs_vec[0..5.min(probs_vec.len())]
-        );
+        // DEBUG output removed
 
         // === ATTENTION SCORE VISUALIZATION (for batched prefill debugging) ===
         #[cfg(feature = "debug-attention-scores")]
@@ -813,11 +782,7 @@ impl BatchedAttention {
 
         // DEBUG: Check final attention output
         let output_vec = attn_output.flatten_all()?.to_vec1::<f32>()?;
-        eprintln!(
-            "DEBUG compute_attention: final output mean={:.6}, sample[0:5]={:?}",
-            output_vec.iter().sum::<f32>() / output_vec.len() as f32,
-            &output_vec[0..5.min(output_vec.len())]
-        );
+        // DEBUG output removed
 
         Ok(attn_output)
     }

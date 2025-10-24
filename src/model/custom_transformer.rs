@@ -2,9 +2,12 @@
 ///
 /// This implementation provides a unified architecture that can be configured to support
 /// various transformer-based language models through different configuration constructors.
+use crate::model::quantizable_linear::QuantizableLinear;
 use candle_core::{DType, Device, IndexOp, Module, Result, Tensor};
-use candle_nn::{Embedding, Linear, RmsNorm, VarBuilder};
+use candle_nn::{Embedding, RmsNorm, VarBuilder};
 use std::collections::HashMap;
+use std::fs::File;
+use std::io::{Read, Seek};
 
 use crate::engine::BatchExecutor;
 use crate::model::batch_metadata::BatchMetadata;
@@ -167,7 +170,7 @@ pub struct BatchedTransformer {
     norm: RmsNorm,
 
     /// Language model head (vocabulary projection)
-    lm_head: Linear,
+    lm_head: QuantizableLinear,
 
     /// Precomputed cosine values for RoPE [max_seq_len, head_dim]
     cos: Tensor,
@@ -241,21 +244,18 @@ impl BatchedTransformer {
             )?;
 
             // DEBUG: Verify weight shapes
-            eprintln!(
-                "DEBUG: LM head weight shape (tied): {:?}",
-                embedding_weight.dims()
-            );
+            // DEBUG output removed
             let emb_w_vec = embedding_weight.flatten_all()?.to_vec1::<f32>()?;
             let emb_w_mean: f32 = emb_w_vec.iter().sum::<f32>() / emb_w_vec.len() as f32;
-            eprintln!(
-                "DEBUG: LM head weight mean: {:.6}, sample[0:3]={:?}",
-                emb_w_mean,
-                &emb_w_vec[0..3]
-            );
+            // DEBUG output removed
 
-            candle_nn::Linear::new(embedding_weight.clone(), None)
+            QuantizableLinear::from_linear(candle_nn::Linear::new(embedding_weight.clone(), None))
         } else {
-            candle_nn::linear_no_bias(config.hidden_size, config.vocab_size, vb.pp("lm_head"))?
+            QuantizableLinear::from_linear(candle_nn::linear_no_bias(
+                config.hidden_size,
+                config.vocab_size,
+                vb.pp("lm_head"),
+            )?)
         };
 
         Ok(Self {
@@ -267,6 +267,100 @@ impl BatchedTransformer {
             sin,
             config,
             device,
+            dtype,
+        })
+    }
+
+    /// Create a new BatchedTransformer from GGUF quantized weights
+    ///
+    /// This constructor loads a quantized model from a GGUF file, using our memory-mapped
+    /// loader for efficient loading and QMatMul for quantized inference.
+    ///
+    /// # Arguments
+    /// * `config` - Model configuration (hidden size, num layers, etc.)
+    /// * `gguf_content` - GGUF file content with metadata and tensor info
+    /// * `file` - Open file handle for reading tensor data
+    /// * `device` - Device to load tensors on
+    ///
+    /// # Returns
+    /// BatchedTransformer with quantized weights
+    pub fn from_gguf<R: Read + Seek>(
+        config: BatchedTransformerConfig,
+        gguf_content: &crate::gguf::Content,
+        file: &mut R,
+        device: &Device,
+    ) -> Result<Self> {
+        // Load embedding layer (always unquantized, dequantize if needed)
+        let embedding_tensor = gguf_content.tensor(file, "token_embd.weight", device)?;
+        let embedding_weight = embedding_tensor.dequantize(device)?;
+        let embedding = Embedding::new(embedding_weight, config.hidden_size);
+
+        // Load transformer blocks
+        let mut blocks = Vec::with_capacity(config.num_hidden_layers);
+        for layer_idx in 0..config.num_hidden_layers {
+            let block = BatchedTransformerBlock::from_gguf(
+                layer_idx,
+                config.hidden_size,
+                config.num_attention_heads,
+                config.num_key_value_heads,
+                config.intermediate_size,
+                config.rms_norm_eps,
+                gguf_content,
+                file,
+                device,
+            )?;
+            blocks.push(block);
+        }
+
+        // Load final normalization (dequantize since RmsNorm works with regular tensors)
+        let norm_tensor = gguf_content.tensor(file, "output_norm.weight", device)?;
+        let norm = RmsNorm::new(norm_tensor.dequantize(device)?, config.rms_norm_eps);
+
+        // Load language model head
+        let lm_head = if config.tie_word_embeddings {
+            // Use tied weights - wrap the embedding weight in QuantizableLinear
+            let emb_weight = gguf_content
+                .tensor(file, "token_embd.weight", device)?
+                .dequantize(device)?;
+            QuantizableLinear::from_linear(candle_nn::Linear::new(emb_weight, None))
+        } else {
+            // Load separate output projection
+            match gguf_content.tensor(file, "output.weight", device) {
+                Ok(output_tensor) => {
+                    // Output layer exists - wrap in QMatMul and QuantizableLinear
+                    QuantizableLinear::from_qmatmul(candle_core::quantized::QMatMul::from_qtensor(
+                        output_tensor,
+                    )?)
+                }
+                Err(_) => {
+                    // Fall back to tied weights if output.weight doesn't exist
+                    let emb_weight = gguf_content
+                        .tensor(file, "token_embd.weight", device)?
+                        .dequantize(device)?;
+                    QuantizableLinear::from_linear(candle_nn::Linear::new(emb_weight, None))
+                }
+            }
+        };
+
+        // Precompute RoPE frequencies
+        let dtype = DType::F32;
+        let (cos, sin) = Self::precompute_rope_frequencies(
+            config.hidden_size / config.num_attention_heads,
+            config.max_position_embeddings,
+            config.rope_theta,
+            device,
+            dtype,
+        )?;
+
+        Ok(Self {
+            embedding,
+            blocks,
+            norm,
+            lm_head,
+            cos,
+            sin,
+            config,
+            device: device.clone(),
             dtype,
         })
     }
@@ -342,17 +436,7 @@ impl BatchedTransformer {
         let emb_mean: f32 = emb_vec.iter().sum::<f32>() / emb_vec.len() as f32;
         let emb_max = emb_vec.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
         let emb_min = emb_vec.iter().cloned().fold(f32::INFINITY, f32::min);
-        eprintln!(
-            "DEBUG Batched Embedding OUTPUT: mean={:.6}, min={:.6}, max={:.6}, sample[0:3]={:?}",
-            emb_mean,
-            emb_min,
-            emb_max,
-            &emb_vec[0..3.min(emb_vec.len())]
-        );
-
-        // DEBUG: Check what token ID we're embedding
-        let token_ids = input_ids.to_vec1::<u32>()?;
-        eprintln!("DEBUG Token IDs: {:?}", token_ids);
+        // DEBUG output removed
 
         // Reshape to 3D for transformer blocks: [total_tokens, hidden] -> [1, total_tokens, hidden]
         // For prefill: batch=1, seq=total_tokens
@@ -395,10 +479,7 @@ impl BatchedTransformer {
             metadata.context_lens.get(0).copied().unwrap_or(0)
         };
 
-        eprintln!(
-            "DEBUG TRANSFORMER: is_prefill={}, index_pos={}, context_lens={:?}",
-            metadata.is_prefill, index_pos, metadata.context_lens
-        );
+        // DEBUG output removed
 
         for (layer_idx, block) in self.blocks.iter().enumerate() {
             hidden_states = block.forward(
@@ -417,14 +498,7 @@ impl BatchedTransformer {
                 let mean: f32 = hs_vec.iter().sum::<f32>() / hs_vec.len() as f32;
                 let max = hs_vec.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
                 let min = hs_vec.iter().cloned().fold(f32::INFINITY, f32::min);
-                eprintln!(
-                    "DEBUG Batched Layer {}: mean={:.6}, min={:.6}, max={:.6}, sample[0:3]={:?}",
-                    layer_idx,
-                    mean,
-                    min,
-                    max,
-                    &hs_vec[0..3.min(hs_vec.len())]
-                );
+                // DEBUG output removed
             }
         }
 
@@ -436,13 +510,7 @@ impl BatchedTransformer {
         let hs_mean: f32 = hs_vec.iter().sum::<f32>() / hs_vec.len() as f32;
         let hs_max = hs_vec.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
         let hs_min = hs_vec.iter().cloned().fold(f32::INFINITY, f32::min);
-        eprintln!(
-            "DEBUG After final norm: mean={:.6}, min={:.6}, max={:.6}, sample[0:3]={:?}",
-            hs_mean,
-            hs_min,
-            hs_max,
-            &hs_vec[0..3.min(hs_vec.len())]
-        );
+        // DEBUG output removed
 
         // Extract last token's hidden state for each sequence
         // For prefill: [1, seq_len, hidden] -> [batch_size, hidden] (one last token per sequence)
@@ -477,13 +545,7 @@ impl BatchedTransformer {
         let logits_mean: f32 = logits_vec.iter().sum::<f32>() / logits_vec.len() as f32;
         let logits_max = logits_vec.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
         let logits_min = logits_vec.iter().cloned().fold(f32::INFINITY, f32::min);
-        eprintln!(
-            "DEBUG Final logits: mean={:.6}, min={:.6}, max={:.6}, sample[0:5]={:?}",
-            logits_mean,
-            logits_min,
-            logits_max,
-            &logits_vec[0..5.min(logits_vec.len())]
-        );
+        // DEBUG output removed
 
         Ok(logits)
     }

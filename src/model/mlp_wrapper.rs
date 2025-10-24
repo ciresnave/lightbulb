@@ -10,8 +10,11 @@
 //! public components (`Linear`, `ops::silu`). This is much simpler than our
 //! previous `custom_mlp.rs` which had 400+ lines including debug code.
 
+use crate::model::quantizable_linear::QuantizableLinear;
 use candle_core::{Module, Result, Tensor};
-use candle_nn::{Linear, VarBuilder};
+use candle_nn::VarBuilder;
+use std::fs::File;
+use std::io::{Read, Seek};
 
 /// Minimal MLP using Candle's components
 ///
@@ -20,9 +23,9 @@ use candle_nn::{Linear, VarBuilder};
 /// This is exactly what Candle's internal Mlp does, but made public.
 #[derive(Debug, Clone)]
 pub struct Mlp {
-    gate_proj: Linear, // c_fc1 in Candle
-    up_proj: Linear,   // c_fc2 in Candle
-    down_proj: Linear, // c_proj in Candle
+    gate_proj: QuantizableLinear, // c_fc1 in Candle
+    up_proj: QuantizableLinear,   // c_fc2 in Candle
+    down_proj: QuantizableLinear, // c_proj in Candle
 }
 
 impl Mlp {
@@ -33,15 +36,25 @@ impl Mlp {
     /// * `intermediate_size` - Hidden layer dimension
     /// * `vb` - VarBuilder for loading weights
     pub fn new(hidden_size: usize, intermediate_size: usize, vb: VarBuilder) -> Result<Self> {
-        // DEBUG: Print the path prefix
-        eprintln!("DEBUG MLP loading from path prefix: {:?}", vb.prefix());
-
         // Use Candle's linear_b with bias=false (same as Candle's Llama for models without bias)
-        let gate_proj =
-            candle_nn::linear_b(hidden_size, intermediate_size, false, vb.pp("gate_proj"))?;
-        let up_proj = candle_nn::linear_b(hidden_size, intermediate_size, false, vb.pp("up_proj"))?;
-        let down_proj =
-            candle_nn::linear_b(intermediate_size, hidden_size, false, vb.pp("down_proj"))?;
+        let gate_proj = QuantizableLinear::from_linear(candle_nn::linear_b(
+            hidden_size,
+            intermediate_size,
+            false,
+            vb.pp("gate_proj"),
+        )?);
+        let up_proj = QuantizableLinear::from_linear(candle_nn::linear_b(
+            hidden_size,
+            intermediate_size,
+            false,
+            vb.pp("up_proj"),
+        )?);
+        let down_proj = QuantizableLinear::from_linear(candle_nn::linear_b(
+            intermediate_size,
+            hidden_size,
+            false,
+            vb.pp("down_proj"),
+        )?);
 
         // DEBUG: Check actual weight shapes and stats
         let gate_weight = vb
@@ -61,16 +74,51 @@ impl Mlp {
         let down_max = down_vec.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
         let down_min = down_vec.iter().cloned().fold(f32::INFINITY, f32::min);
 
-        eprintln!(
-            "DEBUG MLP weights: gate [{:?}] mean={:.6}, range=[{:.6}, {:.6}], down [{:?}] mean={:.6}, range=[{:.6}, {:.6}]",
-            gate_weight.shape().dims(),
-            gate_mean,
-            gate_min,
-            gate_max,
-            down_weight.shape().dims(),
-            down_mean,
-            down_min,
-            down_max
+        // DEBUG output removed
+
+        Ok(Self {
+            gate_proj,
+            up_proj,
+            down_proj,
+        })
+    }
+
+    /// Create a new MLP from GGUF quantized weights
+    ///
+    /// # Arguments
+    /// * `hidden_size` - Input/output dimension
+    /// * `intermediate_size` - Hidden layer dimension
+    /// * `gguf_content` - GGUF file content with metadata and tensor info
+    /// * `file` - Open file handle for reading tensor data
+    /// * `device` - Device to load tensors on
+    /// * `layer_idx` - Layer index for tensor naming (e.g., blk.0, blk.1, ...)
+    pub fn from_gguf<R: Read + Seek>(
+        _hidden_size: usize,
+        _intermediate_size: usize,
+        gguf_content: &crate::gguf::Content,
+        file: &mut R,
+        device: &candle_core::Device,
+        layer_idx: usize,
+    ) -> Result<Self> {
+        let prefix = format!("blk.{}", layer_idx);
+
+        // Load quantized MLP tensors
+        // GGUF naming: ffn_gate (w1), ffn_up (w3), ffn_down (w2)
+        let gate_tensor =
+            gguf_content.tensor(file, &format!("{}.ffn_gate.weight", prefix), device)?;
+        let up_tensor = gguf_content.tensor(file, &format!("{}.ffn_up.weight", prefix), device)?;
+        let down_tensor =
+            gguf_content.tensor(file, &format!("{}.ffn_down.weight", prefix), device)?;
+
+        // Convert QTensor to QMatMul and wrap in QuantizableLinear
+        let gate_proj = QuantizableLinear::from_qmatmul(
+            candle_core::quantized::QMatMul::from_qtensor(gate_tensor)?,
+        );
+        let up_proj = QuantizableLinear::from_qmatmul(
+            candle_core::quantized::QMatMul::from_qtensor(up_tensor)?,
+        );
+        let down_proj = QuantizableLinear::from_qmatmul(
+            candle_core::quantized::QMatMul::from_qtensor(down_tensor)?,
         );
 
         Ok(Self {
@@ -107,12 +155,7 @@ impl Mlp {
         let inter_vec = intermediate.flatten_all()?.to_vec1::<f32>()?;
         let inter_max = inter_vec.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
         let inter_mean: f32 = inter_vec.iter().sum::<f32>() / inter_vec.len() as f32;
-        eprintln!(
-            "DEBUG MLP intermediate: shape={:?}, mean={:.6}, max={:.6}",
-            intermediate.shape(),
-            inter_mean,
-            inter_max
-        );
+        // DEBUG output removed
 
         let output = self.down_proj.forward(&intermediate)?;
 
@@ -120,10 +163,7 @@ impl Mlp {
         let out_vec = output.flatten_all()?.to_vec1::<f32>()?;
         let out_max = out_vec.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
         let out_min = out_vec.iter().cloned().fold(f32::INFINITY, f32::min);
-        eprintln!(
-            "DEBUG MLP FORWARD: input mean={:.6}, max={:.6} → output min={:.6}, max={:.6}",
-            input_mean, input_max, out_min, out_max
-        );
+        // DEBUG output removed
 
         Ok(output)
     }

@@ -14,6 +14,7 @@ pub mod kv_tensor; // Canonical KV tensor representation for ScatteredKvCache
 pub mod mlp_wrapper; // Thin wrapper around Candle's MLP components
 pub mod model_manager; // Phase 2D - Approach 2: Generic transformer
 pub mod parallel_model_manager; // Production: Parallel batching with BatchedTransformer
+pub mod quantizable_linear; // Unified linear layer supporting both regular and quantized weights
 
 pub use batch_manager::{BatchManager, TransformerModel};
 pub use batch_metadata::BatchMetadata;

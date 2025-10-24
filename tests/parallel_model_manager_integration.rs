@@ -6,7 +6,7 @@
 //! - True parallel batched forward passes
 //! - Scattered KV cache management
 
-use lightbulb::engine::{Request, RequestContext};
+use lightbulb::engine::{Request, RequestContext, RequestState};
 use lightbulb::model::{ChunkedPrefillConfig, ParallelModelManager};
 use std::path::Path;
 
@@ -17,7 +17,7 @@ fn model_available() -> bool {
 }
 
 #[test]
-#[ignore]// Run with: cargo test --test parallel_model_manager_integration -- --ignored
+#[ignore] // Run with: cargo test --test parallel_model_manager_integration -- --ignored
 fn test_parallel_model_loading() {
     if !model_available() {
         println!("Skipping test: model not found at {}", MODEL_PATH);
@@ -26,8 +26,8 @@ fn test_parallel_model_loading() {
 
     let result = ParallelModelManager::load(
         MODEL_PATH,
-        4,    // max_batch_size
-        512,  // context_length
+        4,   // max_batch_size
+        512, // context_length
         Some("f32"),
         None, // use default chunked prefill config
     );
@@ -77,8 +77,11 @@ fn test_parallel_single_request_generation() {
         }
     }
 
-    assert!(!batch[0].generated_tokens.is_empty(), "Should generate tokens");
-    
+    assert!(
+        !batch[0].generated_tokens.is_empty(),
+        "Should generate tokens"
+    );
+
     let final_text = model.decode(&batch[0].generated_tokens, false).unwrap();
     println!("\n✓ Final output: \"{}\"", final_text);
     println!("✓ Tokens generated: {}", batch[0].tokens_generated);
@@ -138,10 +141,16 @@ fn test_parallel_multi_request_batching() {
 
     // Verify all completed
     for (i, ctx) in batch.iter().enumerate() {
-        assert!(!ctx.generated_tokens.is_empty(), "Request {} should generate tokens", i);
+        assert!(
+            !ctx.generated_tokens.is_empty(),
+            "Request {} should generate tokens",
+            i
+        );
         let text = model.decode(&ctx.generated_tokens, false).unwrap();
-        println!("\n✓ Request {} final: \"{}\" (prompt: \"{}\")", 
-                 i, text, ctx.request.prompt);
+        println!(
+            "\n✓ Request {} final: \"{}\" (prompt: \"{}\")",
+            i, text, ctx.request.prompt
+        );
     }
 
     // Print statistics
@@ -153,7 +162,10 @@ fn test_parallel_multi_request_batching() {
     println!("Chunked prefill batches: {}", stats.chunked_prefill_batches);
     println!("Max batch size seen: {}", stats.max_batch_size);
     println!("Tokens generated: {}", stats.total_tokens_generated);
-    println!("Padding efficiency: {:.1}%", stats.padding_efficiency() * 100.0);
+    println!(
+        "Padding efficiency: {:.1}%",
+        stats.padding_efficiency() * 100.0
+    );
     println!("Throughput: {:.2} tokens/sec", stats.tokens_per_second());
 }
 
@@ -167,19 +179,14 @@ fn test_chunked_prefill_with_variable_lengths() {
 
     // Configure chunked prefill with small chunk size for testing
     let chunked_config = ChunkedPrefillConfig {
-        chunk_size: 64,  // Small chunks to test batching
+        chunk_size: 64, // Small chunks to test batching
         max_batch_size: 4,
         pad_token_id: 0,
     };
 
-    let mut model = ParallelModelManager::load(
-        MODEL_PATH,
-        4,
-        512,
-        Some("f32"),
-        Some(chunked_config),
-    )
-    .expect("Failed to load model");
+    let mut model =
+        ParallelModelManager::load(MODEL_PATH, 4, 512, Some("f32"), Some(chunked_config))
+            .expect("Failed to load model");
 
     // Create requests with very different prompt lengths
     let requests = vec![
@@ -206,7 +213,7 @@ fn test_chunked_prefill_with_variable_lengths() {
 
     println!("\n=== Chunked Prefill Test ===");
     println!("Chunk size: 64");
-    
+
     // Tokenize to see lengths
     for ctx in &batch {
         let tokens = model.tokenize(&ctx.request.prompt, true).unwrap();
@@ -234,9 +241,15 @@ fn test_chunked_prefill_with_variable_lengths() {
     println!("\n=== Chunked Prefill Statistics ===");
     println!("Chunked prefill batches: {}", stats.chunked_prefill_batches);
     println!("Total padding tokens: {}", stats.total_padding_tokens);
-    println!("Padding efficiency: {:.1}%", stats.padding_efficiency() * 100.0);
-    
-    assert!(stats.chunked_prefill_batches > 0, "Should use chunked prefill");
+    println!(
+        "Padding efficiency: {:.1}%",
+        stats.padding_efficiency() * 100.0
+    );
+
+    assert!(
+        stats.chunked_prefill_batches > 0,
+        "Should use chunked prefill"
+    );
 }
 
 #[test]
@@ -255,7 +268,7 @@ fn test_parallel_correctness_vs_sequential() {
     // Run with ParallelModelManager
     let mut parallel_model = ParallelModelManager::load(MODEL_PATH, 4, 512, Some("f32"), None)
         .expect("Failed to load parallel model");
-    
+
     let req1 = Request {
         id: "test-parallel".to_string(),
         prompt: prompt.to_string(),
@@ -264,7 +277,9 @@ fn test_parallel_correctness_vs_sequential() {
     let mut batch1 = vec![RequestContext::new(req1)];
 
     for _ in 0..10 {
-        parallel_model.forward_batch(&mut batch1).expect("Forward failed");
+        parallel_model
+            .forward_batch(&mut batch1)
+            .expect("Forward failed");
         if !batch1[0].should_continue() {
             break;
         }
@@ -276,7 +291,7 @@ fn test_parallel_correctness_vs_sequential() {
     // Run with sequential ModelManager
     let mut sequential_model = ModelManager::load(MODEL_PATH, 4, 512, Some("f32"))
         .expect("Failed to load sequential model");
-    
+
     let req2 = Request {
         id: "test-sequential".to_string(),
         prompt: prompt.to_string(),
@@ -285,7 +300,9 @@ fn test_parallel_correctness_vs_sequential() {
     let mut batch2 = vec![RequestContext::new(req2)];
 
     for _ in 0..10 {
-        sequential_model.forward_batch(&mut batch2).expect("Forward failed");
+        sequential_model
+            .forward_batch(&mut batch2)
+            .expect("Forward failed");
         if !batch2[0].should_continue() {
             break;
         }
@@ -306,7 +323,7 @@ fn test_parallel_correctness_vs_sequential() {
         parallel_tokens, sequential_tokens,
         "Parallel and sequential should produce identical results"
     );
-    
+
     println!("\n✓ Outputs match perfectly!");
 }
 
@@ -318,12 +335,24 @@ fn test_parallel_performance_metrics() {
         return;
     }
 
-    let mut model = ParallelModelManager::load(MODEL_PATH, 8, 512, Some("f32"), None)
+    // Use load_adaptive() to let the hardware detection pick the optimal batch size
+    let mut model = ParallelModelManager::load_adaptive(MODEL_PATH, 512, Some("f32"), None)
         .expect("Failed to load model");
 
-    // Create a substantial batch
-    let requests: Vec<Request> = (0..6)
-        .map(|i| Request {
+    let adaptive_batch_size = model.get_adaptive_batch_size().unwrap_or(8);
+
+    // Test with 100 requests to measure maximum throughput
+    let num_requests = 100;
+
+    // Use RequestQueue to properly manage requests and avoid cache index exhaustion
+    use lightbulb::engine::{BatchAssembler, BatchConfig, Request, RequestQueue};
+    let queue = RequestQueue::new();
+    let batch_config = BatchConfig::new(adaptive_batch_size, 2048);
+    let assembler = BatchAssembler::new(batch_config);
+
+    // Submit all requests to the queue
+    for i in 0..num_requests {
+        let req = Request {
             id: format!("perf-{}", i),
             prompt: match i % 3 {
                 0 => "The capital of France is".to_string(),
@@ -331,23 +360,41 @@ fn test_parallel_performance_metrics() {
                 _ => "Machine learning".to_string(),
             },
             max_new_tokens: 10,
-        })
-        .collect();
+        };
+        queue.submit(req).unwrap();
+    }
 
-    let mut batch: Vec<RequestContext> = requests.into_iter().map(RequestContext::new).collect();
-
-    println!("\n=== Performance Metrics Test ===");
-    println!("Batch size: {}", batch.len());
+    println!("\n=== Performance Metrics Test with Adaptive Batch Sizing ===");
+    println!("Requests to process: {}", num_requests);
+    println!("Adaptive batch size: {}", adaptive_batch_size);
 
     let start_time = std::time::Instant::now();
+    let mut active_batch: Vec<RequestContext> = Vec::new();
 
-    for step in 0..25 {
-        let active = batch.iter().filter(|ctx| ctx.should_continue()).count();
-        if active == 0 {
+    // Process until queue is empty and all active requests are complete
+    for step in 0..500 {
+        // Remove completed requests from active batch
+        active_batch.retain(|ctx| ctx.state != RequestState::Completed);
+
+        // Try to fill the batch from the queue
+        while active_batch.len() < adaptive_batch_size && !queue.is_empty() {
+            if let Some(ctx) = queue.pop() {
+                active_batch.push(ctx);
+            } else {
+                break;
+            }
+        }
+
+        // If no active requests, we're done
+        if active_batch.is_empty() {
             println!("All requests completed at step {}", step);
             break;
         }
-        model.forward_batch(&mut batch).expect("Forward failed");
+
+        // Process the batch
+        model
+            .forward_batch(&mut active_batch)
+            .expect("Forward failed");
     }
 
     let total_time = start_time.elapsed();
@@ -359,19 +406,49 @@ fn test_parallel_performance_metrics() {
     println!("Total batches: {}", stats.total_batches);
     println!("  Prefill batches: {}", stats.prefill_batches);
     println!("  Decode batches: {}", stats.decode_batches);
-    println!("  Chunked prefill batches: {}", stats.chunked_prefill_batches);
+    println!(
+        "  Chunked prefill batches: {}",
+        stats.chunked_prefill_batches
+    );
     println!("Max concurrent batch size: {}", stats.max_batch_size);
     println!("Total tokens generated: {}", stats.total_tokens_generated);
-    println!("Total requests processed: {}", stats.total_requests_processed);
+    println!(
+        "Total requests processed: {}",
+        stats.total_requests_processed
+    );
     println!("Average batch size: {:.2}", stats.average_batch_size());
     println!("Forward time: {:.2}ms", stats.total_forward_time_ms);
     println!("Throughput: {:.2} tokens/sec", stats.tokens_per_second());
-    println!("Padding efficiency: {:.1}%", stats.padding_efficiency() * 100.0);
+    println!(
+        "Padding efficiency: {:.1}%",
+        stats.padding_efficiency() * 100.0
+    );
 
-    // Verify all completed successfully
-    for ctx in &batch {
-        assert!(!ctx.generated_tokens.is_empty());
-    }
+    // Get prefix cache statistics
+    let cache_stats = model.prefix_cache_stats();
+    println!("\n=== Prefix Cache Statistics ===");
+    println!("Cache hits: {}", cache_stats.hits);
+    println!("Cache misses: {}", cache_stats.misses);
+    println!("Hit rate: {:.1}%", cache_stats.hit_rate() * 100.0);
+    println!(
+        "Tokens saved: {} ({:.1} avg per hit)",
+        cache_stats.total_saved_tokens,
+        cache_stats.avg_saved_tokens()
+    );
+    println!(
+        "Potential TTFT improvement: {:.1}% (if KV caching enabled)",
+        cache_stats.hit_rate() * 100.0 * 0.5 // Conservative estimate
+    );
 
-    println!("\n✓ All performance metrics collected successfully");
+    // Verify we processed all requests
+    assert_eq!(
+        stats.total_requests_processed, num_requests,
+        "Should have processed all {} requests",
+        num_requests
+    );
+
+    println!(
+        "\n✓ Performance test complete with {:.2} tokens/sec",
+        stats.tokens_per_second()
+    );
 }

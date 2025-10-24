@@ -556,19 +556,11 @@ impl BatchExecutor {
             }
         }
 
-        eprintln!(
-            "DEBUG IAM BEFORE: batch_mask={:?}, seq_len={}, builder positions={:?}",
-            batch_mask,
-            seq_len,
-            self.cache_builder.positions()
-        );
+        // DEBUG output removed
 
         let iam = self.cache_builder.indices_and_mask(seq_len, &batch_mask)?;
 
-        eprintln!(
-            "DEBUG IAM AFTER: builder positions={:?}",
-            self.cache_builder.positions()
-        );
+        // DEBUG output removed
 
         self.cached_iam = Some(iam.clone());
         Ok(iam)
@@ -603,31 +595,12 @@ impl BatchExecutor {
         // Only print for small batches to avoid huge output
         if iam.indices.dims().len() <= 2 {
             if let Ok(indices_vec) = iam.indices.to_vec2::<u32>() {
-                eprintln!(
-                    "DEBUG append_kv: layer={} iam.indices.shape={:?} iam.indices={:?} iam.active={:?} positions={:?}",
-                    layer_idx,
-                    iam.indices.dims(),
-                    indices_vec,
-                    iam.active,
-                    self.cache_builder.positions()
-                );
+                // DEBUG output removed
             } else {
-                eprintln!(
-                    "DEBUG append_kv: layer={} iam.indices.shape={:?} iam.active={:?} positions={:?}",
-                    layer_idx,
-                    iam.indices.dims(),
-                    iam.active,
-                    self.cache_builder.positions()
-                );
+                // DEBUG output removed
             }
         } else {
-            eprintln!(
-                "DEBUG append_kv: layer={} iam.indices.shape={:?} iam.active={:?} positions={:?}",
-                layer_idx,
-                iam.indices.dims(),
-                iam.active,
-                self.cache_builder.positions()
-            );
+            // DEBUG output removed
         }
 
         Ok(self.caches[layer_idx].append(k, v, iam)?)
@@ -642,10 +615,7 @@ impl BatchExecutor {
 
     /// Reset cache builder state for a specific request ID (before prefill)
     pub fn reset_request_state(&mut self, cache_index: usize) {
-        eprintln!(
-            "DEBUG: Resetting cache builder state for slot {}",
-            cache_index
-        );
+        // DEBUG output removed
         self.cache_builder.reset_batch_index(cache_index);
     }
 
@@ -655,10 +625,7 @@ impl BatchExecutor {
     /// Uses ParallelCacheBuilder's set_position method.
     pub fn set_cache_position(&mut self, cache_index: usize, position: usize) {
         self.cache_builder.set_position(cache_index, position);
-        eprintln!(
-            "DEBUG: Set cache slot {} to position {} (efficient O(1))",
-            cache_index, position
-        );
+        // DEBUG output removed
     }
 
     /// Get current position for a cache slot
@@ -727,6 +694,143 @@ impl BatchExecutor {
         );
         self.cache_builder
             .get_slot_mut(slot_index, &mut self.caches[layer])
+    }
+
+    /// Extract KV tensors for a specific cache slot across all layers
+    ///
+    /// This is used for prefix caching - we extract the KV state after prefill
+    /// so it can be cached and reused for future requests with the same prefix.
+    ///
+    /// # Arguments
+    ///
+    /// * `slot_index` - Which cache slot to extract from (0..max_batch_size)
+    /// * `seq_len` - How many tokens of KV to extract (prefix length)
+    ///
+    /// # Returns
+    ///
+    /// Vec of (k_tensor, v_tensor) tuples, one per layer.
+    /// Each tensor has shape [1, num_heads, seq_len, head_dim]
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // After prefill of 5 tokens in slot 0
+    /// let kv_by_layer = executor.extract_kv_for_slot(0, 5)?;
+    /// // kv_by_layer.len() == num_layers
+    /// // Each (k, v) has shape [1, num_heads, 5, head_dim]
+    /// ```
+    pub fn extract_kv_for_slot(
+        &self,
+        slot_index: usize,
+        seq_len: usize,
+    ) -> Result<Vec<(Tensor, Tensor)>> {
+        if slot_index >= self.max_batch_size {
+            anyhow::bail!(
+                "Slot index {} out of bounds (max_batch_size={})",
+                slot_index,
+                self.max_batch_size
+            );
+        }
+
+        let mut kv_by_layer = Vec::with_capacity(self.caches.len());
+
+        for cache in &self.caches {
+            // Extract this slot's K and V
+            // Cache shape: [max_batch_size, num_heads, context, head_dim]
+            // We want: [1, num_heads, seq_len, head_dim]
+
+            let k_full = cache.k();
+            let v_full = cache.v();
+
+            // Narrow to this slot (dimension 0)
+            let k_slot = k_full.i(slot_index)?; // [num_heads, context, head_dim]
+            let v_slot = v_full.i(slot_index)?; // [num_heads, context, head_dim]
+
+            // Narrow to seq_len (dimension 1, which is now dimension 1 after indexing)
+            let k_prefix = k_slot.narrow(1, 0, seq_len)?; // [num_heads, seq_len, head_dim]
+            let v_prefix = v_slot.narrow(1, 0, seq_len)?; // [num_heads, seq_len, head_dim]
+
+            // Add batch dimension back (unsqueeze at dim 0)
+            let k_batched = k_prefix.unsqueeze(0)?; // [1, num_heads, seq_len, head_dim]
+            let v_batched = v_prefix.unsqueeze(0)?; // [1, num_heads, seq_len, head_dim]
+
+            kv_by_layer.push((k_batched, v_batched));
+        }
+
+        Ok(kv_by_layer)
+    }
+
+    /// Restore KV tensors into a specific cache slot across all layers
+    ///
+    /// This is used for prefix caching - when we get a cache hit, we restore
+    /// the cached KV state so we can skip prefill computation.
+    ///
+    /// # Arguments
+    ///
+    /// * `slot_index` - Which cache slot to write to (0..max_batch_size)
+    /// * `kv_by_layer` - Vec of (k, v) tensors to restore, one per layer
+    ///   Each tensor should have shape [1, num_heads, prefix_len, head_dim]
+    ///
+    /// # Returns
+    ///
+    /// The length of the restored prefix (extracted from tensor shape)
+    ///
+    /// # Errors
+    ///
+    /// - If slot_index is out of bounds
+    /// - If kv_by_layer.len() != num_layers
+    /// - If tensor shapes are invalid
+    /// - If copy operations fail
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Restore cached KV for slot 0
+    /// let prefix_len = executor.restore_kv_to_slot(0, &cached_kv)?;
+    /// // Now slot 0 has KV for the first `prefix_len` tokens
+    /// ```
+    pub fn restore_kv_to_slot(
+        &mut self,
+        slot_index: usize,
+        kv_by_layer: &[(Tensor, Tensor)],
+    ) -> Result<usize> {
+        if slot_index >= self.max_batch_size {
+            anyhow::bail!(
+                "Slot index {} out of bounds (max_batch_size={})",
+                slot_index,
+                self.max_batch_size
+            );
+        }
+
+        if kv_by_layer.len() != self.caches.len() {
+            anyhow::bail!(
+                "KV layer count mismatch: got {} layers, expected {}",
+                kv_by_layer.len(),
+                self.caches.len()
+            );
+        }
+
+        // Extract prefix length from first layer's K tensor
+        let prefix_len = if let Some((k, _)) = kv_by_layer.first() {
+            let dims = k.dims();
+            if dims.len() != 4 || dims[0] != 1 {
+                anyhow::bail!(
+                    "Expected K tensor shape [1, num_heads, seq_len, head_dim], got {:?}",
+                    dims
+                );
+            }
+            dims[2] // seq_len dimension
+        } else {
+            anyhow::bail!("Empty kv_by_layer vector");
+        };
+
+        // Restore KV for each layer
+        for (layer_idx, (k_restore, v_restore)) in kv_by_layer.iter().enumerate() {
+            let cache = &mut self.caches[layer_idx];
+            cache.set_slot_kv(slot_index, k_restore, v_restore)?;
+        }
+
+        Ok(prefix_len)
     }
 }
 

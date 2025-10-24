@@ -160,8 +160,15 @@ pub fn calculate_optimal_batch_size(
     // - 16-core: sqrt(16) × 2 = 8
     // - 128-core: sqrt(128) × 2 ≈ 23
     let cpu_cores = profile.cpu.physical_cores;
-    let cpu_multiplier = if profile.gpu.is_some() { 1.5 } else { 2.0 };
-    let cpu_limited_batch = ((cpu_cores as f64).sqrt() * cpu_multiplier).ceil() as usize;
+    
+    // If GPU is available, CPU constraint is less relevant (GPU does the heavy lifting)
+    // Use a high value that won't be the bottleneck
+    let cpu_limited_batch = if profile.gpu.is_some() {
+        config.max_batch_size  // Don't let CPU limit when GPU is available
+    } else {
+        // CPU-only: conservative scaling
+        ((cpu_cores as f64).sqrt() * 2.0).ceil() as usize
+    };
 
     // === 3. GPU-limited batch size (if applicable) ===
     

@@ -127,27 +127,7 @@ impl ParallelKvCache {
         if self.context <= k.dim(2)? {
             return Ok((k.clone(), v.clone()));
         }
-        // Debug: log incoming IAM indices and builder positions for tracing
-        if iam.indices.dims().len() <= 2 {
-            if let Ok(idx_vec) = iam.indices.to_vec2::<u32>() {
-                eprintln!(
-                    "DEBUG ParallelKvCache::append: iam.indices.shape={:?} iam.indices={:?} iam.active={:?} positions={:?}",
-                    iam.indices.dims(),
-                    idx_vec,
-                    iam.active,
-                    // We can't access the outer BatchExecutor here; log builder positions indirectly
-                    // by creating a temporary vector of zeroes as placeholder if needed
-                    "<positions_hidden>"
-                );
-            } else {
-                eprintln!(
-                    "DEBUG ParallelKvCache::append: iam.indices.shape={:?} iam.active={:?} positions={:?}",
-                    iam.indices.dims(),
-                    iam.active,
-                    "<positions_hidden>"
-                );
-            }
-        }
+        // Debug logging removed
 
         let indices = iam.indices.unsqueeze(2)?.unsqueeze(1)?;
         let indices = indices.broadcast_as(k.shape())?.contiguous()?;
@@ -170,6 +150,114 @@ impl ParallelKvCache {
     /// Shape: [batch_size, num_heads, context, head_dim]
     pub fn v(&self) -> &Tensor {
         &self.v
+    }
+
+    /// Set KV cache for a specific slot (for prefix caching restoration)
+    ///
+    /// This updates the cache at `slot_index` with the provided KV tensors,
+    /// leaving other slots unchanged.
+    ///
+    /// # Arguments
+    ///
+    /// * `slot_index` - Which slot to update (0..batch_size)
+    /// * `k_slot` - Key tensor to write, shape [1, num_heads, prefix_len, head_dim]
+    /// * `v_slot` - Value tensor to write, shape [1, num_heads, prefix_len, head_dim]
+    ///
+    /// # Returns
+    ///
+    /// The prefix length (extracted from tensor shape)
+    ///
+    /// # Errors
+    ///
+    /// - If slot_index is out of bounds
+    /// - If tensor shapes are invalid
+    /// - If prefix_len exceeds context size
+    pub fn set_slot_kv(
+        &mut self,
+        slot_index: usize,
+        k_slot: &Tensor,
+        v_slot: &Tensor,
+    ) -> Result<usize> {
+        let k_dims = k_slot.dims();
+        let v_dims = v_slot.dims();
+
+        // Validate shapes
+        if k_dims.len() != 4 || v_dims.len() != 4 {
+            candle_core::bail!("Expected 4D tensors, got K={:?}, V={:?}", k_dims, v_dims);
+        }
+
+        if k_dims[0] != 1 || v_dims[0] != 1 {
+            candle_core::bail!("Expected batch size 1, got K={:?}, V={:?}", k_dims, v_dims);
+        }
+
+        let prefix_len = k_dims[2];
+        if prefix_len > self.context {
+            candle_core::bail!(
+                "Prefix length {} exceeds context size {}",
+                prefix_len,
+                self.context
+            );
+        }
+
+        // Get cache dimensions
+        let cache_dims = self.k.dims();
+        let batch_size = cache_dims[0];
+
+        if slot_index >= batch_size {
+            candle_core::bail!(
+                "Slot index {} out of bounds (batch_size={})",
+                slot_index,
+                batch_size
+            );
+        }
+
+        // Extract the slot, update prefix region, rebuild
+        let k_slot_full = self.k.narrow(0, slot_index, 1)?; // [1, num_heads, context, head_dim]
+        let v_slot_full = self.v.narrow(0, slot_index, 1)?;
+
+        // Build new slot: prefix + rest
+        let k_rest = if prefix_len < self.context {
+            Some(k_slot_full.narrow(2, prefix_len, self.context - prefix_len)?)
+        } else {
+            None
+        };
+
+        let v_rest = if prefix_len < self.context {
+            Some(v_slot_full.narrow(2, prefix_len, self.context - prefix_len)?)
+        } else {
+            None
+        };
+
+        let k_new_slot = if let Some(k_r) = k_rest {
+            Tensor::cat(&[k_slot, &k_r], 2)?
+        } else {
+            k_slot.clone()
+        };
+
+        let v_new_slot = if let Some(v_r) = v_rest {
+            Tensor::cat(&[v_slot, &v_r], 2)?
+        } else {
+            v_slot.clone()
+        };
+
+        // Rebuild full cache with updated slot
+        let mut k_parts = Vec::new();
+        let mut v_parts = Vec::new();
+
+        for i in 0..batch_size {
+            if i == slot_index {
+                k_parts.push(k_new_slot.clone());
+                v_parts.push(v_new_slot.clone());
+            } else {
+                k_parts.push(self.k.narrow(0, i, 1)?);
+                v_parts.push(self.v.narrow(0, i, 1)?);
+            }
+        }
+
+        self.k = Tensor::cat(&k_parts, 0)?;
+        self.v = Tensor::cat(&v_parts, 0)?;
+
+        Ok(prefix_len)
     }
 }
 
@@ -760,10 +848,7 @@ impl ParallelCacheBuilder {
             } else {
                 let start_index = self.indices[batch_i];
                 let start_pos = self.positions[batch_i];
-                eprintln!(
-                    "DEBUG indices_and_mask: slot={} start_pos={} start_index={} seq_len={} (decode path)",
-                    batch_i, start_pos, start_index, seq_len
-                );
+                // DEBUG output removed
                 let mut masks: Vec<Vec<f32>> = Vec::with_capacity(seq_len);
                 let mut indices = Vec::with_capacity(seq_len);
                 let mut all_pos = vec![usize::MAX; context];
@@ -795,10 +880,7 @@ impl ParallelCacheBuilder {
                         local_index = 0;
                     }
                 }
-                eprintln!(
-                    "DEBUG indices_and_mask: slot={} generated indices={:?}",
-                    batch_i, indices
-                );
+                // DEBUG output removed
 
                 for seq_i in 0..seq_len {
                     let my_pos = seq_i + start_pos;
@@ -926,10 +1008,7 @@ impl ParallelCacheBuilder {
 
                 // Generate indices for this slot's actual tokens
                 let mut local_index = self.indices[batch_i];
-                eprintln!(
-                    "DEBUG indices_and_mask_variable: slot={} start_pos={} start_index={} slot_seq_len={} generating indices...",
-                    batch_i, start_pos, start_index, slot_seq_len
-                );
+                // DEBUG output removed
                 for seq_i in 0..slot_seq_len {
                     all_pos[local_index] = seq_i + start_pos;
                     indices.push(local_index as u32);
@@ -938,10 +1017,7 @@ impl ParallelCacheBuilder {
                         local_index = 0;
                     }
                 }
-                eprintln!(
-                    "DEBUG indices_and_mask_variable: slot={} generated indices (before padding)={:?}",
-                    batch_i, indices
-                );
+                // DEBUG output removed
 
                 // Pad indices to max_seq_len (repeat last valid index)
                 let last_index = *indices.last().unwrap();
@@ -991,16 +1067,9 @@ impl ParallelCacheBuilder {
 
         // Debug: log final IAM before returning
         if let Ok(idx_vec) = indices.to_vec2::<u32>() {
-            eprintln!(
-                "DEBUG indices_and_mask_variable: final indices tensor shape={:?} data={:?}",
-                indices.dims(),
-                idx_vec
-            );
+            // DEBUG output removed
         }
-        eprintln!(
-            "DEBUG indices_and_mask_variable: active_slots={:?} positions_before={:?}",
-            batch_mask, self.positions
-        );
+        // DEBUG output removed
 
         Ok(IndicesAndMask {
             indices,

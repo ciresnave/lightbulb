@@ -117,9 +117,6 @@ impl Content {
                 _ => None,
             });
 
-        eprintln!("DEBUG: Tokenizer model type: {:?}", tokenizer_model);
-        eprintln!("DEBUG: Vocab size: {}", tokens.len());
-
         // Build tokenizer using tokenizers crate
         // Use Unigram model which is more flexible (no [UNK] requirement)
         use tokenizers::{
@@ -164,5 +161,35 @@ impl Content {
             }
             _ => None,
         }
+    }
+
+    /// Load a quantized tensor by name from the GGUF file
+    ///
+    /// This is the key method for loading quantized model weights! It reads the tensor
+    /// data from the memory-mapped file and returns a QTensor ready for use with QMatMul.
+    ///
+    /// # Arguments
+    /// * `reader` - A readable file handle (must be the same file that was memory-mapped)
+    /// * `name` - Tensor name (e.g., "blk.0.attn_q.weight")
+    /// * `device` - Device to load tensor on (CPU/CUDA)
+    ///
+    /// # Returns
+    /// A QTensor containing the quantized weights
+    ///
+    /// # Example
+    /// ```ignore
+    /// let mut file = File::open("model.gguf")?;
+    /// let content = gguf::Content::read("model.gguf")?;
+    /// let q_tensor = content.tensor(&mut file, "blk.0.attn_q.weight", &device)?;
+    /// let qmatmul = QMatMul::from_qtensor(q_tensor)?;
+    /// ```
+    pub fn tensor<R: std::io::Seek + std::io::Read>(
+        &self,
+        reader: &mut R,
+        name: &str,
+        device: &candle_core::Device,
+    ) -> candle_core::Result<candle_core::quantized::QTensor> {
+        // Delegate to Candle's proven tensor loading logic
+        self.candle_content.tensor(reader, name, device)
     }
 }

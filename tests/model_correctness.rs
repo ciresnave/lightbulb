@@ -187,10 +187,7 @@ fn test_batched_vs_standard_llama() -> Result<()> {
 
             // DEBUG: Check embedding layer for standard model
             // We can't easily access internals, but we can check input
-            eprintln!(
-                "DEBUG Standard input tokens: {:?}",
-                seq_tensor.to_vec2::<u32>()?
-            );
+            // DEBUG output removed
 
             let seq_logits = standard_model.forward(&seq_tensor, 0, &mut standard_cache)?;
             // Standard Llama returns [batch=1, vocab_size] (last token only!)

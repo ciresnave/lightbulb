@@ -100,7 +100,7 @@ fn main() -> Result<()> {
         let logits = model.forward(&input, 0)?;
 
         // Debug: Check logits shape
-        eprintln!("DEBUG: Prefill logits shape: {:?}", logits.dims());
+        // DEBUG output removed
 
         // Extract last token logits - Phi-3 might return [batch, seq, vocab] or [batch, vocab]
         let logits = if logits.dims().len() == 3 {
@@ -114,7 +114,7 @@ fn main() -> Result<()> {
             ));
         };
 
-        eprintln!("DEBUG: Final logits shape: {:?}", logits.dims());
+        // DEBUG output removed
         let mut next_token = logits.argmax(0)?.to_scalar::<u32>()?;
 
         if let Ok(text) = tokenizer.decode(&[next_token], false) {

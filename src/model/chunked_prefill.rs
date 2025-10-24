@@ -266,11 +266,7 @@ impl ChunkedPrefillScheduler {
                 .collect::<Vec<_>>(),
         );
 
-        eprintln!(
-            "DEBUG CHUNKED: Dynamic chunk_size={} for {} requests",
-            chunk_size,
-            active_requests.len()
-        );
+        // DEBUG output removed
 
         let mut request_ids = Vec::new();
         let mut token_sequences = Vec::new();
@@ -293,10 +289,7 @@ impl ChunkedPrefillScheduler {
         // Find the max length in this batch
         let max_len = actual_lengths.iter().copied().max().unwrap_or(0);
 
-        eprintln!(
-            "DEBUG CHUNKED: Batch actual_lengths={:?}, max_len={}",
-            actual_lengths, max_len
-        );
+        // DEBUG output removed
 
         // Second pass: pad all sequences to max_len
         let mut padding = Vec::new();

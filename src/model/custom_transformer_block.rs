@@ -75,6 +75,8 @@
 
 use candle_core::{DType, Device, Module, Result, Tensor};
 use candle_nn::{RmsNorm, VarBuilder, rms_norm};
+use std::fs::File;
+use std::io::{Read, Seek};
 
 use super::custom_attention::BatchedAttention;
 use super::mlp_wrapper::Mlp; // Thin wrapper using Candle's components
@@ -178,6 +180,77 @@ impl BatchedTransformerBlock {
         })
     }
 
+    /// Create a new BatchedTransformerBlock from GGUF quantized weights
+    ///
+    /// # Arguments
+    /// * `layer_idx` - Index of this layer (0 to num_layers-1)
+    /// * `hidden_size` - Dimension of hidden states
+    /// * `num_heads` - Number of attention heads
+    /// * `num_kv_heads` - Number of KV heads for GQA
+    /// * `intermediate_size` - MLP intermediate dimension
+    /// * `rms_norm_eps` - Epsilon for RMSNorm stability
+    /// * `gguf_content` - GGUF file content with metadata and tensor info
+    /// * `file` - Open file handle for reading tensor data
+    /// * `device` - Device to load tensors on
+    pub fn from_gguf<R: Read + Seek>(
+        layer_idx: usize,
+        hidden_size: usize,
+        num_heads: usize,
+        num_kv_heads: usize,
+        intermediate_size: usize,
+        rms_norm_eps: f64,
+        gguf_content: &crate::gguf::Content,
+        file: &mut R,
+        device: &Device,
+    ) -> Result<Self> {
+        let prefix = format!("blk.{}", layer_idx);
+
+        // Load RMSNorm weights (dequantize them since RmsNorm doesn't work with quantized weights directly)
+        let input_norm_tensor =
+            gguf_content.tensor(file, &format!("{}.attn_norm.weight", prefix), device)?;
+        let post_attn_norm_tensor =
+            gguf_content.tensor(file, &format!("{}.ffn_norm.weight", prefix), device)?;
+
+        let input_layernorm = RmsNorm::new(input_norm_tensor.dequantize(device)?, rms_norm_eps);
+        let post_attention_layernorm =
+            RmsNorm::new(post_attn_norm_tensor.dequantize(device)?, rms_norm_eps);
+
+        // Load attention with quantized weights
+        let self_attn = BatchedAttention::from_gguf(
+            hidden_size,
+            num_heads,
+            num_kv_heads,
+            gguf_content,
+            file,
+            device,
+            layer_idx,
+        )?;
+
+        // Load MLP with quantized weights
+        let mlp = Mlp::from_gguf(
+            hidden_size,
+            intermediate_size,
+            gguf_content,
+            file,
+            device,
+            layer_idx,
+        )?;
+
+        // Use F32 for quantized models
+        let dtype = DType::F32;
+
+        Ok(Self {
+            layer_idx,
+            input_layernorm,
+            self_attn,
+            post_attention_layernorm,
+            mlp,
+            hidden_size,
+            device: device.clone(),
+            dtype,
+        })
+    }
+
     /// Forward pass through the transformer block
     ///
     /// # Arguments
@@ -234,10 +307,7 @@ impl BatchedTransformerBlock {
             let raw_vec = hidden_states.flatten_all()?.to_vec1::<f32>()?;
             let raw_mean: f32 = raw_vec.iter().sum::<f32>() / raw_vec.len() as f32;
             let raw_max = raw_vec.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-            eprintln!(
-                "DEBUG Layer {}: RAW input (before input norm): mean={:.6}, max={:.6}",
-                self.layer_idx, raw_mean, raw_max
-            );
+            // DEBUG output removed
         }
 
         // 1. Normalize input
@@ -248,10 +318,7 @@ impl BatchedTransformerBlock {
             let norm_vec = normed_input.flatten_all()?.to_vec1::<f32>()?;
             let norm_mean: f32 = norm_vec.iter().sum::<f32>() / norm_vec.len() as f32;
             let norm_max = norm_vec.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-            eprintln!(
-                "DEBUG Layer {}: After input norm (attn input): mean={:.6}, max={:.6}",
-                self.layer_idx, norm_mean, norm_max
-            );
+            // DEBUG output removed
         }
 
         // 2. Apply batched self-attention
@@ -270,28 +337,13 @@ impl BatchedTransformerBlock {
             let attn_vec = attn_output.flatten_all()?.to_vec1::<f32>()?;
             let attn_mean: f32 = attn_vec.iter().sum::<f32>() / attn_vec.len() as f32;
             let attn_max = attn_vec.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-            eprintln!(
-                "DEBUG Layer {}: hidden_states BEFORE residual shape={:?}, attn_output shape={:?}",
-                self.layer_idx,
-                hidden_states.dims(),
-                attn_output.dims()
-            );
+            // DEBUG output removed
 
             // Check input to residual
             let hs_vec = hidden_states.flatten_all()?.to_vec1::<f32>()?;
             let hs_mean: f32 = hs_vec.iter().sum::<f32>() / hs_vec.len() as f32;
-            eprintln!(
-                "DEBUG Layer {}: hidden_states BEFORE residual: mean={:.6}, sample[0:3]={:?}",
-                self.layer_idx,
-                hs_mean,
-                &hs_vec[0..3]
-            );
-            eprintln!(
-                "DEBUG Layer {}: attn_output: mean={:.6}, sample[0:3]={:?}",
-                self.layer_idx,
-                attn_mean,
-                &attn_vec[0..3]
-            );
+            // DEBUG output removed
+            // DEBUG output removed
         }
 
         // 3. Residual connection: x = x + attention(norm(x))
@@ -302,13 +354,7 @@ impl BatchedTransformerBlock {
             let hs_vec = hidden_states.flatten_all()?.to_vec1::<f32>()?;
             let hs_mean: f32 = hs_vec.iter().sum::<f32>() / hs_vec.len() as f32;
             let hs_max = hs_vec.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-            eprintln!(
-                "DEBUG Layer {}: hidden_states AFTER residual: mean={:.6}, max={:.6}, sample[0:3]={:?}",
-                self.layer_idx,
-                hs_mean,
-                hs_max,
-                &hs_vec[0..3]
-            );
+            // DEBUG output removed
         }
 
         // === MLP Block (with Pre-LN) ===
@@ -323,10 +369,7 @@ impl BatchedTransformerBlock {
                 .iter()
                 .cloned()
                 .fold(f32::NEG_INFINITY, f32::max);
-            eprintln!(
-                "DEBUG Layer {}: After post_attn norm (MLP input): mean={:.6}, max={:.6}",
-                self.layer_idx, norm_mlp_mean, norm_mlp_max
-            );
+            // DEBUG output removed
         }
 
         // 2. Apply batched MLP
@@ -338,14 +381,7 @@ impl BatchedTransformerBlock {
             let mlp_mean: f32 = mlp_vec.iter().sum::<f32>() / mlp_vec.len() as f32;
             let mlp_max = mlp_vec.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
             let mlp_min = mlp_vec.iter().cloned().fold(f32::INFINITY, f32::min);
-            eprintln!(
-                "DEBUG Layer {}: mlp_output: mean={:.6}, min={:.6}, max={:.6}, sample[0:3]={:?}",
-                self.layer_idx,
-                mlp_mean,
-                mlp_min,
-                mlp_max,
-                &mlp_vec[0..3]
-            );
+            // DEBUG output removed
         }
 
         // 3. Residual connection: x = x + mlp(norm(x))
@@ -357,14 +393,7 @@ impl BatchedTransformerBlock {
             let final_mean: f32 = final_vec.iter().sum::<f32>() / final_vec.len() as f32;
             let final_max = final_vec.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
             let final_min = final_vec.iter().cloned().fold(f32::INFINITY, f32::min);
-            eprintln!(
-                "DEBUG Layer {}: FINAL OUTPUT: mean={:.6}, min={:.6}, max={:.6}, sample[0:3]={:?}",
-                self.layer_idx,
-                final_mean,
-                final_min,
-                final_max,
-                &final_vec[0..3]
-            );
+            // DEBUG output removed
         }
 
         Ok(hidden_states)

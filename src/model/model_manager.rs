@@ -419,22 +419,13 @@ impl ModelManager {
                 // Temporary: Convert string IDs to numeric for new BatchMetadata API
                 let numeric_ids: Vec<usize> = (0..request_ids.len()).collect();
                 // Debug: log request ids and positions before creating metadata
-                eprintln!(
-                    "DEBUG ModelManager: decode batch numeric_ids={:?}, positions={:?}, request_ids={:?}",
-                    numeric_ids, positions, request_ids
-                );
+                // DEBUG output removed
                 let metadata = BatchMetadata::from_decode_batch(numeric_ids.clone(), positions.clone(), positions.clone());
 
                 // Debug: inspect metadata sequences and context_lens
-                eprintln!(
-                    "DEBUG ModelManager: metadata.is_prefill={} batch_size={} context_lens={:?}",
-                    metadata.is_prefill, metadata.batch_size, metadata.context_lens
-                );
+                // DEBUG output removed
                 for (i, seq) in metadata.sequences.iter().enumerate() {
-                    eprintln!(
-                        "DEBUG ModelManager: seq {} -> start_pos={}, actual_length={}, padded_length={}, cache_offset={}",
-                        i, seq.start_pos, seq.actual_length, seq.padded_length, seq.cache_offset
-                    );
+                    // DEBUG output removed
                 }
 
                 // Collect caches for batch (preserve order)
@@ -447,10 +438,7 @@ impl ModelManager {
                 // **BATCHED FORWARD PASS** (Model-agnostic BatchManager)
                 let forward_start = Instant::now();
                 // Debug: log BatchExecutor cache positions before forward
-                eprintln!(
-                    "DEBUG ModelManager: BatchExecutor cache positions before forward: {:?}",
-                    self.batch_manager.batch_executor().device() // placeholder to avoid borrow issues
-                );
+                // DEBUG output removed
 
                 let logits_batch = self.batch_manager.forward_decode_batch(
                     &tokens_tensor,
@@ -466,10 +454,7 @@ impl ModelManager {
                     let old_pos = self.batch_manager.batch_executor_mut().get_cache_position(cache_idx);
                     let new_pos = old_pos + 1;
                     self.batch_manager.batch_executor_mut().set_cache_position(cache_idx, new_pos);
-                    eprintln!(
-                        "DEBUG: Advanced cache position for slot {}: {} -> {}",
-                        cache_idx, old_pos, new_pos
-                    );
+                    // DEBUG output removed
                 }
 
                 // Restore caches (maintain correct request<->cache mapping)
