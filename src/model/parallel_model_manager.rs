@@ -17,6 +17,7 @@ use std::time::Instant;
 use tokenizers::Tokenizer;
 
 use crate::engine::{BatchExecutor, RequestContext, RequestState};
+use crate::hardware::{BatchSizeConfig, RuntimeBatchAdjuster};
 use crate::loaders::load_local_llama;
 use crate::model::{
     BatchMetadata, BatchedTransformer, BatchedTransformerConfig, ChunkedPrefillConfig,
@@ -78,6 +79,7 @@ pub struct ParallelModelManager {
     device: Device,
     stats: ParallelBatchStats,
     cache_index_pool: Vec<bool>, // true = in use, false = available
+    runtime_adjuster: Option<RuntimeBatchAdjuster>, // Dynamic batch size adjustment
 }
 
 impl ParallelModelManager {
@@ -175,6 +177,7 @@ impl ParallelModelManager {
             device,
             stats: ParallelBatchStats::new(),
             cache_index_pool: vec![false; max_batch_size],
+            runtime_adjuster: None, // Will be enabled via enable_runtime_monitoring()
         })
     }
 
@@ -315,6 +318,76 @@ impl ParallelModelManager {
         }
     }
 
+    /// Enable runtime batch size monitoring and adjustment
+    ///
+    /// This enables dynamic batch size adjustment based on memory pressure
+    /// and queue length during inference.
+    ///
+    /// # Arguments
+    ///
+    /// * `initial_batch_size` - Starting batch size
+    /// * `config` - Configuration for adjustment thresholds
+    pub fn enable_runtime_monitoring(
+        &mut self,
+        initial_batch_size: usize,
+        config: BatchSizeConfig,
+    ) {
+        self.runtime_adjuster = Some(RuntimeBatchAdjuster::new(initial_batch_size, config));
+    }
+
+    /// Get current adaptive batch size
+    ///
+    /// Returns the current batch size recommendation from the runtime adjuster,
+    /// or None if runtime monitoring is not enabled.
+    pub fn get_adaptive_batch_size(&self) -> Option<usize> {
+        self.runtime_adjuster
+            .as_ref()
+            .map(|adjuster| adjuster.current_batch_size())
+    }
+
+    /// Check and apply batch size adjustment
+    ///
+    /// Call this periodically (e.g., once per batch) to allow the runtime
+    /// adjuster to monitor system state and adjust batch size if needed.
+    ///
+    /// # Arguments
+    ///
+    /// * `queue_length` - Number of pending requests waiting to be processed
+    ///
+    /// # Returns
+    ///
+    /// New batch size if adjustment was made, None otherwise
+    pub fn check_batch_adjustment(&mut self, queue_length: usize) -> Option<usize> {
+        if self.runtime_adjuster.is_some() {
+            // Get current memory usage (simplified - in production would query actual memory)
+            let current_memory = self.estimate_current_memory_usage();
+            let available_memory = self.estimate_available_memory();
+            
+            self.runtime_adjuster.as_mut().unwrap()
+                .check_adjustment(current_memory, available_memory, queue_length)
+        } else {
+            None
+        }
+    }
+
+    /// Estimate current memory usage (simplified)
+    ///
+    /// In production, this would query actual memory usage from the system
+    fn estimate_current_memory_usage(&self) -> u64 {
+        // Rough estimate: model weights + active cache entries
+        let active_entries = self.cache_index_pool.iter().filter(|&&used| used).count();
+        let per_entry_memory = 1024 * 1024 * 10; // Assume 10MB per active entry
+        (active_entries * per_entry_memory) as u64
+    }
+
+    /// Estimate available memory (simplified)
+    ///
+    /// In production, this would query actual available memory from the system
+    fn estimate_available_memory(&self) -> u64 {
+        // Placeholder: return a reasonable default
+        16 * 1024 * 1024 * 1024 // 16GB
+    }
+
     /// Process a batch of requests with parallel batched inference
     ///
     /// This method implements:
@@ -325,6 +398,18 @@ impl ParallelModelManager {
     /// Returns generated tokens for each request (None if request not ready or completed)
     pub fn forward_batch(&mut self, batch: &mut [RequestContext]) -> Result<Vec<Option<u32>>> {
         let batch_start = Instant::now();
+
+        // Check for runtime batch size adjustment (if enabled)
+        if let Some(new_batch_size) = self.check_batch_adjustment(batch.len()) {
+            println!(
+                "⚡ Runtime batch size adjusted: {} -> {} (queue: {})",
+                self.runtime_adjuster.as_ref().unwrap().current_batch_size(),
+                new_batch_size,
+                batch.len()
+            );
+            // Note: The new batch size will be used for future batches
+            // Current batch continues with its original size
+        }
 
         // Separate requests by state
         let mut prefill_requests = Vec::new();
@@ -598,6 +683,16 @@ impl ParallelModelManager {
         }
 
         self.stats.total_requests_processed += batch.len();
+
+        // Record memory usage for runtime adjuster (if enabled)
+        if self.runtime_adjuster.is_some() {
+            let memory_used = self.estimate_current_memory_usage();
+            let active_requests = batch.iter().filter(|ctx| matches!(ctx.state, RequestState::Decoding)).count();
+            if active_requests > 0 {
+                self.runtime_adjuster.as_mut().unwrap()
+                    .record_batch_memory(memory_used, active_requests);
+            }
+        }
 
         Ok(results)
     }

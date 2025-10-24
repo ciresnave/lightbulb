@@ -16,6 +16,9 @@
 pub mod batch_sizing;
 pub mod model_selection;
 
+pub use batch_sizing::{BatchSizeConfig, RuntimeBatchAdjuster, calculate_optimal_batch_size};
+pub use model_selection::{ModelRecommendation, recommend_model, list_viable_models};
+
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
