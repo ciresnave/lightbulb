@@ -178,6 +178,109 @@ impl ParallelModelManager {
         })
     }
 
+    /// Load a model with hardware-adaptive configuration
+    ///
+    /// Automatically detects hardware capabilities and selects optimal batch size.
+    /// Falls back to load() defaults if hardware detection fails.
+    ///
+    /// # Arguments
+    /// * `model_dir` - Path to model directory
+    /// * `context_length` - Context window size
+    /// * `dtype_str` - Data type ("f32", "f16", "bf16", "q8", "q4")
+    /// * `chunked_prefill_config` - Optional config for chunked prefill
+    pub fn load_adaptive(
+        model_dir: impl AsRef<Path>,
+        context_length: usize,
+        dtype_str: Option<&str>,
+        chunked_prefill_config: Option<ChunkedPrefillConfig>,
+    ) -> Result<Self> {
+        use crate::hardware::{
+            batch_sizing::{calculate_optimal_batch_size, BatchSizeConfig, ModelMemoryProfile},
+            HardwareProfile,
+        };
+
+        let model_dir_ref = model_dir.as_ref();
+
+        // Detect hardware
+        let profile = HardwareProfile::detect()
+            .unwrap_or_else(|_| {
+                eprintln!("Warning: Hardware detection failed, using defaults");
+                // Minimal fallback profile
+                HardwareProfile {
+                    cpu: crate::hardware::CpuInfo {
+                        physical_cores: 4,
+                        logical_cores: 8,
+                        architecture: "unknown".to_string(),
+                        model_name: "Unknown CPU".to_string(),
+                    },
+                    memory: crate::hardware::MemoryInfo {
+                        total_bytes: 8 * 1024 * 1024 * 1024, // 8GB fallback
+                        available_bytes: 6 * 1024 * 1024 * 1024,
+                        bandwidth_gbs: Some(25.0),
+                    },
+                    gpu: None,
+                    ml_score: 3.0,
+                }
+            });
+
+        println!("Hardware detected: {}", profile.summary());
+
+        // Load config using existing loader to get model configuration
+        let (_llama_model, _cache, config, _device) = load_local_llama(
+            model_dir_ref.to_str().unwrap_or(""),
+            dtype_str,
+            true,  // use_kv_cache
+            false, // use_flash_attn
+        )?;
+
+        // Estimate model memory profile
+        let dtype = match dtype_str {
+            Some("f32") => crate::hardware::model_selection::DataType::F32,
+            Some("f16") => crate::hardware::model_selection::DataType::F16,
+            Some("bf16") => crate::hardware::model_selection::DataType::BF16,
+            Some("q8") => crate::hardware::model_selection::DataType::Q8,
+            Some("q4") => crate::hardware::model_selection::DataType::Q4,
+            _ => crate::hardware::model_selection::DataType::F16, // Default
+        };
+
+        let bytes_per_param = dtype.bytes_per_param();
+        let total_params = config.hidden_size * config.hidden_size * config.num_hidden_layers * 12;
+        let weights_bytes = (total_params as f64 * bytes_per_param) as u64;
+
+        let model_profile = ModelMemoryProfile {
+            weights_bytes,
+            num_layers: config.num_hidden_layers,
+            hidden_size: config.hidden_size,
+            num_kv_heads: config.num_key_value_heads,
+            context_window: context_length,
+        };
+
+        // Calculate optimal batch size
+        let batch_config = BatchSizeConfig::default();
+        let optimal_batch_size = calculate_optimal_batch_size(
+            &profile,
+            &model_profile,
+            2, // Minimum batch size
+            Some(batch_config),
+        )?;
+
+        println!(
+            "Adaptive batch size: {} (based on {} cores, {} GB RAM)",
+            optimal_batch_size,
+            profile.cpu.physical_cores,
+            profile.memory.total_bytes / (1024 * 1024 * 1024)
+        );
+
+        // Use regular load with the adaptive batch size
+        Self::load(
+            model_dir,
+            optimal_batch_size,
+            context_length,
+            dtype_str,
+            chunked_prefill_config,
+        )
+    }
+
     /// Tokenize a prompt
     pub fn tokenize(&self, prompt: &str, add_bos: bool) -> Result<Vec<u32>> {
         let encoding = self

@@ -50,6 +50,9 @@
     # Model Context Protocol implementation
     mocopr = { workspace = true }
 
+    # Hardware detection and system analysis
+    system-analysis = { workspace = true }
+
     # Upstream Candle crates (pin to a released version; adjust as needed)
     candle-core         = { git = "https://github.com/huggingface/candle", package = "candle-core", rev = "9fe623237a515f95f70d117c0a6da610c28a5ecd" }
     candle-nn           = { git = "https://github.com/huggingface/candle", package = "candle-nn", rev = "9fe623237a515f95f70d117c0a6da610c28a5ecd" }
