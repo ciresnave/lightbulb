@@ -17,7 +17,7 @@ fn model_available() -> bool {
 }
 
 #[test]
-#[ignore] // Run with: cargo test --test parallel_model_manager_integration -- --ignored
+#[ignore]// Run with: cargo test --test parallel_model_manager_integration -- --ignored
 fn test_parallel_model_loading() {
     if !model_available() {
         println!("Skipping test: model not found at {}", MODEL_PATH);
@@ -169,7 +169,6 @@ fn test_chunked_prefill_with_variable_lengths() {
     let chunked_config = ChunkedPrefillConfig {
         chunk_size: 64,  // Small chunks to test batching
         max_batch_size: 4,
-        pad_last_chunk: true,
         pad_token_id: 0,
     };
 

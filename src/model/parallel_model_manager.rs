@@ -168,6 +168,10 @@ impl ParallelModelManager {
 
         let chunked_prefill_config = chunked_prefill_config.unwrap_or_default();
 
+        // Enable runtime monitoring by default with reasonable defaults
+        let batch_config = BatchSizeConfig::default();
+        let runtime_adjuster = Some(RuntimeBatchAdjuster::new(max_batch_size, batch_config));
+
         Ok(Self {
             model,
             batch_executor,
@@ -177,7 +181,7 @@ impl ParallelModelManager {
             device,
             stats: ParallelBatchStats::new(),
             cache_index_pool: vec![false; max_batch_size],
-            runtime_adjuster: None, // Will be enabled via enable_runtime_monitoring()
+            runtime_adjuster,
         })
     }
 
@@ -198,33 +202,32 @@ impl ParallelModelManager {
         chunked_prefill_config: Option<ChunkedPrefillConfig>,
     ) -> Result<Self> {
         use crate::hardware::{
-            batch_sizing::{calculate_optimal_batch_size, BatchSizeConfig, ModelMemoryProfile},
             HardwareProfile,
+            batch_sizing::{BatchSizeConfig, ModelMemoryProfile, calculate_optimal_batch_size},
         };
 
         let model_dir_ref = model_dir.as_ref();
 
         // Detect hardware
-        let profile = HardwareProfile::detect()
-            .unwrap_or_else(|_| {
-                eprintln!("Warning: Hardware detection failed, using defaults");
-                // Minimal fallback profile
-                HardwareProfile {
-                    cpu: crate::hardware::CpuInfo {
-                        physical_cores: 4,
-                        logical_cores: 8,
-                        architecture: "unknown".to_string(),
-                        model_name: "Unknown CPU".to_string(),
-                    },
-                    memory: crate::hardware::MemoryInfo {
-                        total_bytes: 8 * 1024 * 1024 * 1024, // 8GB fallback
-                        available_bytes: 6 * 1024 * 1024 * 1024,
-                        bandwidth_gbs: Some(25.0),
-                    },
-                    gpu: None,
-                    ml_score: 3.0,
-                }
-            });
+        let profile = HardwareProfile::detect().unwrap_or_else(|_| {
+            eprintln!("Warning: Hardware detection failed, using defaults");
+            // Minimal fallback profile
+            HardwareProfile {
+                cpu: crate::hardware::CpuInfo {
+                    physical_cores: 4,
+                    logical_cores: 8,
+                    architecture: "unknown".to_string(),
+                    model_name: "Unknown CPU".to_string(),
+                },
+                memory: crate::hardware::MemoryInfo {
+                    total_bytes: 8 * 1024 * 1024 * 1024, // 8GB fallback
+                    available_bytes: 6 * 1024 * 1024 * 1024,
+                    bandwidth_gbs: Some(25.0),
+                },
+                gpu: None,
+                ml_score: 3.0,
+            }
+        });
 
         println!("Hardware detected: {}", profile.summary());
 
@@ -318,21 +321,28 @@ impl ParallelModelManager {
         }
     }
 
-    /// Enable runtime batch size monitoring and adjustment
+    /// Override runtime batch size monitoring configuration
     ///
-    /// This enables dynamic batch size adjustment based on memory pressure
-    /// and queue length during inference.
+    /// Runtime monitoring is enabled by default with reasonable settings.
+    /// Use this method to customize the adjustment thresholds or initial batch size.
     ///
     /// # Arguments
     ///
     /// * `initial_batch_size` - Starting batch size
     /// * `config` - Configuration for adjustment thresholds
-    pub fn enable_runtime_monitoring(
+    pub fn configure_runtime_monitoring(
         &mut self,
         initial_batch_size: usize,
         config: BatchSizeConfig,
     ) {
         self.runtime_adjuster = Some(RuntimeBatchAdjuster::new(initial_batch_size, config));
+    }
+
+    /// Disable runtime batch size monitoring
+    ///
+    /// Use this if you want fixed batch sizes without dynamic adjustment.
+    pub fn disable_runtime_monitoring(&mut self) {
+        self.runtime_adjuster = None;
     }
 
     /// Get current adaptive batch size
