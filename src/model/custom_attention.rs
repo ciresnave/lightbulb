@@ -39,6 +39,26 @@ use candle_nn::VarBuilder;
 use std::fs::File;
 use std::io::{Read, Seek};
 
+/// FlashAttention-2 wrapper with feature gating
+///
+/// When the flash-attn feature is enabled and CUDA is available, this provides
+/// highly optimized attention computation using FlashAttention-2 kernels.
+#[cfg(feature = "flash-attn")]
+fn flash_attn(
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    softmax_scale: f32,
+    causal: bool,
+) -> Result<Tensor> {
+    candle_flash_attn::flash_attn(q, k, v, softmax_scale, causal)
+}
+
+#[cfg(not(feature = "flash-attn"))]
+fn flash_attn(_: &Tensor, _: &Tensor, _: &Tensor, _: f32, _: bool) -> Result<Tensor> {
+    candle_core::bail!("compile with '--features flash-attn'")
+}
+
 /// Batched Multi-Head Attention Layer
 ///
 /// Processes multiple sequences in parallel using shared KV cache.
@@ -58,6 +78,9 @@ pub struct BatchedAttention {
 
     // Attention scale factor
     scale: f64,
+
+    // FlashAttention-2 flag
+    use_flash_attn: bool,
 
     // Device and dtype
     device: Device,
@@ -106,6 +129,9 @@ impl BatchedAttention {
         let device = vb.device().clone();
         let dtype = vb.dtype();
 
+        // Enable FlashAttention on CUDA with float16/bfloat16 when feature is available
+        let use_flash_attn = cfg!(feature = "flash-attn") && device.is_cuda();
+
         Ok(Self {
             q_proj,
             k_proj,
@@ -116,6 +142,7 @@ impl BatchedAttention {
             head_dim,
             hidden_size,
             scale,
+            use_flash_attn,
             device,
             dtype,
         })
@@ -169,6 +196,9 @@ impl BatchedAttention {
         // Use F32 for quantized models (QMatMul handles the actual precision)
         let dtype = DType::F32;
 
+        // Enable FlashAttention on CUDA with float16/bfloat16 when feature is available
+        let use_flash_attn = cfg!(feature = "flash-attn") && device.is_cuda();
+
         Ok(Self {
             q_proj,
             k_proj,
@@ -179,6 +209,7 @@ impl BatchedAttention {
             head_dim,
             hidden_size,
             scale,
+            use_flash_attn,
             device: device.clone(),
             dtype,
         })
@@ -711,8 +742,49 @@ impl BatchedAttention {
     ) -> Result<Tensor> {
         // Get dimensions
         let (_batch, _num_heads, seq_q, _head_dim) = q.dims4()?;
-        let (_batch_k, _num_heads_k, seq_k, _head_dim_k) = k.dims4()?;
+        let (_batch_k, num_heads_k, seq_k, _head_dim_k) = k.dims4()?;
 
+        // === FlashAttention-2 Path ===
+        // Use FlashAttention when:
+        // 1. Feature is enabled and we're on CUDA
+        // 2. No complex attention masks (FlashAttention handles causal internally)
+        // 3. K/V have same number of heads as Q (GQA already expanded)
+        let use_flash = self.use_flash_attn
+            && mask.is_none()
+            && num_heads_k == self.num_heads
+            && self.device.is_cuda();
+
+        if use_flash {
+            // FlashAttention expects (batch, seq_len, num_heads, head_dim)
+            // Our tensors are (batch, num_heads, seq_len, head_dim)
+            let q_flash = q.transpose(1, 2)?; // [batch, seq_q, num_heads, head_dim]
+            let k_flash = k.transpose(1, 2)?; // [batch, seq_k, num_heads, head_dim]
+            let v_flash = v.transpose(1, 2)?; // [batch, seq_k, num_heads, head_dim]
+
+            // FlashAttention requires F16 or BF16
+            let original_dtype = q.dtype();
+            let flash_dtype = if self.device.is_cuda() {
+                DType::F16
+            } else {
+                original_dtype
+            };
+
+            let q_flash = q_flash.to_dtype(flash_dtype)?;
+            let k_flash = k_flash.to_dtype(flash_dtype)?;
+            let v_flash = v_flash.to_dtype(flash_dtype)?;
+
+            let softmax_scale = self.scale as f32;
+            let causal = seq_q > 1; // Causal during prefill, non-causal during decode
+
+            // Call FlashAttention
+            let attn_output = flash_attn(&q_flash, &k_flash, &v_flash, softmax_scale, causal)?;
+
+            // Convert back to original dtype and transpose back
+            // [batch, seq_q, num_heads, head_dim] -> [batch, num_heads, seq_q, head_dim]
+            return attn_output.to_dtype(original_dtype)?.transpose(1, 2);
+        }
+
+        // === Manual Attention Path (Fallback) ===
         // Note: GQA head expansion already done before calling this function
         // So k and v already have num_heads (Q heads), not num_kv_heads
 
