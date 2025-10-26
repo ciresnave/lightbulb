@@ -5,12 +5,14 @@
 
 pub mod slot_monitor;
 pub mod slot_pool;
+pub mod speculative;
 
 pub use slot_monitor::{AdjustmentConfig, MemoryStatistics, SlotPoolMonitor};
 pub use slot_pool::{
     CompletedToken, Request as SlotPoolRequest, RequestId, SlotId, SlotPool, SlotPoolError,
     SlotPoolStats, SlotState,
 };
+pub use speculative::{SpeculativeConfig, SpeculativeDecoder, SpeculativeModel, SpeculativeStats};
 
 // Legacy types for backward compatibility (will be migrated to SlotPool)
 use anyhow::Result;

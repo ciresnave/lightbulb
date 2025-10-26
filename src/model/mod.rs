@@ -15,6 +15,7 @@ pub mod mlp_wrapper; // Thin wrapper around Candle's MLP components
 pub mod model_manager; // Phase 2D - Approach 2: Generic transformer
 pub mod parallel_model_manager; // Production: Parallel batching with BatchedTransformer
 pub mod quantizable_linear; // Unified linear layer supporting both regular and quantized weights
+pub mod speculative_adapters; // Adapters for speculative decoding
 
 pub use batch_manager::{BatchManager, TransformerModel};
 pub use batch_metadata::BatchMetadata;
@@ -30,3 +31,4 @@ pub use custom_transformer_block::BatchedTransformerBlock;
 pub use kv_tensor::KVTensor;
 pub use model_manager::{BatchStats, ModelManager};
 pub use parallel_model_manager::{ParallelBatchStats, ParallelModelManager};
+pub use speculative_adapters::BatchedTransformerAdapter;
