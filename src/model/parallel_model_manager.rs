@@ -1,9 +1,9 @@
 //! Parallel model manager with true batched inference
 //!
 //! This is the production-ready implementation using:
-//! - BatchedTransformer for parallel forward passes (safetensors)
-//! - Quantized GGUF models for memory-efficient inference
-//! - BatchExecutor with ScatteredKvCache for efficient memory management  
+//! - BatchedTransformer for parallel forward passes (safetensors AND GGUF)
+//! - QuantizableLinear for transparent quantization support
+//! - ParallelCacheBuilder + ParallelKvCache for efficient per-slot cache management  
 //! - ChunkedPrefillScheduler for optimal prefill batching with padding
 //!
 //! Expected performance improvements over sequential model_manager:
@@ -13,49 +13,18 @@
 use anyhow::Result;
 use candle_core::{DType, Device, IndexOp, Tensor};
 use candle_transformers::models::llama::{Config, LlamaEosToks};
-use candle_transformers::models::quantized_llama::ModelWeights as QuantizedLlamaWeights;
 use std::path::Path;
 use std::time::Instant;
 use tokenizers::Tokenizer;
 
 use crate::cache::{PrefixCacheConfig, PrefixKvCache};
-use crate::engine::{BatchExecutor, RequestContext, RequestState};
+use crate::engine::{ParallelCacheBuilder, ParallelKvCache, RequestContext, RequestState};
 use crate::hardware::{BatchSizeConfig, RuntimeBatchAdjuster};
-use crate::loaders::{load_gguf_llama, load_local_llama};
+use crate::loaders::load_local_llama;
 use crate::model::{
     BatchMetadata, BatchedTransformer, BatchedTransformerConfig, ChunkedPrefillConfig,
     ChunkedPrefillScheduler, PrefillRequest,
 };
-
-/// Model type - either custom batched or quantized
-enum ModelType {
-    /// Custom BatchedTransformer loaded from safetensors
-    Custom(BatchedTransformer),
-    /// Quantized model loaded from GGUF
-    Quantized(QuantizedLlamaWeights),
-}
-
-impl ModelType {
-    /// Forward pass - dispatches to the appropriate model type
-    fn forward(
-        &mut self,
-        input_ids: &Tensor,
-        batch_executor: &mut BatchExecutor,
-        metadata: &BatchMetadata,
-    ) -> Result<Tensor> {
-        match self {
-            ModelType::Custom(model) => {
-                // Convert candle_core::Result to anyhow::Result
-                Ok(model.forward(input_ids, batch_executor, metadata)?)
-            }
-            ModelType::Quantized(_model) => {
-                // TODO: Implement quantized model forward pass
-                // For now, return an error
-                anyhow::bail!("Quantized model forward pass not yet implemented")
-            }
-        }
-    }
-}
 
 /// Performance statistics for parallel batched inference
 #[derive(Debug, Clone, Default)]
@@ -102,10 +71,11 @@ impl ParallelBatchStats {
     }
 }
 
-/// Parallel model manager using BatchedTransformer or Quantized models
+/// Parallel model manager using BatchedTransformer (supports both safetensors and GGUF)
 pub struct ParallelModelManager {
-    model: ModelType,
-    batch_executor: BatchExecutor,
+    model: BatchedTransformer,
+    cache_builder: ParallelCacheBuilder,
+    caches: Vec<ParallelKvCache>, // Per-layer KV caches
     tokenizer: Tokenizer,
     config: Config,
     chunked_prefill_config: ChunkedPrefillConfig,
@@ -153,24 +123,24 @@ impl ParallelModelManager {
         let tokenizer = Tokenizer::from_file(&tokenizer_path)
             .map_err(|e| anyhow::anyhow!("Failed to load tokenizer: {}", e))?;
 
-        // Create BatchExecutor
+        // Create ParallelCacheBuilder and caches
         let num_layers = config.num_hidden_layers;
-        let num_heads = config.num_attention_heads;
+        let _num_heads = config.num_attention_heads;
         let num_kv_heads = config.num_key_value_heads; // For GQA
         let head_dim = config.hidden_size / config.num_attention_heads;
 
-        // Note: BatchExecutor cache should be created with num_kv_heads, not num_heads
+        // Create cache builder - tracks position for each request slot
+        // Note: Cache should be created with num_kv_heads, not num_heads
         // because K/V tensors have num_kv_heads dimension in GQA models
         // The head expansion from num_kv_heads -> num_heads happens in attention layer
-        let batch_executor = BatchExecutor::new(
-            max_batch_size,
-            context_length,
-            num_layers,
-            num_kv_heads, // Use num_kv_heads for cache, not num_heads
-            head_dim,
-            dtype,
-            &device,
-        )?;
+        let cache_builder =
+            ParallelCacheBuilder::new(max_batch_size, context_length, dtype, &device)?;
+
+        // Create per-layer KV caches
+        let mut caches = Vec::with_capacity(num_layers);
+        for _ in 0..num_layers {
+            caches.push(cache_builder.make_cache(num_kv_heads, head_dim)?);
+        }
 
         // Create BatchedTransformer configuration
         let transformer_config = BatchedTransformerConfig {
@@ -215,8 +185,9 @@ impl ParallelModelManager {
         let prefix_cache = PrefixKvCache::new(prefix_cache_config);
 
         Ok(Self {
-            model: ModelType::Custom(model),
-            batch_executor,
+            model,
+            cache_builder,
+            caches,
             tokenizer,
             config,
             chunked_prefill_config,
@@ -406,18 +377,20 @@ impl ParallelModelManager {
         // Extract tokenizer
         let tokenizer = content.extract_tokenizer()?;
 
-        // Create BatchExecutor
+        // Create cache builder and per-layer KV caches
         let head_dim = hidden_size / num_attention_heads;
 
-        let batch_executor = BatchExecutor::new(
+        let cache_builder = ParallelCacheBuilder::new(
             max_batch_size,
             context_length,
-            num_hidden_layers,
-            num_key_value_heads,
-            head_dim,
             DType::F32, // GGUF quantized weights will be dequantized for cache
             &device,
         )?;
+
+        let mut caches = Vec::with_capacity(num_hidden_layers);
+        for _ in 0..num_hidden_layers {
+            caches.push(cache_builder.make_cache(num_key_value_heads, head_dim)?);
+        }
 
         // Build BatchedTransformer config
         let transformer_config = BatchedTransformerConfig {
@@ -459,8 +432,9 @@ impl ParallelModelManager {
         let prefix_cache = PrefixKvCache::new(prefix_cache_config);
 
         Ok(Self {
-            model: ModelType::Custom(model),
-            batch_executor,
+            model,
+            cache_builder,
+            caches,
             tokenizer,
             config,
             chunked_prefill_config,
@@ -606,6 +580,17 @@ impl ParallelModelManager {
             .iter()
             .position(|&used| !used)
             .map(|idx| {
+                debug_assert!(
+                    idx < self.cache_index_pool.len(),
+                    "Allocated cache index {} >= pool size {}",
+                    idx,
+                    self.cache_index_pool.len()
+                );
+                debug_assert!(
+                    !self.cache_index_pool[idx],
+                    "Attempting to allocate already-occupied slot {}",
+                    idx
+                );
                 self.cache_index_pool[idx] = true;
                 idx
             })
@@ -613,9 +598,73 @@ impl ParallelModelManager {
 
     /// Release a cache index back to the pool
     fn release_cache_index(&mut self, index: usize) {
+        debug_assert!(
+            index < self.cache_index_pool.len(),
+            "Attempted to release cache index {} >= pool size {}",
+            index,
+            self.cache_index_pool.len()
+        );
+        debug_assert!(
+            self.cache_index_pool[index],
+            "Attempting to release already-free slot {}",
+            index
+        );
         if index < self.cache_index_pool.len() {
             self.cache_index_pool[index] = false;
         }
+    }
+
+    /// Restore KV cache to a specific slot (for prefix caching)
+    fn restore_kv_to_slot(
+        &mut self,
+        slot_idx: usize,
+        kv_by_layer: &[(Tensor, Tensor)],
+    ) -> Result<usize> {
+        if kv_by_layer.is_empty() {
+            return Ok(0);
+        }
+
+        // Get prefix length from first layer
+        let (k_first, _v_first) = &kv_by_layer[0];
+        let prefix_len = k_first.dim(2)?;
+
+        // Restore each layer
+        for (layer_idx, (k, v)) in kv_by_layer.iter().enumerate() {
+            if layer_idx >= self.caches.len() {
+                break;
+            }
+
+            self.caches[layer_idx].set_slot_kv(slot_idx, k, v)?;
+        }
+
+        Ok(prefix_len)
+    }
+
+    /// Extract KV cache for a specific slot (for prefix caching)
+    fn extract_kv_for_slot(
+        &self,
+        slot_idx: usize,
+        prefix_len: usize,
+    ) -> Result<Vec<(Tensor, Tensor)>> {
+        let mut kv_by_layer = Vec::with_capacity(self.caches.len());
+
+        for cache in &self.caches {
+            // Extract K/V for this slot
+            let k_full = cache.k().i(slot_idx)?; // [num_heads, context, head_dim]
+            let v_full = cache.v().i(slot_idx)?;
+
+            // Narrow to prefix length
+            let k_prefix = k_full.narrow(1, 0, prefix_len)?; // [num_heads, prefix_len, head_dim]
+            let v_prefix = v_full.narrow(1, 0, prefix_len)?;
+
+            // Expand batch dimension for set_slot_kv compatibility
+            let k_with_batch = k_prefix.unsqueeze(0)?; // [1, num_heads, prefix_len, head_dim]
+            let v_with_batch = v_prefix.unsqueeze(0)?;
+
+            kv_by_layer.push((k_with_batch, v_with_batch));
+        }
+
+        Ok(kv_by_layer)
     }
 
     /// Override runtime batch size monitoring configuration
@@ -707,7 +756,15 @@ impl ParallelModelManager {
     ///
     /// Returns generated tokens for each request (None if request not ready or completed)
     pub fn forward_batch(&mut self, batch: &mut [RequestContext]) -> Result<Vec<Option<u32>>> {
-        let batch_start = Instant::now();
+        debug_assert!(!batch.is_empty(), "forward_batch called with empty batch");
+        debug_assert!(
+            batch.len() <= self.cache_builder.batch_size(),
+            "Batch size {} exceeds slot pool size {}",
+            batch.len(),
+            self.cache_builder.batch_size()
+        );
+
+        let _batch_start = Instant::now();
 
         // Check for runtime batch size adjustment (if enabled)
         if let Some(new_batch_size) = self.check_batch_adjustment(batch.len()) {
@@ -742,13 +799,11 @@ impl ParallelModelManager {
                         ctx.assign_cache_index(cache_idx);
 
                         // Restore cached KV into this slot
-                        let prefix_len = self
-                            .batch_executor
-                            .restore_kv_to_slot(cache_idx, &cached_entry.kv_by_layer)?;
+                        let prefix_len =
+                            self.restore_kv_to_slot(cache_idx, &cached_entry.kv_by_layer)?;
 
                         // Set cache position to prefix length
-                        self.batch_executor
-                            .set_cache_position(cache_idx, prefix_len);
+                        self.cache_builder.set_position(cache_idx, prefix_len);
 
                         // Update context position to reflect cached tokens
                         ctx.position = prefix_len;
@@ -789,7 +844,11 @@ impl ParallelModelManager {
                         decode_requests.push(idx);
                     }
                 }
-                RequestState::Completed => {}
+                RequestState::Completed => {
+                    // In continuous batching, we need to include Completed slots too
+                    // They'll be masked out, but we need the full batch size
+                    decode_requests.push(idx);
+                }
             }
         }
 
@@ -832,14 +891,32 @@ impl ParallelModelManager {
                         let cache_idx = self
                             .allocate_cache_index()
                             .expect("No available cache indices in pool");
+                        debug_assert!(
+                            cache_idx < self.cache_builder.batch_size(),
+                            "Allocated cache index {} >= batch size {}",
+                            cache_idx,
+                            self.cache_builder.batch_size()
+                        );
                         ctx.assign_cache_index(cache_idx);
                         // ONLY reset cache builder position for the FIRST chunk of a new request
                         // This ensures RoPE uses correct positions (0, 1, 2, ...) from the start
-                        self.batch_executor.reset_request_state(cache_idx);
+                        self.cache_builder.reset_batch_index(cache_idx);
                     }
 
                     // Use the assigned cache index (stable across chunks and into decode)
-                    request_ids.push(ctx.cache_index.unwrap());
+                    let cache_idx = ctx.cache_index.unwrap();
+                    debug_assert!(
+                        cache_idx < self.cache_builder.batch_size(),
+                        "Cache index {} >= batch size {}",
+                        cache_idx,
+                        self.cache_builder.batch_size()
+                    );
+                    debug_assert!(
+                        self.cache_index_pool[cache_idx],
+                        "Using cache index {} that's marked as free!",
+                        cache_idx
+                    );
+                    request_ids.push(cache_idx);
                 }
 
                 // Create metadata for prefill
@@ -861,9 +938,12 @@ impl ParallelModelManager {
                     batch_size,
                     metadata
                 );
-                let logits = self
-                    .model
-                    .forward(&input_ids, &mut self.batch_executor, &metadata)?;
+                let logits = self.model.forward(
+                    &input_ids,
+                    &mut self.cache_builder,
+                    &mut self.caches,
+                    &metadata,
+                )?;
                 crate::debug_prefill!("logits shape={:?}", logits.dims());
                 self.stats.total_forward_time_ms += forward_start.elapsed().as_secs_f64() * 1000.0;
 
@@ -872,9 +952,9 @@ impl ParallelModelManager {
                 // explicitly advance positions here by the actual token count (not padded)
                 for (i, actual_len) in chunked_batch.actual_lengths.iter().enumerate() {
                     let cache_idx = request_ids[i];
-                    let old_pos = self.batch_executor.get_cache_position(cache_idx);
+                    let old_pos = self.cache_builder.get_position(cache_idx);
                     let new_pos = old_pos + actual_len;
-                    self.batch_executor.set_cache_position(cache_idx, new_pos);
+                    self.cache_builder.set_position(cache_idx, new_pos);
                     crate::debug_prefill!(
                         "Slot {} position: {} -> {} (advanced by {} actual tokens)",
                         cache_idx,
@@ -959,10 +1039,7 @@ impl ParallelModelManager {
 
                             // Only insert if not already cached (avoid redundant work)
                             if !self.prefix_cache.check_would_hit(tokens_to_cache) {
-                                match self
-                                    .batch_executor
-                                    .extract_kv_for_slot(cache_idx, prompt_len)
-                                {
+                                match self.extract_kv_for_slot(cache_idx, prompt_len) {
                                     Ok(kv_by_layer) => {
                                         // Insert into cache
                                         if let Err(e) = self.prefix_cache.insert(
@@ -1003,37 +1080,85 @@ impl ParallelModelManager {
 
         // === DECODE PHASE: True parallel batching ===
         if !decode_requests.is_empty() {
-            let batch_size = decode_requests.len();
+            // For continuous batching, batch_size MUST equal slot pool size
+            let batch_size = self.cache_builder.batch_size();
+
+            debug_assert!(
+                !decode_requests.is_empty(),
+                "Decode phase entered with empty decode_requests"
+            );
+            debug_assert!(batch_size > 0, "Slot pool size is 0");
 
             crate::debug_decode!(
-                "batch_size={}, decode_requests={:?}",
+                "slot_pool_size={}, decode_requests={:?}",
                 batch_size,
                 decode_requests
             );
 
-            // Collect tokens and positions
+            // Collect tokens and positions for ALL slots in the pool
+            // Active slots get real values, inactive slots get dummy values + will be masked
             let mut token_ids = Vec::with_capacity(batch_size);
             let mut positions = Vec::with_capacity(batch_size);
             let mut request_ids = Vec::with_capacity(batch_size);
 
-            for &idx in &decode_requests {
-                let ctx = &batch[idx];
-                let last_token = *ctx.generated_tokens.last().unwrap();
-                token_ids.push(last_token);
-                positions.push(ctx.position);
-                // Use the stable cache index assigned during prefill
-                request_ids.push(
-                    ctx.cache_index
-                        .expect("cache_index should be assigned during prefill"),
-                );
+            // Process ALL slots in the pool (batch.len() should equal batch_size for continuous batching)
+            for idx in 0..batch_size {
+                if idx < batch.len() {
+                    let ctx = &batch[idx];
 
-                crate::debug_decode!(
-                    "PREP: idx={}, last_token={}, position={}, generated_tokens={:?}",
-                    idx,
-                    last_token,
-                    ctx.position,
-                    ctx.generated_tokens
-                );
+                    // Check if this slot is actually active (Decoding with tokens)
+                    let is_active =
+                        ctx.state == RequestState::Decoding && !ctx.generated_tokens.is_empty();
+
+                    if is_active {
+                        let last_token = *ctx.generated_tokens.last().unwrap();
+                        token_ids.push(last_token);
+                        positions.push(ctx.position);
+                        // Use the cache index assigned during prefill
+                        let cache_idx = ctx
+                            .cache_index
+                            .expect("cache_index should be assigned during prefill");
+                        debug_assert!(
+                            cache_idx < batch_size,
+                            "Cache index {} >= batch size {}",
+                            cache_idx,
+                            batch_size
+                        );
+                        debug_assert!(
+                            self.cache_index_pool[cache_idx],
+                            "Using cache index {} that's marked as free in decode phase!",
+                            cache_idx
+                        );
+                        request_ids.push(cache_idx);
+
+                        crate::debug_decode!(
+                            "PREP: idx={}, last_token={}, position={}, cache_idx={}, generated_tokens={:?}",
+                            idx,
+                            last_token,
+                            ctx.position,
+                            cache_idx,
+                            ctx.generated_tokens
+                        );
+                    } else {
+                        // Inactive slot (Completed or Pending) - use dummy values
+                        token_ids.push(0);
+                        positions.push(0);
+                        // For inactive slots, use the slot index as a placeholder cache index
+                        request_ids.push(idx);
+
+                        crate::debug_decode!(
+                            "PREP: idx={} INACTIVE (state={:?}, masked out)",
+                            idx,
+                            ctx.state
+                        );
+                    }
+                } else {
+                    // Slot beyond batch array - use dummy values
+                    token_ids.push(0);
+                    positions.push(0);
+                    request_ids.push(idx);
+                    crate::debug_decode!("PREP: idx={} EMPTY (beyond batch array)", idx);
+                }
             }
 
             // Create batched tensor [batch_size] (1D for BatchedTransformer)
@@ -1053,20 +1178,32 @@ impl ParallelModelManager {
                 positions
             );
 
-            // CRITICAL: Advance cache positions BEFORE forward pass
+            // CRITICAL: Advance cache positions BEFORE forward pass (only for active slots with valid cache_index)
             // The pure indices_and_mask uses current position to determine WHERE to write KV
             // So we must set position to where we WANT to write, not where we just read from
-            for (i, &cache_idx) in request_ids.iter().enumerate() {
-                let new_position = positions[i] + 1; // Advance to next position for KV write
-                self.batch_executor
-                    .set_cache_position(cache_idx, new_position);
+            for (idx, &cache_idx) in request_ids.iter().enumerate() {
+                // Only advance if this is an active request with a valid cache index
+                // (inactive slots use idx as placeholder, which doesn't match their actual cache_index)
+                if idx < batch.len() {
+                    let ctx = &batch[idx];
+                    if ctx.state == RequestState::Decoding
+                        && !ctx.generated_tokens.is_empty()
+                        && ctx.cache_index == Some(cache_idx)
+                    {
+                        let new_position = positions[idx] + 1; // Advance to next position for KV write
+                        self.cache_builder.set_position(cache_idx, new_position);
+                    }
+                }
             }
 
             // Single parallel forward pass for all decode requests!
             let forward_start = Instant::now();
-            let logits = self
-                .model
-                .forward(&input_ids, &mut self.batch_executor, &metadata)?;
+            let logits = self.model.forward(
+                &input_ids,
+                &mut self.cache_builder,
+                &mut self.caches,
+                &metadata,
+            )?;
             self.stats.total_forward_time_ms += forward_start.elapsed().as_secs_f64() * 1000.0;
 
             crate::debug_decode!("logits shape={:?}", logits.dims());
@@ -1075,11 +1212,16 @@ impl ParallelModelManager {
             self.stats.total_batches += 1;
             self.stats.max_batch_size = self.stats.max_batch_size.max(batch_size);
 
-            // Process results
-            for (i, &idx) in decode_requests.iter().enumerate() {
+            // Process results (only for decode_requests, which are the requests that went through decode)
+            for (_i, &idx) in decode_requests.iter().enumerate() {
                 let ctx = &mut batch[idx];
 
-                let logits_slice = logits.i(i)?;
+                // Skip if not actually decoding (Completed or Pending)
+                if ctx.state != RequestState::Decoding || ctx.generated_tokens.is_empty() {
+                    continue;
+                }
+
+                let logits_slice = logits.i(idx)?; // Use idx directly since logits shape matches batch_size
                 let next_token = logits_slice.argmax(0)?.to_scalar::<u32>()?;
 
                 crate::debug_decode!("RESULT: idx={}, i={}, next_token={}", idx, i, next_token);

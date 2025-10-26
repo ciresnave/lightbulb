@@ -80,7 +80,8 @@ use std::path::Path;
 use std::time::Instant;
 use tokenizers::Tokenizer;
 
-use crate::engine::{BatchExecutor, RequestContext, RequestState};
+use crate::cache::ParallelCacheBuilder;
+use crate::engine::{RequestContext, RequestState};
 use crate::loaders::load_local_llama;
 use crate::model::{BatchManager, BatchMetadata};
 
@@ -176,7 +177,7 @@ impl ModelManager {
         let model_dir = model_dir.as_ref();
 
         // Load model and cache
-        let (model, cache, config, device) = load_local_llama(
+        let (model, _cache, config, device) = load_local_llama(
             model_dir.to_str().context("Invalid model path")?,
             dtype,
             true,  // use_kv_cache
@@ -189,9 +190,9 @@ impl ModelManager {
             .map_err(|e| anyhow::anyhow!("Failed to load tokenizer: {}", e))?;
 
         // Create batch executor
-        let num_layers = config.num_hidden_layers;
-        let num_heads = config.num_attention_heads;
-        let head_dim = config.hidden_size / config.num_attention_heads;
+        let _num_layers = config.num_hidden_layers;
+        let _num_heads = config.num_attention_heads;
+        let _head_dim = config.hidden_size / config.num_attention_heads;
 
         let dtype_enum = match dtype {
             Some("f32") | None => DType::F32,
@@ -200,18 +201,11 @@ impl ModelManager {
             _ => DType::F32,
         };
 
-        let batch_executor = BatchExecutor::new(
-            max_batch_size,
-            context_length,
-            num_layers,
-            num_heads,
-            head_dim,
-            dtype_enum,
-            &device,
-        )?;
+        let cache_builder =
+            ParallelCacheBuilder::new(max_batch_size, context_length, dtype_enum, &device)?;
 
         // Create model-agnostic batch manager
-        let batch_manager = BatchManager::new(model, batch_executor, device.clone());
+        let batch_manager = BatchManager::new(model, cache_builder, device.clone());
 
         // We'll create caches on-demand per request instead of pre-allocating
         let caches = HashMap::new();
@@ -256,7 +250,7 @@ impl ModelManager {
     /// Note: This implementation processes requests sequentially with per-request caches.
     /// Full integration with BatchExecutor's ScatteredKvCache for true batched inference is TODO.
     pub fn forward_batch(&mut self, batch: &mut [RequestContext]) -> Result<Vec<Option<u32>>> {
-        let batch_start = Instant::now();
+        let _batch_start = Instant::now();
 
         let mut results = Vec::with_capacity(batch.len());
 
@@ -420,11 +414,15 @@ impl ModelManager {
                 let numeric_ids: Vec<usize> = (0..request_ids.len()).collect();
                 // Debug: log request ids and positions before creating metadata
                 // DEBUG output removed
-                let metadata = BatchMetadata::from_decode_batch(numeric_ids.clone(), positions.clone(), positions.clone());
+                let metadata = BatchMetadata::from_decode_batch(
+                    numeric_ids.clone(),
+                    positions.clone(),
+                    positions.clone(),
+                );
 
                 // Debug: inspect metadata sequences and context_lens
                 // DEBUG output removed
-                for (i, seq) in metadata.sequences.iter().enumerate() {
+                for (_i, _seq) in metadata.sequences.iter().enumerate() {
                     // DEBUG output removed
                 }
 
@@ -448,12 +446,14 @@ impl ModelManager {
                 self.stats.total_forward_time_ms += forward_start.elapsed().as_secs_f64() * 1000.0;
 
                 // CRITICAL: Advance cache positions after forward pass
-                // The BatchExecutor's indices_and_mask is now pure (doesn't mutate positions),
+                // The BatchManager's cache_builder's indices_and_mask is now pure (doesn't mutate positions),
                 // so we must explicitly advance positions by 1 for each decode token
-                for (i, &cache_idx) in numeric_ids.iter().enumerate() {
-                    let old_pos = self.batch_manager.batch_executor_mut().get_cache_position(cache_idx);
+                for (_i, &cache_idx) in numeric_ids.iter().enumerate() {
+                    let old_pos = self.batch_manager.cache_builder().get_position(cache_idx);
                     let new_pos = old_pos + 1;
-                    self.batch_manager.batch_executor_mut().set_cache_position(cache_idx, new_pos);
+                    self.batch_manager
+                        .cache_builder_mut()
+                        .set_position(cache_idx, new_pos);
                     // DEBUG output removed
                 }
 

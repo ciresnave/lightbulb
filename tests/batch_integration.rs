@@ -2,7 +2,8 @@
 
 use candle_core::{DType, Device, Tensor};
 use lightbulb::engine::{
-    BatchAssembler, BatchConfig, BatchExecutor, Request, RequestContext, RequestQueue, RequestState,
+    BatchAssembler, BatchConfig, IndicesAndMask, ParallelCacheBuilder, ParallelKvCache, Request,
+    RequestContext, RequestQueue, RequestState,
 };
 
 /// Test end-to-end batched inference simulation
@@ -31,10 +32,12 @@ fn test_end_to_end_batch_inference_simulation() {
         max_batch_tokens: 512,
     };
     let assembler = BatchAssembler::new(config);
-    let mut executor = BatchExecutor::new(
-        batch_size, context, num_layers, num_heads, head_dim, dtype, &device,
-    )
-    .unwrap();
+    let mut cache_builder = ParallelCacheBuilder::new(batch_size, context, num_layers);
+    let mut caches: Vec<ParallelKvCache> = (0..num_layers)
+        .map(|_| {
+            ParallelKvCache::new(batch_size, num_heads, context, head_dim, dtype, &device).unwrap()
+        })
+        .collect();
 
     // Submit requests
     for i in 1..=5 {
@@ -60,7 +63,7 @@ fn test_end_to_end_batch_inference_simulation() {
     }
 
     // Assign cache indices
-    executor.prepare_batch(&mut batch).unwrap();
+    cache_builder.prepare_batch(&mut batch).unwrap();
     println!(
         "Batch 1 cache indices: {:?}",
         batch.iter().map(|ctx| ctx.cache_index).collect::<Vec<_>>()
@@ -68,10 +71,10 @@ fn test_end_to_end_batch_inference_simulation() {
     assert_eq!(batch[0].cache_index, Some(0));
     assert_eq!(batch[1].cache_index, Some(1));
     assert_eq!(batch[2].cache_index, Some(2));
-    assert_eq!(executor.available_slots(), 0);
+    assert_eq!(cache_builder.available_slots(), 0);
 
     // Get indices and mask
-    let iam = executor.get_indices_and_mask(&batch, seq_len).unwrap();
+    let iam = cache_builder.indices_and_mask(&batch, seq_len).unwrap();
 
     // Simulate forward pass through all layers
     let k_shape = (batch_size, num_heads, seq_len, head_dim);
@@ -81,7 +84,7 @@ fn test_end_to_end_batch_inference_simulation() {
         let v = Tensor::randn(0f32, 1.0, k_shape, &device).unwrap();
 
         // Append to cache
-        let (k_out, _v_out) = executor.append_kv(layer_idx, &k, &v, &iam).unwrap();
+        let (k_out, _v_out) = caches[layer_idx].append(&k, &v, &iam).unwrap();
 
         // Verify output shapes
         assert_eq!(k_out.dims(), &[batch_size, num_heads, context, head_dim]);
@@ -92,8 +95,8 @@ fn test_end_to_end_batch_inference_simulation() {
     // Advance cache builder positions by seq_len for active slots (once per forward)
     for ctx in &batch {
         if let Some(cache_idx) = ctx.cache_index {
-            let cur = executor.get_cache_position(cache_idx);
-            executor.set_cache_position(cache_idx, cur + seq_len);
+            let cur = cache_builder.get_cache_position(cache_idx);
+            cache_builder.set_cache_position(cache_idx, cur + seq_len);
         }
     }
 
@@ -101,13 +104,13 @@ fn test_end_to_end_batch_inference_simulation() {
     println!("\n=== Completing request req-1 ===");
     let completed_idx = batch[0].cache_index.unwrap();
     batch[0].complete();
-    executor.release_request(completed_idx);
+    cache_builder.release_request(completed_idx);
     println!(
         "Released cache index {}, available slots: {}",
         completed_idx,
-        executor.available_slots()
+        cache_builder.available_slots()
     );
-    assert_eq!(executor.available_slots(), 1);
+    assert_eq!(cache_builder.available_slots(), 1);
 
     // Remove completed requests from batch
     batch.retain(|ctx| ctx.state != RequestState::Completed);
@@ -132,12 +135,12 @@ fn test_end_to_end_batch_inference_simulation() {
 
     // Try to assign cache indices to new requests
     // This will fail if we try to assign more than available slots
-    if new_batch.len() > executor.available_slots() {
+    if new_batch.len() > cache_builder.available_slots() {
         // Take only what fits
-        new_batch.truncate(executor.available_slots());
+        new_batch.truncate(cache_builder.available_slots());
     }
 
-    executor.prepare_batch(&mut new_batch).unwrap();
+    cache_builder.prepare_batch(&mut new_batch).unwrap();
     println!(
         "New request cache indices: {:?}",
         new_batch
@@ -152,11 +155,11 @@ fn test_end_to_end_batch_inference_simulation() {
     assert_eq!(batch.len(), 3);
 
     // Process second iteration
-    let iam = executor.get_indices_and_mask(&batch, seq_len).unwrap();
+    let iam = cache_builder.indices_and_mask(&batch, seq_len).unwrap();
     for layer_idx in 0..num_layers {
         let k = Tensor::randn(0f32, 1.0, k_shape, &device).unwrap();
         let v = Tensor::randn(0f32, 1.0, k_shape, &device).unwrap();
-        let (k_out, v_out) = executor.append_kv(layer_idx, &k, &v, &iam).unwrap();
+        let (k_out, v_out) = caches[layer_idx].append(&k, &v, &iam).unwrap();
         assert_eq!(k_out.dims(), &[batch_size, num_heads, context, head_dim]);
     }
 
@@ -171,7 +174,19 @@ fn test_end_to_end_batch_inference_simulation() {
 #[test]
 fn test_batch_mask_with_mixed_states() {
     let device = Device::Cpu;
-    let mut executor = BatchExecutor::new(3, 128, 2, 4, 32, DType::F32, &device).unwrap();
+    let batch_size = 3;
+    let context = 128;
+    let num_layers = 2;
+    let num_heads = 4;
+    let head_dim = 32;
+    let dtype = DType::F32;
+
+    let mut cache_builder = ParallelCacheBuilder::new(batch_size, context, num_layers);
+    let mut caches: Vec<ParallelKvCache> = (0..num_layers)
+        .map(|_| {
+            ParallelKvCache::new(batch_size, num_heads, context, head_dim, dtype, &device).unwrap()
+        })
+        .collect();
 
     let req1 = Request {
         id: "req-1".to_string(),
@@ -198,10 +213,10 @@ fn test_batch_mask_with_mixed_states() {
     // ctx3 stays Pending
 
     let mut batch = vec![ctx1, ctx2, ctx3];
-    executor.prepare_batch(&mut batch).unwrap();
+    cache_builder.prepare_batch(&mut batch).unwrap();
 
     // Get indices and mask - should only process Decoding requests
-    let iam = executor.get_indices_and_mask(&batch, 1).unwrap();
+    let iam = cache_builder.indices_and_mask(&batch, 1).unwrap();
 
     // The batch mask should be [true, true, false]
     // Only the first two requests should be processed
@@ -211,7 +226,7 @@ fn test_batch_mask_with_mixed_states() {
     let v = Tensor::zeros((3, 4, 1, 32), DType::F32, &device).unwrap();
 
     // Should work without error
-    let result = executor.append_kv(0, &k, &v, &iam);
+    let result = caches[0].append(&k, &v, &iam);
     assert!(result.is_ok());
 }
 
@@ -219,8 +234,19 @@ fn test_batch_mask_with_mixed_states() {
 #[test]
 fn test_cache_context_window() {
     let device = Device::Cpu;
+    let batch_size = 1;
     let context = 10; // Small context for testing
-    let mut executor = BatchExecutor::new(1, context, 1, 2, 16, DType::F32, &device).unwrap();
+    let num_layers = 1;
+    let num_heads = 2;
+    let head_dim = 16;
+    let dtype = DType::F32;
+
+    let mut cache_builder = ParallelCacheBuilder::new(batch_size, context, num_layers);
+    let mut caches: Vec<ParallelKvCache> = (0..num_layers)
+        .map(|_| {
+            ParallelKvCache::new(batch_size, num_heads, context, head_dim, dtype, &device).unwrap()
+        })
+        .collect();
 
     let req = Request {
         id: "req-1".to_string(),
@@ -231,15 +257,15 @@ fn test_cache_context_window() {
     ctx.start_decoding();
 
     let mut batch = vec![ctx];
-    executor.prepare_batch(&mut batch).unwrap();
+    cache_builder.prepare_batch(&mut batch).unwrap();
 
     // Simulate generating more tokens than context
     for i in 0..15 {
-        let iam = executor.get_indices_and_mask(&batch, 1).unwrap();
+        let iam = cache_builder.indices_and_mask(&batch, 1).unwrap();
         let k = Tensor::zeros((1, 2, 1, 16), DType::F32, &device).unwrap();
         let v = Tensor::zeros((1, 2, 1, 16), DType::F32, &device).unwrap();
 
-        let result = executor.append_kv(0, &k, &v, &iam);
+        let result = caches[0].append(&k, &v, &iam);
         assert!(result.is_ok(), "Failed at iteration {}", i);
 
         // Update position
@@ -271,7 +297,19 @@ fn test_concurrent_batch_operations() {
         max_batch_tokens: 1024,
     });
 
-    let mut executor = BatchExecutor::new(4, 128, 2, 4, 32, DType::F32, &device).unwrap();
+    let batch_size = 4;
+    let context = 128;
+    let num_layers = 2;
+    let num_heads = 4;
+    let head_dim = 32;
+    let dtype = DType::F32;
+
+    let mut cache_builder = ParallelCacheBuilder::new(batch_size, context, num_layers);
+    let mut caches: Vec<ParallelKvCache> = (0..num_layers)
+        .map(|_| {
+            ParallelKvCache::new(batch_size, num_heads, context, head_dim, dtype, &device).unwrap()
+        })
+        .collect();
 
     let mut total_processed = 0;
 
@@ -291,30 +329,30 @@ fn test_concurrent_batch_operations() {
         }
 
         // Assign cache indices
-        executor.prepare_batch(&mut batch).unwrap();
+        cache_builder.prepare_batch(&mut batch).unwrap();
 
         // Simulate one forward pass
-        let iam = executor.get_indices_and_mask(&batch, 1).unwrap();
+        let iam = cache_builder.indices_and_mask(&batch, 1).unwrap();
 
         // Create tensors with max batch size dimensions
         // This works even for partial batches because batch_mask indicates active slots
         let k = Tensor::zeros((4, 4, 1, 32), DType::F32, &device).unwrap();
         let v = Tensor::zeros((4, 4, 1, 32), DType::F32, &device).unwrap();
 
-        let (_k_out, _v_out) = executor.append_kv(0, &k, &v, &iam).unwrap();
+        let (_k_out, _v_out) = caches[0].append(&k, &v, &iam).unwrap();
 
         total_processed += batch_len;
 
         // Release all
         for ctx in batch {
             if let Some(idx) = ctx.cache_index {
-                executor.release_request(idx);
+                cache_builder.release_request(idx);
             }
         }
     }
 
     assert_eq!(total_processed, 10);
-    assert_eq!(executor.available_slots(), 4); // All released
+    assert_eq!(cache_builder.available_slots(), 4); // All released
     println!(
         "Processed {} requests in batches (including partial batch)",
         total_processed
@@ -327,8 +365,19 @@ fn test_concurrent_batch_operations() {
 fn test_partial_batch_handling() {
     let device = Device::Cpu;
     let max_batch_size = 4;
-    let mut executor =
-        BatchExecutor::new(max_batch_size, 128, 2, 4, 32, DType::F32, &device).unwrap();
+    let context = 128;
+    let num_layers = 2;
+    let num_heads = 4;
+    let head_dim = 32;
+    let dtype = DType::F32;
+
+    let mut cache_builder = ParallelCacheBuilder::new(max_batch_size, context, num_layers);
+    let mut caches: Vec<ParallelKvCache> = (0..num_layers)
+        .map(|_| {
+            ParallelKvCache::new(max_batch_size, num_heads, context, head_dim, dtype, &device)
+                .unwrap()
+        })
+        .collect();
 
     // Create a partial batch with only 2 requests (half of max_batch_size)
     let req1 = Request {
@@ -350,11 +399,11 @@ fn test_partial_batch_handling() {
     let mut batch = vec![ctx1, ctx2];
 
     // Prepare batch (assign cache indices)
-    executor.prepare_batch(&mut batch).unwrap();
+    cache_builder.prepare_batch(&mut batch).unwrap();
     assert_eq!(batch.len(), 2); // Partial batch
 
     // Get indices and mask - should pad batch_mask to max_batch_size internally
-    let iam = executor.get_indices_and_mask(&batch, 1).unwrap();
+    let iam = cache_builder.indices_and_mask(&batch, 1).unwrap();
 
     // Create tensors with max batch size (4), not actual batch size (2)
     // The batch_mask will tell Candle which slots are active
@@ -362,7 +411,7 @@ fn test_partial_batch_handling() {
     let v = Tensor::zeros((max_batch_size, 4, 1, 32), DType::F32, &device).unwrap();
 
     // Should work without tensor dimension mismatch
-    let result = executor.append_kv(0, &k, &v, &iam);
+    let result = caches[0].append(&k, &v, &iam);
     assert!(
         result.is_ok(),
         "Partial batch should work with padded batch_mask"
@@ -390,16 +439,13 @@ fn test_padded_multi_chunk_prefill() {
     let head_dim = 32;
     let dtype = DType::F32;
 
-    let mut executor = BatchExecutor::new(
-        max_batch_size,
-        context,
-        num_layers,
-        num_heads,
-        head_dim,
-        dtype,
-        &device,
-    )
-    .unwrap();
+    let mut cache_builder = ParallelCacheBuilder::new(max_batch_size, context, num_layers);
+    let mut caches: Vec<ParallelKvCache> = (0..num_layers)
+        .map(|_| {
+            ParallelKvCache::new(max_batch_size, num_heads, context, head_dim, dtype, &device)
+                .unwrap()
+        })
+        .collect();
 
     // Simulate two requests with different lengths
     // Request 0: 50 tokens (will be split into chunks)
@@ -408,14 +454,14 @@ fn test_padded_multi_chunk_prefill() {
     let slot_1 = 1;
 
     // Reset both slots to position 0
-    executor.reset_request_state(slot_0);
-    executor.reset_request_state(slot_1);
+    cache_builder.reset_request_state(slot_0);
+    cache_builder.reset_request_state(slot_1);
 
     // First chunk: both active, padded to 32 tokens each
     // Request 0: 32 actual tokens (chunk 1/2)
     // Request 1: 30 actual tokens with 2 padding
     let chunk1_seq_len = 32;
-    let iam1 = executor
+    let iam1 = cache_builder
         .get_indices_and_mask_simple(2, chunk1_seq_len)
         .unwrap();
 
@@ -430,20 +476,20 @@ fn test_padded_multi_chunk_prefill() {
     .to_dtype(dtype)
     .unwrap();
     let v1 = k1.clone();
-    executor.append_kv(0, &k1, &v1, &iam1).unwrap();
+    caches[0].append(&k1, &v1, &iam1).unwrap();
 
     // Advance positions by actual lengths (not padded)
     // Request 0: 32 tokens -> position 32
     // Request 1: 30 tokens -> position 30
-    executor.set_cache_position(slot_0, 32);
-    executor.set_cache_position(slot_1, 30);
+    cache_builder.set_cache_position(slot_0, 32);
+    cache_builder.set_cache_position(slot_1, 30);
 
-    assert_eq!(executor.get_cache_position(slot_0), 32);
-    assert_eq!(executor.get_cache_position(slot_1), 30);
+    assert_eq!(cache_builder.get_cache_position(slot_0), 32);
+    assert_eq!(cache_builder.get_cache_position(slot_1), 30);
 
     // Second chunk: only request 0 active (remaining 18 tokens, padded to 32)
     let chunk2_seq_len = 32;
-    let iam2 = executor
+    let iam2 = cache_builder
         .get_indices_and_mask_simple(1, chunk2_seq_len)
         .unwrap();
 
@@ -457,19 +503,19 @@ fn test_padded_multi_chunk_prefill() {
     .to_dtype(dtype)
     .unwrap();
     let v2 = k2.clone();
-    executor.append_kv(0, &k2, &v2, &iam2).unwrap();
+    caches[0].append(&k2, &v2, &iam2).unwrap();
 
     // Advance position for request 0 by actual length only (18 tokens)
-    executor.set_cache_position(slot_0, 32 + 18);
+    cache_builder.set_cache_position(slot_0, 32 + 18);
 
     // Verify final positions
     assert_eq!(
-        executor.get_cache_position(slot_0),
+        cache_builder.get_cache_position(slot_0),
         50,
         "Request 0 should have processed 50 tokens total"
     );
     assert_eq!(
-        executor.get_cache_position(slot_1),
+        cache_builder.get_cache_position(slot_1),
         30,
         "Request 1 position should not change when inactive"
     );
@@ -489,29 +535,26 @@ fn test_indices_and_mask_purity() {
     let head_dim = 16;
     let dtype = DType::F32;
 
-    let mut executor = BatchExecutor::new(
-        max_batch_size,
-        context,
-        num_layers,
-        num_heads,
-        head_dim,
-        dtype,
-        &device,
-    )
-    .unwrap();
+    let mut cache_builder = ParallelCacheBuilder::new(max_batch_size, context, num_layers);
+    let _caches: Vec<ParallelKvCache> = (0..num_layers)
+        .map(|_| {
+            ParallelKvCache::new(max_batch_size, num_heads, context, head_dim, dtype, &device)
+                .unwrap()
+        })
+        .collect();
 
     let slot_0 = 0;
-    executor.reset_request_state(slot_0);
+    cache_builder.reset_request_state(slot_0);
 
-    let pos_before = executor.get_cache_position(slot_0);
+    let pos_before = cache_builder.get_cache_position(slot_0);
     assert_eq!(pos_before, 0);
 
     // Call indices_and_mask multiple times without explicit position advancement
-    let _iam1 = executor.get_indices_and_mask_simple(1, 5).unwrap();
-    let pos_after_iam1 = executor.get_cache_position(slot_0);
+    let _iam1 = cache_builder.get_indices_and_mask_simple(1, 5).unwrap();
+    let pos_after_iam1 = cache_builder.get_cache_position(slot_0);
 
-    let _iam2 = executor.get_indices_and_mask_simple(1, 5).unwrap();
-    let pos_after_iam2 = executor.get_cache_position(slot_0);
+    let _iam2 = cache_builder.get_indices_and_mask_simple(1, 5).unwrap();
+    let pos_after_iam2 = cache_builder.get_cache_position(slot_0);
 
     // Position should not change from calling indices_and_mask alone
     assert_eq!(
@@ -524,8 +567,8 @@ fn test_indices_and_mask_purity() {
     );
 
     // Now explicitly advance
-    executor.set_cache_position(slot_0, pos_before + 5);
-    let pos_after_advance = executor.get_cache_position(slot_0);
+    cache_builder.set_cache_position(slot_0, pos_before + 5);
+    let pos_after_advance = cache_builder.get_cache_position(slot_0);
     assert_eq!(
         pos_after_advance, 5,
         "Position should only change with explicit set_cache_position"

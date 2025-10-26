@@ -23,8 +23,11 @@
 //!
 //! We start with Approach 1 to get batching working quickly, with clear
 //! TODOs for where Approach 2 optimizations would go.
+//!
+//! **NOTE:** This module is legacy code and not currently used in production.
+//! ParallelModelManager with custom transformers is used instead.
 
-use crate::engine::BatchExecutor;
+use crate::engine::ParallelCacheBuilder;
 use crate::model::BatchMetadata;
 use anyhow::Result;
 use candle_core::{Device, IndexOp, Tensor};
@@ -37,7 +40,7 @@ use candle_transformers::models::llama::{Cache, Llama};
 /// efficient memory management.
 pub struct BatchedLlamaWrapper {
     model: Llama,
-    batch_executor: BatchExecutor,
+    cache_builder: ParallelCacheBuilder,
     device: Device,
 }
 
@@ -46,12 +49,12 @@ impl BatchedLlamaWrapper {
     ///
     /// # Arguments
     /// * `model` - Pre-loaded Candle Llama model
-    /// * `batch_executor` - Batch executor with ScatteredKvCache
+    /// * `cache_builder` - Cache builder for position tracking
     /// * `device` - Device for tensor operations
-    pub fn new(model: Llama, batch_executor: BatchExecutor, device: Device) -> Self {
+    pub fn new(model: Llama, cache_builder: ParallelCacheBuilder, device: Device) -> Self {
         Self {
             model,
-            batch_executor,
+            cache_builder,
             device,
         }
     }
@@ -178,14 +181,14 @@ impl BatchedLlamaWrapper {
         &self.device
     }
 
-    /// Get reference to batch executor for cache management
-    pub fn batch_executor(&self) -> &BatchExecutor {
-        &self.batch_executor
+    /// Get reference to cache builder
+    pub fn cache_builder(&self) -> &ParallelCacheBuilder {
+        &self.cache_builder
     }
 
-    /// Get mutable reference to batch executor
-    pub fn batch_executor_mut(&mut self) -> &mut BatchExecutor {
-        &mut self.batch_executor
+    /// Get mutable reference to cache builder
+    pub fn cache_builder_mut(&mut self) -> &mut ParallelCacheBuilder {
+        &mut self.cache_builder
     }
 
     /// Get mutable reference to the underlying model

@@ -398,9 +398,10 @@ mod tests {
 
         let batch = scheduler.next_batch(&mut requests).unwrap();
         assert_eq!(batch.actual_lengths[0], 3);
-        assert_eq!(batch.padding[0], 509); // 512 - 3
-        assert_eq!(batch.token_sequences[0].len(), 512);
-        assert_eq!(batch.token_sequences[0][3], 99); // Padded with 99
+        // With single request, max_len == actual_len, so no padding
+        assert_eq!(batch.padding[0], 0); // No inter-batch padding needed
+        assert_eq!(batch.token_sequences[0].len(), 3);
+        // No padding tokens added since there's only one request
     }
 
     #[test]

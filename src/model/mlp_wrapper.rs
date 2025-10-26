@@ -13,7 +13,6 @@
 use crate::model::quantizable_linear::QuantizableLinear;
 use candle_core::{Module, Result, Tensor};
 use candle_nn::VarBuilder;
-use std::fs::File;
 use std::io::{Read, Seek};
 
 /// Minimal MLP using Candle's components
@@ -57,24 +56,12 @@ impl Mlp {
         )?);
 
         // DEBUG: Check actual weight shapes and stats
-        let gate_weight = vb
+        let _gate_weight = vb
             .pp("gate_proj")
             .get((intermediate_size, hidden_size), "weight")?;
-        let down_weight = vb
+        let _down_weight = vb
             .pp("down_proj")
             .get((hidden_size, intermediate_size), "weight")?;
-
-        let gate_vec = gate_weight.flatten_all()?.to_vec1::<f32>()?;
-        let gate_mean: f32 = gate_vec.iter().sum::<f32>() / gate_vec.len() as f32;
-        let gate_max = gate_vec.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-        let gate_min = gate_vec.iter().cloned().fold(f32::INFINITY, f32::min);
-
-        let down_vec = down_weight.flatten_all()?.to_vec1::<f32>()?;
-        let down_mean: f32 = down_vec.iter().sum::<f32>() / down_vec.len() as f32;
-        let down_max = down_vec.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-        let down_min = down_vec.iter().cloned().fold(f32::INFINITY, f32::min);
-
-        // DEBUG output removed
 
         Ok(Self {
             gate_proj,
@@ -137,33 +124,13 @@ impl Mlp {
     pub fn forward(&self, x: &Tensor) -> Result<Tensor> {
         // DEBUG: Check input stats
         let input_vec = x.flatten_all()?.to_vec1::<f32>()?;
-        let input_max = input_vec.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-        let input_mean: f32 = input_vec.iter().sum::<f32>() / input_vec.len() as f32;
+        let _input_max = input_vec.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+        let _input_mean: f32 = input_vec.iter().sum::<f32>() / input_vec.len() as f32;
 
         let gate = candle_nn::ops::silu(&self.gate_proj.forward(x)?)?;
         let up = self.up_proj.forward(x)?;
-
-        // DEBUG: Check intermediate stats
-        let gate_vec = gate.flatten_all()?.to_vec1::<f32>()?;
-        let gate_max = gate_vec.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-        let up_vec = up.flatten_all()?.to_vec1::<f32>()?;
-        let up_max = up_vec.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-
         let intermediate = (gate * up)?;
-
-        // DEBUG: Check intermediate product shape and stats
-        let inter_vec = intermediate.flatten_all()?.to_vec1::<f32>()?;
-        let inter_max = inter_vec.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-        let inter_mean: f32 = inter_vec.iter().sum::<f32>() / inter_vec.len() as f32;
-        // DEBUG output removed
-
         let output = self.down_proj.forward(&intermediate)?;
-
-        // DEBUG: Always print for comparison
-        let out_vec = output.flatten_all()?.to_vec1::<f32>()?;
-        let out_max = out_vec.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-        let out_min = out_vec.iter().cloned().fold(f32::INFINITY, f32::min);
-        // DEBUG output removed
 
         Ok(output)
     }

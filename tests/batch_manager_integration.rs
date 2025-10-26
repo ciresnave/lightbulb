@@ -11,7 +11,7 @@
 use anyhow::Result;
 use candle_core::{DType, Device, IndexOp, Tensor};
 use candle_transformers::models::llama::{Cache, Config, Llama};
-use lightbulb::engine::BatchExecutor;
+use lightbulb::engine::ParallelCacheBuilder;
 use lightbulb::model::{BatchManager, BatchMetadata};
 use std::path::Path;
 
@@ -44,17 +44,13 @@ fn test_batch_manager_single_request_matches_direct_llama() -> Result<()> {
     let (llama_model, _, config, device) = load_test_model()?;
 
     // Create BatchManager
-    let batch_executor = BatchExecutor::new(
+    let cache_builder = ParallelCacheBuilder::new(
         4,   // max_batch_size
         512, // context_length
         config.num_hidden_layers,
-        config.num_attention_heads,
-        config.hidden_size / config.num_attention_heads,
-        DType::F32,
-        &device,
-    )?;
+    );
 
-    let mut batch_manager = BatchManager::new(llama_model, batch_executor, device.clone());
+    let mut batch_manager = BatchManager::new(llama_model, cache_builder, device.clone());
 
     // Load separate model for direct comparison
     let (direct_llama, _, _, _) = load_test_model()?;
@@ -144,17 +140,9 @@ fn test_batch_manager_decode_step() -> Result<()> {
     let (llama_model, _, config, device) = load_test_model()?;
 
     // Create BatchManager
-    let batch_executor = BatchExecutor::new(
-        4,
-        512,
-        config.num_hidden_layers,
-        config.num_attention_heads,
-        config.hidden_size / config.num_attention_heads,
-        DType::F32,
-        &device,
-    )?;
+    let cache_builder = ParallelCacheBuilder::new(4, 512, config.num_hidden_layers);
 
-    let mut batch_manager = BatchManager::new(llama_model, batch_executor, device.clone());
+    let mut batch_manager = BatchManager::new(llama_model, cache_builder, device.clone());
 
     // Load separate model for direct comparison
     let (mut direct_llama, _, _, _) = load_test_model()?;
@@ -234,17 +222,9 @@ fn test_batch_manager_multiple_requests() -> Result<()> {
     let (llama_model, _, config, device) = load_test_model()?;
 
     // Create BatchManager
-    let batch_executor = BatchExecutor::new(
-        8,
-        512,
-        config.num_hidden_layers,
-        config.num_attention_heads,
-        config.hidden_size / config.num_attention_heads,
-        DType::F32,
-        &device,
-    )?;
+    let cache_builder = ParallelCacheBuilder::new(8, 512, config.num_hidden_layers);
 
-    let mut batch_manager = BatchManager::new(llama_model, batch_executor, device.clone());
+    let mut batch_manager = BatchManager::new(llama_model, cache_builder, device.clone());
 
     // Create 3 different "requests" with different prompts
     let prompts = vec![
@@ -338,17 +318,13 @@ fn test_batch_size_one_equals_direct_llama() -> Result<()> {
 
     let (llama_model, _, config, device) = load_test_model()?;
 
-    let batch_executor = BatchExecutor::new(
+    let cache_builder = ParallelCacheBuilder::new(
         1,
         512, // max_batch_size = 1
         config.num_hidden_layers,
-        config.num_attention_heads,
-        config.hidden_size / config.num_attention_heads,
-        DType::F32,
-        &device,
-    )?;
+    );
 
-    let mut batch_manager = BatchManager::new(llama_model, batch_executor, device.clone());
+    let mut batch_manager = BatchManager::new(llama_model, cache_builder, device.clone());
 
     // Load direct model
     let (mut direct_llama, _, _, _) = load_test_model()?;

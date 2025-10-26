@@ -10,7 +10,12 @@
 //!
 //! Original: https://github.com/huggingface/candle/blob/main/candle-nn/src/kv_cache.rs
 
+use crate::cache::cache_span::SpanRegistry;
+use crate::cache::eviction_policy::VotingAggregator;
+use crate::cache::h2o_policy::H2OPolicy;
+use crate::cache::streaming_policy::{StreamingConfig, compute_streaming_index};
 use candle_core::{DType, Device, IndexOp, Result, Tensor};
+use std::collections::HashMap;
 
 /// Indices and attention mask for KV cache operations
 ///
@@ -306,7 +311,7 @@ impl ParallelKvCache {
 /// * `context` - Maximum cache size (e.g., 512)
 /// * `dtype` - Data type for cache tensors
 /// * `device` - CPU/GPU device
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct ParallelCacheBuilder {
     context: usize,
     /// The current position in the stream for each slot (can exceed context)
@@ -315,6 +320,31 @@ pub struct ParallelCacheBuilder {
     indices: Vec<usize>,
     dtype: DType,
     device: Device,
+    /// Optional StreamingLLM configuration for constant-memory long contexts
+    streaming_config: Option<StreamingConfig>,
+    /// Optional H2O policy for attention-based eviction
+    h2o_policy: Option<H2OPolicy>,
+    /// Optional voting aggregator for multi-policy eviction
+    voting_aggregator: Option<VotingAggregator>,
+    /// Mapping from slot_id to current sequence position (for eviction policies)
+    slot_positions: HashMap<usize, usize>,
+    /// Span registry for semantic cache region tracking
+    span_registry: SpanRegistry,
+}
+
+/// Cache usage statistics
+///
+/// Provides information about cache utilization, active spans, and per-tag span counts.
+#[derive(Debug, Clone)]
+pub struct CacheUsageInfo {
+    /// Total number of batch slots
+    pub total_slots: usize,
+    /// Number of active (non-evicted) spans
+    pub active_span_count: usize,
+    /// Current position for each slot
+    pub per_slot_positions: Vec<usize>,
+    /// Count of spans per cache tag
+    pub per_tag_counts: HashMap<crate::cache::CacheTag, usize>,
 }
 
 /// A single slot in the parallel batch - isolated view of one request's state
@@ -509,7 +539,737 @@ impl ParallelCacheBuilder {
             context,
             dtype,
             device: device.clone(),
+            streaming_config: None,
+            h2o_policy: None,
+            voting_aggregator: None,
+            slot_positions: HashMap::new(),
+            span_registry: SpanRegistry::new(),
         })
+    }
+
+    /// Set StreamingLLM configuration for constant-memory long contexts
+    ///
+    /// Enables attention sinks + sliding window eviction policy.
+    ///
+    /// # Arguments
+    ///
+    /// * `config` - StreamingLLM configuration (sink_size, window_size)
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let mut builder = ParallelCacheBuilder::new(4, 2052, DType::F32, &device)?;
+    /// builder.set_streaming_config(Some(StreamingConfig::new(4, 2048)));
+    /// ```
+    pub fn set_streaming_config(&mut self, config: Option<StreamingConfig>) {
+        if let Some(ref cfg) = config {
+            if let Err(e) = cfg.validate() {
+                eprintln!("Warning: Invalid StreamingLLM config: {}", e);
+                return;
+            }
+        }
+        self.streaming_config = config;
+    }
+
+    /// Get the current StreamingLLM configuration
+    pub fn streaming_config(&self) -> Option<&StreamingConfig> {
+        self.streaming_config.as_ref()
+    }
+
+    /// Set H2O policy for attention-based eviction
+    ///
+    /// # Arguments
+    ///
+    /// * `policy` - H2O policy instance (or None to disable)
+    pub fn set_h2o_policy(&mut self, policy: Option<H2OPolicy>) {
+        self.h2o_policy = policy;
+    }
+
+    /// Get the current H2O policy
+    pub fn h2o_policy(&self) -> Option<&H2OPolicy> {
+        self.h2o_policy.as_ref()
+    }
+
+    /// Get mutable reference to H2O policy
+    pub fn h2o_policy_mut(&mut self) -> Option<&mut H2OPolicy> {
+        self.h2o_policy.as_mut()
+    }
+
+    /// Set voting aggregator for multi-policy eviction
+    ///
+    /// # Arguments
+    ///
+    /// * `aggregator` - Voting aggregator combining multiple policies
+    pub fn set_voting_aggregator(&mut self, aggregator: Option<VotingAggregator>) {
+        self.voting_aggregator = aggregator;
+    }
+
+    /// Get the current voting aggregator
+    pub fn voting_aggregator(&self) -> Option<&VotingAggregator> {
+        self.voting_aggregator.as_ref()
+    }
+
+    /// Update H2O policy with attention weights from the last generation step
+    ///
+    /// # Arguments
+    ///
+    /// * `attention_weights` - Attention weights [query_pos][key_pos]
+    ///   Should be aggregated across heads if multi-head
+    ///
+    /// This method should be called after each forward pass to track
+    /// cumulative attention scores per token for eviction decisions.
+    pub fn update_attention_scores(&mut self, attention_weights: &[Vec<f32>]) {
+        if let Some(ref mut h2o) = self.h2o_policy {
+            h2o.update_attention_scores(attention_weights, &self.slot_positions);
+        }
+    }
+
+    // === Cache Span Management APIs ===
+
+    /// Begin a new cache span at the current position
+    ///
+    /// Creates span metadata tracking a semantic region of the KV cache.
+    /// The span remains "open" until `end_span()` is called with the returned SpanId.
+    ///
+    /// **Note**: This does NOT store tokens - caller must manage token storage externally
+    /// (e.g., HashMap<SpanId, Vec<u32>>, Vector DB, disk, etc.)
+    ///
+    /// # Arguments
+    ///
+    /// * `slot` - Which batch slot this span belongs to
+    /// * `tag` - Semantic tag for the span (SystemPrompt, ToolOutput, etc.)
+    /// * `name` - Optional unique name for human reference
+    ///
+    /// # Returns
+    ///
+    /// SpanId that can be used to reference this span later
+    ///
+    /// # Errors
+    ///
+    /// Returns error if name already exists (names must be unique)
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let span_id = builder.begin_span(0, CacheTag::SystemPrompt, Some("sys_v1".into()))?;
+    /// // ... process tokens ...
+    /// builder.end_span(span_id)?;
+    /// ```
+    pub fn begin_span(
+        &mut self,
+        slot: usize,
+        tag: crate::cache::CacheTag,
+        name: Option<String>,
+    ) -> Result<crate::cache::SpanId> {
+        use crate::cache::CacheSpan;
+
+        if slot >= self.positions.len() {
+            candle_core::bail!("Slot {} out of range (max: {})", slot, self.positions.len());
+        }
+
+        let span_id = self.span_registry.next_span_id();
+        let start_pos = self.positions[slot];
+
+        let span = CacheSpan::new(span_id, slot, start_pos, start_pos, tag, name);
+
+        self.span_registry
+            .register(span)
+            .map_err(|e| candle_core::Error::Msg(e))?;
+
+        Ok(span_id)
+    }
+
+    /// End an open span at the current position
+    ///
+    /// Updates the span's end position to the current position of its slot.
+    ///
+    /// # Arguments
+    ///
+    /// * `span_id` - ID of the span to end (from `begin_span()`)
+    ///
+    /// # Errors
+    ///
+    /// Returns error if span_id doesn't exist
+    pub fn end_span(&mut self, span_id: crate::cache::SpanId) -> Result<()> {
+        let span = self
+            .span_registry
+            .get_mut(span_id)
+            .ok_or_else(|| candle_core::Error::Msg(format!("Span {} not found", span_id)))?;
+
+        let current_pos = self.positions[span.slot];
+        span.end_pos = current_pos;
+
+        Ok(())
+    }
+
+    /// Tag an existing region of the cache as a span
+    ///
+    /// Creates a complete span for a known position range (doesn't need end_span).
+    ///
+    /// # Arguments
+    ///
+    /// * `slot` - Which batch slot
+    /// * `start_pos` - Starting position (inclusive)
+    /// * `end_pos` - Ending position (exclusive)
+    /// * `tag` - Semantic tag
+    /// * `name` - Optional unique name
+    ///
+    /// # Returns
+    ///
+    /// SpanId for the created span
+    ///
+    /// # Errors
+    ///
+    /// Returns error if name already exists or positions are invalid
+    pub fn tag_region(
+        &mut self,
+        slot: usize,
+        start_pos: usize,
+        end_pos: usize,
+        tag: crate::cache::CacheTag,
+        name: Option<String>,
+    ) -> Result<crate::cache::SpanId> {
+        use crate::cache::CacheSpan;
+
+        if slot >= self.positions.len() {
+            candle_core::bail!("Slot {} out of range (max: {})", slot, self.positions.len());
+        }
+
+        if end_pos <= start_pos {
+            candle_core::bail!(
+                "Invalid span range: end_pos ({}) must be > start_pos ({})",
+                end_pos,
+                start_pos
+            );
+        }
+
+        let span_id = self.span_registry.next_span_id();
+        let span = CacheSpan::new(span_id, slot, start_pos, end_pos, tag, name);
+
+        self.span_registry
+            .register(span)
+            .map_err(|e| candle_core::Error::Msg(e))?;
+
+        Ok(span_id)
+    }
+
+    /// Get immutable reference to a span
+    ///
+    /// # Returns
+    ///
+    /// Option containing the span if it exists
+    pub fn get_span(&self, span_id: crate::cache::SpanId) -> Option<&crate::cache::CacheSpan> {
+        self.span_registry.get(span_id)
+    }
+
+    /// Get mutable reference to a span
+    ///
+    /// # Returns
+    ///
+    /// Option containing the span if it exists
+    pub fn get_span_mut(
+        &mut self,
+        span_id: crate::cache::SpanId,
+    ) -> Option<&mut crate::cache::CacheSpan> {
+        self.span_registry.get_mut(span_id)
+    }
+
+    /// Find a span by its unique name
+    ///
+    /// # Returns
+    ///
+    /// Option containing the span if found
+    pub fn find_span_by_name(&self, name: &str) -> Option<&crate::cache::CacheSpan> {
+        self.span_registry.find_by_name(name)
+    }
+
+    /// Get all spans for a specific slot
+    ///
+    /// # Returns
+    ///
+    /// Vector of references to spans in the given slot
+    pub fn spans_for_slot(&self, slot: usize) -> Vec<&crate::cache::CacheSpan> {
+        self.span_registry.spans_for_slot(slot)
+    }
+
+    /// Check if a span is currently active
+    ///
+    /// # Returns
+    ///
+    /// true if span exists and is Active, false otherwise
+    pub fn is_span_active(&self, span_id: crate::cache::SpanId) -> bool {
+        self.span_registry
+            .get(span_id)
+            .map(|s| s.is_active())
+            .unwrap_or(false)
+    }
+
+    /// Set the importance score for a span
+    ///
+    /// Importance affects eviction priority: 0.0 = evict first, 1.0 = evict last
+    ///
+    /// # Arguments
+    ///
+    /// * `span_id` - ID of the span
+    /// * `importance` - Score from 0.0 to 1.0
+    ///
+    /// # Errors
+    ///
+    /// Returns error if span doesn't exist
+    pub fn set_span_importance(
+        &mut self,
+        span_id: crate::cache::SpanId,
+        importance: f32,
+    ) -> Result<()> {
+        let span = self
+            .span_registry
+            .get_mut(span_id)
+            .ok_or_else(|| candle_core::Error::Msg(format!("Span {} not found", span_id)))?;
+
+        span.importance = importance.clamp(0.0, 1.0);
+        Ok(())
+    }
+
+    /// Set parent-child relationship between spans
+    ///
+    /// When the parent is evicted, all children are automatically evicted.
+    ///
+    /// # Arguments
+    ///
+    /// * `child_id` - ID of the child span
+    /// * `parent_id` - ID of the parent span
+    ///
+    /// # Errors
+    ///
+    /// Returns error if:
+    /// - Either span doesn't exist
+    /// - Creating the relationship would form a cycle
+    pub fn set_span_parent(
+        &mut self,
+        child_id: crate::cache::SpanId,
+        parent_id: crate::cache::SpanId,
+    ) -> Result<()> {
+        // Check for cycles
+        if self.span_registry.would_create_cycle(child_id, parent_id) {
+            candle_core::bail!(
+                "Cannot set parent: would create circular dependency between {} and {}",
+                child_id,
+                parent_id
+            );
+        }
+
+        // Update child's parent
+        {
+            let child = self.span_registry.get_mut(child_id).ok_or_else(|| {
+                candle_core::Error::Msg(format!("Child span {} not found", child_id))
+            })?;
+            child.parent = Some(parent_id);
+        }
+
+        // Update parent's children list
+        {
+            let parent = self.span_registry.get_mut(parent_id).ok_or_else(|| {
+                candle_core::Error::Msg(format!("Parent span {} not found", parent_id))
+            })?;
+            if !parent.children.contains(&child_id) {
+                parent.children.push(child_id);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Evict all spans with a specific tag
+    ///
+    /// Marks all matching spans as evicted and returns information about
+    /// what was affected. Automatically cascades to child spans.
+    ///
+    /// **Note**: This marks spans as evicted in metadata but does NOT
+    /// actually clear the KV cache tensors. Caller must handle tensor cleanup
+    /// based on the returned EvictionResult.
+    ///
+    /// # Arguments
+    ///
+    /// * `tag` - The tag to match
+    ///
+    /// # Returns
+    ///
+    /// EvictionResult containing affected spans and positions
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let result = builder.evict_tagged(CacheTag::ToolOutput)?;
+    /// for (span_id, impact) in result.spans_affected {
+    ///     if matches!(impact, EvictionImpact::FullyEvicted) {
+    ///         // Clean up external token storage
+    ///         token_storage.remove(&span_id);
+    ///     }
+    /// }
+    /// ```
+    pub fn evict_tagged(
+        &mut self,
+        tag: crate::cache::CacheTag,
+    ) -> Result<crate::cache::EvictionResult> {
+        use crate::cache::EvictionResult;
+
+        let mut result = EvictionResult::empty();
+
+        // Find all spans with this tag
+        let span_ids: Vec<crate::cache::SpanId> = self
+            .span_registry
+            .spans_with_tag(tag)
+            .into_iter()
+            .map(|s| s.id)
+            .collect();
+
+        // Evict each span (including children)
+        for span_id in span_ids {
+            let span_result = self.evict_span_internal(span_id)?;
+            result.spans_affected.extend(span_result.spans_affected);
+            result
+                .positions_evicted
+                .extend(span_result.positions_evicted);
+        }
+
+        Ok(result)
+    }
+
+    /// Evict a specific span by ID
+    ///
+    /// Marks the span and all its children as evicted.
+    ///
+    /// # Arguments
+    ///
+    /// * `span_id` - ID of the span to evict
+    ///
+    /// # Returns
+    ///
+    /// EvictionResult containing affected spans
+    pub fn evict_span(
+        &mut self,
+        span_id: crate::cache::SpanId,
+    ) -> Result<crate::cache::EvictionResult> {
+        self.evict_span_internal(span_id)
+    }
+
+    /// Evict a span by its unique name
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - Name of the span to evict
+    ///
+    /// # Returns
+    ///
+    /// EvictionResult containing affected spans
+    ///
+    /// # Errors
+    ///
+    /// Returns error if no span with that name exists
+    pub fn evict_named(&mut self, name: &str) -> Result<crate::cache::EvictionResult> {
+        let span_id = self
+            .find_span_by_name(name)
+            .map(|s| s.id)
+            .ok_or_else(|| candle_core::Error::Msg(format!("No span named '{}'", name)))?;
+
+        self.evict_span_internal(span_id)
+    }
+
+    /// Internal helper for span eviction with cascade
+    fn evict_span_internal(
+        &mut self,
+        span_id: crate::cache::SpanId,
+    ) -> Result<crate::cache::EvictionResult> {
+        use crate::cache::{EvictionImpact, EvictionResult, SpanState};
+
+        let mut result = EvictionResult::empty();
+
+        // Get all children (recursive)
+        let children = self.span_registry.get_all_children(span_id);
+
+        // Evict children first
+        for child_id in children {
+            if let Some(child) = self.span_registry.get_mut(child_id) {
+                if child.is_active() {
+                    let slot = child.slot;
+                    let range = child.start_pos..child.end_pos;
+
+                    child.state = SpanState::FullyEvicted;
+
+                    result
+                        .spans_affected
+                        .push((child_id, EvictionImpact::FullyEvicted));
+                    result.positions_evicted.push((slot, range));
+                }
+            }
+        }
+
+        // Evict the span itself
+        if let Some(span) = self.span_registry.get_mut(span_id) {
+            if span.is_active() {
+                let slot = span.slot;
+                let range = span.start_pos..span.end_pos;
+
+                span.state = SpanState::FullyEvicted;
+
+                result
+                    .spans_affected
+                    .push((span_id, EvictionImpact::FullyEvicted));
+                result.positions_evicted.push((slot, range));
+            }
+        }
+
+        Ok(result)
+    }
+
+    /// Get cache usage statistics
+    ///
+    /// Returns information about cache utilization, span counts, and
+    /// per-tag statistics. Only counts active (non-evicted) spans.
+    pub fn get_cache_usage(&self) -> CacheUsageInfo {
+        let mut info = CacheUsageInfo {
+            total_slots: self.positions.len(),
+            active_span_count: self.span_registry.active_span_count(),
+            per_slot_positions: self.positions.clone(),
+            per_tag_counts: std::collections::HashMap::new(),
+        };
+
+        // Count active spans by tag
+        use crate::cache::CacheTag;
+        for tag in &[
+            CacheTag::SystemPrompt,
+            CacheTag::UserInput,
+            CacheTag::ToolOutput,
+            CacheTag::LongTermMemory,
+            CacheTag::ModelGeneration,
+            CacheTag::Custom,
+        ] {
+            let count = self
+                .span_registry
+                .spans_with_tag(*tag)
+                .into_iter()
+                .filter(|s| s.is_active())
+                .count();
+            if count > 0 {
+                info.per_tag_counts.insert(*tag, count);
+            }
+        }
+
+        info
+    }
+
+    // =======================
+    // KV Cache Insertion APIs
+    // =======================
+
+    /// Evict a range of cache positions to make room for insertion
+    ///
+    /// This clears cache slots in the range [start_pos, end_pos) for the given slot,
+    /// marking any affected spans as evicted and returning information about what was
+    /// removed. This is typically used before inserting new context mid-conversation.
+    ///
+    /// # Arguments
+    ///
+    /// * `slot` - Batch slot index to evict from
+    /// * `start_pos` - Starting position (inclusive) to evict
+    /// * `end_pos` - Ending position (exclusive) to evict
+    ///
+    /// # Returns
+    ///
+    /// EvictionResult containing:
+    /// - `spans_affected`: List of spans that were fully or partially evicted
+    /// - `positions_evicted`: List of (slot, range) tuples for evicted positions
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Evict positions 50-100 in slot 0 to make room for RAG context
+    /// let result = cache_builder.evict_range(0, 50, 100)?;
+    /// println!("Evicted {} spans", result.spans_affected.len());
+    /// ```
+    pub fn evict_range(
+        &mut self,
+        slot: usize,
+        start_pos: usize,
+        end_pos: usize,
+    ) -> Result<crate::cache::EvictionResult> {
+        use crate::cache::{EvictionImpact, EvictionResult, SpanState};
+
+        let mut result = EvictionResult::empty();
+
+        // Find all spans that overlap with this range and collect their info
+        let overlapping_spans: Vec<_> = self
+            .span_registry
+            .spans_overlapping_range(slot, start_pos, end_pos)
+            .into_iter()
+            .map(|span| (span.id, span.start_pos, span.end_pos))
+            .collect();
+
+        for (span_id, span_start, span_end) in overlapping_spans {
+            // Calculate overlap
+            let overlap_start = start_pos.max(span_start);
+            let overlap_end = end_pos.min(span_end);
+
+            if overlap_start >= overlap_end {
+                continue; // No actual overlap
+            }
+
+            // Get mutable reference to update span state
+            if let Some(span_mut) = self.span_registry.get_mut(span_id) {
+                if overlap_start == span_start && overlap_end == span_end {
+                    // Fully evicted
+                    span_mut.state = SpanState::FullyEvicted;
+                    result
+                        .spans_affected
+                        .push((span_id, EvictionImpact::FullyEvicted));
+                } else {
+                    // Partially evicted - track remaining ranges
+                    let mut remaining = Vec::new();
+                    if overlap_start > span_start {
+                        remaining.push(span_start..overlap_start);
+                    }
+                    if overlap_end < span_end {
+                        remaining.push(overlap_end..span_end);
+                    }
+                    span_mut.state = SpanState::PartiallyEvicted {
+                        remaining_ranges: remaining.clone(),
+                    };
+                    result
+                        .spans_affected
+                        .push((span_id, EvictionImpact::PartiallyEvicted { remaining }));
+                }
+
+                result
+                    .positions_evicted
+                    .push((slot, overlap_start..overlap_end));
+            }
+        }
+
+        // Note: Actual KV tensor zeroing would happen in the model's forward pass
+        // This method only tracks the metadata for what should be evicted
+
+        Ok(result)
+    }
+
+    /// Insert new context at a specific position, evicting everything after it
+    ///
+    /// This is the main API for mid-conversation context injection (e.g., RAG retrieval).
+    /// It evicts all cache content after the insertion point and returns information
+    /// about what was evicted so it can be re-processed.
+    ///
+    /// # Process
+    ///
+    /// 1. Evict everything from `insertion_pos` onwards
+    /// 2. Caller inserts new context tokens at `insertion_pos`
+    /// 3. Caller re-processes evicted content to rebuild KV cache
+    ///
+    /// # Arguments
+    ///
+    /// * `slot` - Batch slot index for insertion
+    /// * `insertion_pos` - Position where new context will be inserted
+    ///
+    /// # Returns
+    ///
+    /// EvictionResult with information about evicted spans and positions.
+    /// The caller should use `positions_evicted` to determine what content
+    /// needs to be re-processed after insertion.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Insert RAG context at position 50
+    /// let evicted = cache_builder.insert_context_at(slot_id, 50)?;
+    ///
+    /// // Process new context
+    /// model.forward(&new_context_tokens, &metadata)?;
+    ///
+    /// // Re-process evicted content to rebuild cache
+    /// if !evicted.positions_evicted.is_empty() {
+    ///     let evicted_tokens = get_tokens_for_positions(&evicted);
+    ///     model.forward_kv_only(&evicted_tokens, &metadata)?;
+    /// }
+    /// ```
+    pub fn insert_context_at(
+        &mut self,
+        slot: usize,
+        insertion_pos: usize,
+    ) -> Result<crate::cache::EvictionResult> {
+        // Evict from insertion_pos to current position
+        let current_pos = self.positions.get(slot).copied().unwrap_or(0);
+
+        if insertion_pos >= current_pos {
+            // Nothing to evict - insertion is at or beyond current position
+            return Ok(crate::cache::EvictionResult::empty());
+        }
+
+        // Evict everything from insertion_pos onwards
+        let result = self.evict_range(slot, insertion_pos, current_pos)?;
+
+        // Reset the position to insertion_pos so new content can be written there
+        if let Some(pos) = self.positions.get_mut(slot) {
+            *pos = insertion_pos;
+        }
+        if let Some(idx) = self.indices.get_mut(slot) {
+            *idx = insertion_pos % self.context;
+        }
+
+        Ok(result)
+    }
+
+    /// Helper to reconstruct token sequence after insertion
+    ///
+    /// When inserting context mid-conversation, you need to re-process evicted content
+    /// to rebuild the KV cache. This helper constructs the proper token sequence:
+    /// [cached_prefix] + [inserted_context] + [evicted_suffix]
+    ///
+    /// # Arguments
+    ///
+    /// * `cached_tokens` - All tokens that were cached before insertion
+    /// * `insertion_pos` - Position where new context was inserted
+    /// * `inserted_tokens` - New tokens inserted at insertion_pos
+    ///
+    /// # Returns
+    ///
+    /// A tuple of:
+    /// - `full_sequence`: Complete token sequence for re-processing
+    /// - `reprocess_start`: Index in full_sequence where re-processing should start
+    ///   (everything before this is cached and can be skipped)
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Original: [A, B, C, D, E] cached
+    /// // Insert [X, Y] at position 2
+    /// let (seq, start) = ParallelCacheBuilder::reconstruct_after_insertion(
+    ///     &[A, B, C, D, E],
+    ///     2,
+    ///     &[X, Y]
+    /// );
+    /// // Result: seq = [A, B, X, Y, C, D, E], start = 2
+    /// // Only process [X, Y, C, D, E] with KV-only forward pass
+    /// ```
+    pub fn reconstruct_after_insertion(
+        cached_tokens: &[u32],
+        insertion_pos: usize,
+        inserted_tokens: &[u32],
+    ) -> (Vec<u32>, usize) {
+        let mut full_sequence = Vec::with_capacity(cached_tokens.len() + inserted_tokens.len());
+
+        // Copy prefix that's still cached (before insertion point)
+        full_sequence.extend_from_slice(&cached_tokens[..insertion_pos]);
+
+        // Add new inserted context
+        full_sequence.extend_from_slice(inserted_tokens);
+
+        // Add evicted suffix that needs re-processing
+        if insertion_pos < cached_tokens.len() {
+            full_sequence.extend_from_slice(&cached_tokens[insertion_pos..]);
+        }
+
+        // Everything from insertion_pos onwards needs re-processing
+        let reprocess_start = insertion_pos;
+
+        (full_sequence, reprocess_start)
     }
 
     /// Create a new ParallelKvCache with this builder's configuration
@@ -585,15 +1345,22 @@ impl ParallelCacheBuilder {
     /// // Now slot 0 is at position 0, ready for prefill
     /// ```
     pub fn reset_batch_index(&mut self, batch_index: usize) {
-        let old_pos = self.positions[batch_index];
-        let old_idx = self.indices[batch_index];
+        let _old_pos = self.positions[batch_index];
+        let _old_idx = self.indices[batch_index];
         self.positions[batch_index] = 0;
         self.indices[batch_index] = 0;
+
+        // Clear from eviction policy tracking
+        self.slot_positions.remove(&batch_index);
+        if let Some(ref mut h2o) = self.h2o_policy {
+            h2o.clear_slot(batch_index);
+        }
+
         crate::debug_cache!(
             "reset_batch_index: Slot {} position {} -> 0, index {} -> 0",
             batch_index,
-            old_pos,
-            old_idx
+            _old_pos,
+            _old_idx
         );
     }
 
@@ -633,15 +1400,38 @@ impl ParallelCacheBuilder {
     ///
     /// This ensures the cache index wraps correctly for long sequences.
     pub fn set_position(&mut self, slot: usize, position: usize) {
+        debug_assert!(
+            slot < self.positions.len(),
+            "Slot index {} >= batch size {}",
+            slot,
+            self.positions.len()
+        );
+        // Allow positions up to context * 10 before warning (handles long sequences)
+        debug_assert!(
+            position < self.context * 10,
+            "Position {} unusually large (context size: {}). Possible overflow?",
+            position,
+            self.context
+        );
+
         if slot < self.positions.len() {
-            let old_pos = self.positions[slot];
+            let _old_pos = self.positions[slot];
             self.positions[slot] = position;
-            // Calculate cache index from position (wraps around context)
-            self.indices[slot] = position % self.context;
+
+            // Calculate cache index: use StreamingLLM if enabled, else simple wraparound
+            self.indices[slot] = if let Some(ref cfg) = self.streaming_config {
+                compute_streaming_index(position, cfg, self.context)
+            } else {
+                position % self.context
+            };
+
+            // Update slot_positions mapping for eviction policies
+            self.slot_positions.insert(slot, position);
+
             crate::debug_cache!(
                 "set_position: Slot {} position {} -> {}",
                 slot,
-                old_pos,
+                _old_pos,
                 position
             );
         }
@@ -659,6 +1449,12 @@ impl ParallelCacheBuilder {
     ///
     /// Current position, or 0 if slot index is invalid
     pub fn get_position(&self, slot: usize) -> usize {
+        debug_assert!(
+            slot < self.positions.len(),
+            "Slot index {} >= batch size {}",
+            slot,
+            self.positions.len()
+        );
         self.positions.get(slot).copied().unwrap_or(0)
     }
 
@@ -674,6 +1470,12 @@ impl ParallelCacheBuilder {
     ///
     /// Cache index (0..context), or 0 if slot index is invalid
     pub fn get_cache_index(&self, slot: usize) -> usize {
+        debug_assert!(
+            slot < self.indices.len(),
+            "Slot index {} >= batch size {}",
+            slot,
+            self.indices.len()
+        );
         self.indices.get(slot).copied().unwrap_or(0)
     }
 
@@ -695,6 +1497,12 @@ impl ParallelCacheBuilder {
     ///
     /// true if slot is at position 0, false otherwise
     pub fn should_clear_slot(&self, slot: usize) -> bool {
+        debug_assert!(
+            slot < self.positions.len(),
+            "Slot index {} >= batch size {}",
+            slot,
+            self.positions.len()
+        );
         // Return true if this slot has been reset
         self.positions.get(slot).copied().unwrap_or(0) == 0
     }
@@ -872,12 +1680,23 @@ impl ParallelCacheBuilder {
                 // be advanced explicitly by the caller after the forward pass.
                 let mut local_index = self.indices[batch_i];
                 for seq_i in 0..seq_len {
-                    all_pos[local_index] = seq_i + start_pos;
-                    indices.push(local_index as u32);
-                    // advance local counter (wrap inside context)
-                    local_index += 1;
-                    if local_index >= self.context {
-                        local_index = 0;
+                    // Compute cache index: use StreamingLLM if enabled, else simple wraparound
+                    let cache_idx = if let Some(ref cfg) = self.streaming_config {
+                        compute_streaming_index(seq_i + start_pos, cfg, context)
+                    } else {
+                        local_index
+                    };
+
+                    all_pos[cache_idx] = seq_i + start_pos;
+                    indices.push(cache_idx as u32);
+
+                    // Advance local counter (wrap inside context)
+                    // Only used when StreamingLLM is disabled
+                    if self.streaming_config.is_none() {
+                        local_index += 1;
+                        if local_index >= self.context {
+                            local_index = 0;
+                        }
                     }
                 }
                 // DEBUG output removed
@@ -1066,7 +1885,7 @@ impl ParallelCacheBuilder {
         let indices = Tensor::new(cache_indices, self.device())?;
 
         // Debug: log final IAM before returning
-        if let Ok(idx_vec) = indices.to_vec2::<u32>() {
+        if let Ok(_idx_vec) = indices.to_vec2::<u32>() {
             // DEBUG output removed
         }
         // DEBUG output removed
@@ -1268,6 +2087,430 @@ mod tests {
             mask,
             [[[0.0, 0.0, -inf, -inf, -inf]], [[0.0, 0.0, 0.0, 0.0, 0.0]]]
         );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_span_lifecycle() -> Result<()> {
+        use crate::cache::CacheTag;
+        let device = Device::Cpu;
+        let mut builder = ParallelCacheBuilder::new(2, 512, DType::F32, &device)?;
+
+        // Begin a span (first span has ID 1, not 0)
+        let span_id = builder.begin_span(0, CacheTag::SystemPrompt, Some("sys".into()))?;
+        assert_eq!(span_id, 1);
+        assert!(builder.is_span_active(span_id));
+
+        // Advance position
+        builder.set_position(0, 10);
+
+        // End the span
+        builder.end_span(span_id)?;
+
+        let span = builder.get_span(span_id).unwrap();
+        assert_eq!(span.start_pos, 0);
+        assert_eq!(span.end_pos, 10);
+        assert_eq!(span.slot, 0);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_tag_region() -> Result<()> {
+        use crate::cache::CacheTag;
+        let device = Device::Cpu;
+        let mut builder = ParallelCacheBuilder::new(2, 512, DType::F32, &device)?;
+
+        let span_id = builder.tag_region(1, 5, 20, CacheTag::ToolOutput, Some("tool1".into()))?;
+
+        let span = builder.get_span(span_id).unwrap();
+        assert_eq!(span.start_pos, 5);
+        assert_eq!(span.end_pos, 20);
+        assert_eq!(span.slot, 1);
+        assert_eq!(span.tag, CacheTag::ToolOutput);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_span_unique_names() -> Result<()> {
+        use crate::cache::CacheTag;
+        let device = Device::Cpu;
+        let mut builder = ParallelCacheBuilder::new(1, 512, DType::F32, &device)?;
+
+        let _span1 = builder.tag_region(0, 0, 10, CacheTag::Custom, Some("unique".into()))?;
+
+        // Try to create another with same name
+        let result = builder.tag_region(0, 10, 20, CacheTag::Custom, Some("unique".into()));
+        assert!(result.is_err());
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_span_parent_child() -> Result<()> {
+        use crate::cache::CacheTag;
+        let device = Device::Cpu;
+        let mut builder = ParallelCacheBuilder::new(1, 512, DType::F32, &device)?;
+
+        let parent = builder.tag_region(0, 0, 50, CacheTag::ToolOutput, Some("parent".into()))?;
+        let child = builder.tag_region(0, 50, 100, CacheTag::Custom, Some("child".into()))?;
+
+        builder.set_span_parent(child, parent)?;
+
+        let child_span = builder.get_span(child).unwrap();
+        assert_eq!(child_span.parent, Some(parent));
+
+        let parent_span = builder.get_span(parent).unwrap();
+        assert!(parent_span.children.contains(&child));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_span_eviction_cascade() -> Result<()> {
+        use crate::cache::{CacheTag, EvictionImpact};
+        let device = Device::Cpu;
+        let mut builder = ParallelCacheBuilder::new(1, 512, DType::F32, &device)?;
+
+        let parent = builder.tag_region(0, 0, 50, CacheTag::ToolOutput, Some("parent".into()))?;
+        let child = builder.tag_region(0, 50, 100, CacheTag::Custom, Some("child".into()))?;
+        builder.set_span_parent(child, parent)?;
+
+        // Evict parent should cascade to child
+        let result = builder.evict_span(parent)?;
+
+        assert_eq!(result.spans_affected.len(), 2);
+        assert!(
+            result
+                .spans_affected
+                .iter()
+                .all(|(_, impact)| matches!(impact, EvictionImpact::FullyEvicted))
+        );
+
+        assert!(!builder.is_span_active(parent));
+        assert!(!builder.is_span_active(child));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_evict_tagged() -> Result<()> {
+        use crate::cache::CacheTag;
+        let device = Device::Cpu;
+        let mut builder = ParallelCacheBuilder::new(1, 512, DType::F32, &device)?;
+
+        let _tool1 = builder.tag_region(0, 0, 10, CacheTag::ToolOutput, Some("tool1".into()))?;
+        let _tool2 = builder.tag_region(0, 10, 20, CacheTag::ToolOutput, Some("tool2".into()))?;
+        let _user = builder.tag_region(0, 20, 30, CacheTag::UserInput, Some("user1".into()))?;
+
+        let result = builder.evict_tagged(CacheTag::ToolOutput)?;
+
+        assert_eq!(result.spans_affected.len(), 2);
+        assert!(builder.is_span_active(_user));
+        assert!(!builder.is_span_active(_tool1));
+        assert!(!builder.is_span_active(_tool2));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_cache_usage_info() -> Result<()> {
+        use crate::cache::CacheTag;
+        let device = Device::Cpu;
+        let mut builder = ParallelCacheBuilder::new(2, 512, DType::F32, &device)?;
+
+        let _s1 = builder.tag_region(0, 0, 10, CacheTag::SystemPrompt, None)?;
+        let _s2 = builder.tag_region(0, 10, 20, CacheTag::UserInput, None)?;
+        let _s3 = builder.tag_region(1, 0, 15, CacheTag::ToolOutput, None)?;
+
+        let info = builder.get_cache_usage();
+
+        assert_eq!(info.total_slots, 2);
+        assert_eq!(info.active_span_count, 3);
+        assert_eq!(info.per_tag_counts.get(&CacheTag::SystemPrompt), Some(&1));
+        assert_eq!(info.per_tag_counts.get(&CacheTag::UserInput), Some(&1));
+        assert_eq!(info.per_tag_counts.get(&CacheTag::ToolOutput), Some(&1));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_span_importance() -> Result<()> {
+        use crate::cache::CacheTag;
+        let device = Device::Cpu;
+        let mut builder = ParallelCacheBuilder::new(1, 512, DType::F32, &device)?;
+
+        let span = builder.tag_region(0, 0, 10, CacheTag::Custom, None)?;
+        builder.set_span_importance(span, 0.8)?;
+
+        let s = builder.get_span(span).unwrap();
+        assert_eq!(s.importance, 0.8);
+
+        // Test clamping
+        builder.set_span_importance(span, 1.5)?;
+        let s = builder.get_span(span).unwrap();
+        assert_eq!(s.importance, 1.0);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_find_span_by_name() -> Result<()> {
+        use crate::cache::CacheTag;
+        let device = Device::Cpu;
+        let mut builder = ParallelCacheBuilder::new(1, 512, DType::F32, &device)?;
+
+        let span_id = builder.tag_region(0, 0, 10, CacheTag::Custom, Some("test_span".into()))?;
+
+        let found = builder.find_span_by_name("test_span");
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().id, span_id);
+
+        let not_found = builder.find_span_by_name("nonexistent");
+        assert!(not_found.is_none());
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_evict_named() -> Result<()> {
+        use crate::cache::CacheTag;
+        let device = Device::Cpu;
+        let mut builder = ParallelCacheBuilder::new(1, 512, DType::F32, &device)?;
+
+        let span_id = builder.tag_region(0, 0, 10, CacheTag::Custom, Some("deleteme".into()))?;
+
+        assert!(builder.is_span_active(span_id));
+
+        let result = builder.evict_named("deleteme")?;
+        assert_eq!(result.spans_affected.len(), 1);
+        assert!(!builder.is_span_active(span_id));
+
+        // Try to evict non-existent name
+        let result = builder.evict_named("nonexistent");
+        assert!(result.is_err());
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_kv_insertion_at_start() -> Result<()> {
+        use crate::cache::CacheTag;
+        let device = Device::Cpu;
+        let mut builder = ParallelCacheBuilder::new(1, 512, DType::F32, &device)?;
+
+        // Simulate conversation: 100 tokens cached
+        builder.set_position(0, 100);
+        let span_id =
+            builder.tag_region(0, 0, 100, CacheTag::UserInput, Some("original".into()))?;
+
+        // Insert 50 tokens at position 0 (beginning)
+        let result = builder.insert_context_at(0, 0)?;
+
+        // Everything should be evicted since insertion is at start
+        assert_eq!(result.positions_evicted.len(), 1);
+        assert_eq!(result.positions_evicted[0].1, 0..100);
+
+        // Position should reset to 0 for new content
+        assert_eq!(builder.get_position(0), 0);
+
+        // Span should be fully evicted
+        assert_eq!(result.spans_affected.len(), 1);
+        assert_eq!(result.spans_affected[0].0, span_id);
+        match &result.spans_affected[0].1 {
+            crate::cache::EvictionImpact::FullyEvicted => {}
+            _ => panic!("Expected FullyEvicted"),
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_kv_insertion_at_middle() -> Result<()> {
+        use crate::cache::CacheTag;
+        let device = Device::Cpu;
+        let mut builder = ParallelCacheBuilder::new(1, 512, DType::F32, &device)?;
+
+        // Simulate conversation: 100 tokens cached
+        builder.set_position(0, 100);
+        let span_id =
+            builder.tag_region(0, 0, 100, CacheTag::UserInput, Some("original".into()))?;
+
+        // Insert at position 50 (middle)
+        let result = builder.insert_context_at(0, 50)?;
+
+        // Only positions 50-100 should be evicted
+        assert_eq!(result.positions_evicted.len(), 1);
+        assert_eq!(result.positions_evicted[0].1, 50..100);
+
+        // Position should reset to 50
+        assert_eq!(builder.get_position(0), 50);
+
+        // Span should be partially evicted (0-50 remains)
+        assert_eq!(result.spans_affected.len(), 1);
+        match &result.spans_affected[0].1 {
+            crate::cache::EvictionImpact::PartiallyEvicted { remaining } => {
+                assert_eq!(remaining.len(), 1);
+                assert_eq!(remaining[0], 0..50);
+            }
+            _ => panic!("Expected PartiallyEvicted"),
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_kv_insertion_at_end() -> Result<()> {
+        let device = Device::Cpu;
+        let mut builder = ParallelCacheBuilder::new(1, 512, DType::F32, &device)?;
+
+        // Simulate conversation: 100 tokens cached
+        builder.set_position(0, 100);
+
+        // Insert at position 100 (end) - nothing to evict
+        let result = builder.insert_context_at(0, 100)?;
+
+        assert!(result.positions_evicted.is_empty());
+        assert!(result.spans_affected.is_empty());
+
+        // Position should stay at 100
+        assert_eq!(builder.get_position(0), 100);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_kv_insertion_beyond_end() -> Result<()> {
+        let device = Device::Cpu;
+        let mut builder = ParallelCacheBuilder::new(1, 512, DType::F32, &device)?;
+
+        builder.set_position(0, 100);
+
+        // Insert beyond current position - nothing to evict
+        let result = builder.insert_context_at(0, 150)?;
+
+        assert!(result.positions_evicted.is_empty());
+        assert!(result.spans_affected.is_empty());
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_kv_insertion_with_multiple_spans() -> Result<()> {
+        use crate::cache::CacheTag;
+        let device = Device::Cpu;
+        let mut builder = ParallelCacheBuilder::new(1, 512, DType::F32, &device)?;
+
+        // Create multiple overlapping spans
+        builder.set_position(0, 200);
+        let span1 = builder.tag_region(0, 0, 50, CacheTag::SystemPrompt, Some("span1".into()))?;
+        let span2 = builder.tag_region(0, 40, 100, CacheTag::UserInput, Some("span2".into()))?;
+        let span3 = builder.tag_region(0, 90, 150, CacheTag::ToolOutput, Some("span3".into()))?;
+        let span4 =
+            builder.tag_region(0, 140, 200, CacheTag::ModelGeneration, Some("span4".into()))?;
+
+        // Insert at position 75 - should affect span2, span3, span4
+        let result = builder.insert_context_at(0, 75)?;
+
+        // Check affected spans
+        assert_eq!(result.spans_affected.len(), 3);
+
+        let affected_ids: Vec<_> = result.spans_affected.iter().map(|(id, _)| *id).collect();
+        assert!(!affected_ids.contains(&span1)); // Fully before insertion
+        assert!(affected_ids.contains(&span2)); // Overlaps
+        assert!(affected_ids.contains(&span3)); // Overlaps
+        assert!(affected_ids.contains(&span4)); // Fully after
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_kv_evict_range_partial_span() -> Result<()> {
+        use crate::cache::CacheTag;
+        let device = Device::Cpu;
+        let mut builder = ParallelCacheBuilder::new(1, 512, DType::F32, &device)?;
+
+        // Create a span covering 0-100
+        let span_id = builder.tag_region(0, 0, 100, CacheTag::UserInput, Some("test".into()))?;
+
+        // Evict middle section 30-70
+        let result = builder.evict_range(0, 30, 70)?;
+
+        // Span should be partially evicted with two remaining ranges
+        assert_eq!(result.spans_affected.len(), 1);
+        match &result.spans_affected[0].1 {
+            crate::cache::EvictionImpact::PartiallyEvicted { remaining } => {
+                assert_eq!(remaining.len(), 2);
+                assert_eq!(remaining[0], 0..30);
+                assert_eq!(remaining[1], 70..100);
+            }
+            _ => panic!("Expected PartiallyEvicted with split ranges"),
+        }
+
+        // Check span state
+        let span = builder.span_registry.get(span_id).unwrap();
+        match &span.state {
+            crate::cache::SpanState::PartiallyEvicted { remaining_ranges } => {
+                assert_eq!(remaining_ranges.len(), 2);
+            }
+            _ => panic!("Expected PartiallyEvicted state"),
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_reconstruct_after_insertion() {
+        let cached = vec![10, 20, 30, 40, 50, 60, 70, 80];
+        let inserted = vec![100, 200, 300];
+
+        // Insert at beginning
+        let (seq, start) = ParallelCacheBuilder::reconstruct_after_insertion(&cached, 0, &inserted);
+        assert_eq!(seq, vec![100, 200, 300, 10, 20, 30, 40, 50, 60, 70, 80]);
+        assert_eq!(start, 0); // Everything needs reprocessing
+
+        // Insert in middle
+        let (seq, start) = ParallelCacheBuilder::reconstruct_after_insertion(&cached, 4, &inserted);
+        assert_eq!(seq, vec![10, 20, 30, 40, 100, 200, 300, 50, 60, 70, 80]);
+        assert_eq!(start, 4); // Only from insertion onwards
+
+        // Insert at end
+        let (seq, start) = ParallelCacheBuilder::reconstruct_after_insertion(&cached, 8, &inserted);
+        assert_eq!(seq, vec![10, 20, 30, 40, 50, 60, 70, 80, 100, 200, 300]);
+        assert_eq!(start, 8); // Only new tokens
+    }
+
+    #[test]
+    fn test_kv_insertion_span_importance_preserved() -> Result<()> {
+        use crate::cache::CacheTag;
+        let device = Device::Cpu;
+        let mut builder = ParallelCacheBuilder::new(1, 512, DType::F32, &device)?;
+
+        builder.set_position(0, 100);
+        let span_id =
+            builder.tag_region(0, 20, 80, CacheTag::SystemPrompt, Some("important".into()))?;
+
+        // Set high importance
+        if let Some(span) = builder.span_registry.get_mut(span_id) {
+            span.importance = 0.95;
+        }
+
+        // Insert at position 50 - partially evicts span
+        let result = builder.insert_context_at(0, 50)?;
+
+        // Importance should be preserved
+        let span = builder.span_registry.get(span_id).unwrap();
+        assert_eq!(span.importance, 0.95);
+
+        // But state should reflect partial eviction
+        match &span.state {
+            crate::cache::SpanState::PartiallyEvicted { remaining_ranges } => {
+                assert_eq!(remaining_ranges[0], 20..50);
+            }
+            _ => panic!("Expected PartiallyEvicted"),
+        }
 
         Ok(())
     }

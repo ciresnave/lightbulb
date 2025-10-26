@@ -4,6 +4,7 @@
 //! over traditional seek+read approaches. Key features:
 //!
 //! - **Zero-copy tensor access**: Tensors are sliced directly from mmap (no copying)
+//! - **Direct header parsing**: Parse GGUF v3 format directly from mmap bytes
 //! - **Integrated tokenizer extraction**: Extracts tokenizer from GGUF metadata
 //! - **Candle-compatible API**: Works alongside candle::quantized::gguf_file
 //! - **Cross-platform**: Uses memmap2 for Windows/Linux/Mac compatibility
@@ -13,6 +14,8 @@
 //! - Memory-mapped (Lightning): 0.5-2 seconds (1 mmap + pointer math)
 //! - Speedup: 2-10x faster model loading
 
+mod parser;
+
 use anyhow::{Context, Result};
 use memmap2::Mmap;
 use std::collections::HashMap;
@@ -20,19 +23,24 @@ use std::fs::File;
 use std::path::Path;
 use std::sync::Arc;
 
+pub use parser::{GGUFHeader, MetadataValue, TensorInfo as LightningTensorInfo};
+
 // Re-export types from Candle for compatibility
 pub use candle_core::quantized::gguf_file::{TensorInfo, Value};
 
-/// Memory-mapped GGUF file content
+/// Memory-mapped GGUF file content with zero-copy tensor access
 ///
 /// This struct holds a memory-mapped view of a GGUF file, providing zero-copy
 /// access to tensor data and metadata. The mmap is kept alive for the lifetime
 /// of the Content struct.
 pub struct Content {
-    /// Memory-mapped file (must be kept alive)
-    _mmap: Arc<Mmap>,
+    /// Memory-mapped file (must be kept alive for zero-copy access)
+    mmap: Arc<Mmap>,
 
-    /// Candle's parsed content (for compatibility)
+    /// Parsed GGUF header with metadata and tensor offsets
+    header: GGUFHeader,
+
+    /// Candle's parsed content (for backward compatibility)
     candle_content: candle_core::quantized::gguf_file::Content,
 }
 
@@ -67,18 +75,33 @@ impl Content {
 
         let mmap = Arc::new(mmap);
 
-        // For now, also parse using Candle's API for compatibility
-        // TODO: Implement our own zero-copy parsing
+        // Parse GGUF header directly from mmap (zero-copy)
+        let header = parser::parse_gguf(&mmap)
+            .with_context(|| format!("Failed to parse GGUF header from: {}", path.display()))?;
+
+        // Also parse using Candle's API for backward compatibility
+        // (Can be removed once all code uses Lightning GGUF)
         let mut file = File::open(path)?;
         let candle_content = candle_core::quantized::gguf_file::Content::read(&mut file)?;
 
         Ok(Self {
-            _mmap: mmap,
+            mmap,
+            header,
             candle_content,
         })
     }
 
-    /// Get metadata
+    /// Get metadata from Lightning parser
+    pub fn lightning_metadata(&self) -> &HashMap<String, parser::MetadataValue> {
+        &self.header.metadata
+    }
+
+    /// Get tensor infos from Lightning parser
+    pub fn lightning_tensor_infos(&self) -> &[parser::TensorInfo] {
+        &self.header.tensor_infos
+    }
+
+    /// Get metadata (Candle compatibility)
     pub fn metadata(&self) -> &HashMap<String, Value> {
         &self.candle_content.metadata
     }
@@ -109,7 +132,7 @@ impl Content {
             .context("Missing tokenizer.ggml.tokens in GGUF metadata")?;
 
         // Check what tokenizer model this is
-        let tokenizer_model = self
+        let _tokenizer_model = self
             .metadata()
             .get("tokenizer.ggml.model")
             .and_then(|v| match v {
@@ -161,6 +184,61 @@ impl Content {
             }
             _ => None,
         }
+    }
+
+    /// Get zero-copy access to tensor data by name (Lightning GGUF)
+    ///
+    /// Returns a slice directly into the memory-mapped file for the specified tensor.
+    /// This is the zero-copy path that provides 2-10x faster loading.
+    ///
+    /// # Arguments
+    /// * `name` - Tensor name (e.g., "blk.0.attn_q.weight")
+    ///
+    /// # Returns
+    /// A byte slice pointing to the tensor data in the mmap (zero-copy)
+    ///
+    /// # Example
+    /// ```ignore
+    /// let content = gguf::Content::read("model.gguf")?;
+    /// let tensor_bytes = content.get_tensor_data("blk.0.attn_q.weight")?;
+    /// // Parse quantized data from bytes (Q4_K, Q8_0, etc.)
+    /// ```
+    pub fn get_tensor_data(&self, name: &str) -> Result<&[u8]> {
+        // Find tensor index and info
+        let (tensor_idx, tensor_info) = self
+            .header
+            .tensor_infos
+            .iter()
+            .enumerate()
+            .find(|(_, ti)| ti.name == name)
+            .with_context(|| format!("Tensor '{}' not found in GGUF file", name))?;
+
+        // Calculate start offset (absolute position in file)
+        let start = (self.header.tensor_data_offset + tensor_info.offset) as usize;
+
+        // Calculate end offset:
+        // If there's a next tensor, use its offset
+        // Otherwise, use the file size
+        let end = if tensor_idx + 1 < self.header.tensor_infos.len() {
+            let next_tensor = &self.header.tensor_infos[tensor_idx + 1];
+            (self.header.tensor_data_offset + next_tensor.offset) as usize
+        } else {
+            self.mmap.len()
+        };
+
+        // Validate bounds
+        if start >= self.mmap.len() || end > self.mmap.len() || start >= end {
+            anyhow::bail!(
+                "Invalid tensor bounds for '{}' (start: {}, end: {}, file size: {})",
+                name,
+                start,
+                end,
+                self.mmap.len()
+            );
+        }
+
+        // Return zero-copy slice
+        Ok(&self.mmap[start..end])
     }
 
     /// Load a quantized tensor by name from the GGUF file

@@ -86,44 +86,6 @@ pub enum GpuBackend {
 }
 
 impl HardwareProfile {
-    /// Get total system memory (platform-specific implementation)
-    #[cfg(target_os = "windows")]
-    fn get_total_memory() -> u64 {
-        // On Windows, estimate based on environment
-        // TODO: Use proper Windows API calls
-        16 * 1024 * 1024 * 1024 // Default to 16GB estimate
-    }
-
-    #[cfg(target_os = "linux")]
-    fn get_total_memory() -> u64 {
-        // On Linux, read from /proc/meminfo
-        use std::fs;
-        if let Ok(contents) = fs::read_to_string("/proc/meminfo") {
-            for line in contents.lines() {
-                if let Some(mem_str) = line.strip_prefix("MemTotal:") {
-                    if let Some(kb_str) = mem_str.trim().split_whitespace().next() {
-                        if let Ok(kb) = kb_str.parse::<u64>() {
-                            return kb * 1024; // Convert KB to bytes
-                        }
-                    }
-                }
-            }
-        }
-        16 * 1024 * 1024 * 1024 // Fallback to 16GB
-    }
-
-    #[cfg(target_os = "macos")]
-    fn get_total_memory() -> u64 {
-        // On macOS, use sysctl
-        // TODO: Implement proper sysctl call
-        16 * 1024 * 1024 * 1024 // Default to 16GB estimate
-    }
-
-    #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
-    fn get_total_memory() -> u64 {
-        16 * 1024 * 1024 * 1024 // Default to 16GB estimate
-    }
-
     /// Detect current hardware capabilities
     ///
     /// Uses the `system-analysis` crate to probe CPU, memory, and GPU resources.

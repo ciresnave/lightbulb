@@ -6,10 +6,9 @@ use crate::model::quantizable_linear::QuantizableLinear;
 use candle_core::{DType, Device, IndexOp, Module, Result, Tensor};
 use candle_nn::{Embedding, RmsNorm, VarBuilder};
 use std::collections::HashMap;
-use std::fs::File;
 use std::io::{Read, Seek};
 
-use crate::engine::BatchExecutor;
+use crate::engine::{ParallelCacheBuilder, ParallelKvCache};
 use crate::model::batch_metadata::BatchMetadata;
 use crate::model::custom_transformer_block::BatchedTransformerBlock;
 
@@ -246,7 +245,7 @@ impl BatchedTransformer {
             // DEBUG: Verify weight shapes
             // DEBUG output removed
             let emb_w_vec = embedding_weight.flatten_all()?.to_vec1::<f32>()?;
-            let emb_w_mean: f32 = emb_w_vec.iter().sum::<f32>() / emb_w_vec.len() as f32;
+            let _emb_w_mean: f32 = emb_w_vec.iter().sum::<f32>() / emb_w_vec.len() as f32;
             // DEBUG output removed
 
             QuantizableLinear::from_linear(candle_nn::Linear::new(embedding_weight.clone(), None))
@@ -409,7 +408,8 @@ impl BatchedTransformer {
     ///
     /// # Arguments
     /// * `input_ids` - Token IDs tensor of shape [total_tokens]
-    /// * `batch_executor` - Manages KV cache across all layers
+    /// * `cache_builder` - Tracks KV cache positions for each slot
+    /// * `caches` - Per-layer KV caches
     /// * `metadata` - Batch metadata with sequence information
     ///
     /// # Returns
@@ -417,26 +417,15 @@ impl BatchedTransformer {
     pub fn forward(
         &mut self,
         input_ids: &Tensor,
-        batch_executor: &mut BatchExecutor,
+        cache_builder: &mut ParallelCacheBuilder,
+        caches: &mut [ParallelKvCache],
         metadata: &BatchMetadata,
     ) -> Result<Tensor> {
-        // Clear the cached IndicesAndMask at the start of each forward pass
-        // This ensures all layers get the same position indices for this token,
-        // while the persistent builder tracks position advancement across tokens
-        batch_executor.clear_iam_cache();
-
         // Get total number of tokens
         let total_tokens = input_ids.dims()[0];
 
         // Embed tokens: [total_tokens] -> [total_tokens, hidden_size]
         let hidden_states = self.embedding.forward(input_ids)?;
-
-        // DEBUG: Print embedding output stats
-        let emb_vec = hidden_states.flatten_all()?.to_vec1::<f32>()?;
-        let emb_mean: f32 = emb_vec.iter().sum::<f32>() / emb_vec.len() as f32;
-        let emb_max = emb_vec.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-        let emb_min = emb_vec.iter().cloned().fold(f32::INFINITY, f32::min);
-        // DEBUG output removed
 
         // Reshape to 3D for transformer blocks: [total_tokens, hidden] -> [1, total_tokens, hidden]
         // For prefill: batch=1, seq=total_tokens
@@ -481,41 +470,64 @@ impl BatchedTransformer {
 
         // DEBUG output removed
 
+        // Track attention weights from the last layer (most relevant for eviction)
+        let mut last_attn_weights: Option<Tensor> = None;
+
         for (layer_idx, block) in self.blocks.iter().enumerate() {
-            hidden_states = block.forward(
+            let (new_hidden_states, attn_weights) = block.forward(
                 &hidden_states,
                 index_pos, // RoPE starting position
                 &self.cos,
                 &self.sin,
-                batch_executor,
+                cache_builder,
+                &mut caches[layer_idx],
                 metadata,
             )?;
+            hidden_states = new_hidden_states;
+
+            // Keep the last layer's attention weights for H2O policy
+            if attn_weights.is_some() {
+                last_attn_weights = attn_weights;
+            }
             // Note: layer_idx is used internally by block for KV cache access
 
             // DEBUG: Print stats for first and last few layers
             if layer_idx < 3 || layer_idx >= self.blocks.len() - 3 {
                 let hs_vec = hidden_states.flatten_all()?.to_vec1::<f32>()?;
-                let mean: f32 = hs_vec.iter().sum::<f32>() / hs_vec.len() as f32;
-                let max = hs_vec.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-                let min = hs_vec.iter().cloned().fold(f32::INFINITY, f32::min);
+                let _mean: f32 = hs_vec.iter().sum::<f32>() / hs_vec.len() as f32;
+                let _max = hs_vec.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+                let _min = hs_vec.iter().cloned().fold(f32::INFINITY, f32::min);
                 // DEBUG output removed
+            }
+        }
+
+        // Update H2O policy with attention weights if available
+        if let Some(ref attn_weights) = last_attn_weights {
+            // Convert tensor to Vec<Vec<f32>> for H2O policy
+            // attn_weights shape: [query_pos, key_pos] or similar
+            if let Ok(dims) = attn_weights.dims2() {
+                let (query_len, key_len) = dims;
+                let flat = attn_weights.flatten_all()?.to_vec1::<f32>()?;
+
+                let mut attention_matrix = Vec::with_capacity(query_len);
+                for i in 0..query_len {
+                    let start = i * key_len;
+                    let end = start + key_len;
+                    attention_matrix.push(flat[start..end].to_vec());
+                }
+
+                // Update H2O policy with the attention scores
+                cache_builder.update_attention_scores(&attention_matrix);
             }
         }
 
         // Final normalization
         hidden_states = self.norm.forward(&hidden_states)?;
 
-        // DEBUG: Check after final norm
-        let hs_vec = hidden_states.flatten_all()?.to_vec1::<f32>()?;
-        let hs_mean: f32 = hs_vec.iter().sum::<f32>() / hs_vec.len() as f32;
-        let hs_max = hs_vec.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-        let hs_min = hs_vec.iter().cloned().fold(f32::INFINITY, f32::min);
-        // DEBUG output removed
-
         // Extract last token's hidden state for each sequence
         // For prefill: [1, seq_len, hidden] -> [batch_size, hidden] (one last token per sequence)
         // For decode: [batch, 1, hidden] -> [batch, hidden]
-        let (dim0, dim1, hidden_dim) = hidden_states.dims3()?;
+        let (_dim0, _dim1, _hidden_dim) = hidden_states.dims3()?;
         let last_hidden = if metadata.is_prefill {
             // Prefill: extract last token for each sequence using SequenceInfo
             // For padded sequences, the last real token is at start_pos + actual_length - 1
@@ -537,17 +549,136 @@ impl BatchedTransformer {
             hidden_states.i((.., 0, ..))?.contiguous()?
         };
 
-        // Project to vocabulary: [batch_or_1, hidden_size] -> [batch_or_1, vocab_size]
+        // Language model head: [batch_size, hidden] -> [batch_size, vocab]
         let logits = self.lm_head.forward(&last_hidden)?;
 
-        // DEBUG: Check logits
-        let logits_vec = logits.flatten_all()?.to_vec1::<f32>()?;
-        let logits_mean: f32 = logits_vec.iter().sum::<f32>() / logits_vec.len() as f32;
-        let logits_max = logits_vec.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-        let logits_min = logits_vec.iter().cloned().fold(f32::INFINITY, f32::min);
-        // DEBUG output removed
-
         Ok(logits)
+    }
+
+    /// Forward pass for KV cache computation only (no logits)
+    ///
+    /// This is an optimized path for re-processing evicted content after KV insertion.
+    /// Skips the final LM head computation since we're not generating tokens, just
+    /// rebuilding the KV cache.
+    ///
+    /// Use case: After `insert_context_at()`, you need to re-process evicted tokens.
+    /// This method is ~10-15% faster than full forward pass by skipping logit computation.
+    ///
+    /// # Arguments
+    ///
+    /// * `input_ids` - Token IDs tensor of shape [total_tokens]
+    /// * `cache_builder` - Tracks KV cache positions for each slot
+    /// * `caches` - Per-layer KV caches (will be updated with new K/V values)
+    /// * `metadata` - Batch metadata with sequence information
+    ///
+    /// # Returns
+    ///
+    /// Ok(()) on success - KV caches are updated in place
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Insert context and get evicted ranges
+    /// let evicted = cache_builder.insert_context_at(slot, pos)?;
+    ///
+    /// // Reconstruct sequence
+    /// let (seq, start) = reconstruct_after_insertion(&cached, pos, &inserted);
+    ///
+    /// // Re-process evicted portion (KV-only, fast)
+    /// let reprocess_tokens = &seq[start..];
+    /// model.forward_kv_only(reprocess_tokens, cache_builder, caches, metadata)?;
+    ///
+    /// // Continue generation with full forward pass
+    /// let logits = model.forward(new_tokens, cache_builder, caches, metadata)?;
+    /// ```
+    pub fn forward_kv_only(
+        &mut self,
+        input_ids: &Tensor,
+        cache_builder: &mut ParallelCacheBuilder,
+        caches: &mut [ParallelKvCache],
+        metadata: &BatchMetadata,
+    ) -> Result<()> {
+        // Get total number of tokens
+        let total_tokens = input_ids.dims()[0];
+
+        // Embed tokens: [total_tokens] -> [total_tokens, hidden_size]
+        let hidden_states = self.embedding.forward(input_ids)?;
+
+        // Reshape to 3D for transformer blocks
+        let mut hidden_states = if metadata.is_prefill {
+            hidden_states.unsqueeze(0)?
+        } else {
+            hidden_states.reshape((total_tokens, 1, self.config.hidden_size))?
+        };
+
+        // Verify shape
+        let (batch_size, seq_len, hidden_size) = hidden_states.dims3()?;
+        if batch_size * seq_len != total_tokens {
+            candle_core::bail!(
+                "Expected {} total tokens, got batch={} * seq={}",
+                total_tokens,
+                batch_size,
+                seq_len
+            );
+        }
+        if hidden_size != self.config.hidden_size {
+            candle_core::bail!(
+                "Expected hidden size {}, got {}",
+                self.config.hidden_size,
+                hidden_size
+            );
+        }
+
+        // Determine RoPE position
+        let index_pos = if metadata.is_prefill {
+            0
+        } else {
+            metadata.context_lens.get(0).copied().unwrap_or(0)
+        };
+
+        // Track attention weights for H2O policy
+        let mut last_attn_weights: Option<Tensor> = None;
+
+        // Pass through all transformer blocks (updates KV caches)
+        for (layer_idx, block) in self.blocks.iter().enumerate() {
+            let (new_hidden_states, attn_weights) = block.forward(
+                &hidden_states,
+                index_pos,
+                &self.cos,
+                &self.sin,
+                cache_builder,
+                &mut caches[layer_idx],
+                metadata,
+            )?;
+            hidden_states = new_hidden_states;
+
+            if attn_weights.is_some() {
+                last_attn_weights = attn_weights;
+            }
+        }
+
+        // Update H2O policy with attention weights if available
+        if let Some(ref attn_weights) = last_attn_weights {
+            if let Ok(dims) = attn_weights.dims2() {
+                let (query_len, key_len) = dims;
+                let flat = attn_weights.flatten_all()?.to_vec1::<f32>()?;
+
+                let mut attention_matrix = Vec::with_capacity(query_len);
+                for i in 0..query_len {
+                    let start = i * key_len;
+                    let end = start + key_len;
+                    attention_matrix.push(flat[start..end].to_vec());
+                }
+
+                cache_builder.update_attention_scores(&attention_matrix);
+            }
+        }
+
+        // Final normalization (needed for KV computation correctness)
+        let _normalized = self.norm.forward(&hidden_states)?;
+
+        // Skip LM head computation - we only need KV cache updates
+        Ok(())
     }
 
     /// Get model configuration

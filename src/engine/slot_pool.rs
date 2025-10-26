@@ -146,6 +146,9 @@ pub enum SlotPoolError {
 
     #[error("Invalid slot ID {0} (max slots: {1})")]
     InvalidSlotId(SlotId, usize),
+
+    #[error("Cannot resize slot pool while active requests are in flight")]
+    CannotResizeWithActiveSlots,
 }
 
 /// Slot pool managing dynamic batch formation
@@ -324,6 +327,42 @@ impl SlotPool {
         self.slots.get(slot_id)
     }
 
+    /// Get maximum number of slots in the pool
+    pub fn max_slots(&self) -> usize {
+        self.max_slots
+    }
+
+    /// Mark a slot as finished (for testing/simulation)
+    ///
+    /// In real usage, slots transition to Finished automatically when
+    /// max_new_tokens is reached via update_slot(). This method is provided
+    /// for testing and simulation scenarios.
+    pub fn mark_finished(&mut self, slot_id: SlotId) -> Result<(), SlotPoolError> {
+        if slot_id >= self.max_slots {
+            return Err(SlotPoolError::InvalidSlotId(slot_id, self.max_slots));
+        }
+
+        match &self.slots[slot_id] {
+            SlotState::Active {
+                request_id,
+                generated_tokens,
+                ..
+            } => {
+                let req_id = request_id.clone();
+                let result = generated_tokens.clone();
+
+                self.slots[slot_id] = SlotState::Finished {
+                    request_id: req_id.clone(),
+                    result,
+                };
+
+                self.request_to_slot.remove(&req_id);
+                Ok(())
+            }
+            _ => Err(SlotPoolError::SlotNotActive(slot_id)),
+        }
+    }
+
     /// Mark a slot as free, making it available for new requests
     ///
     /// This should be called after picking up finished results.
@@ -376,6 +415,105 @@ impl SlotPool {
             .iter()
             .filter(|s| matches!(s, SlotState::Active { .. }))
             .count()
+    }
+
+    /// Check if the pool can be safely resized
+    ///
+    /// Resizing is only safe when no requests are actively being processed.
+    /// Finished slots are OK (they're about to be freed), but Active slots
+    /// have KV cache state that must be preserved.
+    pub fn can_resize(&self) -> bool {
+        self.slots
+            .iter()
+            .all(|s| !matches!(s, SlotState::Active { .. }))
+    }
+
+    /// Resize the slot pool to a new capacity
+    ///
+    /// This can only be called when `can_resize()` returns true (no active slots).
+    /// Finished slots will be freed automatically. Pending requests are preserved.
+    ///
+    /// # Arguments
+    ///
+    /// * `new_max_slots` - New maximum slot count
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(())` - Resize successful
+    /// * `Err(_)` - Cannot resize (active slots exist)
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// if pool.can_resize() {
+    ///     pool.resize_to(32)?;  // Reduce from 64 to 32 slots
+    /// }
+    /// ```
+    pub fn resize_to(&mut self, new_max_slots: usize) -> Result<(), SlotPoolError> {
+        // Safety check: no active requests
+        if !self.can_resize() {
+            return Err(SlotPoolError::CannotResizeWithActiveSlots);
+        }
+
+        // Free any finished slots first
+        for slot_id in 0..self.slots.len() {
+            if matches!(self.slots[slot_id], SlotState::Finished { .. }) {
+                let _ = self.free_slot(slot_id);
+            }
+        }
+
+        // Resize the slots array
+        if new_max_slots > self.max_slots {
+            // Growing: add new Free slots
+            let additional = new_max_slots - self.max_slots;
+            self.slots.extend(vec![SlotState::Free; additional]);
+        } else if new_max_slots < self.max_slots {
+            // Shrinking: remove free slots from the end
+            self.slots.truncate(new_max_slots);
+        }
+
+        self.max_slots = new_max_slots;
+
+        println!(
+            "✓ Resized slot pool to {} slots ({} active, {} pending)",
+            new_max_slots,
+            self.active_count(),
+            self.pending_requests.len()
+        );
+
+        Ok(())
+    }
+
+    /// Get current positions for all active slots (for memory estimation)
+    ///
+    /// Returns a vector of token positions, one per active slot.
+    /// Used by monitoring to estimate KV cache memory usage.
+    pub fn get_active_positions(&self) -> Vec<usize> {
+        self.slots
+            .iter()
+            .filter_map(|state| match state {
+                SlotState::Active {
+                    current_position, ..
+                } => Some(*current_position),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Get the number of pending requests in queue
+    pub fn pending_count(&self) -> usize {
+        self.pending_requests.len()
+    }
+
+    /// Free all finished slots at once
+    ///
+    /// This is a convenience method for batch cleanup after picking up results.
+    pub fn free_finished_slots(&mut self) {
+        for slot_id in 0..self.slots.len() {
+            if matches!(self.slots[slot_id], SlotState::Finished { .. }) {
+                let _ = self.free_slot(slot_id);
+            }
+        }
     }
 }
 

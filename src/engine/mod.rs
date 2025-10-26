@@ -3,10 +3,13 @@
 //! This module contains the core scheduling and execution infrastructure
 //! for continuous batching and request management.
 
+pub mod slot_monitor;
 pub mod slot_pool;
 
+pub use slot_monitor::{AdjustmentConfig, MemoryStatistics, SlotPoolMonitor};
 pub use slot_pool::{
-    CompletedToken, Request as SlotPoolRequest, RequestId, SlotId, SlotPool, SlotPoolError, SlotPoolStats, SlotState,
+    CompletedToken, Request as SlotPoolRequest, RequestId, SlotId, SlotPool, SlotPoolError,
+    SlotPoolStats, SlotState,
 };
 
 // Legacy types for backward compatibility (will be migrated to SlotPool)
@@ -182,9 +185,7 @@ impl BatchAssembler {
     }
 }
 
-/// Legacy BatchExecutor trait
-pub trait BatchExecutor {
-    fn prepare_batch(&mut self, requests: &[RequestContext]) -> Result<()>;
-    fn execute_step(&mut self) -> Result<Vec<u32>>;
-    fn cleanup_batch(&mut self) -> Result<()>;
-}
+// Re-export cache types for direct use throughout the codebase
+pub use crate::cache::parallel_cache_builder::{
+    IndicesAndMask, ParallelCacheBuilder, ParallelKvCache,
+};

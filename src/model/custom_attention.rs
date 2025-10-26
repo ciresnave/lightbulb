@@ -31,12 +31,11 @@
 //! )?;  // Returns [batch_size, hidden]
 //! ```
 
-use crate::engine::BatchExecutor;
+use crate::engine::{ParallelCacheBuilder, ParallelKvCache};
 use crate::model::BatchMetadata;
 use crate::model::quantizable_linear::QuantizableLinear;
 use candle_core::{DType, Device, IndexOp, Module, Result, Tensor};
 use candle_nn::VarBuilder;
-use std::fs::File;
 use std::io::{Read, Seek};
 
 /// FlashAttention-2 wrapper with feature gating
@@ -74,7 +73,6 @@ pub struct BatchedAttention {
     num_heads: usize,
     num_kv_heads: usize,
     head_dim: usize,
-    hidden_size: usize,
 
     // Attention scale factor
     scale: f64,
@@ -82,9 +80,11 @@ pub struct BatchedAttention {
     // FlashAttention-2 flag
     use_flash_attn: bool,
 
-    // Device and dtype
+    // Device
     device: Device,
-    dtype: DType,
+
+    // Whether to capture attention weights for eviction policies
+    capture_attention: bool,
 }
 
 impl BatchedAttention {
@@ -127,7 +127,6 @@ impl BatchedAttention {
         )?);
 
         let device = vb.device().clone();
-        let dtype = vb.dtype();
 
         // Enable FlashAttention on CUDA with float16/bfloat16 when feature is available
         let use_flash_attn = cfg!(feature = "flash-attn") && device.is_cuda();
@@ -140,11 +139,10 @@ impl BatchedAttention {
             num_heads,
             num_kv_heads,
             head_dim,
-            hidden_size,
             scale,
             use_flash_attn,
             device,
-            dtype,
+            capture_attention: false,
         })
     }
 
@@ -193,9 +191,6 @@ impl BatchedAttention {
             candle_core::quantized::QMatMul::from_qtensor(o_tensor)?,
         );
 
-        // Use F32 for quantized models (QMatMul handles the actual precision)
-        let dtype = DType::F32;
-
         // Enable FlashAttention on CUDA with float16/bfloat16 when feature is available
         let use_flash_attn = cfg!(feature = "flash-attn") && device.is_cuda();
 
@@ -207,12 +202,20 @@ impl BatchedAttention {
             num_heads,
             num_kv_heads,
             head_dim,
-            hidden_size,
             scale,
             use_flash_attn,
             device: device.clone(),
-            dtype,
+            capture_attention: false,
         })
+    }
+
+    /// Enable or disable attention weight capture
+    ///
+    /// When enabled, attention weights are returned from forward() for use
+    /// by eviction policies like H2O. This adds memory overhead, so only
+    /// enable when needed.
+    pub fn set_capture_attention(&mut self, capture: bool) {
+        self.capture_attention = capture;
     }
 
     /// Forward pass with batched sequences
@@ -227,17 +230,20 @@ impl BatchedAttention {
     /// * `layer_idx` - Which transformer layer (0..num_layers)
     ///
     /// # Returns
-    /// Output tensor [batch_size, seq_len, hidden_size]
+    /// Tuple of (output_tensor, optional_attention_weights)
+    /// - output_tensor: [batch_size, seq_len, hidden_size]
+    /// - attention_weights: [batch_size, num_heads, seq_q, seq_k] if capture_attention=true
     pub fn forward(
         &self,
         hidden_states: &Tensor,
         index_pos: usize,
         cos: &Tensor,
         sin: &Tensor,
-        batch_executor: &mut BatchExecutor,
+        cache_builder: &mut ParallelCacheBuilder,
+        cache: &mut ParallelKvCache,
         metadata: &BatchMetadata,
         layer_idx: usize,
-    ) -> Result<Tensor> {
+    ) -> Result<(Tensor, Option<Tensor>)> {
         let (batch_size, seq_len, _) = hidden_states.dims3()?;
 
         // === Step 1: Q/K/V Projections ===
@@ -269,18 +275,6 @@ impl BatchedAttention {
             && metadata.sequence_lengths().iter().any(|&len| len > 1);
 
         // === Step 3: Apply RoPE (Rotary Position Embeddings) ===
-        // DEBUG: Check Q/K before RoPE
-        if layer_idx == 0 {
-            let q_vec = q.flatten_all()?.to_vec1::<f32>()?;
-            let k_vec = k.flatten_all()?.to_vec1::<f32>()?;
-            let cos_vec = cos.flatten_all()?.to_vec1::<f32>()?;
-            let sin_vec = sin.flatten_all()?.to_vec1::<f32>()?;
-            // DEBUG output removed
-            // DEBUG output removed
-            // DEBUG output removed
-            // DEBUG output removed
-        }
-
         // Apply RoPE. For batched prefill we must apply RoPE per-sequence (positions start at 0
         // for each prompt). Therefore skip the global RoPE here when doing batched prefill and
         // apply it later to each extracted q/k slice.
@@ -293,14 +287,6 @@ impl BatchedAttention {
             )
         };
 
-        // DEBUG: Check Q/K after RoPE
-        if layer_idx == 0 {
-            let q_vec = q.flatten_all()?.to_vec1::<f32>()?;
-            let k_vec = k.flatten_all()?.to_vec1::<f32>()?;
-            // DEBUG output removed
-            // DEBUG output removed
-        }
-
         // === Step 3.5: Restructure for Batched Prefill ===
         // During batched prefill with concatenated sequences, we need to split and pad
         // Q/K/V so they all have uniform shapes for proper batched processing.
@@ -312,9 +298,28 @@ impl BatchedAttention {
                 metadata.sequence_lengths()
             );
 
+            // Build batch_mask and seq_lengths for variable-length batched prefill
+            // MUST match slot pool size for continuous batching
+            let slot_pool_size = cache_builder.batch_size();
+            let _num_sequences = metadata.request_ids.len();
+
+            // Pad to slot pool size
+            let mut batch_mask = vec![false; slot_pool_size];
+            let mut seq_lengths = metadata.sequence_lengths();
+
+            // Mark active slots based on request_ids
+            for &req_id in &metadata.request_ids {
+                if req_id < slot_pool_size {
+                    batch_mask[req_id] = true;
+                }
+            }
+
+            // Pad seq_lengths to match slot pool size
+            seq_lengths.resize(slot_pool_size, 0);
+
             // Get variable-length indices and mask
-            let iam = batch_executor
-                .get_indices_and_mask_variable(&metadata.request_ids, &metadata.sequence_lengths())
+            let iam = cache_builder
+                .indices_and_mask_variable(&seq_lengths, &batch_mask)
                 .map_err(|e| {
                     candle_core::Error::Msg(format!("Failed to get variable indices: {}", e))
                 })?;
@@ -424,20 +429,20 @@ impl BatchedAttention {
             let iam = iam_opt.as_ref().unwrap();
 
             // Wrap K/V in KVTensor to expand to max_batch_size for cache
-            let k_wrapped = crate::model::KVTensor::from_compact(
-                &k_batched,
-                batch_executor.max_batch_size(),
-            )
-            .map_err(|e| candle_core::Error::Msg(format!("Failed to wrap batched K: {}", e)))?;
-            let v_wrapped = crate::model::KVTensor::from_compact(
-                &v_batched,
-                batch_executor.max_batch_size(),
-            )
-            .map_err(|e| candle_core::Error::Msg(format!("Failed to wrap batched V: {}", e)))?;
+            let k_wrapped =
+                crate::model::KVTensor::from_compact(&k_batched, cache_builder.batch_size())
+                    .map_err(|e| {
+                        candle_core::Error::Msg(format!("Failed to wrap batched K: {}", e))
+                    })?;
+            let v_wrapped =
+                crate::model::KVTensor::from_compact(&v_batched, cache_builder.batch_size())
+                    .map_err(|e| {
+                        candle_core::Error::Msg(format!("Failed to wrap batched V: {}", e))
+                    })?;
 
             // Append to cache
-            let (k_cache, v_cache) = batch_executor
-                .append_kv(layer_idx, k_wrapped.as_full(), v_wrapped.as_full(), iam)
+            let (k_cache, v_cache) = cache
+                .append(k_wrapped.as_full(), v_wrapped.as_full(), iam)
                 .map_err(|e| {
                     candle_core::Error::Msg(format!("Failed to append batched KV: {}", e))
                 })?;
@@ -445,30 +450,39 @@ impl BatchedAttention {
             (k_cache, v_cache)
         } else {
             // Single request or decode: use original unified path
-            let iam = batch_executor
-                .get_indices_and_mask_for_requests(&metadata.request_ids, seq_len)
+            // Build batch_mask from request_ids
+            let max_batch_size = cache_builder.batch_size();
+            let mut batch_mask = vec![false; max_batch_size];
+            for &req_id in &metadata.request_ids {
+                if req_id < max_batch_size {
+                    batch_mask[req_id] = true;
+                }
+            }
+
+            let iam = cache_builder
+                .indices_and_mask(seq_len, &batch_mask)
                 .map_err(|e| {
                     candle_core::Error::Msg(format!("Failed to get indices and mask: {}", e))
                 })?;
 
             // Wrap K/V in KVTensor to expand batch dimension to max_batch_size
-            let k_wrapped = crate::model::KVTensor::from_compact(
-                &k_batched,
-                batch_executor.max_batch_size(),
-            )
-            .map_err(|e| candle_core::Error::Msg(format!("Failed to wrap K tensor: {}", e)))?;
-            let v_wrapped = crate::model::KVTensor::from_compact(
-                &v_batched,
-                batch_executor.max_batch_size(),
-            )
-            .map_err(|e| candle_core::Error::Msg(format!("Failed to wrap V tensor: {}", e)))?;
+            let k_wrapped =
+                crate::model::KVTensor::from_compact(&k_batched, cache_builder.batch_size())
+                    .map_err(|e| {
+                        candle_core::Error::Msg(format!("Failed to wrap K tensor: {}", e))
+                    })?;
+            let v_wrapped =
+                crate::model::KVTensor::from_compact(&v_batched, cache_builder.batch_size())
+                    .map_err(|e| {
+                        candle_core::Error::Msg(format!("Failed to wrap V tensor: {}", e))
+                    })?;
 
             if layer_idx == 0 {
                 // DEBUG output removed
             }
 
-            let (k_full, v_full) = batch_executor
-                .append_kv(layer_idx, k_wrapped.as_full(), v_wrapped.as_full(), &iam)
+            let (k_full, v_full) = cache
+                .append(k_wrapped.as_full(), v_wrapped.as_full(), &iam)
                 .map_err(|e| candle_core::Error::Msg(format!("Failed to append KV: {}", e)))?;
 
             if layer_idx == 0 {
@@ -511,7 +525,7 @@ impl BatchedAttention {
 
         if layer_idx == 0 {
             // DEBUG output removed
-            if let Some(ref mask) = attention_mask {
+            if let Some(ref _mask) = attention_mask {
                 // DEBUG output removed
             }
         }
@@ -590,22 +604,6 @@ impl BatchedAttention {
         let k_for_attn = k_full.narrow(0, 0, actual_batch_size)?;
         let v_for_attn = v_full.narrow(0, 0, actual_batch_size)?;
 
-        if layer_idx == 0 {
-            // DEBUG output removed
-        }
-
-        if layer_idx <= 1 {
-            // DEBUG output removed
-
-            // Print actual Q, K, V values
-            let q_vec = q_batched.flatten_all()?.to_vec1::<f32>()?;
-            let k_vec = k_for_attn.flatten_all()?.to_vec1::<f32>()?;
-            let v_vec = v_for_attn.flatten_all()?.to_vec1::<f32>()?;
-            // DEBUG output removed
-            // DEBUG output removed
-            // DEBUG output removed
-        }
-
         // Pass attention mask for batched prefill to handle padding
         // Need to narrow mask to actual_batch_size to match narrowed K/V
         let mask_for_attn = attention_mask
@@ -613,13 +611,11 @@ impl BatchedAttention {
             .map(|mask| mask.narrow(0, 0, actual_batch_size))
             .transpose()?;
 
-        let attn_output =
+        let (attn_output, captured_weights) =
             self.compute_attention(&q_batched, &k_for_attn, &v_for_attn, mask_for_attn.as_ref())?;
 
-        if layer_idx == 0 {
-            let attn_vec = attn_output.flatten_all()?.to_vec1::<f32>()?;
-            // DEBUG output removed
-        }
+        // Extract attention weights if requested (second element of tuple)
+        let attn_weights = captured_weights;
 
         // === Step 6: Reshape and Output Projection ===
         // IMPORTANT: Must match input shape for residual connection!
@@ -659,11 +655,11 @@ impl BatchedAttention {
         let output = self.o_proj.forward(&attn_output_for_proj)?;
 
         if layer_idx == 0 {
-            let output_vec = output.flatten_all()?.to_vec1::<f32>()?;
+            let _output_vec = output.flatten_all()?.to_vec1::<f32>()?;
             // DEBUG output removed
         }
 
-        Ok(output)
+        Ok((output, attn_weights))
     }
 
     /// Apply Rotary Position Embeddings using Candle's built-in implementation
@@ -688,10 +684,6 @@ impl BatchedAttention {
         // Extract cos and sin for the current position range
         let cos_slice = cos.narrow(0, index_pos, seq_len)?;
         let sin_slice = sin.narrow(0, index_pos, seq_len)?;
-
-        if index_pos == 0 {
-            // DEBUG output removed
-        }
 
         // Input x is [batch, num_heads, seq, head_dim]
         // cos/sin are [seq, head_dim/2] (Llama-style RoPE)
@@ -732,14 +724,16 @@ impl BatchedAttention {
     /// * `mask` - Optional attention mask [batch, 1, seq_q, seq_k] where NEG_INFINITY blocks attention
     ///
     /// # Returns
-    /// Attention output [batch, num_heads, seq_q, head_dim]
+    /// Tuple of (attention_output, optional_attention_weights)
+    /// - attention_output: [batch, num_heads, seq_q, head_dim]
+    /// - attention_weights: [batch, num_heads, seq_q, seq_k] if capture_attention=true
     fn compute_attention(
         &self,
         q: &Tensor,
         k: &Tensor,
         v: &Tensor,
         mask: Option<&Tensor>,
-    ) -> Result<Tensor> {
+    ) -> Result<(Tensor, Option<Tensor>)> {
         // Get dimensions
         let (_batch, _num_heads, seq_q, _head_dim) = q.dims4()?;
         let (_batch_k, num_heads_k, seq_k, _head_dim_k) = k.dims4()?;
@@ -781,7 +775,10 @@ impl BatchedAttention {
 
             // Convert back to original dtype and transpose back
             // [batch, seq_q, num_heads, head_dim] -> [batch, num_heads, seq_q, head_dim]
-            return attn_output.to_dtype(original_dtype)?.transpose(1, 2);
+            let output_tensor = attn_output.to_dtype(original_dtype)?.transpose(1, 2)?;
+
+            // FlashAttention doesn't expose attention weights, so return None
+            return Ok((output_tensor, None));
         }
 
         // === Manual Attention Path (Fallback) ===
@@ -794,21 +791,12 @@ impl BatchedAttention {
         let k_t = k.t()?; // Transpose - swaps last two dimensions
         let attn_weights = q.matmul(&k_t)?;
 
-        // DEBUG: Check raw attention scores
-        let attn_w_vec = attn_weights.flatten_all()?.to_vec1::<f32>()?;
-        // DEBUG output removed
-
         // Scale by 1/sqrt(head_dim)
         let attn_weights = (attn_weights * self.scale)?;
-
-        // DEBUG: Check scaled attention scores
-        let scaled_vec = attn_weights.flatten_all()?.to_vec1::<f32>()?;
-        // DEBUG output removed
 
         // === Apply ScatteredCache Mask ===
         // This mask prevents batch elements from attending to each other's cache positions
         let attn_weights = if let Some(cache_mask) = mask {
-            // DEBUG output removed
             // cache_mask shape: [batch, 1, seq_q, context]
             // attn_weights shape: [batch, heads, seq_q, seq_k]
             // The mask should broadcast across heads
@@ -821,8 +809,8 @@ impl BatchedAttention {
         // For decoder, mask out future positions
         let attn_weights = if seq_q > 1 {
             // Only apply mask during prefill (seq_q > 1)
-            let mask = self.create_causal_mask(seq_q, seq_k)?;
-            attn_weights.broadcast_add(&mask)?
+            let _mask = self.create_causal_mask(seq_q, seq_k)?;
+            attn_weights.broadcast_add(&_mask)?
         } else {
             // During decode, we only attend to past (no masking needed)
             attn_weights
@@ -836,10 +824,6 @@ impl BatchedAttention {
         // Replace NaN with 0.0 to make padding tokens have zero attention
         // attn_probs = attn_probs.nan_to_num(0.0, f32::INFINITY, f32::NEG_INFINITY)?;
 
-        // DEBUG: Check softmax probabilities
-        let probs_vec = attn_probs.flatten_all()?.to_vec1::<f32>()?;
-        // DEBUG output removed
-
         // === ATTENTION SCORE VISUALIZATION (for batched prefill debugging) ===
         #[cfg(feature = "debug-attention-scores")]
         if seq_q > 1 {
@@ -852,11 +836,14 @@ impl BatchedAttention {
         // -> [batch, heads, seq_q, head_dim]
         let attn_output = attn_probs.matmul(&v)?;
 
-        // DEBUG: Check final attention output
-        let output_vec = attn_output.flatten_all()?.to_vec1::<f32>()?;
-        // DEBUG output removed
+        // Optionally capture attention weights for eviction policies
+        let captured_weights = if self.capture_attention {
+            Some(attn_probs.clone())
+        } else {
+            None
+        };
 
-        Ok(attn_output)
+        Ok((attn_output, captured_weights))
     }
 
     /// Create causal attention mask

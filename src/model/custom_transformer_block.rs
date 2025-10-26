@@ -75,12 +75,11 @@
 
 use candle_core::{DType, Device, Module, Result, Tensor};
 use candle_nn::{RmsNorm, VarBuilder, rms_norm};
-use std::fs::File;
 use std::io::{Read, Seek};
 
 use super::custom_attention::BatchedAttention;
 use super::mlp_wrapper::Mlp; // Thin wrapper using Candle's components
-use crate::engine::BatchExecutor;
+use crate::engine::{ParallelCacheBuilder, ParallelKvCache};
 use crate::model::batch_metadata::BatchMetadata;
 
 /// Batched Transformer Block
@@ -264,7 +263,9 @@ impl BatchedTransformerBlock {
     ///
     /// # Returns
     ///
-    /// Output tensor [batch_size, seq_len, hidden_size]
+    /// Tuple of (output_tensor, optional_attention_weights)
+    /// - output_tensor: [batch_size, seq_len, hidden_size]
+    /// - attention_weights: Option<Tensor> if captured, [query_pos, key_pos]
     ///
     /// # Algorithm (Pre-LN Pattern)
     ///
@@ -278,16 +279,17 @@ impl BatchedTransformerBlock {
     ///    - Transform: mlp_output = mlp(normed)
     ///    - Residual: hidden_states = hidden_states + mlp_output
     ///
-    /// 3. Return: hidden_states
+    /// 3. Return: (hidden_states, attention_weights)
     pub fn forward(
         &self,
         hidden_states: &Tensor,
         index_pos: usize,
         cos: &Tensor,
         sin: &Tensor,
-        batch_executor: &mut BatchExecutor,
+        cache_builder: &mut ParallelCacheBuilder,
+        cache: &mut ParallelKvCache,
         metadata: &BatchMetadata,
-    ) -> Result<Tensor> {
+    ) -> Result<(Tensor, Option<Tensor>)> {
         let (_batch_size, _seq_len, hidden_dim) = hidden_states.dims3()?;
 
         // Validate input dimensions
@@ -302,101 +304,35 @@ impl BatchedTransformerBlock {
 
         // === Self-Attention Block (with Pre-LN) ===
 
-        // DEBUG: Check RAW input to layer (before norm)
-        if self.layer_idx < 3 {
-            let raw_vec = hidden_states.flatten_all()?.to_vec1::<f32>()?;
-            let raw_mean: f32 = raw_vec.iter().sum::<f32>() / raw_vec.len() as f32;
-            let raw_max = raw_vec.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-            // DEBUG output removed
-        }
-
         // 1. Normalize input
         let normed_input = self.input_layernorm.forward(hidden_states)?;
 
-        // DEBUG: Check normalization output
-        if self.layer_idx < 3 {
-            let norm_vec = normed_input.flatten_all()?.to_vec1::<f32>()?;
-            let norm_mean: f32 = norm_vec.iter().sum::<f32>() / norm_vec.len() as f32;
-            let norm_max = norm_vec.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-            // DEBUG output removed
-        }
-
         // 2. Apply batched self-attention
-        let attn_output = self.self_attn.forward(
+        let (attn_output, attn_weights) = self.self_attn.forward(
             &normed_input,
             index_pos,
             cos,
             sin,
-            batch_executor,
+            cache_builder,
+            cache,
             metadata,
             self.layer_idx,
         )?;
 
-        // DEBUG: Check shapes and values
-        if self.layer_idx == 0 {
-            let attn_vec = attn_output.flatten_all()?.to_vec1::<f32>()?;
-            let attn_mean: f32 = attn_vec.iter().sum::<f32>() / attn_vec.len() as f32;
-            let attn_max = attn_vec.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-            // DEBUG output removed
-
-            // Check input to residual
-            let hs_vec = hidden_states.flatten_all()?.to_vec1::<f32>()?;
-            let hs_mean: f32 = hs_vec.iter().sum::<f32>() / hs_vec.len() as f32;
-            // DEBUG output removed
-            // DEBUG output removed
-        }
-
         // 3. Residual connection: x = x + attention(norm(x))
         let hidden_states = (hidden_states + attn_output)?;
-
-        // DEBUG: Check result AFTER residual
-        if self.layer_idx == 0 {
-            let hs_vec = hidden_states.flatten_all()?.to_vec1::<f32>()?;
-            let hs_mean: f32 = hs_vec.iter().sum::<f32>() / hs_vec.len() as f32;
-            let hs_max = hs_vec.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-            // DEBUG output removed
-        }
 
         // === MLP Block (with Pre-LN) ===
         // 1. Normalize input
         let normed_hidden = self.post_attention_layernorm.forward(&hidden_states)?;
 
-        // DEBUG: Check MLP input normalization for first few layers
-        if self.layer_idx < 3 {
-            let norm_mlp_vec = normed_hidden.flatten_all()?.to_vec1::<f32>()?;
-            let norm_mlp_mean: f32 = norm_mlp_vec.iter().sum::<f32>() / norm_mlp_vec.len() as f32;
-            let norm_mlp_max = norm_mlp_vec
-                .iter()
-                .cloned()
-                .fold(f32::NEG_INFINITY, f32::max);
-            // DEBUG output removed
-        }
-
         // 2. Apply batched MLP
         let mlp_output = self.mlp.forward(&normed_hidden)?;
-
-        // DEBUG: Check MLP output
-        if self.layer_idx == 0 {
-            let mlp_vec = mlp_output.flatten_all()?.to_vec1::<f32>()?;
-            let mlp_mean: f32 = mlp_vec.iter().sum::<f32>() / mlp_vec.len() as f32;
-            let mlp_max = mlp_vec.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-            let mlp_min = mlp_vec.iter().cloned().fold(f32::INFINITY, f32::min);
-            // DEBUG output removed
-        }
 
         // 3. Residual connection: x = x + mlp(norm(x))
         let hidden_states = (hidden_states + mlp_output)?;
 
-        // DEBUG: Check final Layer 0 output
-        if self.layer_idx == 0 {
-            let final_vec = hidden_states.flatten_all()?.to_vec1::<f32>()?;
-            let final_mean: f32 = final_vec.iter().sum::<f32>() / final_vec.len() as f32;
-            let final_max = final_vec.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-            let final_min = final_vec.iter().cloned().fold(f32::INFINITY, f32::min);
-            // DEBUG output removed
-        }
-
-        Ok(hidden_states)
+        Ok((hidden_states, attn_weights))
     }
 
     /// Get the layer index
@@ -423,29 +359,28 @@ impl BatchedTransformerBlock {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::{BatchExecutor, RequestContext, RequestState};
+    use crate::engine::{ParallelCacheBuilder, ParallelKvCache, RequestContext, RequestState};
     use candle_core::{Device, Tensor};
     use candle_nn::{VarBuilder, VarMap};
 
-    fn create_test_batch_executor(
+    fn create_test_cache_components(
         max_batch_size: usize,
         max_seq_len: usize,
         num_layers: usize,
         num_heads: usize,
         head_dim: usize,
-    ) -> BatchExecutor {
+    ) -> (ParallelCacheBuilder, Vec<ParallelKvCache>) {
         let device = Device::Cpu;
         let dtype = candle_core::DType::F32;
-        BatchExecutor::new(
-            max_batch_size,
-            max_seq_len,
-            num_layers,
-            num_heads,
-            head_dim,
-            dtype,
-            &device,
-        )
-        .unwrap()
+        let cache_builder =
+            ParallelCacheBuilder::new(max_batch_size, max_seq_len, dtype, &device).unwrap();
+
+        let mut caches = Vec::with_capacity(num_layers);
+        for _ in 0..num_layers {
+            caches.push(cache_builder.make_cache(num_heads, head_dim).unwrap());
+        }
+
+        (cache_builder, caches)
     }
 
     fn create_dummy_cos_sin(max_seq_len: usize, head_dim: usize) -> (Tensor, Tensor) {
@@ -492,33 +427,33 @@ mod tests {
         let input = Tensor::randn(0f32, 1f32, (batch_size, seq_len, hidden_size), &device).unwrap();
         let (cos, sin) = create_dummy_cos_sin(max_seq_len, head_dim);
 
-        // Create batch executor and metadata
-        let mut batch_executor =
-            create_test_batch_executor(batch_size, max_seq_len, num_layers, num_heads, head_dim);
+        // Create cache builder and caches
+        let (mut cache_builder, mut caches) = create_test_cache_components(
+            batch_size,
+            max_seq_len,
+            num_layers,
+            num_kv_heads,
+            head_dim,
+        );
 
         let request_ids: Vec<usize> = (0..batch_size).collect();
         let positions: Vec<usize> = vec![0; batch_size];
         let metadata =
             BatchMetadata::from_decode_batch(request_ids.clone(), positions.clone(), positions);
 
-        // Prepare batch (assign cache indices)
-        let mut contexts: Vec<RequestContext> = request_ids
-            .iter()
-            .map(|&id| {
-                let mut ctx = RequestContext::new(crate::engine::Request {
-                    id: id.to_string(),
-                    prompt: String::new(),
-                    max_new_tokens: 10,
-                });
-                ctx.state = RequestState::Decoding;
-                ctx
-            })
-            .collect();
-        batch_executor.prepare_batch(&mut contexts).unwrap();
+        // Prepare batch (assign cache indices) - no longer needed with direct cache usage
 
-        // Forward pass
-        let output = block
-            .forward(&input, 0, &cos, &sin, &mut batch_executor, &metadata)
+        // Forward pass - pass first layer's cache
+        let (output, _attn_weights) = block
+            .forward(
+                &input,
+                0,
+                &cos,
+                &sin,
+                &mut cache_builder,
+                &mut caches[0],
+                &metadata,
+            )
             .unwrap();
 
         // Check output shape
@@ -556,27 +491,24 @@ mod tests {
         let input = Tensor::randn(0f32, 1f32, (1, 1, hidden_size), &device).unwrap();
         let (cos, sin) = create_dummy_cos_sin(max_seq_len, head_dim);
 
-        let mut batch_executor =
-            create_test_batch_executor(1, max_seq_len, num_layers, num_heads, head_dim);
+        let (mut cache_builder, mut caches) =
+            create_test_cache_components(1, max_seq_len, num_layers, num_kv_heads, head_dim);
 
         let request_ids = vec![0];
         let positions = vec![0];
         let metadata =
             BatchMetadata::from_decode_batch(request_ids.clone(), positions.clone(), positions);
 
-        let mut contexts = vec![{
-            let mut ctx = RequestContext::new(crate::engine::Request {
-                id: request_ids[0].to_string(),
-                prompt: String::new(),
-                max_new_tokens: 10,
-            });
-            ctx.state = RequestState::Decoding;
-            ctx
-        }];
-        batch_executor.prepare_batch(&mut contexts).unwrap();
-
-        let output = block
-            .forward(&input, 0, &cos, &sin, &mut batch_executor, &metadata)
+        let (output, _attn_weights) = block
+            .forward(
+                &input,
+                0,
+                &cos,
+                &sin,
+                &mut cache_builder,
+                &mut caches[0],
+                &metadata,
+            )
             .unwrap();
 
         assert_eq!(output.dims(), &[1, 1, hidden_size]);
@@ -643,8 +575,8 @@ mod tests {
         let wrong_input = Tensor::randn(0f32, 1f32, (2, 4, 32), &device).unwrap();
         let (cos, sin) = create_dummy_cos_sin(max_seq_len, head_dim);
 
-        let mut batch_executor =
-            create_test_batch_executor(2, max_seq_len, num_layers, num_heads, head_dim);
+        let (mut cache_builder, mut caches) =
+            create_test_cache_components(2, max_seq_len, num_layers, num_heads, head_dim);
 
         let request_ids = vec![0, 1];
         let positions = vec![0, 0];
@@ -663,9 +595,18 @@ mod tests {
                 ctx
             })
             .collect();
-        batch_executor.prepare_batch(&mut contexts).unwrap();
+        // Note: prepare_batch was removed during refactoring
+        // Tests now rely on metadata construction directly
 
-        let result = block.forward(&wrong_input, 0, &cos, &sin, &mut batch_executor, &metadata);
+        let result = block.forward(
+            &wrong_input,
+            0,
+            &cos,
+            &sin,
+            &mut cache_builder,
+            &mut caches[0],
+            &metadata,
+        );
 
         assert!(result.is_err());
     }

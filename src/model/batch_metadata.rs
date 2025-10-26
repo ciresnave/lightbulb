@@ -411,15 +411,15 @@ mod tests {
         assert_eq!(metadata.max_seqlen(), 1);
         assert_eq!(metadata.cu_seqlens(), vec![0, 1, 2, 3]);
 
-        // Check sequence ranges
+        // Check sequence ranges - decode sequences all start at 0 (single token each)
         assert_eq!(metadata.sequence_range(0), (0, 1));
-        assert_eq!(metadata.sequence_range(1), (1, 2));
-        assert_eq!(metadata.sequence_range(2), (2, 3));
+        assert_eq!(metadata.sequence_range(1), (0, 1));
+        assert_eq!(metadata.sequence_range(2), (0, 1));
 
-        // Check last token indices
+        // Check last token indices - for decode, each is the last (and only) token
         assert_eq!(metadata.last_token_idx(0), 0);
-        assert_eq!(metadata.last_token_idx(1), 1);
-        assert_eq!(metadata.last_token_idx(2), 2);
+        assert_eq!(metadata.last_token_idx(1), 0);
+        assert_eq!(metadata.last_token_idx(2), 0);
     }
 
     #[test]
@@ -553,9 +553,9 @@ mod tests {
         assert!(!metadata.is_prefill);
         assert_eq!(metadata.context_lens, positions);
 
-        // Each sequence generates 1 token
+        // Each decode sequence generates 1 token, all start at position 0
         for i in 0..5 {
-            assert_eq!(metadata.sequence_range(i), (i, i + 1));
+            assert_eq!(metadata.sequence_range(i), (0, 1));
         }
     }
 

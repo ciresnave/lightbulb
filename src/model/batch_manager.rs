@@ -14,8 +14,11 @@
 //! The actual model architecture (Llama, Mistral, etc.) is irrelevant to
 //! the batching logic. All we need is a `forward()` method that accepts
 //! tokens and returns logits.
+//!
+//! **NOTE:** This module is currently unused in production - ParallelModelManager
+//! is used instead. This remains for potential future use with standard Candle models.
 
-use crate::engine::BatchExecutor;
+use crate::engine::ParallelCacheBuilder;
 use crate::model::BatchMetadata;
 use anyhow::Result;
 use candle_core::{Device, IndexOp, Tensor};
@@ -30,7 +33,7 @@ use candle_transformers::models::llama::Cache;
 /// * `M` - Model type (e.g., `candle_transformers::models::llama::Llama`)
 pub struct BatchManager<M> {
     model: M,
-    batch_executor: BatchExecutor,
+    cache_builder: ParallelCacheBuilder,
     device: Device,
 }
 
@@ -42,12 +45,12 @@ where
     ///
     /// # Arguments
     /// * `model` - Pre-loaded Candle model (Llama, Mistral, etc.)
-    /// * `batch_executor` - Batch executor with KV cache management
+    /// * `cache_builder` - Cache builder for position tracking
     /// * `device` - Device for tensor operations
-    pub fn new(model: M, batch_executor: BatchExecutor, device: Device) -> Self {
+    pub fn new(model: M, cache_builder: ParallelCacheBuilder, device: Device) -> Self {
         Self {
             model,
-            batch_executor,
+            cache_builder,
             device,
         }
     }
@@ -174,14 +177,14 @@ where
         &self.device
     }
 
-    /// Get reference to batch executor for cache management
-    pub fn batch_executor(&self) -> &BatchExecutor {
-        &self.batch_executor
+    /// Get reference to cache builder for position tracking
+    pub fn cache_builder(&self) -> &ParallelCacheBuilder {
+        &self.cache_builder
     }
 
-    /// Get mutable reference to batch executor
-    pub fn batch_executor_mut(&mut self) -> &mut BatchExecutor {
-        &mut self.batch_executor
+    /// Get mutable reference to cache builder
+    pub fn cache_builder_mut(&mut self) -> &mut ParallelCacheBuilder {
+        &mut self.cache_builder
     }
 
     /// Get mutable reference to the underlying model
