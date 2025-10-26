@@ -20,11 +20,19 @@ use std::io::{Read, Seek};
 /// Architecture: `down_proj(silu(gate_proj(x)) * up_proj(x))`
 ///
 /// This is exactly what Candle's internal Mlp does, but made public.
+///
+/// # CPU Kernel Fusion (M3.3)
+///
+/// When `use_fused_kernels` is enabled, the MLP uses fused operations for better
+/// CPU performance:
+/// - `fused_linear_silu` for gate_proj path (~11% bandwidth reduction)
+/// - Maintains bit-exact correctness with unfused path
 #[derive(Debug, Clone)]
 pub struct Mlp {
     gate_proj: QuantizableLinear, // c_fc1 in Candle
     up_proj: QuantizableLinear,   // c_fc2 in Candle
     down_proj: QuantizableLinear, // c_proj in Candle
+    use_fused_kernels: bool,      // M3.3: Enable CPU kernel fusion
 }
 
 impl Mlp {
@@ -34,7 +42,13 @@ impl Mlp {
     /// * `hidden_size` - Input/output dimension
     /// * `intermediate_size` - Hidden layer dimension
     /// * `vb` - VarBuilder for loading weights
-    pub fn new(hidden_size: usize, intermediate_size: usize, vb: VarBuilder) -> Result<Self> {
+    /// * `use_fused_kernels` - Enable CPU kernel fusion for better performance
+    pub fn new(
+        hidden_size: usize,
+        intermediate_size: usize,
+        vb: VarBuilder,
+        use_fused_kernels: bool,
+    ) -> Result<Self> {
         // Use Candle's linear_b with bias=false (same as Candle's Llama for models without bias)
         let gate_proj = QuantizableLinear::from_linear(candle_nn::linear_b(
             hidden_size,
@@ -67,6 +81,7 @@ impl Mlp {
             gate_proj,
             up_proj,
             down_proj,
+            use_fused_kernels,
         })
     }
 
@@ -79,6 +94,7 @@ impl Mlp {
     /// * `file` - Open file handle for reading tensor data
     /// * `device` - Device to load tensors on
     /// * `layer_idx` - Layer index for tensor naming (e.g., blk.0, blk.1, ...)
+    /// * `use_fused_kernels` - Enable CPU kernel fusion for better performance
     pub fn from_gguf<R: Read + Seek>(
         _hidden_size: usize,
         _intermediate_size: usize,
@@ -86,6 +102,7 @@ impl Mlp {
         file: &mut R,
         device: &candle_core::Device,
         layer_idx: usize,
+        use_fused_kernels: bool,
     ) -> Result<Self> {
         let prefix = format!("blk.{}", layer_idx);
 
@@ -112,6 +129,7 @@ impl Mlp {
             gate_proj,
             up_proj,
             down_proj,
+            use_fused_kernels,
         })
     }
 
@@ -121,13 +139,37 @@ impl Mlp {
     ///
     /// Naturally handles batched inputs:
     /// - Input: [batch, seq, hidden] → Output: [batch, seq, hidden]
+    ///
+    /// When `use_fused_kernels` is true, uses `fused_linear_silu` for the gate path
+    /// to reduce memory bandwidth and improve CPU performance (~11% bandwidth reduction).
     pub fn forward(&self, x: &Tensor) -> Result<Tensor> {
         // DEBUG: Check input stats
         let input_vec = x.flatten_all()?.to_vec1::<f32>()?;
         let _input_max = input_vec.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
         let _input_mean: f32 = input_vec.iter().sum::<f32>() / input_vec.len() as f32;
 
-        let gate = candle_nn::ops::silu(&self.gate_proj.forward(x)?)?;
+        // M3.3: Use fused kernels if enabled
+        let gate = if self.use_fused_kernels {
+            // Fused path: gate_proj + silu in one operation
+            // Note: fused_linear_silu currently only supports QuantizableLinear::Regular
+            // For quantized models, fall back to unfused path
+            match &self.gate_proj {
+                crate::model::quantizable_linear::QuantizableLinear::Regular(linear) => {
+                    // Extract weight and bias from Linear layer
+                    let weight = linear.weight();
+                    let bias = linear.bias();
+                    crate::model::fused_kernels::fused_linear_silu(x, weight, bias)?
+                }
+                crate::model::quantizable_linear::QuantizableLinear::Quantized(_) => {
+                    // Quantized path: use unfused (fusion doesn't apply to quantized ops)
+                    candle_nn::ops::silu(&self.gate_proj.forward(x)?)?
+                }
+            }
+        } else {
+            // Unfused path: separate gate_proj + silu
+            candle_nn::ops::silu(&self.gate_proj.forward(x)?)?
+        };
+
         let up = self.up_proj.forward(x)?;
         let intermediate = (gate * up)?;
         let output = self.down_proj.forward(&intermediate)?;

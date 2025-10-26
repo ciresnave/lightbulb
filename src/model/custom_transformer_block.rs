@@ -165,7 +165,14 @@ impl BatchedTransformerBlock {
         let self_attn = BatchedAttention::new(hidden_size, num_heads, num_kv_heads, self_attn_vb)?;
 
         // Use our thin MLP wrapper (built on Candle's Linear + ops::silu)
-        let mlp = Mlp::new(hidden_size, intermediate_size, vb.pp("mlp"))?;
+        // M3.3: Enable CPU kernel fusion by default for better performance
+        let use_fused_kernels = true; // TODO: Make configurable via model config
+        let mlp = Mlp::new(
+            hidden_size,
+            intermediate_size,
+            vb.pp("mlp"),
+            use_fused_kernels,
+        )?;
 
         Ok(Self {
             layer_idx,
@@ -226,6 +233,8 @@ impl BatchedTransformerBlock {
         )?;
 
         // Load MLP with quantized weights
+        // M3.3: Enable CPU kernel fusion by default
+        let use_fused_kernels = true; // TODO: Make configurable via model config
         let mlp = Mlp::from_gguf(
             hidden_size,
             intermediate_size,
@@ -233,6 +242,7 @@ impl BatchedTransformerBlock {
             file,
             device,
             layer_idx,
+            use_fused_kernels,
         )?;
 
         // Use F32 for quantized models
