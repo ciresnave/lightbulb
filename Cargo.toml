@@ -9,7 +9,7 @@
 [features]
     cuda = ["candle-core/cuda", "candle-nn/cuda", "candle-transformers/cuda"]
     default = []
-    flash-attn = ["candle-transformers/flash-attn"]
+    flash-attn = ["candle-flash-attn", "candle-transformers/flash-attn", "cuda"]
     metal = [
         "candle-core/metal",
         "candle-nn/metal",
@@ -58,5 +58,6 @@
     candle-core         = { git = "https://github.com/huggingface/candle", package = "candle-core", rev = "9fe623237a515f95f70d117c0a6da610c28a5ecd" }
     candle-nn           = { git = "https://github.com/huggingface/candle", package = "candle-nn", rev = "9fe623237a515f95f70d117c0a6da610c28a5ecd" }
     candle-transformers = { git = "https://github.com/huggingface/candle", package = "candle-transformers", rev = "9fe623237a515f95f70d117c0a6da610c28a5ecd" }
-    # Optional; enable behind feature if/when needed
-    # candle-flash-attn = { git = "https://github.com/huggingface/candle", package = "candle-flash-attn", optional = true }
+    
+    # FlashAttention-2 support (optional, requires CUDA and flash-attn feature)
+    candle-flash-attn = { git = "https://github.com/huggingface/candle", package = "candle-flash-attn", rev = "9fe623237a515f95f70d117c0a6da610c28a5ecd", optional = true }
