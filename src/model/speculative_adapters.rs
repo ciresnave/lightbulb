@@ -34,13 +34,9 @@ impl BatchedTransformerAdapter {
         // Create per-layer KV caches
         let mut caches = Vec::with_capacity(config.num_hidden_layers);
         for _ in 0..config.num_hidden_layers {
-            caches.push(ParallelKvCache::new(
-                1,                           // batch_size
+            caches.push(cache_builder.make_cache(
                 config.num_key_value_heads,  // num_kv_heads
-                max_seq_len,                 // max_seq_len
                 config.head_dim(),           // head_dim
-                model.dtype(),               // dtype
-                model.device(),              // device
             )?);
         }
 
@@ -97,7 +93,7 @@ impl SpeculativeModel for BatchedTransformerAdapter {
     fn reset_cache(&mut self) {
         // Reset cache builder and all KV caches for new sequence
         let config = self.model.config();
-        
+
         self.cache_builder = crate::cache::ParallelCacheBuilder::new(
             1,
             self.max_seq_len,
@@ -108,18 +104,11 @@ impl SpeculativeModel for BatchedTransformerAdapter {
 
         self.caches.clear();
         for _ in 0..config.num_hidden_layers {
-            self.caches
-                .push(
-                    ParallelKvCache::new(
-                        1,
-                        config.num_key_value_heads,
-                        self.max_seq_len,
-                        config.head_dim(),
-                        self.model.dtype(),
-                        self.model.device(),
-                    )
+            self.caches.push(
+                self.cache_builder
+                    .make_cache(config.num_key_value_heads, config.head_dim())
                     .expect("Failed to create cache"),
-                );
+            );
         }
     }
 }

@@ -5,7 +5,10 @@
 use std::collections::HashMap;
 
 /// Trait for cache eviction policies.
-pub trait EvictionPolicy {
+///
+/// Implementations must be thread-safe (Send + Sync) to work with
+/// speculative decoding and other concurrent features.
+pub trait EvictionPolicy: Send + Sync {
     /// Compute eviction scores for cache slots.
     ///
     /// Higher score = higher priority for eviction.
