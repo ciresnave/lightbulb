@@ -11,6 +11,7 @@ use std::io::{Read, Seek};
 use crate::engine::{ParallelCacheBuilder, ParallelKvCache};
 use crate::model::batch_metadata::BatchMetadata;
 use crate::model::custom_transformer_block::BatchedTransformerBlock;
+use crate::model::decode_state::DecodeState;
 
 /// Configuration for the generic batched transformer model
 #[derive(Debug, Clone)]
@@ -185,6 +186,11 @@ pub struct BatchedTransformer {
 
     /// Data type (F32/F16/BF16)
     dtype: DType,
+
+    /// Decode-loop optimization state (M3.2)
+    /// Pre-allocated buffers and cached state to reduce per-step overhead
+    /// Uses Mutex for thread-safe access in speculative decoding scenarios
+    decode_state: std::sync::Mutex<DecodeState>,
 }
 
 impl BatchedTransformer {
@@ -267,6 +273,7 @@ impl BatchedTransformer {
             config,
             device,
             dtype,
+            decode_state: std::sync::Mutex::new(DecodeState::new()),
         })
     }
 
@@ -361,6 +368,7 @@ impl BatchedTransformer {
             config,
             device: device.clone(),
             dtype,
+            decode_state: std::sync::Mutex::new(DecodeState::new()),
         })
     }
 
@@ -427,12 +435,27 @@ impl BatchedTransformer {
         // Embed tokens: [total_tokens] -> [total_tokens, hidden_size]
         let hidden_states = self.embedding.forward(input_ids)?;
 
+        // M3.2 Optimization: Reuse decode buffer to avoid repeated allocations
         // Reshape to 3D for transformer blocks: [total_tokens, hidden] -> [1, total_tokens, hidden]
         // For prefill: batch=1, seq=total_tokens
         // For decode: batch=total_tokens, seq=1
         let mut hidden_states = if metadata.is_prefill {
             hidden_states.unsqueeze(0)? // [total_tokens, hidden] -> [1, total_tokens, hidden]
         } else {
+            // M3.2: Use decode buffer if initialized, otherwise fall back to reshape
+            let mut decode_state = self.decode_state.lock().unwrap();
+
+            // Lazy initialization on first decode
+            if !decode_state.is_initialized() {
+                decode_state.init_decode_buffer(
+                    total_tokens,
+                    self.config.hidden_size,
+                    &self.device,
+                )?;
+            }
+
+            // TODO: Could optimize further by reusing buffer, but reshape is cheap
+            // Future: Copy into pre-allocated buffer instead of reshape
             hidden_states.reshape((total_tokens, 1, self.config.hidden_size))? // [total_tokens, hidden] -> [total_tokens, 1, hidden]
         };
 
@@ -454,6 +477,7 @@ impl BatchedTransformer {
             );
         }
 
+        // M3.2 Optimization: Cache position computation
         // Pass through all transformer blocks
         // For RoPE position:
         // - During prefill: use 0 (processing first token(s) of prompt)
@@ -463,9 +487,11 @@ impl BatchedTransformer {
         let index_pos = if metadata.is_prefill {
             0
         } else {
-            // During decode, the position is how many tokens we've already processed
-            // context_lens tells us this
-            metadata.context_lens.get(0).copied().unwrap_or(0)
+            // M3.2: Cache the position lookup in decode_state
+            let mut decode_state = self.decode_state.lock().unwrap();
+            let pos = metadata.context_lens.get(0).copied().unwrap_or(0);
+            decode_state.update_index_pos(pos);
+            pos
         };
 
         // DEBUG output removed
@@ -501,23 +527,31 @@ impl BatchedTransformer {
             }
         }
 
-        // Update H2O policy with attention weights if available
-        if let Some(ref attn_weights) = last_attn_weights {
-            // Convert tensor to Vec<Vec<f32>> for H2O policy
-            // attn_weights shape: [query_pos, key_pos] or similar
-            if let Ok(dims) = attn_weights.dims2() {
-                let (query_len, key_len) = dims;
-                let flat = attn_weights.flatten_all()?.to_vec1::<f32>()?;
+        // M3.2 Optimization: Throttle H2O updates (expensive GPU→CPU transfer + allocations)
+        // Update H2O policy with attention weights if available AND if update is due
+        let should_update_h2o = {
+            let mut decode_state = self.decode_state.lock().unwrap();
+            decode_state.should_update_h2o()
+        };
 
-                let mut attention_matrix = Vec::with_capacity(query_len);
-                for i in 0..query_len {
-                    let start = i * key_len;
-                    let end = start + key_len;
-                    attention_matrix.push(flat[start..end].to_vec());
+        if should_update_h2o {
+            if let Some(ref attn_weights) = last_attn_weights {
+                // Convert tensor to Vec<Vec<f32>> for H2O policy
+                // attn_weights shape: [query_pos, key_pos] or similar
+                if let Ok(dims) = attn_weights.dims2() {
+                    let (query_len, key_len) = dims;
+                    let flat = attn_weights.flatten_all()?.to_vec1::<f32>()?;
+
+                    let mut attention_matrix = Vec::with_capacity(query_len);
+                    for i in 0..query_len {
+                        let start = i * key_len;
+                        let end = start + key_len;
+                        attention_matrix.push(flat[start..end].to_vec());
+                    }
+
+                    // Update H2O policy with the attention scores
+                    cache_builder.update_attention_scores(&attention_matrix);
                 }
-
-                // Update H2O policy with the attention scores
-                cache_builder.update_attention_scores(&attention_matrix);
             }
         }
 

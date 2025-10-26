@@ -10,6 +10,7 @@ pub mod chunked_prefill; // Chunked prefill scheduler with padding
 pub mod custom_attention; // Phase 2D - Approach 2: Parallel batched attention
 pub mod custom_transformer;
 pub mod custom_transformer_block;
+pub mod decode_state; // M3.2: Decode-loop optimization state
 pub mod kv_tensor; // Canonical KV tensor representation for ScatteredKvCache
 pub mod mlp_wrapper; // Thin wrapper around Candle's MLP components
 pub mod model_manager; // Phase 2D - Approach 2: Generic transformer
