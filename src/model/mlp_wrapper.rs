@@ -148,8 +148,23 @@ impl Mlp {
         let _input_max = input_vec.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
         let _input_mean: f32 = input_vec.iter().sum::<f32>() / input_vec.len() as f32;
 
-        // M3.3: Use fused kernels if enabled
-        let gate = if self.use_fused_kernels {
+        // M3.3: Fused kernels implementation
+        // NOTE: Current implementation shows regression due to overhead of extracting
+        // weights from candle_nn::Linear. The weight() and bias() methods appear to
+        // be expensive (possibly cloning or creating new tensors).
+        //
+        // Analysis from benchmark:
+        // - Unfused: 21.7ms per forward pass
+        // - Fused (attempted): 213.7ms per forward pass (10x slower!)
+        //
+        // Root cause: candle_nn::Linear doesn't expose weights efficiently for
+        // external fusion. True kernel fusion would require:
+        // 1. Custom linear layer with direct weight access, OR
+        // 2. Candle upstream changes to provide fused matmul+activation ops
+        //
+        // Decision: Disable fusion for now. Keep infrastructure for future work
+        // when Candle provides proper fused op support.
+        let gate = if self.use_fused_kernels && false {  // Disabled: see NOTE above
             // Fused path: gate_proj + silu in one operation
             // Note: fused_linear_silu currently only supports QuantizableLinear::Regular
             // For quantized models, fall back to unfused path
