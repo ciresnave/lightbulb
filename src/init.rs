@@ -23,6 +23,7 @@
 //!          config.slot_pool_size, config.chunk_size);
 //! ```
 
+use crate::engine::speculative::SpeculativeConfig;
 use crate::hardware::{HardwareProfile, batch_sizing::*};
 use anyhow::{Context, Result};
 
@@ -49,6 +50,9 @@ pub struct SystemConfig {
 
     /// Bytes per tensor element (2 for f16, 4 for f32)
     pub dtype_bytes: usize,
+
+    /// Speculative decoding configuration (optional)
+    pub speculative: Option<SpeculativeConfig>,
 }
 
 impl SystemConfig {
@@ -113,6 +117,15 @@ impl SystemConfig {
         println!("  Chunk size: {} tokens per prefill chunk", chunk_size);
         println!("  Monitoring: enabled");
 
+        // Configure speculative decoding if beneficial
+        let speculative = Self::configure_speculative_decoding(&hardware, &model);
+        if let Some(ref spec_config) = speculative {
+            println!(
+                "  Speculative decoding: {} tokens (enabled)",
+                spec_config.num_speculative_tokens
+            );
+        }
+
         Ok(Self {
             slot_pool_size,
             chunk_size,
@@ -121,6 +134,48 @@ impl SystemConfig {
             hardware,
             model,
             dtype_bytes,
+            speculative,
+        })
+    }
+
+    /// Configure speculative decoding based on hardware capabilities
+    ///
+    /// Speculative decoding benefits from:
+    /// - Sufficient memory for draft + target models
+    /// - Good CPU performance (for draft model)
+    /// - Models with reasonable acceptance rates
+    ///
+    /// Returns None if speculative decoding is not recommended.
+    fn configure_speculative_decoding(
+        hardware: &HardwareProfile,
+        model: &ModelMemoryProfile,
+    ) -> Option<SpeculativeConfig> {
+        // Estimate memory required for draft model (assume ~1/10 the size)
+        let draft_memory_gb = (model.weights_bytes as f64 / 1e9) * 0.1;
+        let total_memory_gb = hardware.memory.available_bytes as f64 / 1e9;
+
+        // Need at least 2x model size + 2GB headroom
+        let target_memory_gb = (model.weights_bytes as f64 / 1e9) * 2.0 + 2.0 + draft_memory_gb;
+
+        if total_memory_gb < target_memory_gb {
+            // Not enough memory for speculative decoding
+            return None;
+        }
+
+        // Configure based on hardware
+        let num_speculative_tokens = if hardware.gpu.is_some() {
+            // GPU: More aggressive speculation (less draft overhead)
+            7
+        } else {
+            // CPU: Conservative speculation
+            4
+        };
+
+        Some(SpeculativeConfig {
+            num_speculative_tokens,
+            min_acceptance_rate: 0.25, // 25% minimum acceptance
+            enabled: true,
+            auto_fallback: true,
         })
     }
 
@@ -179,6 +234,7 @@ impl SystemConfig {
             hardware,
             model,
             dtype_bytes,
+            speculative: None, // Manual construction doesn't auto-configure speculative
         }
     }
 
