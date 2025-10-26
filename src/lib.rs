@@ -3,6 +3,7 @@ pub mod debug;
 pub mod engine;
 pub mod gguf;
 pub mod hardware; // Hardware detection and adaptive configuration
+pub mod init; // Hardware-aware system initialization
 pub mod kernels;
 pub mod loaders;
 pub mod model;
