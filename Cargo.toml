@@ -7,9 +7,10 @@
     version     = "0.1.0"
 
 [features]
-    cuda = ["candle-core/cuda", "candle-nn/cuda", "candle-transformers/cuda"]
+    cuda = ["candle-core/cuda", "candle-nn/cuda", "candle-transformers/cuda", "candle-flash-attn", "candle-transformers/flash-attn"]
     default = []
-    flash-attn = ["candle-flash-attn", "candle-transformers/flash-attn", "cuda"]
+    # Legacy flash-attn feature for backwards compatibility - now included in cuda
+    flash-attn = ["cuda"]
     metal = [
         "candle-core/metal",
         "candle-nn/metal",
