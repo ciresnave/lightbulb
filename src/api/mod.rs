@@ -1,0 +1,343 @@
+//! Lightbulb API Server
+//!
+//! Provides OpenAI-compatible API with Lightbulb-specific extensions.
+//!
+//! # Architecture
+//!
+//! - **OpenAI-Compatible Base**: `/v1/chat/completions`, `/v1/completions`, `/v1/models`
+//! - **Admin API**: `/v1/lightbulb/admin/*` for system management
+//! - **Knowledge Base**: `/v1/lightbulb/knowledge/*` for KB operations
+//! - **Reasoning Controls**: `/v1/lightbulb/reasoning/*` for advanced reasoning
+//! - **State Management**: `/v1/lightbulb/state/*` for persistence/branching
+//!
+//! # Security
+//!
+//! - Bearer token authentication via auth-framework
+//! - Role-based access control (user, admin, llm)
+//! - Rate limiting per API key
+//! - Audit logging for all requests
+//!
+//! # Example
+//!
+//! ```rust,ignore
+//! use lightbulb::api::ApiServer;
+//!
+//! let server = ApiServer::new(config).await?;
+//! server.serve("0.0.0.0:8080").await?;
+//! ```
+
+pub mod admin;
+pub mod auth_middleware;
+pub mod lightbulb;
+pub mod openai;
+pub mod types;
+
+use anyhow::Result;
+use axum::{
+    Router,
+    routing::{get, post},
+};
+use std::sync::Arc;
+use tokio::net::TcpListener;
+use tower_http::cors::{Any, CorsLayer};
+use tower_http::trace::TraceLayer;
+
+use crate::engine::MemoryAwareScheduler;
+use crate::engine::model_runner::ModelRunner;
+use std::path::Path;
+
+/// API server configuration
+#[derive(Debug, Clone)]
+pub struct ApiConfig {
+    /// PostgreSQL connection string
+    pub database_url: String,
+
+    /// Server bind address
+    pub bind_address: String,
+
+    /// Enable OpenAI-compatible endpoints
+    pub enable_openai_api: bool,
+
+    /// Enable admin endpoints
+    pub enable_admin_api: bool,
+
+    /// Enable Lightbulb-specific extensions
+    pub enable_lightbulb_extensions: bool,
+
+    /// JWT secret for token signing
+    pub jwt_secret: String,
+
+    /// Maximum requests per minute per API key
+    pub rate_limit_per_minute: u32,
+
+    /// Optional base directory where models are stored (each model is a subdirectory)
+    pub models_dir: Option<String>,
+
+    /// Default model name to load from `models_dir`
+    pub default_model: String,
+
+    /// Model runner max batch size
+    pub model_max_batch_size: usize,
+
+    /// Model context length
+    pub model_context_length: usize,
+
+    /// Enable audit logging
+    pub enable_audit_log: bool,
+
+    /// TLS configuration
+    pub tls: crate::tls::TlsConfig,
+}
+
+impl Default for ApiConfig {
+    fn default() -> Self {
+        Self {
+            database_url: "postgresql://lightbulb:lightbulb@localhost:5432/lightbulb".to_string(),
+            bind_address: "0.0.0.0:8080".to_string(),
+            enable_openai_api: true,
+            enable_admin_api: true,
+            enable_lightbulb_extensions: true,
+            jwt_secret: "change-me-in-production".to_string(),
+            rate_limit_per_minute: 60,
+            enable_audit_log: true,
+            models_dir: Some("./models".to_string()),
+            default_model: "lightbulb-default".to_string(),
+            model_max_batch_size: 8,
+            model_context_length: 2048,
+            tls: crate::tls::TlsConfig::default(),
+        }
+    }
+}
+
+/// Shared application state
+#[derive(Clone)]
+pub struct AppState {
+    /// Inference scheduler
+    pub scheduler: Arc<MemoryAwareScheduler>,
+
+    /// API configuration
+    pub config: ApiConfig,
+
+    /// Database connection pool
+    pub db_pool: deadpool_postgres::Pool,
+
+    /// Sender to enqueue inference jobs to the model runner thread (if started)
+    pub inference_tx: Option<std::sync::mpsc::Sender<crate::engine::model_runner::InferenceJob>>,
+}
+
+/// API server
+pub struct ApiServer {
+    /// Application state
+    state: AppState,
+}
+
+impl ApiServer {
+    /// Create new API server
+    pub async fn new(config: ApiConfig, scheduler: Arc<MemoryAwareScheduler>) -> Result<Self> {
+        // Parse PostgreSQL connection string
+        let mut pg_config: tokio_postgres::Config = config.database_url.parse()?;
+
+        // For trust auth, tokio-postgres still needs a password value (can be anything)
+        // This is a client-side requirement, not enforced by PostgreSQL with trust auth
+        if pg_config.get_password().is_none() {
+            pg_config.password("trust");
+        }
+
+        // Create connection pool
+        let manager = deadpool_postgres::Manager::new(pg_config, tokio_postgres::NoTls);
+        let db_pool = deadpool_postgres::Pool::builder(manager)
+            .max_size(10)
+            .build()?;
+
+        // Run migrations using refinery
+        let mut client = db_pool.get().await?;
+        refinery::embed_migrations!("./migrations");
+        migrations::runner().run_async(&mut **client).await?;
+        let mut state = AppState {
+            scheduler,
+            config: config.clone(),
+            db_pool,
+            inference_tx: None,
+        };
+
+        // Try to start a model runner thread if a model directory and default model exist
+        if let Some(models_dir) = &state.config.models_dir {
+            let model_path = Path::new(models_dir).join(&state.config.default_model);
+            if model_path.exists() {
+                match ModelRunner::start(
+                    &model_path,
+                    state.config.model_max_batch_size,
+                    state.config.model_context_length,
+                    Some("f32".to_string()),
+                ) {
+                    Ok(sender) => {
+                        state.inference_tx = Some(sender);
+                        println!("Started model runner for {}", model_path.display());
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "Failed to start model runner for {}: {}",
+                            model_path.display(),
+                            e
+                        );
+                    }
+                }
+            } else {
+                println!(
+                    "Model path {} not found; skipping model runner startup",
+                    model_path.display()
+                );
+            }
+        }
+
+        Ok(Self { state })
+    }
+
+    /// Build the router with all routes and middleware
+    pub fn build_router(&self) -> Router<AppState> {
+        let mut router = Router::new();
+
+        // Health check
+        router = router.route("/health", get(health_check));
+
+        // OpenAI-compatible API
+        if self.state.config.enable_openai_api {
+            router = router.merge(openai::routes());
+        }
+
+        // Admin API
+        if self.state.config.enable_admin_api {
+            router = router.merge(admin::routes());
+        }
+
+        // Lightbulb extensions
+        if self.state.config.enable_lightbulb_extensions {
+            router = router.merge(lightbulb::routes());
+        }
+
+        // Add middleware layers
+        router
+            // Audit logging (outermost - logs everything)
+            .layer(axum::middleware::from_fn_with_state(
+                self.state.clone(),
+                auth_middleware::audit_middleware,
+            ))
+            // Rate limiting
+            .layer(axum::middleware::from_fn_with_state(
+                self.state.clone(),
+                auth_middleware::rate_limit_middleware,
+            ))
+            // Authentication (innermost - validates before processing)
+            .layer(axum::middleware::from_fn_with_state(
+                self.state.clone(),
+                auth_middleware::auth_middleware,
+            ))
+            // CORS and tracing
+            .layer(
+                CorsLayer::new()
+                    .allow_origin(Any)
+                    .allow_methods(Any)
+                    .allow_headers(Any),
+            )
+            .layer(TraceLayer::new_for_http())
+    }
+
+    /// Start serving (HTTP and optionally HTTPS)
+    pub async fn serve(self) -> Result<()> {
+        use crate::tls::CertificateManager;
+
+        let http_bind_address = self.state.config.bind_address.clone();
+        let tls_config = self.state.config.tls.clone();
+
+        // Get TLS configuration
+        let cert_manager = CertificateManager::new(tls_config.clone());
+        let tls_server_config = cert_manager.get_server_config().await?;
+
+        // Build router with all routes and middleware
+        let mut app = self.build_router();
+
+        // Add HTTPS redirect middleware if TLS is enabled and forced
+        if cert_manager.should_force_https() {
+            app = app.layer(axum::middleware::from_fn(
+                crate::tls::https_redirect_middleware,
+            ));
+        }
+
+        let app = app.with_state(self.state);
+
+        if let Some((cert_pem, key_pem)) = tls_server_config {
+            let https_bind_address = cert_manager.https_bind_address(&http_bind_address);
+
+            // Create rustls config from certificate and key
+            use axum_server::tls_rustls::RustlsConfig;
+            let rustls_config = RustlsConfig::from_pem(cert_pem, key_pem).await?;
+
+            // Start both HTTP and HTTPS servers concurrently
+            let http_listener = TcpListener::bind(&http_bind_address).await?;
+            let https_addr: std::net::SocketAddr = https_bind_address.parse()?;
+
+            println!("Lightbulb API server listening on:");
+            println!("  HTTP:  {}", http_bind_address);
+            println!("  HTTPS: {}", https_bind_address);
+
+            let http_app = app.clone();
+            let https_app = app;
+
+            // Start both servers concurrently
+            let http_server = tokio::spawn(async move {
+                axum::serve(http_listener, http_app)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("HTTP server error: {}", e))
+            });
+
+            let https_server = tokio::spawn(async move {
+                axum_server::bind_rustls(https_addr, rustls_config)
+                    .serve(https_app.into_make_service())
+                    .await
+                    .map_err(|e| anyhow::anyhow!("HTTPS server error: {}", e))
+            });
+
+            // Wait for either server to complete (or fail)
+            tokio::select! {
+                result = http_server => result??,
+                result = https_server => result??,
+            }
+        } else {
+            // HTTP only
+            let listener = TcpListener::bind(&http_bind_address).await?;
+            println!(
+                "Lightbulb API server listening on HTTP: {}",
+                http_bind_address
+            );
+
+            axum::serve(listener, app)
+                .await
+                .map_err(|e| anyhow::anyhow!("HTTP server error: {}", e))?;
+        }
+
+        Ok(())
+    }
+
+    /// Get application state
+    pub fn state(&self) -> &AppState {
+        &self.state
+    }
+}
+
+/// Health check endpoint
+async fn health_check() -> &'static str {
+    "OK"
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_api_config_default() {
+        let config = ApiConfig::default();
+        assert!(config.enable_openai_api);
+        assert!(config.enable_admin_api);
+        assert!(config.enable_lightbulb_extensions);
+    }
+}

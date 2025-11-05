@@ -1,3 +1,4 @@
+pub mod api;
 pub mod cache;
 pub mod debug;
 pub mod engine;
@@ -6,9 +7,16 @@ pub mod hardware; // Hardware detection and adaptive configuration
 pub mod init; // Hardware-aware system initialization
 pub mod kernels;
 pub mod loaders;
+pub mod lora; // LoRA (Low-Rank Adaptation) support with name mapping (M5.4)
 pub mod model;
+pub mod multi_gpu; // Multi-GPU inference support (M3.6)
+pub mod pruning; // Model pruning utilities (M5)
+pub mod quantization; // GGUF quantization utilities
 pub mod sampling;
 pub mod server;
+pub mod tls; // TLS certificate management
+pub mod tools; // Tool registry with capability detection (M5.6)
+pub mod utils; // Utility functions (M4.2: tensor ops)
 
 pub async fn hello_generate(prompt: &str) -> anyhow::Result<()> {
     // Trivial Candle call to verify dependency linkage; replace with real text-gen soon
@@ -31,7 +39,7 @@ pub fn local_llama_generate(
     use candle_transformers::generation::{LogitsProcessor, Sampling};
     use tokenizers::Tokenizer;
 
-    let (model, mut cache, cfg, device) =
+    let (model, mut cache, cfg, device, _name_mapper) =
         crate::loaders::load_local_llama(model_dir, Some("f32"), true, false)?;
 
     // Load tokenizer.json from model_dir
