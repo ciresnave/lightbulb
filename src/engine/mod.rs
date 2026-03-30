@@ -3,16 +3,100 @@
 //! This module contains the core scheduling and execution infrastructure
 //! for continuous batching and request management.
 
+pub mod adaptive_selection;
+pub mod consistency_checking;
+pub mod context_compression;
+pub mod context_injection;
+pub mod conversation_history;
+pub mod decomposition;
+pub mod knowledge_base;
+pub mod memory_aware_scheduler;
+pub mod metadata_scheduling;
+pub mod mixed_precision;
+pub mod model_runner;
+pub mod moe_router;
+pub mod performance_optimization;
+pub mod pipeline;
+pub mod production_providers;
+pub mod query_analysis;
+pub mod reasoning_controls;
+pub mod relevance_search;
 pub mod slot_monitor;
 pub mod slot_pool;
 pub mod speculative;
+pub mod state_persistence;
+pub mod streaming_context;
 
+pub use adaptive_selection::{
+    ProviderMetrics, ProviderSelector, RegisteredProvider, SelectionConfig, SelectionStrategy,
+};
+pub use consistency_checking::{
+    CheckerConfig, CheckerStats, Conflict, ConflictType, ConsistencyChecker, ConsistencyError,
+    ValidationResult,
+};
+pub use context_compression::{
+    CompressionConfig, CompressionResult, CompressionStrategy, ContextCompressor,
+};
+pub use context_injection::{
+    ContextError, ContextInjection, ContextManager, ContextProvider, CrateApiProvider,
+    InjectionPosition, ProviderConfig, ProviderResult, StaticContextProvider,
+};
+pub use conversation_history::{ConversationConfig, ConversationHistory, ConversationTurn, Role};
+pub use decomposition::{
+    ComplexityLevel, Decomposition, DecompositionConfig, DecompositionEngine, DecompositionError,
+    DecompositionHistory, DecompositionStats, DecompositionStrategy, Problem, ProblemId,
+    SubProblem,
+};
+pub use knowledge_base::{
+    ConvergenceDetector, EvictionRecord, Fact, FactCategory, FactKey, KnowledgeBase,
+    KnowledgeBaseConfig, KnowledgeBaseError, KnowledgeBaseStats,
+};
+pub use memory_aware_scheduler::{MemoryAwareConfig, MemoryAwareScheduler, MemoryStats, Priority};
+pub use metadata_scheduling::{
+    ConstraintError, ConstraintValidator, EthicalFlag, MetadataScheduler,
+    PipelineId as SchedulingPipelineId, Priority as RequestPriority, RequestMetadata, RequestTag,
+    RoutingDecision, RoutingPolicy as MetadataRoutingPolicy,
+};
+pub use model_runner::{InferenceJob, InferenceRequestSender, ModelRunner};
+pub use moe_router::{
+    ExpertId, MoeConfig, MoeRouter, RoutingError, RoutingPolicy, RoutingResult, RoutingStats,
+    TokenAssignment, TokenIndex,
+};
+pub use performance_optimization::{
+    AsyncContextManager, CacheConfig, CacheStats, ConnectionPool, EmbeddingModel,
+    EmbeddingModelConfig, LazyEmbeddingModel, PoolStats,
+};
+pub use pipeline::{
+    CacheRef, Pipeline, PipelineBuilder, PipelineConfig, PipelineError, PipelineId, PipelineStats,
+    Stage, StageData, StageId, StageResult, StageState, StageType,
+};
+pub use production_providers::{
+    EmbeddingConfig, EmbeddingProvider, FileChange, FileChangeType, FileWatcherConfig,
+    FileWatcherProvider, SearchResult as WebSearchResult, WebSearchConfig, WebSearchProvider,
+};
+pub use query_analysis::{
+    AnalyzedQuery, ComparisonOperator, Constraint, ConstraintType, Entity, EntityType,
+    QueryAnalysisError, QueryAnalyzer, QueryIntent, SubQuery,
+};
+pub use relevance_search::{
+    CrossEncoderReranker, Document, DocumentMetadata, HybridSearchPipeline, HydeSearch,
+    MetadataFilter, SearchConfig, SearchError, SearchResult, SearchStrategy, SemanticSearch,
+};
 pub use slot_monitor::{AdjustmentConfig, MemoryStatistics, SlotPoolMonitor};
 pub use slot_pool::{
     CompletedToken, Request as SlotPoolRequest, RequestId, SlotId, SlotPool, SlotPoolError,
     SlotPoolStats, SlotState,
 };
 pub use speculative::{SpeculativeConfig, SpeculativeDecoder, SpeculativeModel, SpeculativeStats};
+pub use state_persistence::{
+    CheckpointId, CheckpointManager, CheckpointMetadata, InferenceCheckpoint,
+    KnowledgeBaseSnapshot, KvCacheSnapshot, PipelineSnapshot, create_checkpoint,
+    restore_kb_from_checkpoint,
+};
+pub use streaming_context::{
+    CodeCompletionStreamProvider, ContextStream, StreamConfig, StreamingContextProvider,
+    WebSearchStreamProvider,
+};
 
 // Legacy types for backward compatibility (will be migrated to SlotPool)
 use anyhow::Result;

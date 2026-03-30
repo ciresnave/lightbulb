@@ -327,6 +327,11 @@ impl SlotPool {
         self.slots.get(slot_id)
     }
 
+    /// Get the slot ID for a given request ID
+    pub fn get_request_slot(&self, request_id: &RequestId) -> Option<&SlotId> {
+        self.request_to_slot.get(request_id)
+    }
+
     /// Get maximum number of slots in the pool
     pub fn max_slots(&self) -> usize {
         self.max_slots

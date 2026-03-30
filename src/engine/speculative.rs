@@ -23,7 +23,7 @@
 //! - "SpecInfer: Accelerating Generative LLM Serving with Speculative Inference" (Miao et al., 2023)
 
 use anyhow::{Context, Result};
-use candle_core::{Device, Tensor};
+use candlelight::core::{Device, Tensor};
 
 /// Configuration for speculative decoding
 #[derive(Debug, Clone)]
