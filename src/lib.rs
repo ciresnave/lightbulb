@@ -1,5 +1,7 @@
 pub mod api;
+pub mod backend; // Hardware-specific backends (CUDA, ROCm, etc.)
 pub mod cache;
+pub mod contracts; // Output Contracts — structured responses from small/weak LLMs
 pub mod debug;
 pub mod engine;
 pub mod gguf;
@@ -8,6 +10,7 @@ pub mod init; // Hardware-aware system initialization
 pub mod kernels;
 pub mod loaders;
 pub mod lora; // LoRA (Low-Rank Adaptation) support with name mapping (M5.4)
+pub mod memory; // Unified memory estimation for models and caches
 pub mod model;
 pub mod multi_gpu; // Multi-GPU inference support (M3.6)
 pub mod pruning; // Model pruning utilities (M5)
@@ -20,7 +23,7 @@ pub mod utils; // Utility functions (M4.2: tensor ops)
 
 pub async fn hello_generate(prompt: &str) -> anyhow::Result<()> {
     // Trivial Candle call to verify dependency linkage; replace with real text-gen soon
-    let a = candle_core::Tensor::arange(0f32, 4f32, &candle_core::Device::Cpu)?;
+    let a = candlelight::core::Tensor::arange(0f32, 4f32, &candlelight::core::Device::Cpu)?;
     let s = a.sum_all()?.to_scalar::<f32>()?;
     println!("[hello-generate] prompt='{prompt}', candle_sum={s}");
     Ok(())
@@ -36,7 +39,7 @@ pub fn local_llama_generate(
     top_p: Option<f64>,
     seed: u64,
 ) -> anyhow::Result<String> {
-    use candle_transformers::generation::{LogitsProcessor, Sampling};
+    use candlelight::transformers::generation::{LogitsProcessor, Sampling};
     use tokenizers::Tokenizer;
 
     let (model, mut cache, cfg, device, _name_mapper) =
@@ -49,7 +52,7 @@ pub fn local_llama_generate(
     let eos_token_id = cfg.eos_token_id.or_else(|| {
         tokenizer
             .token_to_id("</s>")
-            .map(candle_transformers::models::llama::LlamaEosToks::Single)
+            .map(candlelight::transformers::models::llama::LlamaEosToks::Single)
     });
     let mut toks = tokenizer
         .encode(prompt, true)
@@ -70,7 +73,7 @@ pub fn local_llama_generate(
         LogitsProcessor::from_sampling(seed, sampling)
     };
 
-    use candle_core::Tensor;
+    use candlelight::core::Tensor;
     let mut index_pos = 0usize;
     let mut out = String::new();
     for _ in 0..sample_len {
@@ -89,12 +92,12 @@ pub fn local_llama_generate(
         toks.push(next_token);
 
         match eos_token_id {
-            Some(candle_transformers::models::llama::LlamaEosToks::Single(eos))
+            Some(candlelight::transformers::models::llama::LlamaEosToks::Single(eos))
                 if next_token == eos =>
             {
                 break;
             }
-            Some(candle_transformers::models::llama::LlamaEosToks::Multiple(ref ids))
+            Some(candlelight::transformers::models::llama::LlamaEosToks::Multiple(ref ids))
                 if ids.contains(&next_token) =>
             {
                 break;

@@ -30,7 +30,7 @@
 //! ```
 
 use anyhow::{Result, bail};
-use candle_core::{Device, Tensor};
+use candlelight::core::{Device, Tensor};
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -448,7 +448,7 @@ impl LoraAdapter {
     ///
     /// TODO: Add GGUF support when needed
     fn load_lora_tensors(path: &Path) -> Result<HashMap<String, Tensor>> {
-        use candle_core::safetensors::load as load_safetensors;
+        use candlelight::core::safetensors::load as load_safetensors;
 
         // Load safetensors file
         let tensors = load_safetensors(path, &Device::Cpu)?;
@@ -601,7 +601,7 @@ impl LoraAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use candle_core::DType;
+    use candlelight::core::DType;
 
     #[test]
     fn test_detect_lora_format_huggingface() {

@@ -1,6 +1,7 @@
 //! Sampling strategies (top-k, top-p, temperature) and utilities
 
-use rand::distributions::{Distribution, WeightedIndex};
+use rand::distr::Distribution;
+use rand::distr::weighted::WeightedIndex;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 

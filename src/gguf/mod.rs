@@ -26,7 +26,7 @@ use std::sync::Arc;
 pub use parser::{GGUFHeader, MetadataValue, TensorInfo as LightningTensorInfo};
 
 // Re-export types from Candle for compatibility
-pub use candle_core::quantized::gguf_file::{TensorInfo, Value};
+pub use candlelight::core::quantized::gguf_file::{TensorInfo, Value};
 
 /// Memory-mapped GGUF file content with zero-copy tensor access
 ///
@@ -41,7 +41,7 @@ pub struct Content {
     header: GGUFHeader,
 
     /// Candle's parsed content (for backward compatibility)
-    candle_content: candle_core::quantized::gguf_file::Content,
+    candle_content: candlelight::core::quantized::gguf_file::Content,
 }
 
 impl Content {
@@ -82,7 +82,7 @@ impl Content {
         // Also parse using Candle's API for backward compatibility
         // (Can be removed once all code uses Lightning GGUF)
         let mut file = File::open(path)?;
-        let candle_content = candle_core::quantized::gguf_file::Content::read(&mut file)?;
+        let candle_content = candlelight::core::quantized::gguf_file::Content::read(&mut file)?;
 
         Ok(Self {
             mmap,
@@ -99,6 +99,16 @@ impl Content {
     /// Get tensor infos from Lightning parser
     pub fn lightning_tensor_infos(&self) -> &[parser::TensorInfo] {
         &self.header.tensor_infos
+    }
+
+    /// Get raw memory-mapped bytes (for low-level tensor access)
+    pub fn raw_mmap(&self) -> &Arc<Mmap> {
+        &self.mmap
+    }
+
+    /// Get tensor data offset (start of tensor data section)
+    pub fn tensor_data_offset(&self) -> u64 {
+        self.header.tensor_data_offset
     }
 
     /// Get metadata (Candle compatibility)
@@ -265,8 +275,8 @@ impl Content {
         &self,
         reader: &mut R,
         name: &str,
-        device: &candle_core::Device,
-    ) -> candle_core::Result<candle_core::quantized::QTensor> {
+        device: &candlelight::core::Device,
+    ) -> candlelight::core::Result<candlelight::core::quantized::QTensor> {
         // Delegate to Candle's proven tensor loading logic
         self.candle_content.tensor(reader, name, device)
     }

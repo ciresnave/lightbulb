@@ -236,15 +236,15 @@ pub enum InferenceBackend {
 
 impl InferenceBackend {
     /// Convert to Candle device
-    pub fn to_device(&self) -> candle_core::Device {
+    pub fn to_device(&self) -> candlelight::core::Device {
         match self {
-            Self::Cpu => candle_core::Device::Cpu,
+            Self::Cpu => candlelight::core::Device::Cpu,
             Self::Cuda => {
-                candle_core::Device::cuda_if_available(0).unwrap_or(candle_core::Device::Cpu)
+                candlelight::core::Device::cuda_if_available(0).unwrap_or(candlelight::core::Device::Cpu)
             }
-            Self::Rocm => candle_core::Device::Cpu, // TODO: Add ROCm support to Candle
-            Self::Metal => candle_core::Device::new_metal(0).unwrap_or(candle_core::Device::Cpu),
-            Self::Vulkan => candle_core::Device::Cpu, // TODO: Add Vulkan support
+            Self::Rocm => candlelight::core::Device::Cpu, // TODO: Add ROCm support to Candle
+            Self::Metal => candlelight::core::Device::new_metal(0).unwrap_or(candlelight::core::Device::Cpu),
+            Self::Vulkan => candlelight::core::Device::Cpu, // TODO: Add Vulkan support
         }
     }
 }
