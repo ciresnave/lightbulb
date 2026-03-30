@@ -1,0 +1,19 @@
+{
+  "policy": {
+    "Wanda": {
+      "sparsity": 0.5,
+      "pattern": "Unstructured",
+      "calibration_samples": 100,
+      "per_output_row": false
+    }
+  },
+  "layer_sparsity": {
+    "layer.3": 0.5,
+    "layer.1": 0.5,
+    "layer.0": 0.5,
+    "layer.2": 0.5
+  },
+  "layer_mapping": {},
+  "total_sparsity": 0.5,
+  "validation": null
+}
