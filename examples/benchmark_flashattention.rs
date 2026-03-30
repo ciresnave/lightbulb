@@ -32,11 +32,11 @@
 //! - FlashAttention not available, falls back to manual attention
 
 use anyhow::Result;
-use candle_core::{Device, Tensor};
+use candlelight::core::{Device, Tensor};
 use std::time::Instant;
 
 #[cfg(feature = "flash-attn")]
-use candle_core::DType;
+use candlelight::core::DType;
 
 /// Benchmark configuration
 struct BenchmarkConfig {

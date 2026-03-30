@@ -27,7 +27,7 @@
 //! This enables starting decode for Req2 and Req3 while Req1 is still in prefill!
 
 use anyhow::Result;
-use candle_core::{Device, Tensor};
+use candlelight::core::{Device, Tensor};
 
 /// Configuration for chunked prefill strategy
 #[derive(Debug, Clone)]

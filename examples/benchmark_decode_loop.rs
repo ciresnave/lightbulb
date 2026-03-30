@@ -16,7 +16,7 @@
 //! ```
 
 use anyhow::Result;
-use candle_core::{DType, Device, Tensor};
+use candlelight::core::{DType, Device, Tensor};
 use lightbulb::cache::ParallelCacheBuilder;
 use lightbulb::model::batch_metadata::{BatchMetadata, SequenceInfo};
 use lightbulb::model::{BatchedLlama, BatchedTransformerConfig};

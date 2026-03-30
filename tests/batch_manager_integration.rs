@@ -9,8 +9,8 @@
 //! or parallel.
 
 use anyhow::Result;
-use candle_core::{DType, Device, IndexOp, Tensor};
-use candle_transformers::models::llama::{Cache, Config, Llama};
+use candlelight::core::{DType, Device, IndexOp, Tensor};
+use candlelight::transformers::models::llama::{Cache, Config, Llama};
 use lightbulb::engine::ParallelCacheBuilder;
 use lightbulb::model::{BatchManager, BatchMetadata};
 use std::path::Path;
@@ -27,16 +27,18 @@ fn load_test_model() -> Result<(Llama, Cache, Config, Device)> {
     }
 
     // Use the project's load_local_llama utility
-    lightbulb::loaders::load_local_llama(
+    let (model, cache, config, device, _name_mapper) = lightbulb::loaders::load_local_llama(
         model_path,
         Some("f32"),
         true,  // use_kv_cache
         false, // use_flash_attn
-    )
+    )?;
+
+    Ok((model, cache, config, device))
 }
 
 #[test]
-#[ignore] // Requires real model weights
+#[ignore]// Requires real model weights
 fn test_batch_manager_single_request_matches_direct_llama() -> Result<()> {
     println!("\n=== Test: Single Request - BatchManager vs Direct Llama ===\n");
 
@@ -132,7 +134,7 @@ fn test_batch_manager_single_request_matches_direct_llama() -> Result<()> {
 }
 
 #[test]
-#[ignore] // Requires real model weights
+#[ignore]// Requires real model weights
 fn test_batch_manager_decode_step() -> Result<()> {
     println!("\n=== Test: Decode Step - BatchManager vs Direct Llama ===\n");
 
@@ -214,7 +216,7 @@ fn test_batch_manager_decode_step() -> Result<()> {
 }
 
 #[test]
-#[ignore] // Requires real model weights
+#[ignore]// Requires real model weights
 fn test_batch_manager_multiple_requests() -> Result<()> {
     println!("\n=== Test: Multiple Requests - BatchManager ===\n");
 
@@ -309,7 +311,7 @@ fn test_batch_manager_multiple_requests() -> Result<()> {
 }
 
 #[test]
-#[ignore] // Requires real model weights
+#[ignore]// Requires real model weights
 fn test_batch_size_one_equals_direct_llama() -> Result<()> {
     println!("\n=== Test: Batch Size 1 === Direct Llama (Unified Code Path) ===\n");
 

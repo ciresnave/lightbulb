@@ -30,7 +30,7 @@
 //!
 //! Run with: `cargo run --example span_management_demo`
 
-use candle_core::{DType, Device, Result};
+use candlelight::core::{DType, Device, Result};
 use lightbulb::cache::{CacheTag, CacheUsageInfo, EvictionImpact, ParallelCacheBuilder, SpanId};
 use std::collections::HashMap;
 

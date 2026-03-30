@@ -1,8 +1,8 @@
 /// Diagnostic test to compare single-request vs batched generation
 /// This helps identify attention mask or batching issues
 use anyhow::Result;
-use candle_core::{DType, Device, Tensor};
-use candle_transformers::models::llama::{Cache, Config};
+use candlelight::core::{DType, Device, Tensor};
+use candlelight::transformers::models::llama::{Cache, Config};
 use lightbulb::model::model_manager::ModelManager;
 use lightbulb::request::{GenerationParams, Request};
 use std::sync::Arc;

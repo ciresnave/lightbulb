@@ -5,7 +5,7 @@
 ///
 /// Run with: cargo run --example streaming_llm_demo
 use anyhow::Result;
-use candle_core::{DType, Device, IndexOp, Tensor};
+use candlelight::core::{DType, Device, IndexOp, Tensor};
 use lightbulb::cache::{ParallelCacheBuilder, StreamingConfig};
 
 fn main() -> Result<()> {

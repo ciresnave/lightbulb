@@ -23,7 +23,7 @@
 //! This ensures our batched implementation is not just fast, but also correct!
 
 use anyhow::Result;
-use candle_core::{DType, Device, Tensor};
+use candlelight::core::{DType, Device, Tensor};
 use lightbulb::model::BatchedTransformerConfig;
 use std::path::Path;
 

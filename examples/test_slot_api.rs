@@ -6,7 +6,7 @@
 /// **Note**: Slot is designed for state management and inspection, NOT for
 /// writing K/V data. In production, K/V writes happen via batched model
 /// forward passes, not per-slot operations.
-use candle_core::{DType, Device};
+use candlelight::core::{DType, Device};
 use lightbulb::cache::parallel_cache_builder::ParallelCacheBuilder;
 
 fn main() -> anyhow::Result<()> {

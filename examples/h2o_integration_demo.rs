@@ -1,4 +1,4 @@
-use candle_core::{DType, Device};
+use candlelight::core::{DType, Device};
 /// Integration demonstration of H2O + Voting with ParallelCacheBuilder
 ///
 /// This example shows how to use the H2O policy and voting system with

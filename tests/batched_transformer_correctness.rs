@@ -10,8 +10,8 @@
 //! - Full forward pass outputs
 //! - Multi-step generation
 
-use candle_core::{DType, Device, Result, Tensor};
-use candle_nn::VarBuilder;
+use candlelight::core::{DType, Device, Result, Tensor};
+use candlelight::nn::VarBuilder;
 use lightbulb::engine::BatchExecutor;
 use lightbulb::model::batch_metadata::BatchMetadata;
 use lightbulb::model::custom_transformer::{BatchedTransformer, BatchedTransformerConfig};

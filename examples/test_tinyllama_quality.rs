@@ -2,8 +2,8 @@
 //! Compare quality with Phi-3 to validate if TinyLlama is the problem
 
 use anyhow::Result;
-use candle_core::{Device, IndexOp};
-use candle_transformers::models::quantized_llama::ModelWeights as LlamaModelWeights;
+use candlelight::core::{Device, IndexOp};
+use candlelight::transformers::models::quantized_llama::ModelWeights as LlamaModelWeights;
 use lightbulb::gguf;
 use std::env;
 

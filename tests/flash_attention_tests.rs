@@ -22,10 +22,10 @@
 //! - Fallback behavior must be graceful when FlashAttention not available
 
 use anyhow::Result;
-use candle_core::{Device, Tensor};
+use candlelight::core::{Device, Tensor};
 
 #[cfg(feature = "flash-attn")]
-use candle_core::DType;
+use candlelight::core::DType;
 
 /// Maximum allowed relative error between FlashAttention and manual attention
 /// Note: Slightly higher tolerance than CPU tests due to F16 precision in FlashAttention

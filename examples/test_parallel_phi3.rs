@@ -2,8 +2,8 @@
 //! This confirms Phi-3 can generate good text before we try parallel batching
 
 use anyhow::Result;
-use candle_core::{Device, IndexOp};
-use candle_transformers::models::quantized_phi3::ModelWeights as Phi3ModelWeights;
+use candlelight::core::{Device, IndexOp};
+use candlelight::transformers::models::quantized_phi3::ModelWeights as Phi3ModelWeights;
 use lightbulb::gguf;
 use std::env;
 

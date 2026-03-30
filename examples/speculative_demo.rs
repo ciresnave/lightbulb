@@ -9,7 +9,7 @@
 //! ```
 
 use anyhow::Result;
-use candle_core::{Device, Tensor};
+use candlelight::core::{Device, Tensor};
 use lightbulb::engine::speculative::{SpeculativeConfig, SpeculativeDecoder, SpeculativeModel};
 
 /// Mock model for demonstration purposes

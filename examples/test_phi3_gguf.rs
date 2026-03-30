@@ -3,8 +3,8 @@
 //! Uses lightning::gguf for fast memory-mapped loading with tokenizer extraction
 
 use anyhow::Result;
-use candle_core::{Device, IndexOp, Tensor};
-use candle_transformers::models::quantized_phi3::ModelWeights;
+use candlelight::core::{Device, IndexOp, Tensor};
+use candlelight::transformers::models::quantized_phi3::ModelWeights;
 use lightbulb::gguf;
 use std::time::Instant;
 

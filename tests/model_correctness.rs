@@ -20,9 +20,9 @@
 //! This is the critical test that validates our implementation is correct!
 
 use anyhow::Result;
-use candle_core::{DType, Device, IndexOp, Tensor};
-use candle_nn::VarBuilder;
-use candle_transformers::models::llama::{Cache, Llama};
+use candlelight::core::{DType, Device, IndexOp, Tensor};
+use candlelight::nn::VarBuilder;
+use candlelight::transformers::models::llama::{Cache, Llama};
 use lightbulb::engine::BatchExecutor;
 use lightbulb::model::{BatchMetadata, BatchedTransformer, BatchedTransformerConfig};
 use std::path::Path;
@@ -106,7 +106,7 @@ fn test_batched_vs_standard_llama() -> Result<()> {
 
     // 2. Load standard Llama model
     println!("Loading standard Llama model...");
-    let (standard_model, mut standard_cache, config, device) =
+    let (standard_model, mut standard_cache, config, device, _name_mapper) =
         lightbulb::loaders::load_local_llama(model_dir, Some("f32"), true, false)?;
 
     println!(

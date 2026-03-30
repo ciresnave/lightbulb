@@ -10,8 +10,8 @@
 use lightbulb::cache::{ParallelCacheBuilder, ScatteredKvCache};
 use lightbulb::model::batch_metadata::{BatchMetadata, SequenceInfo};
 use lightbulb::model::{BatchedTransformer, BatchedTransformerConfig};
-use candle_core::{Device, DType, Result};
-use candle_nn::VarBuilder;
+use candlelight::core::{Device, DType, Result};
+use candlelight::nn::VarBuilder;
 use std::time::Instant;
 
 // Benchmark configuration

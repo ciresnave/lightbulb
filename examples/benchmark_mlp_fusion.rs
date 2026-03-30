@@ -4,8 +4,8 @@
 //! to isolate the performance improvement from CPU kernel fusion.
 
 use lightbulb::model::mlp_wrapper::Mlp;
-use candle_core::{Device, DType, Result, Tensor};
-use candle_nn::VarBuilder;
+use candlelight::core::{Device, DType, Result, Tensor};
+use candlelight::nn::VarBuilder;
 use std::time::Instant;
 
 // Benchmark configuration

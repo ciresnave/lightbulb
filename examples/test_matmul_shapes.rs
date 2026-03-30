@@ -1,4 +1,4 @@
-use candle_core::{Device, Result, Tensor};
+use candlelight::core::{Device, Result, Tensor};
 
 fn main() -> Result<()> {
     let device = Device::Cpu;

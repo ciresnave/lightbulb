@@ -1,6 +1,6 @@
 //! Integration tests for batched inference with Candle
 
-use candle_core::{DType, Device, Tensor};
+use candlelight::core::{DType, Device, Tensor};
 use lightbulb::engine::{
     BatchAssembler, BatchConfig, IndicesAndMask, ParallelCacheBuilder, ParallelKvCache, Request,
     RequestContext, RequestQueue, RequestState,
