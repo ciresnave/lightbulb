@@ -1,0 +1,22 @@
+{
+	"folders": [
+		{
+			"path": ".."
+		},
+		{
+			"path": "../../../../Desktop/books and courses/Machine Learning"
+		},
+		{
+			"path": "../../scs"
+		},
+		{
+			"path": "../../cognition"
+		},
+		{
+			"path": "../../mlmf"
+		}
+	],
+	"settings": {
+		"powershell.cwd": "lightbulb"
+	}
+}

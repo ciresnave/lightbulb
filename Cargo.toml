@@ -7,15 +7,16 @@
     version     = "0.1.0"
 
 [features]
-    cuda = ["candle-core/cuda", "candle-nn/cuda", "candle-transformers/cuda", "candle-flash-attn", "candle-transformers/flash-attn", "candle-layer-norm"]
+    # CUDA support with flash attention and fused kernels
+    cuda = ["candlelight/cuda"]
     default = []
-    # Legacy flash-attn feature for backwards compatibility - now included in cuda
-    flash-attn = ["cuda"]
-    metal = [
-        "candle-core/metal",
-        "candle-nn/metal",
-        "candle-transformers/metal",
-    ]
+    # Flash attention feature (requires CUDA)
+    flash-attn = ["candlelight/flash-attn"]
+    # Layer norm optimization (requires CUDA)
+    layer-norm = ["candlelight/layer-norm"]
+    # All CUDA optimizations
+    cuda-full = ["candlelight/cuda-full"]
+    metal = ["candlelight/metal"]
     
     # Debug output categories - enable individually or use debug-all
     debug-all = ["debug-prefill", "debug-decode", "debug-attention", "debug-cache", "debug-rope", "debug-mlp", "debug-chunking", "debug-engine", "debug-attention-scores"]
@@ -37,7 +38,7 @@
     ggml-quants        = "0.1.0"
     memmap2            = "0.9"
     parking_lot        = "0.12"
-    rand               = { version = "0.8", features = ["small_rng"] }
+    rand               = "0.9"
     rayon              = "1.10"
     regex              = "1"
     serde              = { version = "1", features = ["derive"] }
@@ -54,6 +55,7 @@
     # HTTP API dependencies
     axum               = { version = "0.8", features = ["tokio"] }
     axum-macros        = "0.5"
+    hyper              = { version = "1.0", features = ["server", "http1", "http2"] }
     chrono             = { version = "0.4", features = ["serde"] }
     futures            = "0.3"
     futures-util       = "0.3"
@@ -73,8 +75,13 @@
     instant-acme       = "0.8"
     x509-parser        = "0.18"
     time               = { version = "0.3", features = ["parsing", "formatting"] }
-    axum-server        = { version = "0.7", features = ["tls-rustls"] }
     base64             = "0.22"
+    hyper-util         = { version = "0.1", features = ["tokio", "server", "service"] }
+    tower              = { version = "0.5", features = ["util"] }
+    http-body-util     = "0.1"
+
+    # Hugging Face Hub integration for model downloading
+    hf-hub             = "0.4"
 
     # Configuration management
     distributed-config = { workspace = true }
@@ -85,16 +92,12 @@
     # Hardware detection and system analysis
     system-analysis = { workspace = true }
 
-    # Upstream Candle crates (pin to a released version; adjust as needed)
-    candle-core         = { git = "https://github.com/huggingface/candle", package = "candle-core", rev = "9fe623237a515f95f70d117c0a6da610c28a5ecd" }
-    candle-nn           = { git = "https://github.com/huggingface/candle", package = "candle-nn", rev = "9fe623237a515f95f70d117c0a6da610c28a5ecd" }
-    candle-transformers = { git = "https://github.com/huggingface/candle", package = "candle-transformers", rev = "9fe623237a515f95f70d117c0a6da610c28a5ecd" }
+    # Candlelight - Unified Candle ML framework wrapper
+    candlelight = { workspace = true }
     
-    # FlashAttention-2 support (optional, requires CUDA and flash-attn feature)
-    candle-flash-attn = { git = "https://github.com/huggingface/candle", package = "candle-flash-attn", rev = "9fe623237a515f95f70d117c0a6da610c28a5ecd", optional = true }
-    
-    # Fused LayerNorm/RMSNorm kernels (optional, requires CUDA)
-    candle-layer-norm = { git = "https://github.com/huggingface/candle-extensions", package = "candle-layer-norm", rev = "e287dd09535ab5d7631c0f2ae0a93d7ec168cb86", optional = true }
+    # MLMF - Machine Learning Model Framework (shared loading infrastructure)
+    # NOTE: MLMF v0.2.1 uses Candlelight, ensuring version compatibility
+    mlmf = { git = "https://github.com/ciresnave/mlmf.git" }
 
 [[bin]]
 name = "lightbulb-cli"
@@ -105,3 +108,8 @@ tempfile       = "3"
 tower          = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
 base64         = "0.22"
+criterion      = { version = "0.8", features = ["html_reports"] }
+
+[[bench]]
+name = "batched_inference_benchmark"
+harness = false

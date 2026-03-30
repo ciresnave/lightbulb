@@ -1,1 +1,22 @@
 /target
+
+# Demo secrets - NEVER COMMIT
+.demo-secrets.env
+.env
+*.env.local
+*.key
+*.pem
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Build artifacts
+*.profraw
