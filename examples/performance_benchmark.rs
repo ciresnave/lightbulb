@@ -17,7 +17,7 @@
 
 use anyhow::Result;
 use lightbulb::engine::{Request, RequestContext, RequestState};
-use lightbulb::model::ModelManager;
+use lightbulb::model::ParallelParallelModelManager;
 use std::time::Instant;
 
 #[derive(Debug)]
@@ -44,7 +44,7 @@ impl BenchmarkResult {
 }
 
 fn benchmark_sequential(
-    model_manager: &mut ModelManager,
+    model_manager: &mut ParallelModelManager,
     requests: Vec<Request>,
 ) -> Result<BenchmarkResult> {
     println!("\n🔄 Running SEQUENTIAL benchmark...");
@@ -99,7 +99,7 @@ fn benchmark_sequential(
 }
 
 fn benchmark_batched(
-    model_manager: &mut ModelManager,
+    model_manager: &mut ParallelModelManager,
     requests: Vec<Request>,
     batch_size: usize,
 ) -> Result<BenchmarkResult> {
@@ -211,7 +211,7 @@ fn main() -> Result<()> {
     println!("\n📂 Loading model...");
     let model_path = "../models/llama-3b";
     let max_batch_size = *batch_sizes.iter().max().unwrap();
-    let mut model_manager = ModelManager::load(model_path, max_batch_size, 512, Some("f32"))?;
+    let mut model_manager = ParallelModelManager::load(model_path, max_batch_size, 512, Some("f32"), None)?;
     println!("✓ Model loaded\n");
 
     let mut results = Vec::new();

@@ -4,7 +4,7 @@ use std::sync::mpsc::{Receiver, Sender};
 use tokio::sync::{mpsc as async_mpsc, oneshot};
 
 use crate::engine::{Request, RequestContext};
-use crate::model::ModelManager;
+use crate::model::ParallelModelManager;
 
 /// Response mode for inference jobs
 #[derive(Debug)]
@@ -28,15 +28,27 @@ pub struct InferenceJob {
 /// Sender type used by API handlers to enqueue inference jobs
 pub type InferenceRequestSender = Sender<InferenceJob>;
 
-/// Lightweight model runner that owns a ModelManager on a dedicated thread
+/// Lightweight model runner that owns a ParallelModelManager on a dedicated thread
 /// and services incoming inference jobs via a blocking mpsc receiver.
+///
+/// Supports both SafeTensors (directory) and GGUF (single file) model formats,
+/// auto-detected from the model path.
 pub struct ModelRunner;
 
 impl ModelRunner {
     /// Start the model runner thread. Returns a Sender used to submit inference jobs.
     ///
     /// This function loads the model on the spawned thread and blocks on the
-    /// receiver to process jobs synchronously with the ModelManager.
+    /// receiver to process jobs synchronously with the ParallelModelManager.
+    ///
+    /// # Arguments
+    ///
+    /// * `model_path` - Path to either a directory containing `model.safetensors`
+    ///   and `tokenizer.json`, or a `.gguf` file
+    /// * `max_batch_size` - Maximum number of concurrent requests
+    /// * `context_length` - Context window size
+    /// * `dtype` - Data type for SafeTensors models ("f32", "f16", "bf16").
+    ///   Ignored for GGUF models (dtype embedded in quantization format).
     pub fn start(
         model_path: impl Into<PathBuf>,
         max_batch_size: usize,
@@ -50,11 +62,40 @@ impl ModelRunner {
         let thread_dtype = dtype.clone();
 
         std::thread::spawn(move || {
+            // Auto-detect model format from path
+            let is_gguf = model_path
+                .extension()
+                .map_or(false, |ext| ext.eq_ignore_ascii_case("gguf"));
+
             // Load model on this thread (blocking)
-            let dtype_ref = thread_dtype.as_deref();
-            match ModelManager::load(&model_path, max_batch_size, context_length, dtype_ref) {
+            let load_result = if is_gguf {
+                println!("Loading GGUF model from {}", model_path.display());
+                ParallelModelManager::load_gguf(
+                    &model_path,
+                    max_batch_size,
+                    context_length,
+                    None, // chunked_prefill_config (use defaults)
+                    None, // device (auto-detect)
+                )
+            } else {
+                let dtype_ref = thread_dtype.as_deref();
+                println!("Loading SafeTensors model from {}", model_path.display());
+                ParallelModelManager::load(
+                    &model_path,
+                    max_batch_size,
+                    context_length,
+                    dtype_ref,
+                    None, // chunked_prefill_config (use defaults)
+                )
+            };
+
+            match load_result {
                 Ok(mut manager) => {
-                    println!("Model loaded at {}", model_path.display());
+                    println!(
+                        "Model loaded at {} (format: {})",
+                        model_path.display(),
+                        if is_gguf { "GGUF" } else { "SafeTensors" }
+                    );
 
                     // Process incoming jobs
                     while let Ok(job) = rx.recv() {

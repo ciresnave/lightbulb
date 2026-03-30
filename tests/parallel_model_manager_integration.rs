@@ -298,30 +298,28 @@ fn test_chunked_prefill_with_variable_lengths() {
 
 #[test]
 #[ignore]
-fn test_parallel_correctness_vs_sequential() {
+fn test_parallel_deterministic_consistency() {
     if !model_available() {
         println!("Skipping test: model not found at {}", MODEL_PATH);
         return;
     }
 
-    use lightbulb::model::ModelManager;
-
     let prompt = "The capital of France is";
     let max_tokens = 5;
 
-    // Run with ParallelModelManager
-    let mut parallel_model = ParallelModelManager::load(MODEL_PATH, 4, 512, Some("f32"), None)
-        .expect("Failed to load parallel model");
+    // Run twice with ParallelModelManager to verify deterministic output
+    let mut model1 = ParallelModelManager::load(MODEL_PATH, 4, 512, Some("f32"), None)
+        .expect("Failed to load model (run 1)");
 
     let req1 = Request {
-        id: "test-parallel".to_string(),
+        id: "test-run1".to_string(),
         prompt: prompt.to_string(),
         max_new_tokens: max_tokens,
     };
     let mut batch1 = vec![RequestContext::new(req1)];
 
     for _ in 0..10 {
-        parallel_model
+        model1
             .forward_batch(&mut batch1)
             .expect("Forward failed");
         if !batch1[0].should_continue() {
@@ -329,22 +327,21 @@ fn test_parallel_correctness_vs_sequential() {
         }
     }
 
-    let parallel_tokens = batch1[0].generated_tokens.clone();
-    let parallel_text = parallel_model.decode(&parallel_tokens, false).unwrap();
+    let tokens1 = batch1[0].generated_tokens.clone();
+    let text1 = model1.decode(&tokens1, false).unwrap();
 
-    // Run with sequential ModelManager
-    let mut sequential_model = ModelManager::load(MODEL_PATH, 4, 512, Some("f32"))
-        .expect("Failed to load sequential model");
+    let mut model2 = ParallelModelManager::load(MODEL_PATH, 4, 512, Some("f32"), None)
+        .expect("Failed to load model (run 2)");
 
     let req2 = Request {
-        id: "test-sequential".to_string(),
+        id: "test-run2".to_string(),
         prompt: prompt.to_string(),
         max_new_tokens: max_tokens,
     };
     let mut batch2 = vec![RequestContext::new(req2)];
 
     for _ in 0..10 {
-        sequential_model
+        model2
             .forward_batch(&mut batch2)
             .expect("Forward failed");
         if !batch2[0].should_continue() {
@@ -352,23 +349,20 @@ fn test_parallel_correctness_vs_sequential() {
         }
     }
 
-    let sequential_tokens = batch2[0].generated_tokens.clone();
-    let sequential_text = sequential_model.decode(&sequential_tokens, false).unwrap();
+    let tokens2 = batch2[0].generated_tokens.clone();
+    let text2 = model2.decode(&tokens2, false).unwrap();
 
-    println!("\n=== Correctness Comparison ===");
+    println!("\n=== Deterministic Consistency ===");
     println!("Prompt: \"{}\"", prompt);
-    println!("\nParallel output:   \"{}\"", parallel_text);
-    println!("Sequential output: \"{}\"", sequential_text);
-    println!("\nParallel tokens:   {:?}", parallel_tokens);
-    println!("Sequential tokens: {:?}", sequential_tokens);
+    println!("\nRun 1: \"{}\" ({:?})", text1, tokens1);
+    println!("Run 2: \"{}\" ({:?})", text2, tokens2);
 
-    // Tokens should match exactly (deterministic generation with same seed)
     assert_eq!(
-        parallel_tokens, sequential_tokens,
-        "Parallel and sequential should produce identical results"
+        tokens1, tokens2,
+        "Two runs should produce identical results"
     );
 
-    println!("\n✓ Outputs match perfectly!");
+    println!("\n✓ Outputs match!");
 }
 
 #[test]

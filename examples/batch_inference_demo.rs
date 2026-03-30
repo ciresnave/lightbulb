@@ -10,7 +10,7 @@
 
 use anyhow::Result;
 use lightbulb::engine::{Request, RequestContext, RequestState};
-use lightbulb::model::ModelManager;
+use lightbulb::model::ParallelModelManager;
 use std::time::Instant;
 
 fn main() -> Result<()> {
@@ -19,11 +19,12 @@ fn main() -> Result<()> {
     // Load model
     println!("📂 Loading llama-3b model...");
     let model_path = "../models/llama-3b";
-    let mut model_manager = ModelManager::load(
+    let mut model_manager = ParallelModelManager::load(
         model_path,
         4,           // max_batch_size
         512,         // context_length
         Some("f32"), // dtype
+        None,        // chunked_prefill_config
     )?;
     println!("✓ Model loaded successfully\n");
 
