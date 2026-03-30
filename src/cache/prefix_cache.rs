@@ -30,7 +30,7 @@
 //! ```
 
 use anyhow::Result;
-use candle_core::{Device, Tensor};
+use candlelight::core::{Device, Tensor};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
