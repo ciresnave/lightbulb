@@ -268,13 +268,28 @@ impl ApiServer {
         if let Some((cert_pem, key_pem)) = tls_server_config {
             let https_bind_address = cert_manager.https_bind_address(&http_bind_address);
 
-            // Create rustls config from certificate and key
-            use axum_server::tls_rustls::RustlsConfig;
-            let rustls_config = RustlsConfig::from_pem(cert_pem, key_pem).await?;
+            // Parse TLS certificates and key
+            use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+            use rustls::ServerConfig;
+            use std::io::Cursor;
+            use tokio_rustls::TlsAcceptor;
+            
+            let certs: Vec<CertificateDer> = rustls_pemfile::certs(&mut Cursor::new(&cert_pem))
+                .collect::<Result<Vec<_>, _>>()?;
+            
+            let key = rustls_pemfile::private_key(&mut Cursor::new(&key_pem))?
+                .ok_or_else(|| anyhow::anyhow!("No private key found in PEM file"))?;
+            
+            let mut tls_config = ServerConfig::builder()
+                .with_no_client_auth()
+                .with_single_cert(certs, key)?;
+            
+            tls_config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+            let tls_acceptor = TlsAcceptor::from(Arc::new(tls_config));
 
-            // Start both HTTP and HTTPS servers concurrently
+            // Bind both HTTP and HTTPS listeners
             let http_listener = TcpListener::bind(&http_bind_address).await?;
-            let https_addr: std::net::SocketAddr = https_bind_address.parse()?;
+            let https_listener = TcpListener::bind(&https_bind_address).await?;
 
             println!("Lightbulb API server listening on:");
             println!("  HTTP:  {}", http_bind_address);
@@ -283,24 +298,84 @@ impl ApiServer {
             let http_app = app.clone();
             let https_app = app;
 
-            // Start both servers concurrently
+            // HTTP server task
             let http_server = tokio::spawn(async move {
                 axum::serve(http_listener, http_app)
                     .await
                     .map_err(|e| anyhow::anyhow!("HTTP server error: {}", e))
             });
 
+            // HTTPS server task with manual TLS handling
             let https_server = tokio::spawn(async move {
-                axum_server::bind_rustls(https_addr, rustls_config)
-                    .serve(https_app.into_make_service())
-                    .await
-                    .map_err(|e| anyhow::anyhow!("HTTPS server error: {}", e))
+                let make_service = https_app.into_make_service();
+                
+                loop {
+                    let (tcp_stream, remote_addr) = match https_listener.accept().await {
+                        Ok(conn) => conn,
+                        Err(e) => {
+                            tracing::error!("Failed to accept HTTPS connection: {}", e);
+                            continue;
+                        }
+                    };
+
+                    let tls_acceptor = tls_acceptor.clone();
+                    let make_service = make_service.clone();
+
+                    tokio::spawn(async move {
+                        // Perform TLS handshake
+                        let tls_stream = match tls_acceptor.accept(tcp_stream).await {
+                            Ok(stream) => stream,
+                            Err(e) => {
+                                tracing::debug!("TLS handshake failed: {}", e);
+                                return;
+                            }
+                        };
+
+                        // Create service for this connection
+                        use tower::Service;
+                        let service = match make_service.clone().call(remote_addr).await {
+                            Ok(svc) => svc,
+                            Err(_) => {
+                                tracing::error!("Failed to create service for connection");
+                                return;
+                            }
+                        };
+                        
+                        // Create the hyper IO wrapper
+                        let io = hyper_util::rt::TokioIo::new(tls_stream);
+
+                        // Serve the connection with tower-to-hyper adapter
+                        let conn = hyper_util::server::conn::auto::Builder::new(
+                            hyper_util::rt::TokioExecutor::new()
+                        );
+
+                        let hyper_service = hyper::service::service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
+                            let mut service = service.clone();
+                            async move {
+                                service.call(req).await.map_err(|err| {
+                                    tracing::error!("Service error: {:?}", err);
+                                    std::io::Error::new(std::io::ErrorKind::Other, "service error")
+                                })
+                            }
+                        });
+
+                        if let Err(e) = conn.serve_connection_with_upgrades(io, hyper_service).await {
+                            tracing::debug!("Error serving HTTPS connection: {}", e);
+                        }
+                    });
+                }
             });
 
-            // Wait for either server to complete (or fail)
+            // Wait for either server to fail (they both run indefinitely)
             tokio::select! {
-                result = http_server => result??,
-                result = https_server => result??,
+                result = http_server => {
+                    result??;
+                    Ok(())
+                }
+                _ = https_server => {
+                    // HTTPS server runs forever in a loop, this shouldn't normally return
+                    Ok(())
+                }
             }
         } else {
             // HTTP only
@@ -313,9 +388,9 @@ impl ApiServer {
             axum::serve(listener, app)
                 .await
                 .map_err(|e| anyhow::anyhow!("HTTP server error: {}", e))?;
-        }
 
-        Ok(())
+            Ok(())
+        }
     }
 
     /// Get application state
