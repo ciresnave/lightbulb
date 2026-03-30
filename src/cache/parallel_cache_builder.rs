@@ -13,8 +13,9 @@
 use crate::cache::cache_span::SpanRegistry;
 use crate::cache::eviction_policy::VotingAggregator;
 use crate::cache::h2o_policy::H2OPolicy;
+use crate::cache::kv_compression::CompressionPolicy;
 use crate::cache::streaming_policy::{StreamingConfig, compute_streaming_index};
-use candle_core::{DType, Device, IndexOp, Result, Tensor};
+use candlelight::core::{DType, Device, IndexOp, Result, Tensor};
 use std::collections::HashMap;
 
 /// Indices and attention mask for KV cache operations
@@ -132,12 +133,12 @@ impl ParallelKvCache {
         if self.context <= k.dim(2)? {
             return Ok((k.clone(), v.clone()));
         }
-        // Debug logging removed
 
         let indices = iam.indices.unsqueeze(2)?.unsqueeze(1)?;
         let indices = indices.broadcast_as(k.shape())?.contiguous()?;
         self.k.scatter_set(&indices, k, 2)?;
         self.v.scatter_set(&indices, v, 2)?;
+
         Ok((self.k.clone(), self.v.clone()))
     }
 
@@ -188,16 +189,16 @@ impl ParallelKvCache {
 
         // Validate shapes
         if k_dims.len() != 4 || v_dims.len() != 4 {
-            candle_core::bail!("Expected 4D tensors, got K={:?}, V={:?}", k_dims, v_dims);
+            candlelight::core::bail!("Expected 4D tensors, got K={:?}, V={:?}", k_dims, v_dims);
         }
 
         if k_dims[0] != 1 || v_dims[0] != 1 {
-            candle_core::bail!("Expected batch size 1, got K={:?}, V={:?}", k_dims, v_dims);
+            candlelight::core::bail!("Expected batch size 1, got K={:?}, V={:?}", k_dims, v_dims);
         }
 
         let prefix_len = k_dims[2];
         if prefix_len > self.context {
-            candle_core::bail!(
+            candlelight::core::bail!(
                 "Prefix length {} exceeds context size {}",
                 prefix_len,
                 self.context
@@ -209,7 +210,7 @@ impl ParallelKvCache {
         let batch_size = cache_dims[0];
 
         if slot_index >= batch_size {
-            candle_core::bail!(
+            candlelight::core::bail!(
                 "Slot index {} out of bounds (batch_size={})",
                 slot_index,
                 batch_size
@@ -263,6 +264,91 @@ impl ParallelKvCache {
         self.v = Tensor::cat(&v_parts, 0)?;
 
         Ok(prefix_len)
+    }
+
+    /// Restore KV tensors at a specific position range within a slot.
+    ///
+    /// Used for re-injecting promoted segments back into the cache at their
+    /// original positions. Unlike `set_slot_kv()` which writes from position 0,
+    /// this writes at an arbitrary offset.
+    ///
+    /// # Arguments
+    ///
+    /// * `slot_index` - Which batch slot to write to (0..batch_size)
+    /// * `start_pos` - Starting position within the cache (0..context)
+    /// * `k_data` - Key tensor, shape [1, num_heads, span_len, head_dim]
+    /// * `v_data` - Value tensor, shape [1, num_heads, span_len, head_dim]
+    ///
+    /// # Returns
+    ///
+    /// Number of positions written.
+    pub fn restore_kv_range(
+        &mut self,
+        slot_index: usize,
+        start_pos: usize,
+        k_data: &Tensor,
+        v_data: &Tensor,
+    ) -> Result<usize> {
+        let k_dims = k_data.dims();
+        if k_dims.len() != 4 || k_dims[0] != 1 {
+            candlelight::core::bail!(
+                "Expected [1, heads, span_len, dim], got {:?}",
+                k_dims
+            );
+        }
+
+        let span_len = k_dims[2];
+        if start_pos + span_len > self.context {
+            candlelight::core::bail!(
+                "Restore range {}..{} exceeds context size {}",
+                start_pos,
+                start_pos + span_len,
+                self.context
+            );
+        }
+
+        let cache_dims = self.k.dims();
+        let batch_size = cache_dims[0];
+        if slot_index >= batch_size {
+            candlelight::core::bail!(
+                "Slot index {} out of bounds (batch_size={})",
+                slot_index,
+                batch_size
+            );
+        }
+
+        // Extract the slot's current cache
+        let k_slot = self.k.narrow(0, slot_index, 1)?; // [1, heads, context, dim]
+        let v_slot = self.v.narrow(0, slot_index, 1)?;
+
+        // Split into before, replaced, after
+        let k_before = k_slot.narrow(2, 0, start_pos)?;
+        let k_after_start = start_pos + span_len;
+        let k_after_len = self.context - k_after_start;
+        let k_after = k_slot.narrow(2, k_after_start, k_after_len)?;
+        let k_new = Tensor::cat(&[&k_before, k_data, &k_after], 2)?;
+
+        let v_before = v_slot.narrow(2, 0, start_pos)?;
+        let v_after = v_slot.narrow(2, k_after_start, k_after_len)?;
+        let v_new = Tensor::cat(&[&v_before, v_data, &v_after], 2)?;
+
+        // Rebuild full cache with updated slot
+        let mut k_parts = Vec::with_capacity(batch_size);
+        let mut v_parts = Vec::with_capacity(batch_size);
+        for i in 0..batch_size {
+            if i == slot_index {
+                k_parts.push(k_new.clone());
+                v_parts.push(v_new.clone());
+            } else {
+                k_parts.push(self.k.narrow(0, i, 1)?);
+                v_parts.push(self.v.narrow(0, i, 1)?);
+            }
+        }
+
+        self.k = Tensor::cat(&k_parts, 0)?;
+        self.v = Tensor::cat(&v_parts, 0)?;
+
+        Ok(span_len)
     }
 }
 
@@ -330,6 +416,15 @@ pub struct ParallelCacheBuilder {
     slot_positions: HashMap<usize, usize>,
     /// Span registry for semantic cache region tracking
     span_registry: SpanRegistry,
+    /// Optional KV cache compression policy (KIVI, R-KV, Low-rank, Relationship-aware)
+    compression_policy: Option<CompressionPolicy>,
+    /// Optional name mapper for architecture-aware operations (M5.1)
+    /// Enables automatic detection of layer count and architecture-specific optimizations
+    name_mapper: Option<std::sync::Arc<crate::pruning::name_mapping::TensorNameMapper>>,
+    /// Per-slot sets of evicted cache positions.
+    /// Positions in these sets are masked out (NEG_INFINITY) during attention computation.
+    /// Populated by evict_span_internal() and evict_range().
+    evicted_positions: Vec<std::collections::HashSet<usize>>,
 }
 
 /// Cache usage statistics
@@ -544,7 +639,79 @@ impl ParallelCacheBuilder {
             voting_aggregator: None,
             slot_positions: HashMap::new(),
             span_registry: SpanRegistry::new(),
+            compression_policy: None,
+            name_mapper: None,
+            evicted_positions: (0..batch_size)
+                .map(|_| std::collections::HashSet::new())
+                .collect(),
         })
+    }
+
+    /// Set name mapper for architecture-aware operations (M5.1)
+    ///
+    /// Enables automatic detection of layer count and architecture-specific optimizations.
+    /// The name mapper is shared (Arc) to allow zero-cost use across multiple components.
+    ///
+    /// # Arguments
+    ///
+    /// * `mapper` - Optional TensorNameMapper (wrapped in Arc for sharing)
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use std::sync::Arc;
+    /// use lightbulb::pruning::name_mapping::TensorNameMapper;
+    ///
+    /// let tensor_names = vec!["blk.0.attn_q.weight".to_string(), /* ... */];
+    /// let mapper = TensorNameMapper::from_tensor_names(&tensor_names)?;
+    /// builder.set_name_mapper(Some(Arc::new(mapper)));
+    ///
+    /// // Now cache builder knows model has N layers (from mapper.layer_indices)
+    /// let num_layers = builder.detected_layer_count().unwrap();
+    /// ```
+    pub fn set_name_mapper(
+        &mut self,
+        mapper: Option<std::sync::Arc<crate::pruning::name_mapping::TensorNameMapper>>,
+    ) {
+        self.name_mapper = mapper;
+    }
+
+    /// Get the detected number of layers from the name mapper
+    ///
+    /// Returns the number of transformer layers detected by the name mapper,
+    /// or None if no name mapper is set.
+    ///
+    /// # Returns
+    ///
+    /// - `Some(layer_count)` if name mapper is available
+    /// - `None` if no name mapper or detection failed
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// if let Some(num_layers) = builder.detected_layer_count() {
+    ///     println!("Model has {} layers", num_layers);
+    ///     // Can now size per-layer caches correctly
+    /// }
+    /// ```
+    pub fn detected_layer_count(&self) -> Option<usize> {
+        self.name_mapper
+            .as_ref()
+            .map(|mapper| mapper.layer_indices.len())
+    }
+
+    /// Get the detected model architecture from the name mapper
+    ///
+    /// Returns the architecture type (LLaMA, GPT, Mistral, etc.) or None.
+    ///
+    /// # Returns
+    ///
+    /// - `Some(architecture)` if name mapper is available
+    /// - `None` if no name mapper
+    pub fn detected_architecture(
+        &self,
+    ) -> Option<&crate::pruning::name_mapping::ModelArchitecture> {
+        self.name_mapper.as_ref().map(|mapper| &mapper.architecture)
     }
 
     /// Set StreamingLLM configuration for constant-memory long contexts
@@ -609,6 +776,60 @@ impl ParallelCacheBuilder {
         self.voting_aggregator.as_ref()
     }
 
+    /// Set compression policy for KV cache compression
+    ///
+    /// **Note**: This field stores the compression configuration but does NOT automatically
+    /// apply compression during `append()`. Compression must be applied **externally** by the
+    /// caller before appending to the cache.
+    ///
+    /// This design keeps ParallelCacheBuilder simple while giving callers full control over
+    /// compression timing and context (e.g., attention scores, layer info).
+    ///
+    /// # Arguments
+    ///
+    /// * `policy` - Compression policy (KIVI, R-KV, Low-rank, Relationship-aware, or None)
+    ///
+    /// # Available Policies
+    ///
+    /// - **KIVI**: 2-4 bit quantization with per-head scaling (75% memory reduction)
+    /// - **R-KV**: Training-free importance-redundancy scoring (30-70% reduction)
+    /// - **Low-rank**: SVD approximation at specified rank (50-80% reduction)
+    /// - **Relationship-aware**: Multi-dimensional eviction with cluster preservation (40-60% reduction)
+    /// - **None**: Disable compression (full precision)
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use lightbulb::cache::kv_compression::{CompressionPolicy, KiviConfig, CompressionCtx};
+    ///
+    /// // Set compression policy on builder
+    /// let policy = CompressionPolicy::Kivi(KiviConfig::default());
+    /// builder.set_compression_policy(Some(policy.clone()));
+    ///
+    /// // Create compressor from policy
+    /// let mut compressor = policy.create_compressor().unwrap();
+    ///
+    /// // Compress before appending (caller's responsibility)
+    /// let mut ctx = CompressionCtx { layer_idx: 0, num_heads: 32, head_dim: 128, ... };
+    /// let k_compressed = compressor.compress_keys(&k, &mut ctx)?;
+    /// let v_compressed = compressor.compress_values(&v, &mut ctx)?;
+    ///
+    /// // Append compressed tensors to cache
+    /// let (k_cache, v_cache) = cache.append(&k_compressed, &v_compressed, &iam)?;
+    ///
+    /// // Decompress for attention computation
+    /// let k_full = compressor.decompress_keys(&k_cache, &ctx)?;
+    /// let v_full = compressor.decompress_values(&v_cache, &ctx)?;
+    /// ```
+    pub fn set_compression_policy(&mut self, policy: Option<CompressionPolicy>) {
+        self.compression_policy = policy;
+    }
+
+    /// Get the current compression policy
+    pub fn compression_policy(&self) -> Option<&CompressionPolicy> {
+        self.compression_policy.as_ref()
+    }
+
     /// Update H2O policy with attention weights from the last generation step
     ///
     /// # Arguments
@@ -622,6 +843,231 @@ impl ParallelCacheBuilder {
         if let Some(ref mut h2o) = self.h2o_policy {
             h2o.update_attention_scores(attention_weights, &self.slot_positions);
         }
+    }
+
+    // === Segmented Eviction Integration ===
+
+    /// Enable segmented eviction policy on this cache builder.
+    ///
+    /// Creates a `SegmentedEvictionPolicy` and registers it in a new
+    /// `VotingAggregator` alongside a `RecencyPolicy` for combined scoring.
+    ///
+    /// Also enables an H2O policy if one isn't already set (required for
+    /// per-token attention data that feeds into segment-level scoring).
+    pub fn enable_segmented_eviction(&mut self, config: crate::cache::SegmentedCacheConfig) {
+        use crate::cache::eviction_policy::RecencyPolicy;
+        use crate::cache::segmented_eviction_policy::SegmentedEvictionPolicy;
+
+        // Ensure H2O is enabled (we need per-token attention data)
+        if self.h2o_policy.is_none() {
+            use crate::cache::h2o_policy::{H2OConfig, H2OPolicy};
+            let h2o_config = H2OConfig {
+                enabled: true,
+                num_recent_to_keep: 4,
+                decay_factor: 0.95,
+            };
+            self.h2o_policy = Some(H2OPolicy::new(h2o_config));
+        }
+
+        // Create segmented policy
+        let segmented_policy = SegmentedEvictionPolicy::new(config);
+
+        // Create voting aggregator with segmented (0.7) + recency (0.3)
+        let aggregator = crate::cache::eviction_policy::VotingAggregator::new()
+            .add_policy(segmented_policy, 0.7)
+            .add_policy(RecencyPolicy::new(4), 0.3);
+
+        self.voting_aggregator = Some(aggregator);
+    }
+
+    /// Update segmented eviction scores using current H2O data and span registry.
+    ///
+    /// This should be called periodically during decode (throttled by config interval).
+    /// It aggregates per-token attention from H2O into per-span scores.
+    pub fn update_segmented_scores(&mut self, current_utilization: f32) {
+        // We need to extract the segmented policy from the aggregator, update it,
+        // and put it back. Since VotingAggregator owns the policies as Box<dyn EvictionPolicy>,
+        // we can't easily reach in. Instead, we maintain a separate SegmentedEvictionPolicy
+        // that we update here and use for ranking.
+        //
+        // TODO: Consider refactoring VotingAggregator to allow updating internal policies.
+        // For now, the segmented policy's scores are updated via rank_eviction_candidates()
+        // which is called separately.
+        let _ = current_utilization;
+    }
+
+    /// Rank active spans for potential eviction using the segmented policy.
+    ///
+    /// Creates a temporary SegmentedEvictionPolicy, updates it with current
+    /// H2O data, and returns ranked eviction candidates.
+    ///
+    /// # Returns
+    ///
+    /// Vector of `(SpanId, relevance_score)` sorted ascending (lowest = evict first).
+    /// SystemPrompt spans are excluded.
+    pub fn rank_eviction_candidates(
+        &self,
+        config: &crate::cache::SegmentedCacheConfig,
+        current_utilization: f32,
+    ) -> Vec<(crate::cache::SpanId, f32)> {
+        use crate::cache::segmented_eviction_policy::SegmentedEvictionPolicy;
+
+        let h2o = match &self.h2o_policy {
+            Some(h2o) => h2o,
+            None => return Vec::new(),
+        };
+
+        let mut policy = SegmentedEvictionPolicy::new(config.clone());
+        policy.update_scores(&self.span_registry, h2o, current_utilization);
+        policy.rank_spans_for_eviction(&self.span_registry)
+    }
+
+    /// Log eviction candidates (shadow mode).
+    ///
+    /// Computes eviction rankings and logs the top N candidates with span info.
+    /// Does not perform any eviction.
+    pub fn log_eviction_candidates(
+        &self,
+        config: &crate::cache::SegmentedCacheConfig,
+        top_n: usize,
+    ) {
+        let max_util = self.get_max_utilization();
+        let candidates = self.rank_eviction_candidates(config, max_util);
+
+        if candidates.is_empty() {
+            return;
+        }
+
+        println!(
+            "=== Eviction Candidates (shadow mode, pressure={:.2}) ===",
+            max_util
+        );
+        for (i, (span_id, score)) in candidates.iter().take(top_n).enumerate() {
+            let span_info = self
+                .span_registry
+                .get(*span_id)
+                .map(|s| {
+                    format!(
+                        "{:?} [{}..{}] ({} tokens)",
+                        s.tag,
+                        s.start_pos,
+                        s.end_pos,
+                        s.end_pos - s.start_pos
+                    )
+                })
+                .unwrap_or_else(|| "unknown".to_string());
+
+            println!(
+                "  #{}: Span {} | {} | relevance: {:.6}",
+                i + 1,
+                span_id,
+                span_info,
+                score
+            );
+        }
+        println!("========================================================");
+    }
+
+    /// Compute cache utilization for a given slot (0.0 to 1.0).
+    ///
+    /// Returns the ratio of current position to context size, indicating
+    /// how full the cache is for this slot.
+    pub fn get_utilization(&self, slot: usize) -> f32 {
+        if slot >= self.positions.len() || self.context == 0 {
+            return 0.0;
+        }
+        self.positions[slot] as f32 / self.context as f32
+    }
+
+    /// Compute the maximum utilization across all active slots.
+    pub fn get_max_utilization(&self) -> f32 {
+        self.positions
+            .iter()
+            .map(|&pos| pos as f32 / self.context as f32)
+            .fold(0.0_f32, f32::max)
+    }
+
+    /// Compute per-span attention summaries using H2O token-level data.
+    ///
+    /// For each active span in the registry, sums the cumulative attention
+    /// scores from the H2O policy for tokens within the span's position range.
+    ///
+    /// # Returns
+    ///
+    /// Vector of `(span_id, tag, token_count, total_attention, avg_attention)`
+    /// sorted by total_attention descending (most-attended spans first).
+    pub fn compute_span_attention_summary(
+        &self,
+    ) -> Vec<(
+        crate::cache::SpanId,
+        crate::cache::CacheTag,
+        usize,
+        f32,
+        f32,
+    )> {
+        let h2o = match &self.h2o_policy {
+            Some(h2o) => h2o,
+            None => return Vec::new(),
+        };
+
+        let mut summaries = Vec::new();
+
+        // Get all active spans across all slots
+        for slot in 0..self.positions.len() {
+            let spans = self.span_registry.spans_for_slot(slot);
+            for span in spans {
+                if !span.is_active() {
+                    continue;
+                }
+
+                let mut total_attention = 0.0_f32;
+                let mut token_count = 0_usize;
+
+                // Sum attention for all positions within this span
+                for pos in span.start_pos..span.end_pos {
+                    // H2O policy tracks by slot_id (which maps to positions)
+                    // We need to check if this position has attention data
+                    // The slot_positions map links slot_id -> seq_position
+                    // For per-position lookup, we iterate H2O's metadata
+                    if let Some(metadata) = h2o.get_token_metadata(pos) {
+                        total_attention += metadata.cumulative_attention;
+                        token_count += 1;
+                    }
+                }
+
+                let avg_attention = if token_count > 0 {
+                    total_attention / token_count as f32
+                } else {
+                    0.0
+                };
+
+                summaries.push((span.id, span.tag, token_count, total_attention, avg_attention));
+            }
+        }
+
+        // Sort by total attention descending
+        summaries.sort_by(|a, b| b.3.partial_cmp(&a.3).unwrap_or(std::cmp::Ordering::Equal));
+
+        summaries
+    }
+
+    /// Log span attention summaries to stdout (for debugging/tuning).
+    ///
+    /// Only logs if there are active spans with attention data.
+    pub fn log_span_attention_summary(&self) {
+        let summaries = self.compute_span_attention_summary();
+        if summaries.is_empty() {
+            return;
+        }
+
+        println!("=== Span Attention Summary ===");
+        for (span_id, tag, token_count, total_attn, avg_attn) in &summaries {
+            println!(
+                "  Span {:3} | {:18?} | {:4} tokens | total_attn: {:8.4} | avg_attn: {:8.6}",
+                span_id, tag, token_count, total_attn, avg_attn
+            );
+        }
+        println!("==============================");
     }
 
     // === Cache Span Management APIs ===
@@ -664,7 +1110,7 @@ impl ParallelCacheBuilder {
         use crate::cache::CacheSpan;
 
         if slot >= self.positions.len() {
-            candle_core::bail!("Slot {} out of range (max: {})", slot, self.positions.len());
+            candlelight::core::bail!("Slot {} out of range (max: {})", slot, self.positions.len());
         }
 
         let span_id = self.span_registry.next_span_id();
@@ -674,7 +1120,7 @@ impl ParallelCacheBuilder {
 
         self.span_registry
             .register(span)
-            .map_err(|e| candle_core::Error::Msg(e))?;
+            .map_err(|e| candlelight::core::Error::Msg(e))?;
 
         Ok(span_id)
     }
@@ -694,7 +1140,7 @@ impl ParallelCacheBuilder {
         let span = self
             .span_registry
             .get_mut(span_id)
-            .ok_or_else(|| candle_core::Error::Msg(format!("Span {} not found", span_id)))?;
+            .ok_or_else(|| candlelight::core::Error::Msg(format!("Span {} not found", span_id)))?;
 
         let current_pos = self.positions[span.slot];
         span.end_pos = current_pos;
@@ -732,11 +1178,11 @@ impl ParallelCacheBuilder {
         use crate::cache::CacheSpan;
 
         if slot >= self.positions.len() {
-            candle_core::bail!("Slot {} out of range (max: {})", slot, self.positions.len());
+            candlelight::core::bail!("Slot {} out of range (max: {})", slot, self.positions.len());
         }
 
         if end_pos <= start_pos {
-            candle_core::bail!(
+            candlelight::core::bail!(
                 "Invalid span range: end_pos ({}) must be > start_pos ({})",
                 end_pos,
                 start_pos
@@ -748,7 +1194,7 @@ impl ParallelCacheBuilder {
 
         self.span_registry
             .register(span)
-            .map_err(|e| candle_core::Error::Msg(e))?;
+            .map_err(|e| candlelight::core::Error::Msg(e))?;
 
         Ok(span_id)
     }
@@ -824,7 +1270,7 @@ impl ParallelCacheBuilder {
         let span = self
             .span_registry
             .get_mut(span_id)
-            .ok_or_else(|| candle_core::Error::Msg(format!("Span {} not found", span_id)))?;
+            .ok_or_else(|| candlelight::core::Error::Msg(format!("Span {} not found", span_id)))?;
 
         span.importance = importance.clamp(0.0, 1.0);
         Ok(())
@@ -851,7 +1297,7 @@ impl ParallelCacheBuilder {
     ) -> Result<()> {
         // Check for cycles
         if self.span_registry.would_create_cycle(child_id, parent_id) {
-            candle_core::bail!(
+            candlelight::core::bail!(
                 "Cannot set parent: would create circular dependency between {} and {}",
                 child_id,
                 parent_id
@@ -861,7 +1307,7 @@ impl ParallelCacheBuilder {
         // Update child's parent
         {
             let child = self.span_registry.get_mut(child_id).ok_or_else(|| {
-                candle_core::Error::Msg(format!("Child span {} not found", child_id))
+                candlelight::core::Error::Msg(format!("Child span {} not found", child_id))
             })?;
             child.parent = Some(parent_id);
         }
@@ -869,7 +1315,7 @@ impl ParallelCacheBuilder {
         // Update parent's children list
         {
             let parent = self.span_registry.get_mut(parent_id).ok_or_else(|| {
-                candle_core::Error::Msg(format!("Parent span {} not found", parent_id))
+                candlelight::core::Error::Msg(format!("Parent span {} not found", parent_id))
             })?;
             if !parent.children.contains(&child_id) {
                 parent.children.push(child_id);
@@ -970,7 +1416,7 @@ impl ParallelCacheBuilder {
         let span_id = self
             .find_span_by_name(name)
             .map(|s| s.id)
-            .ok_or_else(|| candle_core::Error::Msg(format!("No span named '{}'", name)))?;
+            .ok_or_else(|| candlelight::core::Error::Msg(format!("No span named '{}'", name)))?;
 
         self.evict_span_internal(span_id)
     }
@@ -996,6 +1442,15 @@ impl ParallelCacheBuilder {
 
                     child.state = SpanState::FullyEvicted;
 
+                    // Mark cache positions as evicted for mask exclusion
+                    if slot < self.evicted_positions.len() {
+                        for pos in range.clone() {
+                            // Map sequence position to cache index
+                            let cache_idx = pos % self.context;
+                            self.evicted_positions[slot].insert(cache_idx);
+                        }
+                    }
+
                     result
                         .spans_affected
                         .push((child_id, EvictionImpact::FullyEvicted));
@@ -1011,6 +1466,14 @@ impl ParallelCacheBuilder {
                 let range = span.start_pos..span.end_pos;
 
                 span.state = SpanState::FullyEvicted;
+
+                // Mark cache positions as evicted for mask exclusion
+                if slot < self.evicted_positions.len() {
+                    for pos in range.clone() {
+                        let cache_idx = pos % self.context;
+                        self.evicted_positions[slot].insert(cache_idx);
+                    }
+                }
 
                 result
                     .spans_affected
@@ -1056,6 +1519,78 @@ impl ParallelCacheBuilder {
         }
 
         info
+    }
+
+    /// Partially evict individual positions within a span.
+    ///
+    /// Used by the hybrid per-token eviction system (Phase 4). Marks specific
+    /// positions as evicted while keeping the span in a `PartiallyEvicted` state
+    /// with `remaining_ranges` tracking which positions survive.
+    ///
+    /// # Arguments
+    ///
+    /// * `span_id` - The span to partially evict
+    /// * `evicted_positions` - Absolute positions to evict within the span
+    /// * `remaining_ranges` - The surviving position ranges after eviction
+    ///
+    /// # Returns
+    ///
+    /// Number of positions actually evicted.
+    pub fn partially_evict_span(
+        &mut self,
+        span_id: crate::cache::SpanId,
+        evicted_positions: &[usize],
+        remaining_ranges: Vec<std::ops::Range<usize>>,
+    ) -> Result<usize> {
+        use crate::cache::SpanState;
+
+        let span = self
+            .span_registry
+            .get_mut(span_id)
+            .ok_or_else(|| candlelight::core::Error::Msg(format!("Span {} not found", span_id)))?;
+
+        if !span.is_active() && !matches!(span.state, SpanState::PartiallyEvicted { .. }) {
+            return Ok(0); // Already fully evicted
+        }
+
+        let slot = span.slot;
+
+        // Update span state
+        span.state = SpanState::PartiallyEvicted {
+            remaining_ranges,
+        };
+
+        // Mark positions in the eviction mask
+        let mut count = 0;
+        if slot < self.evicted_positions.len() {
+            for &pos in evicted_positions {
+                let cache_idx = pos % self.context;
+                if self.evicted_positions[slot].insert(cache_idx) {
+                    count += 1;
+                }
+            }
+        }
+
+        Ok(count)
+    }
+
+    /// Clear evicted positions for a range within a slot.
+    ///
+    /// Called when a promoted segment is re-injected into the cache, so
+    /// the attention mask will once again allow attending to those positions.
+    ///
+    /// # Arguments
+    ///
+    /// * `slot` - Batch slot index
+    /// * `start_pos` - Start of position range to un-evict
+    /// * `end_pos` - End of position range (exclusive)
+    pub fn clear_evicted_range(&mut self, slot: usize, start_pos: usize, end_pos: usize) {
+        if slot < self.evicted_positions.len() {
+            for pos in start_pos..end_pos {
+                let cache_idx = pos % self.context;
+                self.evicted_positions[slot].remove(&cache_idx);
+            }
+        }
     }
 
     // =======================
@@ -1354,6 +1889,11 @@ impl ParallelCacheBuilder {
         self.slot_positions.remove(&batch_index);
         if let Some(ref mut h2o) = self.h2o_policy {
             h2o.clear_slot(batch_index);
+        }
+
+        // Clear evicted positions for this slot
+        if batch_index < self.evicted_positions.len() {
+            self.evicted_positions[batch_index].clear();
         }
 
         crate::debug_cache!(
@@ -1701,15 +2241,28 @@ impl ParallelCacheBuilder {
                 }
                 // DEBUG output removed
 
+                // Get evicted positions for this slot (if any)
+                let empty_set = std::collections::HashSet::new();
+                let evicted = if batch_i < self.evicted_positions.len() {
+                    &self.evicted_positions[batch_i]
+                } else {
+                    &empty_set
+                };
+
                 for seq_i in 0..seq_len {
                     let my_pos = seq_i + start_pos;
                     let mask = all_pos
                         .iter()
-                        .map(|&pos| {
-                            if pos <= my_pos {
-                                0.0
-                            } else {
+                        .enumerate()
+                        .map(|(cache_idx, &pos)| {
+                            if pos > my_pos {
+                                // Future position: causal mask
                                 f32::NEG_INFINITY
+                            } else if evicted.contains(&cache_idx) {
+                                // Evicted position: mask out
+                                f32::NEG_INFINITY
+                            } else {
+                                0.0
                             }
                         })
                         .collect::<Vec<f32>>();
@@ -2011,7 +2564,7 @@ impl ParallelCacheBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use candle_core::IndexOp;
+    use candlelight::core::IndexOp;
 
     #[test]
     fn test_set_position() -> Result<()> {

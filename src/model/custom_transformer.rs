@@ -3,8 +3,8 @@
 /// This implementation provides a unified architecture that can be configured to support
 /// various transformer-based language models through different configuration constructors.
 use crate::model::quantizable_linear::QuantizableLinear;
-use candle_core::{DType, Device, IndexOp, Module, Result, Tensor};
-use candle_nn::{Embedding, RmsNorm, VarBuilder};
+use candlelight::core::{DType, Device, IndexOp, Module, Result, Tensor};
+use candlelight::nn::{Embedding, VarBuilder};
 use std::collections::HashMap;
 use std::io::{Read, Seek};
 
@@ -12,6 +12,9 @@ use crate::engine::{ParallelCacheBuilder, ParallelKvCache};
 use crate::model::batch_metadata::BatchMetadata;
 use crate::model::custom_transformer_block::BatchedTransformerBlock;
 use crate::model::decode_state::DecodeState;
+use crate::model::fused_rmsnorm::FusedRmsNorm;
+use crate::multi_gpu::config::MultiGPUConfig;
+use crate::multi_gpu::distributed_cache::DistributedCacheManager;
 
 /// Configuration for the generic batched transformer model
 #[derive(Debug, Clone)]
@@ -55,6 +58,10 @@ pub struct BatchedTransformerConfig {
 
     /// Whether to tie word embeddings with output layer
     pub tie_word_embeddings: bool,
+
+    /// Optional multi-GPU configuration for distributed inference (M3.6)
+    /// When provided, enables tensor/pipeline parallelism across multiple GPUs
+    pub multi_gpu: Option<MultiGPUConfig>,
 }
 
 impl BatchedTransformerConfig {
@@ -85,6 +92,7 @@ impl BatchedTransformerConfig {
             sliding_window: None,
             use_flash_attn: false,
             tie_word_embeddings,
+            multi_gpu: None, // M3.6: Multi-GPU disabled by default
         }
     }
 
@@ -123,7 +131,7 @@ impl BatchedTransformerConfig {
     /// Validate configuration parameters
     pub fn validate(&self) -> Result<()> {
         if self.hidden_size % self.num_attention_heads != 0 {
-            candle_core::bail!(
+            candlelight::core::bail!(
                 "hidden_size ({}) must be divisible by num_attention_heads ({})",
                 self.hidden_size,
                 self.num_attention_heads
@@ -131,7 +139,7 @@ impl BatchedTransformerConfig {
         }
 
         if self.num_attention_heads % self.num_key_value_heads != 0 {
-            candle_core::bail!(
+            candlelight::core::bail!(
                 "num_attention_heads ({}) must be divisible by num_key_value_heads ({})",
                 self.num_attention_heads,
                 self.num_key_value_heads
@@ -139,7 +147,7 @@ impl BatchedTransformerConfig {
         }
 
         if self.num_hidden_layers == 0 {
-            candle_core::bail!("num_hidden_layers must be > 0");
+            candlelight::core::bail!("num_hidden_layers must be > 0");
         }
         Ok(())
     }
@@ -167,7 +175,7 @@ pub struct BatchedTransformer {
     blocks: Vec<BatchedTransformerBlock>,
 
     /// Final normalization layer
-    norm: RmsNorm,
+    norm: FusedRmsNorm,
 
     /// Language model head (vocabulary projection)
     lm_head: QuantizableLinear,
@@ -191,6 +199,10 @@ pub struct BatchedTransformer {
     /// Pre-allocated buffers and cached state to reduce per-step overhead
     /// Uses Mutex for thread-safe access in speculative decoding scenarios
     decode_state: std::sync::Mutex<DecodeState>,
+
+    /// Optional distributed KV cache manager for multi-GPU inference (M3.6)
+    /// When multi_gpu is enabled, this coordinates cache across GPUs
+    distributed_cache: Option<std::sync::Mutex<DistributedCacheManager>>,
 }
 
 impl BatchedTransformer {
@@ -203,7 +215,7 @@ impl BatchedTransformer {
         let dtype = vb.dtype();
 
         // Create token embeddings
-        let embedding = candle_nn::embedding(
+        let embedding = candlelight::nn::embedding(
             config.vocab_size,
             config.hidden_size,
             vb.pp("model.embed_tokens"),
@@ -237,8 +249,7 @@ impl BatchedTransformer {
         }
 
         // Final normalization
-        let norm =
-            candle_nn::rms_norm(config.hidden_size, config.rms_norm_eps, vb.pp("model.norm"))?;
+        let norm = FusedRmsNorm::new(config.hidden_size, config.rms_norm_eps, vb.pp("model.norm"))?;
 
         // Language model head
         let lm_head = if config.tie_word_embeddings {
@@ -254,9 +265,9 @@ impl BatchedTransformer {
             let _emb_w_mean: f32 = emb_w_vec.iter().sum::<f32>() / emb_w_vec.len() as f32;
             // DEBUG output removed
 
-            QuantizableLinear::from_linear(candle_nn::Linear::new(embedding_weight.clone(), None))
+            QuantizableLinear::from_linear(candlelight::nn::Linear::new(embedding_weight.clone(), None))
         } else {
-            QuantizableLinear::from_linear(candle_nn::linear_no_bias(
+            QuantizableLinear::from_linear(candlelight::nn::linear_no_bias(
                 config.hidden_size,
                 config.vocab_size,
                 vb.pp("lm_head"),
@@ -274,6 +285,7 @@ impl BatchedTransformer {
             device,
             dtype,
             decode_state: std::sync::Mutex::new(DecodeState::new()),
+            distributed_cache: None, // M3.6: Initialized separately if multi_gpu enabled
         })
     }
 
@@ -287,6 +299,7 @@ impl BatchedTransformer {
     /// * `gguf_content` - GGUF file content with metadata and tensor info
     /// * `file` - Open file handle for reading tensor data
     /// * `device` - Device to load tensors on
+    /// * `name_mapper` - Tensor name mapper for architecture-agnostic loading
     ///
     /// # Returns
     /// BatchedTransformer with quantized weights
@@ -295,9 +308,21 @@ impl BatchedTransformer {
         gguf_content: &crate::gguf::Content,
         file: &mut R,
         device: &Device,
+        name_mapper: &crate::pruning::name_mapping::TensorNameMapper,
     ) -> Result<Self> {
+        // Map abstract names to concrete architecture-specific names
+        let embedding_name = name_mapper
+            .map_name("embedding.weight")
+            .unwrap_or_else(|| "token_embd.weight".to_string());
+        let output_norm_name = name_mapper
+            .map_name("output.normalization")
+            .unwrap_or_else(|| "output_norm.weight".to_string());
+        let output_weight_name = name_mapper
+            .map_name("output.projection")
+            .unwrap_or_else(|| "output.weight".to_string());
+
         // Load embedding layer (always unquantized, dequantize if needed)
-        let embedding_tensor = gguf_content.tensor(file, "token_embd.weight", device)?;
+        let embedding_tensor = gguf_content.tensor(file, &embedding_name, device)?;
         let embedding_weight = embedding_tensor.dequantize(device)?;
         let embedding = Embedding::new(embedding_weight, config.hidden_size);
 
@@ -314,36 +339,38 @@ impl BatchedTransformer {
                 gguf_content,
                 file,
                 device,
+                name_mapper,
             )?;
             blocks.push(block);
         }
 
-        // Load final normalization (dequantize since RmsNorm works with regular tensors)
-        let norm_tensor = gguf_content.tensor(file, "output_norm.weight", device)?;
-        let norm = RmsNorm::new(norm_tensor.dequantize(device)?, config.rms_norm_eps);
+        // Load final normalization (dequantize since FusedRmsNorm works with regular tensors)
+        let norm_tensor = gguf_content.tensor(file, &output_norm_name, device)?;
+        let norm =
+            FusedRmsNorm::new_with_weight(norm_tensor.dequantize(device)?, config.rms_norm_eps);
 
         // Load language model head
         let lm_head = if config.tie_word_embeddings {
             // Use tied weights - wrap the embedding weight in QuantizableLinear
             let emb_weight = gguf_content
-                .tensor(file, "token_embd.weight", device)?
+                .tensor(file, &embedding_name, device)?
                 .dequantize(device)?;
-            QuantizableLinear::from_linear(candle_nn::Linear::new(emb_weight, None))
+            QuantizableLinear::from_linear(candlelight::nn::Linear::new(emb_weight, None))
         } else {
             // Load separate output projection
-            match gguf_content.tensor(file, "output.weight", device) {
+            match gguf_content.tensor(file, &output_weight_name, device) {
                 Ok(output_tensor) => {
                     // Output layer exists - wrap in QMatMul and QuantizableLinear
-                    QuantizableLinear::from_qmatmul(candle_core::quantized::QMatMul::from_qtensor(
+                    QuantizableLinear::from_qmatmul(candlelight::core::quantized::QMatMul::from_qtensor(
                         output_tensor,
                     )?)
                 }
                 Err(_) => {
                     // Fall back to tied weights if output.weight doesn't exist
                     let emb_weight = gguf_content
-                        .tensor(file, "token_embd.weight", device)?
+                        .tensor(file, &embedding_name, device)?
                         .dequantize(device)?;
-                    QuantizableLinear::from_linear(candle_nn::Linear::new(emb_weight, None))
+                    QuantizableLinear::from_linear(candlelight::nn::Linear::new(emb_weight, None))
                 }
             }
         };
@@ -369,6 +396,7 @@ impl BatchedTransformer {
             device: device.clone(),
             dtype,
             decode_state: std::sync::Mutex::new(DecodeState::new()),
+            distributed_cache: None, // M3.6: Initialized separately if multi_gpu enabled
         })
     }
 
@@ -462,7 +490,7 @@ impl BatchedTransformer {
         // Verify shape
         let (batch_size, seq_len, hidden_size) = hidden_states.dims3()?;
         if batch_size * seq_len != total_tokens {
-            candle_core::bail!(
+            candlelight::core::bail!(
                 "Expected {} total tokens, got batch={} * seq={}",
                 total_tokens,
                 batch_size,
@@ -470,7 +498,7 @@ impl BatchedTransformer {
             );
         }
         if hidden_size != self.config.hidden_size {
-            candle_core::bail!(
+            candlelight::core::bail!(
                 "Expected hidden size {}, got {}",
                 self.config.hidden_size,
                 hidden_size
@@ -536,21 +564,44 @@ impl BatchedTransformer {
 
         if should_update_h2o {
             if let Some(ref attn_weights) = last_attn_weights {
-                // Convert tensor to Vec<Vec<f32>> for H2O policy
-                // attn_weights shape: [query_pos, key_pos] or similar
-                if let Ok(dims) = attn_weights.dims2() {
-                    let (query_len, key_len) = dims;
-                    let flat = attn_weights.flatten_all()?.to_vec1::<f32>()?;
+                // Attention weights shape from compute_attention():
+                //   [batch, num_heads, seq_q, seq_k]
+                //
+                // For H2O policy we need a 2D matrix [seq_q, seq_k] representing
+                // the average attention pattern across batch and heads.
+                //
+                // Previous code called dims2() which silently failed on the 4D
+                // tensor, so H2O never received data. Fixed: handle both 4D
+                // (batched multi-head) and 2D (pre-aggregated) shapes.
+                let aggregated = if let Ok((_batch, _heads, _seq_q, _seq_k)) =
+                    attn_weights.dims4()
+                {
+                    // 4D: [batch, num_heads, seq_q, seq_k]
+                    // Average across heads (dim 1), then across batch (dim 0)
+                    // Result: [seq_q, seq_k]
+                    Some(attn_weights.mean(1)?.mean(0)?)
+                } else if let Ok((_seq_q, _seq_k)) = attn_weights.dims2() {
+                    // 2D: Already aggregated [seq_q, seq_k]
+                    Some(attn_weights.clone())
+                } else {
+                    // Unexpected shape — skip this update
+                    None
+                };
 
-                    let mut attention_matrix = Vec::with_capacity(query_len);
-                    for i in 0..query_len {
-                        let start = i * key_len;
-                        let end = start + key_len;
-                        attention_matrix.push(flat[start..end].to_vec());
+                if let Some(ref agg) = aggregated {
+                    if let Ok((query_len, key_len)) = agg.dims2() {
+                        let flat = agg.flatten_all()?.to_vec1::<f32>()?;
+
+                        let mut attention_matrix = Vec::with_capacity(query_len);
+                        for i in 0..query_len {
+                            let start = i * key_len;
+                            let end = start + key_len;
+                            attention_matrix.push(flat[start..end].to_vec());
+                        }
+
+                        // Update H2O policy with the attention scores
+                        cache_builder.update_attention_scores(&attention_matrix);
                     }
-
-                    // Update H2O policy with the attention scores
-                    cache_builder.update_attention_scores(&attention_matrix);
                 }
             }
         }
@@ -648,7 +699,7 @@ impl BatchedTransformer {
         // Verify shape
         let (batch_size, seq_len, hidden_size) = hidden_states.dims3()?;
         if batch_size * seq_len != total_tokens {
-            candle_core::bail!(
+            candlelight::core::bail!(
                 "Expected {} total tokens, got batch={} * seq={}",
                 total_tokens,
                 batch_size,
@@ -656,7 +707,7 @@ impl BatchedTransformer {
             );
         }
         if hidden_size != self.config.hidden_size {
-            candle_core::bail!(
+            candlelight::core::bail!(
                 "Expected hidden size {}, got {}",
                 self.config.hidden_size,
                 hidden_size
@@ -715,6 +766,96 @@ impl BatchedTransformer {
         Ok(())
     }
 
+    /// Forward pass through specific layers only (for pipeline parallelism)
+    ///
+    /// This method enables pipeline parallelism by processing only a subset of
+    /// transformer layers. The input should be hidden states from the previous
+    /// pipeline stage, and the output will be hidden states for the next stage.
+    ///
+    /// # Arguments
+    ///
+    /// * `hidden_states` - Input hidden states [batch, seq, hidden_size]
+    /// * `layer_start` - First layer to process (inclusive)
+    /// * `layer_end` - Last layer to process (exclusive)
+    /// * `index_pos` - RoPE position index
+    /// * `cache_builder` - Tracks KV cache positions
+    /// * `caches` - Per-layer KV caches
+    /// * `metadata` - Batch metadata
+    ///
+    /// # Returns
+    ///
+    /// Hidden states after processing layers [layer_start, layer_end)
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Process layers 0-20 on GPU 0
+    /// let hidden = model.forward_layers(
+    ///     &input_hidden,
+    ///     0, 20,  // layers 0-19
+    ///     pos,
+    ///     cache_builder,
+    ///     caches,
+    ///     metadata,
+    /// )?;
+    ///
+    /// // Process layers 20-40 on GPU 1
+    /// let output = model.forward_layers(
+    ///     &hidden,
+    ///     20, 40,  // layers 20-39
+    ///     pos,
+    ///     cache_builder,
+    ///     caches,
+    ///     metadata,
+    /// )?;
+    /// ```
+    pub fn forward_layers(
+        &self,
+        hidden_states: &Tensor,
+        layer_start: usize,
+        layer_end: usize,
+        index_pos: usize,
+        cache_builder: &mut ParallelCacheBuilder,
+        caches: &mut [ParallelKvCache],
+        metadata: &BatchMetadata,
+    ) -> Result<Tensor> {
+        if layer_start >= layer_end {
+            return Err(candlelight::core::Error::Msg(format!(
+                "Invalid layer range: start={} >= end={}",
+                layer_start, layer_end
+            ))
+            .into());
+        }
+
+        if layer_end > self.blocks.len() {
+            return Err(candlelight::core::Error::Msg(format!(
+                "Layer end {} exceeds number of blocks {}",
+                layer_end,
+                self.blocks.len()
+            ))
+            .into());
+        }
+
+        let mut hidden_states = hidden_states.clone();
+
+        // Process layers in range [layer_start, layer_end)
+        for layer_idx in layer_start..layer_end {
+            let block = &self.blocks[layer_idx];
+            let (new_hidden_states, _attn_weights) = block.forward(
+                &hidden_states,
+                index_pos,
+                &self.cos,
+                &self.sin,
+                cache_builder,
+                &mut caches[layer_idx],
+                metadata,
+            )?;
+            hidden_states = new_hidden_states;
+        }
+
+        Ok(hidden_states)
+    }
+
     /// Get model configuration
     pub fn config(&self) -> &BatchedTransformerConfig {
         &self.config
@@ -728,6 +869,91 @@ impl BatchedTransformer {
     /// Get dtype
     pub fn dtype(&self) -> DType {
         self.dtype
+    }
+
+    /// Initialize multi-GPU distributed cache (M3.6)
+    ///
+    /// Must be called after model creation if multi_gpu config is provided.
+    /// Creates a DistributedCacheManager to coordinate KV cache across GPUs.
+    ///
+    /// # Arguments
+    /// * `batch_size` - Maximum batch size for cache allocation
+    /// * `context_size` - Maximum context length for cache allocation
+    ///
+    /// # Returns
+    /// Ok(()) if successful, Err if multi_gpu is not configured or initialization fails
+    pub fn enable_distributed_cache(
+        &mut self,
+        batch_size: usize,
+        context_size: usize,
+    ) -> Result<()> {
+        let multi_gpu = self
+            .config
+            .multi_gpu
+            .as_ref()
+            .ok_or_else(|| candlelight::core::Error::Msg("Multi-GPU not configured".to_string()))?;
+
+        use crate::multi_gpu::distributed_cache::CacheSyncStrategy;
+
+        let cache_manager = DistributedCacheManager::new(
+            multi_gpu.topology.clone(),
+            CacheSyncStrategy::Replicated,
+            batch_size,
+            context_size,
+            self.dtype,
+        )
+        .map_err(|e| {
+            candlelight::core::Error::Msg(format!("Failed to create distributed cache: {}", e))
+        })?;
+
+        self.distributed_cache = Some(std::sync::Mutex::new(cache_manager));
+        Ok(())
+    }
+
+    /// Check if multi-GPU is enabled
+    pub fn is_multi_gpu(&self) -> bool {
+        self.config.multi_gpu.is_some()
+    }
+
+    /// Get reference to distributed cache manager (M3.6)
+    pub fn distributed_cache(&self) -> Option<&std::sync::Mutex<DistributedCacheManager>> {
+        self.distributed_cache.as_ref()
+    }
+
+    /// Get mutable reference to distributed cache manager (M3.6)
+    pub fn distributed_cache_mut(
+        &mut self,
+    ) -> Option<&mut std::sync::Mutex<DistributedCacheManager>> {
+        self.distributed_cache.as_mut()
+    }
+
+    /// Enable or disable attention weight capture across all transformer blocks.
+    ///
+    /// When enabled, the last layer's attention weights are returned from `forward()`
+    /// and fed to H2O / segmented eviction policies. Only the last layer is tracked
+    /// because it reflects the model's final decision-making.
+    ///
+    /// Note: FlashAttention does not expose attention weights. During decode (seq_q=1),
+    /// the manual attention path is used regardless, so capture works during decode
+    /// even when FlashAttention is compiled in.
+    ///
+    /// # Arguments
+    /// * `capture` - true to enable capture, false to disable
+    /// * `last_layer_only` - if true, only enables capture on the last block
+    ///   (saves memory by not cloning attention probs in earlier layers)
+    pub fn set_capture_attention(&mut self, capture: bool, last_layer_only: bool) {
+        let num_blocks = self.blocks.len();
+        if last_layer_only && capture {
+            // Only enable on the last block
+            for (i, block) in self.blocks.iter_mut().enumerate() {
+                block.set_capture_attention(i == num_blocks - 1);
+            }
+        } else {
+            // Enable/disable on all blocks
+            for block in self.blocks.iter_mut() {
+                block.set_capture_attention(capture);
+            }
+        }
     }
 }
 
@@ -743,7 +969,7 @@ pub type BatchedGemma = BatchedTransformer;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use candle_core::{IndexOp, test_utils::to_vec2_round};
+    use candlelight::core::{IndexOp, test_utils::to_vec2_round};
 
     fn create_test_config() -> BatchedTransformerConfig {
         BatchedTransformerConfig {
@@ -760,6 +986,7 @@ mod tests {
             sliding_window: None,
             use_flash_attn: false,
             tie_word_embeddings: false,
+            multi_gpu: None,
         }
     }
 

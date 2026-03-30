@@ -215,6 +215,19 @@ impl H2OPolicy {
         self.slot_metadata.clear();
         self.current_step = 0;
     }
+
+    /// Get token metadata by slot ID (for span-level attention aggregation).
+    ///
+    /// Used by the segmented eviction policy to aggregate per-token attention
+    /// scores into per-span relevance scores.
+    pub fn get_token_metadata(&self, slot_id: usize) -> Option<&TokenMetadata> {
+        self.slot_metadata.get(&slot_id)
+    }
+
+    /// Get all token metadata (for iteration by external policies).
+    pub fn all_token_metadata(&self) -> &HashMap<usize, TokenMetadata> {
+        &self.slot_metadata
+    }
 }
 
 impl EvictionPolicy for H2OPolicy {

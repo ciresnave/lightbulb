@@ -10,9 +10,9 @@
 //! - CPU: 5-10x faster
 //! - GPU: 10-50x faster
 
-use anyhow::Result;
-use candle_core::{DType, Device, IndexOp, Tensor};
-use candle_transformers::models::llama::{Config, LlamaEosToks};
+use anyhow::{Context, Result};
+use candlelight::core::{DType, Device, IndexOp, Tensor};
+use candlelight::transformers::models::llama::{Config, LlamaEosToks};
 use std::path::Path;
 use std::time::Instant;
 use tokenizers::Tokenizer;
@@ -84,6 +84,14 @@ pub struct ParallelModelManager {
     cache_index_pool: Vec<bool>, // true = in use, false = available
     runtime_adjuster: Option<RuntimeBatchAdjuster>, // Dynamic batch size adjustment
     prefix_cache: PrefixKvCache, // Prefix KV cache for shared prompt prefixes
+    // Segmented KV cache fields
+    segmented_config: Option<crate::cache::SegmentedCacheConfig>,
+    /// Maps cache_idx → open ModelGeneration span for active decode requests
+    active_generation_spans: std::collections::HashMap<usize, crate::cache::SpanId>,
+    /// Tiered storage for demoted KV cache segments (VRAM → RAM → Disk)
+    tiered_storage: Option<crate::cache::TieredStorageManager>,
+    /// Per-token tracker for hybrid eviction (Phase 4). Only one active at a time.
+    per_token_tracker: Option<crate::cache::PerTokenTracker>,
 }
 
 impl ParallelModelManager {
@@ -105,7 +113,7 @@ impl ParallelModelManager {
         let model_dir = model_dir.as_ref();
 
         // Load config and setup using existing loader (but we'll ignore the Llama model)
-        let (_llama_model, _cache, config, device) = load_local_llama(
+        let (_llama_model, _cache, config, device, _name_mapper) = load_local_llama(
             model_dir.to_str().unwrap_or(""),
             dtype_str,
             true,  // use_kv_cache
@@ -157,11 +165,12 @@ impl ParallelModelManager {
             sliding_window: None,
             tie_word_embeddings: config.tie_word_embeddings,
             use_flash_attn: false,
+            multi_gpu: None, // M3.6: Can be configured via separate API
         };
 
         // Load model weights
         let vb = unsafe {
-            candle_nn::VarBuilder::from_mmaped_safetensors(
+            candlelight::nn::VarBuilder::from_mmaped_safetensors(
                 &[model_dir.join("model.safetensors")],
                 dtype,
                 &device,
@@ -196,6 +205,10 @@ impl ParallelModelManager {
             cache_index_pool: vec![false; max_batch_size],
             runtime_adjuster,
             prefix_cache,
+            segmented_config: None,
+            active_generation_spans: std::collections::HashMap::new(),
+            tiered_storage: None,
+            per_token_tracker: None,
         })
     }
 
@@ -214,7 +227,7 @@ impl ParallelModelManager {
         device: Option<Device>,
         chunked_prefill_config: Option<ChunkedPrefillConfig>,
     ) -> Result<Self> {
-        use candle_core::quantized::gguf_file::Value;
+        use candlelight::core::quantized::gguf_file::Value;
         use std::fs::File;
         use std::io::BufReader;
 
@@ -356,7 +369,7 @@ impl ParallelModelManager {
         println!();
 
         // Build Config struct
-        let config = candle_transformers::models::llama::Config {
+        let config = candlelight::transformers::models::llama::Config {
             hidden_size,
             intermediate_size,
             vocab_size,
@@ -369,7 +382,7 @@ impl ParallelModelManager {
             max_position_embeddings,
             bos_token_id,
             eos_token_id: eos_token_id
-                .map(|id| candle_transformers::models::llama::LlamaEosToks::Single(id)),
+                .map(|id| candlelight::transformers::models::llama::LlamaEosToks::Single(id)),
             rope_scaling: None,
             tie_word_embeddings: false,
         };
@@ -377,15 +390,43 @@ impl ParallelModelManager {
         // Extract tokenizer
         let tokenizer = content.extract_tokenizer()?;
 
+        // Build name mapper for architecture-agnostic tensor loading
+        use crate::pruning::name_mapping::TensorNameMapper;
+        let tensor_names: Vec<String> = content.tensor_infos().keys().cloned().collect();
+        let name_mapper = TensorNameMapper::from_tensor_names(&tensor_names)
+            .context("Failed to build tensor name mapper")?;
+
+        println!(
+            "🔍 Detected model architecture: {:?}",
+            name_mapper.architecture
+        );
+        println!();
+
+        // Wrap name mapper in Arc for sharing
+        let name_mapper_arc = std::sync::Arc::new(name_mapper.clone());
+
         // Create cache builder and per-layer KV caches
         let head_dim = hidden_size / num_attention_heads;
 
-        let cache_builder = ParallelCacheBuilder::new(
+        let mut cache_builder = ParallelCacheBuilder::new(
             max_batch_size,
             context_length,
             DType::F32, // GGUF quantized weights will be dequantized for cache
             &device,
         )?;
+
+        // Enable architecture-aware cache management (M5.1)
+        cache_builder.set_name_mapper(Some(name_mapper_arc.clone()));
+
+        // Verify layer count detection
+        if let Some(detected_layers) = cache_builder.detected_layer_count() {
+            if detected_layers != num_hidden_layers {
+                println!(
+                    "⚠️  Layer count mismatch: config={}, detected={}",
+                    num_hidden_layers, detected_layers
+                );
+            }
+        }
 
         let mut caches = Vec::with_capacity(num_hidden_layers);
         for _ in 0..num_hidden_layers {
@@ -407,14 +448,20 @@ impl ParallelModelManager {
             sliding_window: None,
             tie_word_embeddings: false,
             use_flash_attn: false,
+            multi_gpu: None, // M3.6: Can be configured via separate API
         };
 
         // Open file for tensor loading
         let mut file = BufReader::new(File::open(gguf_path)?);
 
         // Load model from GGUF with quantization
-        let model =
-            BatchedTransformer::from_gguf(transformer_config, &content, &mut file, &device)?;
+        let model = BatchedTransformer::from_gguf(
+            transformer_config,
+            &content,
+            &mut file,
+            &device,
+            &name_mapper,
+        )?;
 
         let chunked_prefill_config = chunked_prefill_config.unwrap_or_default();
 
@@ -443,6 +490,10 @@ impl ParallelModelManager {
             cache_index_pool: vec![false; max_batch_size],
             runtime_adjuster,
             prefix_cache,
+            segmented_config: None,
+            active_generation_spans: std::collections::HashMap::new(),
+            tiered_storage: None,
+            per_token_tracker: None,
         })
     }
     /// Load a model with hardware-adaptive configuration
@@ -493,7 +544,7 @@ impl ParallelModelManager {
         println!("Hardware detected: {}", profile.summary());
 
         // Load config using existing loader to get model configuration
-        let (_llama_model, _cache, config, _device) = load_local_llama(
+        let (_llama_model, _cache, config, _device, _name_mapper) = load_local_llama(
             model_dir_ref.to_str().unwrap_or(""),
             dtype_str,
             true,  // use_kv_cache
@@ -556,6 +607,267 @@ impl ParallelModelManager {
             dtype_str,
             chunked_prefill_config,
         )
+    }
+
+    // === Segmented KV Cache Configuration ===
+
+    /// Enable the segmented KV cache system.
+    ///
+    /// This activates:
+    /// - Automatic CacheSpan creation for prefill (UserInput) and decode (ModelGeneration)
+    /// - Attention weight capture on the last transformer layer
+    /// - Segment-level attention logging (if `config.log_span_attention` is true)
+    ///
+    /// Call this after loading the model but before processing any requests.
+    pub fn enable_segmented_cache(&mut self, config: crate::cache::SegmentedCacheConfig) {
+        if let Err(e) = config.validate() {
+            eprintln!("Invalid SegmentedCacheConfig: {}. Using defaults.", e);
+            let config = crate::cache::SegmentedCacheConfig::default();
+            self.segmented_config = Some(config);
+            return;
+        }
+
+        if config.capture_attention {
+            // Only capture on last layer to minimize memory overhead
+            self.model.set_capture_attention(true, true);
+        }
+
+        // Enable H2O + segmented eviction on the cache builder
+        self.cache_builder
+            .enable_segmented_eviction(config.clone());
+
+        // Create tiered storage manager if demotion is enabled
+        if config.tiered_demotion {
+            let max_ram = config.max_ram_demoted_segments;
+            let mut storage = crate::cache::TieredStorageManager::new(
+                self.device.clone(),
+                max_ram,
+            );
+
+            // Set up disk backend if configured
+            if let Some(ref path) = config.disk_storage_path {
+                match crate::cache::tiered_storage::FileDiskStore::new(path) {
+                    Ok(store) => {
+                        storage.set_disk_store(Box::new(store));
+                        println!("Disk tier enabled at: {}", path);
+                    }
+                    Err(e) => {
+                        eprintln!("Warning: Failed to create disk store at {}: {}", path, e);
+                    }
+                }
+            }
+
+            self.tiered_storage = Some(storage);
+        }
+
+        self.segmented_config = Some(config);
+    }
+
+    /// Generate a summary for a segment being evicted.
+    ///
+    /// Decodes the token IDs in the evicted range back to text and creates
+    /// a truncated summary. For a full model-powered summary, use
+    /// `generate_model_summary()` (requires an additional forward pass).
+    fn generate_eviction_summary_text(
+        &self,
+        slot: usize,
+        position_range: &std::ops::Range<usize>,
+    ) -> String {
+        // Try to reconstruct text from the request context
+        // Since we don't store per-position token IDs, use a positional summary
+        let span_len = position_range.end - position_range.start;
+        format!(
+            "Context from positions {}..{} ({} tokens, slot {})",
+            position_range.start, position_range.end, span_len, slot
+        )
+    }
+
+    /// Handle eviction pressure: per-token eviction or full segment demotion.
+    ///
+    /// Called when context utilization exceeds the pressure threshold.
+    /// If per-token eviction is enabled and a tracker is active, it processes
+    /// individual token evictions. Otherwise, it demotes the lowest-scoring
+    /// full segment.
+    fn handle_eviction_pressure(
+        &mut self,
+        config: &crate::cache::SegmentedCacheConfig,
+        max_util: f32,
+    ) {
+        // Phase 4: Update active per-token tracker
+        if self.per_token_tracker.is_some() {
+            if let Some(h2o) = self.cache_builder.h2o_policy().cloned() {
+                let pressure_mod = 1.0 + (max_util - config.eviction_pressure_threshold) * 2.0;
+
+                let tracker = self.per_token_tracker.as_mut().unwrap();
+                tracker.update_scores(&h2o, pressure_mod);
+
+                let evictions = tracker.select_evictions(5, config.base_decay_rate * 2.0);
+
+                if !evictions.is_empty() {
+                    tracker.mark_evicted(&evictions);
+                    let span_id = tracker.target_span;
+                    let remaining_after = tracker.remaining_ranges();
+
+                    if let Err(e) = self.cache_builder.partially_evict_span(
+                        span_id,
+                        &evictions,
+                        remaining_after,
+                    ) {
+                        eprintln!("Warning: Partial eviction failed: {}", e);
+                    }
+                }
+
+                // If span is >75% evicted, fully evict and drop tracker
+                let total = tracker.token_scores.len();
+                let evicted = tracker.evicted_count();
+                if total > 0 && evicted * 4 >= total * 3 {
+                    let span_id = tracker.target_span;
+                    let _ = self.cache_builder.evict_span(span_id);
+                    self.per_token_tracker = None;
+                    println!(
+                        "Per-token tracker: span {} fully evicted ({}% tokens removed)",
+                        span_id,
+                        evicted * 100 / total
+                    );
+                }
+            }
+            return; // Tracker is active — don't do full-segment eviction
+        }
+
+        // Full segment eviction path
+        let candidates = self
+            .cache_builder
+            .rank_eviction_candidates(config, max_util);
+
+        let (span_id, _score) = match candidates.first() {
+            Some(c) => *c,
+            None => return,
+        };
+
+        // Phase 4: Activate per-token tracking instead of immediate eviction
+        if config.per_token_eviction {
+            let span_meta = self
+                .cache_builder
+                .get_span(span_id)
+                .map(|s| (s.start_pos, s.end_pos - s.start_pos));
+
+            if let Some((start_pos, span_len)) = span_meta {
+                self.per_token_tracker = Some(crate::cache::PerTokenTracker::new(
+                    span_id,
+                    start_pos,
+                    span_len,
+                    config.attention_power,
+                    config.base_decay_rate,
+                ));
+                println!(
+                    "Per-token tracker activated on span {} ({} tokens)",
+                    span_id, span_len
+                );
+            }
+            return;
+        }
+
+        // Standard path: demote entire segment
+        let span_meta = self
+            .cache_builder
+            .get_span(span_id)
+            .map(|s| (s.slot, s.start_pos..s.end_pos));
+
+        if let Some((slot, position_range)) = span_meta {
+            if config.tiered_demotion {
+                // Generate summary before borrowing tiered_storage mutably
+                let summary = self.generate_eviction_summary_text(slot, &position_range);
+
+                if let Some(ref mut storage) = self.tiered_storage {
+                    let span_len = position_range.end - position_range.start;
+
+                    // Extract per-layer KV tensors
+                    let mut kv_layers = Vec::new();
+                    let mut extraction_ok = true;
+
+                    for cache in self.caches.iter() {
+                        match (|| -> candlelight::core::Result<(Tensor, Tensor)> {
+                            let k = cache
+                                .k()
+                                .narrow(0, slot, 1)?
+                                .narrow(2, position_range.start, span_len)?
+                                .to_device(&Device::Cpu)?;
+                            let v = cache
+                                .v()
+                                .narrow(0, slot, 1)?
+                                .narrow(2, position_range.start, span_len)?
+                                .to_device(&Device::Cpu)?;
+                            Ok((k, v))
+                        })() {
+                            Ok((k, v)) => kv_layers.push((k, v)),
+                            Err(e) => {
+                                eprintln!(
+                                    "Warning: Failed to extract KV for span {}: {}",
+                                    span_id, e
+                                );
+                                extraction_ok = false;
+                                break;
+                            }
+                        }
+                    }
+
+                    if extraction_ok {
+                        // Auto-demote oldest RAM segment to disk if full
+                        if storage.is_ram_full() {
+                            match storage.auto_demote_oldest_to_disk() {
+                                Ok(Some(old_id)) => {
+                                    println!("Auto-demoted span {} from RAM to disk", old_id);
+                                }
+                                Ok(None) => {}
+                                Err(e) => {
+                                    eprintln!("Warning: RAM->disk demotion failed: {}", e);
+                                }
+                            }
+                        }
+
+                        match storage.demote_to_ram(
+                            span_id,
+                            slot,
+                            position_range,
+                            kv_layers,
+                            summary.clone(),
+                            summary,
+                            None,
+                        ) {
+                            Ok(fact_key) => {
+                                println!(
+                                    "Demoted span {} to RAM (KB key: {})",
+                                    span_id, fact_key
+                                );
+                            }
+                            Err(e) => {
+                                eprintln!("Warning: Failed to demote span {}: {}", span_id, e);
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Evict from KV cache (marks metadata + masks positions)
+            if let Err(e) = self.cache_builder.evict_span(span_id) {
+                eprintln!("Warning: Failed to evict span {}: {}", span_id, e);
+            }
+        }
+    }
+
+    /// Disable the segmented KV cache system.
+    pub fn disable_segmented_cache(&mut self) {
+        self.model.set_capture_attention(false, false);
+        self.segmented_config = None;
+        self.active_generation_spans.clear();
+    }
+
+    /// Check if segmented cache is enabled.
+    pub fn is_segmented_cache_enabled(&self) -> bool {
+        self.segmented_config
+            .as_ref()
+            .map(|c| c.enabled)
+            .unwrap_or(false)
     }
 
     /// Tokenize a prompt
@@ -930,6 +1242,27 @@ impl ParallelModelManager {
                     padded_lengths,
                 );
 
+                // Segmented cache: begin UserInput spans before prefill forward pass
+                let mut prefill_span_ids: Vec<Option<crate::cache::SpanId>> =
+                    vec![None; request_ids.len()];
+                if self.is_segmented_cache_enabled() {
+                    for (i, &cache_idx) in request_ids.iter().enumerate() {
+                        match self.cache_builder.begin_span(
+                            cache_idx,
+                            crate::cache::CacheTag::UserInput,
+                            None,
+                        ) {
+                            Ok(span_id) => prefill_span_ids[i] = Some(span_id),
+                            Err(e) => {
+                                eprintln!(
+                                    "Warning: Failed to begin UserInput span for slot {}: {}",
+                                    cache_idx, e
+                                );
+                            }
+                        }
+                    }
+                }
+
                 // Forward pass
                 let forward_start = Instant::now();
                 crate::debug_prefill!(
@@ -962,6 +1295,15 @@ impl ParallelModelManager {
                         new_pos,
                         actual_len
                     );
+                }
+
+                // Segmented cache: end UserInput spans after position advance
+                if self.is_segmented_cache_enabled() {
+                    for span_id in prefill_span_ids.into_iter().flatten() {
+                        if let Err(e) = self.cache_builder.end_span(span_id) {
+                            eprintln!("Warning: Failed to end UserInput span {}: {}", span_id, e);
+                        }
+                    }
                 }
 
                 self.stats.prefill_batches += 1;
@@ -1212,6 +1554,28 @@ impl ParallelModelManager {
             self.stats.total_batches += 1;
             self.stats.max_batch_size = self.stats.max_batch_size.max(batch_size);
 
+            // Segmented cache: periodic logging and eviction after decode forward pass
+            if let Some(ref config) = self.segmented_config {
+                if config.enabled {
+                    // Throttle to H2O update interval
+                    if self.stats.decode_batches % config.h2o_update_interval == 0 {
+                        if config.log_span_attention {
+                            self.cache_builder.log_span_attention_summary();
+                        }
+
+                        let max_util = self.cache_builder.get_max_utilization();
+
+                        if config.shadow_mode {
+                            self.cache_builder
+                                .log_eviction_candidates(config, 5);
+                        } else if max_util > config.eviction_pressure_threshold {
+                            let config_clone = config.clone();
+                            self.handle_eviction_pressure(&config_clone, max_util);
+                        }
+                    }
+                }
+            }
+
             // Process results (only for decode_requests, which are the requests that went through decode)
             for (_i, &idx) in decode_requests.iter().enumerate() {
                 let ctx = &mut batch[idx];
@@ -1230,9 +1594,105 @@ impl ParallelModelManager {
                 ctx.record_token();
                 self.stats.total_tokens_generated += 1;
 
+                // Segmented cache: check for <RETRIEVE:key> token pattern
+                if self.is_segmented_cache_enabled() {
+                    if let Some(ref config) = self.segmented_config {
+                        if config.tiered_demotion && !config.shadow_mode {
+                            // Decode last ~15 tokens to check for RETRIEVE pattern
+                            let check_len = ctx.generated_tokens.len().min(15);
+                            let tail = &ctx.generated_tokens
+                                [ctx.generated_tokens.len() - check_len..];
+                            if let Ok(decoded) = self.tokenizer.decode(tail, false) {
+                                if let Some(start) = decoded.find("<RETRIEVE:") {
+                                    if let Some(end) = decoded[start..].find('>') {
+                                        let key =
+                                            &decoded[start + 10..start + end];
+                                        // Look up the demoted segment
+                                        if let Some(ref mut storage) =
+                                            self.tiered_storage
+                                        {
+                                            if let Some(span_id) =
+                                                storage.find_by_fact_key(key)
+                                            {
+                                                // Promote back to GPU
+                                                match storage
+                                                    .promote_with_disk(span_id)
+                                                {
+                                                    Ok((slot, range, kv_layers)) => {
+                                                        // Re-inject KV tensors into cache
+                                                        let mut inject_ok = true;
+                                                        for (layer_idx, (k, v)) in
+                                                            kv_layers.iter().enumerate()
+                                                        {
+                                                            if layer_idx < self.caches.len() {
+                                                                if let Err(e) = self.caches
+                                                                    [layer_idx]
+                                                                    .restore_kv_range(
+                                                                        slot,
+                                                                        range.start,
+                                                                        k,
+                                                                        v,
+                                                                    )
+                                                                {
+                                                                    eprintln!(
+                                                                        "Warning: KV re-injection failed at layer {}: {}",
+                                                                        layer_idx, e
+                                                                    );
+                                                                    inject_ok = false;
+                                                                    break;
+                                                                }
+                                                            }
+                                                        }
+
+                                                        if inject_ok {
+                                                            // Clear evicted positions so mask allows attention again
+                                                            self.cache_builder
+                                                                .clear_evicted_range(
+                                                                    slot,
+                                                                    range.start,
+                                                                    range.end,
+                                                                );
+                                                            println!(
+                                                                "Promoted span {} back to GPU, re-injected at positions {}..{} (key: {})",
+                                                                span_id, range.start, range.end, key
+                                                            );
+                                                        }
+                                                    }
+                                                    Err(e) => {
+                                                        eprintln!(
+                                                            "Warning: Failed to promote span {}: {}",
+                                                            span_id, e
+                                                        );
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
                 if self.is_eos_token(next_token)
                     || ctx.tokens_generated >= ctx.request.max_new_tokens
                 {
+                    // Segmented cache: end ModelGeneration span on completion
+                    if self.is_segmented_cache_enabled() {
+                        if let Some(cache_idx) = ctx.cache_index {
+                            if let Some(span_id) =
+                                self.active_generation_spans.remove(&cache_idx)
+                            {
+                                if let Err(e) = self.cache_builder.end_span(span_id) {
+                                    eprintln!(
+                                        "Warning: Failed to end ModelGeneration span {}: {}",
+                                        span_id, e
+                                    );
+                                }
+                            }
+                        }
+                    }
+
                     ctx.complete();
                     // Automatically release cache index when request completes
                     if let Some(cache_idx) = ctx.cache_index {
@@ -1240,6 +1700,30 @@ impl ParallelModelManager {
                     }
                     results[idx] = None;
                 } else {
+                    // Segmented cache: begin ModelGeneration span on first decode token
+                    if self.is_segmented_cache_enabled() {
+                        if let Some(cache_idx) = ctx.cache_index {
+                            if !self.active_generation_spans.contains_key(&cache_idx) {
+                                match self.cache_builder.begin_span(
+                                    cache_idx,
+                                    crate::cache::CacheTag::ModelGeneration,
+                                    None,
+                                ) {
+                                    Ok(span_id) => {
+                                        self.active_generation_spans
+                                            .insert(cache_idx, span_id);
+                                    }
+                                    Err(e) => {
+                                        eprintln!(
+                                            "Warning: Failed to begin ModelGeneration span for slot {}: {}",
+                                            cache_idx, e
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+
                     results[idx] = Some(next_token);
                 }
             }

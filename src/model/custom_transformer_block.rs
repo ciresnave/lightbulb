@@ -73,11 +73,12 @@
 //! )?;
 //! ```
 
-use candle_core::{DType, Device, Module, Result, Tensor};
-use candle_nn::{RmsNorm, VarBuilder, rms_norm};
+use candlelight::core::{DType, Device, Module, Result, Tensor};
+use candlelight::nn::VarBuilder;
 use std::io::{Read, Seek};
 
 use super::custom_attention::BatchedAttention;
+use super::fused_rmsnorm::FusedRmsNorm;
 use super::mlp_wrapper::Mlp; // Thin wrapper using Candle's components
 use crate::engine::{ParallelCacheBuilder, ParallelKvCache};
 use crate::model::batch_metadata::BatchMetadata;
@@ -89,9 +90,9 @@ use crate::model::batch_metadata::BatchMetadata;
 ///
 /// # Components
 ///
-/// - **input_layernorm**: RMSNorm before attention
+/// - **input_layernorm**: FusedRmsNorm before attention (uses fused GPU kernels on CUDA)
 /// - **self_attn**: Multi-head self-attention with KV cache
-/// - **post_attention_layernorm**: RMSNorm before MLP
+/// - **post_attention_layernorm**: FusedRmsNorm before MLP (uses fused GPU kernels on CUDA)
 /// - **mlp**: Feed-forward network with SwiGLU
 ///
 /// # Memory Layout
@@ -105,14 +106,14 @@ pub struct BatchedTransformerBlock {
     /// Layer index (0 to num_layers-1)
     layer_idx: usize,
 
-    /// RMSNorm before self-attention (Pre-LN pattern)
-    input_layernorm: RmsNorm,
+    /// FusedRmsNorm before self-attention (Pre-LN pattern)
+    input_layernorm: FusedRmsNorm,
 
     /// Batched multi-head self-attention
     self_attn: BatchedAttention,
 
-    /// RMSNorm before MLP (Pre-LN pattern)
-    post_attention_layernorm: RmsNorm,
+    /// FusedRmsNorm before MLP (Pre-LN pattern)
+    post_attention_layernorm: FusedRmsNorm,
 
     /// Feed-forward network (using Candle's Mlp - no need for custom version!)
     mlp: Mlp,
@@ -155,10 +156,11 @@ impl BatchedTransformerBlock {
         let device = vb.device().clone();
         let dtype = vb.dtype();
 
-        // Load RMSNorm layers (Candle provides this!)
-        let input_layernorm = rms_norm(hidden_size, rms_norm_eps, vb.pp("input_layernorm"))?;
+        // Load FusedRmsNorm layers (uses fused GPU kernels on CUDA, standard on CPU)
+        let input_layernorm =
+            FusedRmsNorm::new(hidden_size, rms_norm_eps, vb.pp("input_layernorm"))?;
         let post_attention_layernorm =
-            rms_norm(hidden_size, rms_norm_eps, vb.pp("post_attention_layernorm"))?;
+            FusedRmsNorm::new(hidden_size, rms_norm_eps, vb.pp("post_attention_layernorm"))?;
 
         // Create batched attention layer
         let self_attn_vb = vb.pp("self_attn");
@@ -198,6 +200,7 @@ impl BatchedTransformerBlock {
     /// * `gguf_content` - GGUF file content with metadata and tensor info
     /// * `file` - Open file handle for reading tensor data
     /// * `device` - Device to load tensors on
+    /// * `name_mapper` - Tensor name mapper for architecture-agnostic loading
     pub fn from_gguf<R: Read + Seek>(
         layer_idx: usize,
         hidden_size: usize,
@@ -208,18 +211,24 @@ impl BatchedTransformerBlock {
         gguf_content: &crate::gguf::Content,
         file: &mut R,
         device: &Device,
+        name_mapper: &crate::pruning::name_mapping::TensorNameMapper,
     ) -> Result<Self> {
-        let prefix = format!("blk.{}", layer_idx);
+        // Map abstract names to concrete architecture-specific names
+        let attn_norm_name = name_mapper
+            .map_name(&format!("layer_{}.attention.normalization", layer_idx))
+            .unwrap_or_else(|| format!("blk.{}.attn_norm.weight", layer_idx));
+        let ffn_norm_name = name_mapper
+            .map_name(&format!("layer_{}.ffn.normalization", layer_idx))
+            .unwrap_or_else(|| format!("blk.{}.ffn_norm.weight", layer_idx));
 
-        // Load RMSNorm weights (dequantize them since RmsNorm doesn't work with quantized weights directly)
-        let input_norm_tensor =
-            gguf_content.tensor(file, &format!("{}.attn_norm.weight", prefix), device)?;
-        let post_attn_norm_tensor =
-            gguf_content.tensor(file, &format!("{}.ffn_norm.weight", prefix), device)?;
+        // Load FusedRmsNorm weights (dequantize them since FusedRmsNorm doesn't work with quantized weights directly)
+        let input_norm_tensor = gguf_content.tensor(file, &attn_norm_name, device)?;
+        let post_attn_norm_tensor = gguf_content.tensor(file, &ffn_norm_name, device)?;
 
-        let input_layernorm = RmsNorm::new(input_norm_tensor.dequantize(device)?, rms_norm_eps);
+        let input_layernorm =
+            FusedRmsNorm::new_with_weight(input_norm_tensor.dequantize(device)?, rms_norm_eps);
         let post_attention_layernorm =
-            RmsNorm::new(post_attn_norm_tensor.dequantize(device)?, rms_norm_eps);
+            FusedRmsNorm::new_with_weight(post_attn_norm_tensor.dequantize(device)?, rms_norm_eps);
 
         // Load attention with quantized weights
         let self_attn = BatchedAttention::from_gguf(
@@ -230,6 +239,7 @@ impl BatchedTransformerBlock {
             file,
             device,
             layer_idx,
+            name_mapper,
         )?;
 
         // Load MLP with quantized weights
@@ -243,6 +253,7 @@ impl BatchedTransformerBlock {
             device,
             layer_idx,
             use_fused_kernels,
+            name_mapper,
         )?;
 
         // Use F32 for quantized models
@@ -304,7 +315,7 @@ impl BatchedTransformerBlock {
 
         // Validate input dimensions
         if hidden_dim != self.hidden_size {
-            candle_core::bail!(
+            candlelight::core::bail!(
                 "Input hidden dimension {} does not match expected {} for layer {}",
                 hidden_dim,
                 self.hidden_size,
@@ -364,14 +375,23 @@ impl BatchedTransformerBlock {
     pub fn hidden_size(&self) -> usize {
         self.hidden_size
     }
+
+    /// Enable or disable attention weight capture for this block's attention layer.
+    ///
+    /// When enabled, the attention layer returns attention weights alongside its
+    /// output, which are used by H2O and segmented eviction policies to determine
+    /// what context the model finds valuable.
+    pub fn set_capture_attention(&mut self, capture: bool) {
+        self.self_attn.set_capture_attention(capture);
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::engine::{ParallelCacheBuilder, ParallelKvCache, RequestContext, RequestState};
-    use candle_core::{Device, Tensor};
-    use candle_nn::{VarBuilder, VarMap};
+    use candlelight::core::{Device, Tensor};
+    use candlelight::nn::{VarBuilder, VarMap};
 
     fn create_test_cache_components(
         max_batch_size: usize,
@@ -381,7 +401,7 @@ mod tests {
         head_dim: usize,
     ) -> (ParallelCacheBuilder, Vec<ParallelKvCache>) {
         let device = Device::Cpu;
-        let dtype = candle_core::DType::F32;
+        let dtype = candlelight::core::DType::F32;
         let cache_builder =
             ParallelCacheBuilder::new(max_batch_size, max_seq_len, dtype, &device).unwrap();
 
@@ -397,15 +417,15 @@ mod tests {
         let device = Device::Cpu;
         // RoPE cos/sin are generated at half the head dimension (freqs for pairs)
         let half_dim = head_dim / 2;
-        let cos = Tensor::ones((max_seq_len, half_dim), candle_core::DType::F32, &device).unwrap();
-        let sin = Tensor::zeros((max_seq_len, half_dim), candle_core::DType::F32, &device).unwrap();
+        let cos = Tensor::ones((max_seq_len, half_dim), candlelight::core::DType::F32, &device).unwrap();
+        let sin = Tensor::zeros((max_seq_len, half_dim), candlelight::core::DType::F32, &device).unwrap();
         (cos, sin)
     }
 
     #[test]
     fn test_batched_transformer_block_shapes() {
         let device = Device::Cpu;
-        let dtype = candle_core::DType::F32;
+        let dtype = candlelight::core::DType::F32;
         let hidden_size = 64;
         let num_heads = 4;
         let num_kv_heads = 4;
@@ -473,7 +493,7 @@ mod tests {
     #[test]
     fn test_batched_transformer_block_single_token() {
         let device = Device::Cpu;
-        let dtype = candle_core::DType::F32;
+        let dtype = candlelight::core::DType::F32;
         let hidden_size = 32;
         let num_heads = 2;
         let num_kv_heads = 2;
@@ -527,7 +547,7 @@ mod tests {
     #[test]
     fn test_batched_transformer_block_properties() {
         let device = Device::Cpu;
-        let dtype = candle_core::DType::F32;
+        let dtype = candlelight::core::DType::F32;
         let hidden_size = 64;
         let num_heads = 4;
         let num_kv_heads = 4;
@@ -557,7 +577,7 @@ mod tests {
     #[test]
     fn test_batched_transformer_block_dimension_validation() {
         let device = Device::Cpu;
-        let dtype = candle_core::DType::F32;
+        let dtype = candlelight::core::DType::F32;
         let hidden_size = 64;
         let num_heads = 4;
         let num_kv_heads = 4;
