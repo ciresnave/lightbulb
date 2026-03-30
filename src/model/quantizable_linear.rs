@@ -1,12 +1,12 @@
 //! Quantizable Linear Layer
 //!
-//! A unified linear layer type that supports both regular (fp32/fp16) and quantized (Q4/Q8) weights.
+//! A linear layer that supports both regular and quantized weights.
 //! This allows our custom batched transformer to work with both safetensors and GGUF models
 //! without changing the inference code.
 
-use candle_core::quantized::QMatMul;
-use candle_core::{Module, Result, Tensor};
-use candle_nn::Linear;
+use candlelight::core::quantized::QMatMul;
+use candlelight::core::{Module, Result, Tensor};
+use candlelight::nn::Linear;
 
 /// A linear layer that can use either regular or quantized weights
 ///
@@ -22,7 +22,7 @@ use candle_nn::Linear;
 /// ```rust,ignore
 /// // From safetensors (regular)
 /// let linear = QuantizableLinear::from_linear(
-///     candle_nn::linear(in_dim, out_dim, vb)?
+///     candlelight::nn::linear(in_dim, out_dim, vb)?
 /// );
 ///
 /// // From GGUF (quantized)

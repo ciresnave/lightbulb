@@ -73,8 +73,8 @@
 //! - Enables continuous batching at scale
 
 use anyhow::{Context, Result};
-use candle_core::{DType, Device, IndexOp, Tensor};
-use candle_transformers::models::llama::{Cache, Config, LlamaEosToks};
+use candlelight::core::{DType, Device, IndexOp, Tensor};
+use candlelight::transformers::models::llama::{Cache, Config, LlamaEosToks};
 use std::collections::HashMap;
 use std::path::Path;
 use std::time::Instant;
@@ -151,7 +151,7 @@ impl BatchStats {
 
 /// Wrapper for a loaded model with tokenizer and batch manager
 pub struct ModelManager {
-    batch_manager: BatchManager<candle_transformers::models::llama::Llama>, // Model-agnostic batch manager
+    batch_manager: BatchManager<candlelight::transformers::models::llama::Llama>, // Model-agnostic batch manager
     caches: HashMap<String, Cache>, // Per-request caches (keyed by request ID)
     config: Config,
     tokenizer: Tokenizer,
@@ -177,7 +177,7 @@ impl ModelManager {
         let model_dir = model_dir.as_ref();
 
         // Load model and cache
-        let (model, _cache, config, device) = load_local_llama(
+        let (model, _cache, config, device, _name_mapper) = load_local_llama(
             model_dir.to_str().context("Invalid model path")?,
             dtype,
             true,  // use_kv_cache

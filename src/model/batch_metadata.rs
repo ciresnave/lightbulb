@@ -4,7 +4,7 @@
 //! of requests is structured, enabling efficient batched forward passes while
 //! handling variable-length sequences.
 
-use candle_core::{Device, Result, Tensor};
+use candlelight::core::{Device, Result, Tensor};
 
 /// Request ID type (numeric identifier for batch tracking)
 ///
@@ -447,7 +447,7 @@ mod tests {
 
     #[test]
     fn test_position_tensor_decode() {
-        use candle_core::Device;
+        use candlelight::core::Device;
 
         let metadata = BatchMetadata::from_decode_batch(vec![1, 2], vec![5, 2], vec![5, 2]);
 
@@ -462,7 +462,7 @@ mod tests {
 
     #[test]
     fn test_position_tensor_prefill() {
-        use candle_core::Device;
+        use candlelight::core::Device;
 
         let metadata = BatchMetadata::from_prefill_batch(vec![1, 2], vec![3, 2]);
 
@@ -623,7 +623,7 @@ mod tests {
 
     #[test]
     fn test_position_tensor_single_token() -> Result<()> {
-        use candle_core::Device;
+        use candlelight::core::Device;
 
         let metadata = BatchMetadata::from_decode_batch(vec![0], vec![0], vec![0]);
         let device = Device::Cpu;
@@ -638,7 +638,7 @@ mod tests {
 
     #[test]
     fn test_position_tensor_max_position() -> Result<()> {
-        use candle_core::Device;
+        use candlelight::core::Device;
 
         let max_pos = 8191;
         let metadata = BatchMetadata::from_decode_batch(vec![0], vec![max_pos], vec![max_pos]);

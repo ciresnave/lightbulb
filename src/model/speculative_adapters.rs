@@ -8,7 +8,7 @@ use crate::engine::speculative::SpeculativeModel;
 use crate::model::batch_metadata::BatchMetadata;
 use crate::model::custom_transformer::BatchedTransformer;
 use anyhow::Result;
-use candle_core::{Device, IndexOp, Tensor};
+use candlelight::core::{Device, IndexOp, Tensor};
 
 /// Adapter for BatchedTransformer to work with speculative decoding
 pub struct BatchedTransformerAdapter {

@@ -21,8 +21,8 @@
 use crate::engine::ParallelCacheBuilder;
 use crate::model::BatchMetadata;
 use anyhow::Result;
-use candle_core::{Device, IndexOp, Tensor};
-use candle_transformers::models::llama::Cache;
+use candlelight::core::{Device, IndexOp, Tensor};
+use candlelight::transformers::models::llama::Cache;
 
 /// Model-agnostic batch manager for inference
 ///
@@ -30,7 +30,7 @@ use candle_transformers::models::llama::Cache;
 /// Works with Llama, Mistral, Gemma, Qwen, etc. without modification.
 ///
 /// # Type Parameters
-/// * `M` - Model type (e.g., `candle_transformers::models::llama::Llama`)
+/// * `M` - Model type (e.g., `candlelight::transformers::models::llama::Llama`)
 pub struct BatchManager<M> {
     model: M,
     cache_builder: ParallelCacheBuilder,
@@ -211,25 +211,25 @@ pub trait TransformerModel {
 }
 
 // Implement trait for Candle's Llama model
-impl TransformerModel for candle_transformers::models::llama::Llama {
+impl TransformerModel for candlelight::transformers::models::llama::Llama {
     fn forward(&mut self, tokens: &Tensor, position: usize, cache: &mut Cache) -> Result<Tensor> {
-        // Candle's Llama::forward returns candle_core::Result, convert to anyhow::Result
-        candle_transformers::models::llama::Llama::forward(self, tokens, position, cache)
+        // Candle's Llama::forward returns candlelight::core::Result, convert to anyhow::Result
+        candlelight::transformers::models::llama::Llama::forward(self, tokens, position, cache)
             .map_err(|e| anyhow::anyhow!("Llama forward pass failed: {}", e))
     }
 }
 
 // Implement trait for Mistral (when needed)
-// impl TransformerModel for candle_transformers::models::mistral::Model {
+// impl TransformerModel for candlelight::transformers::models::mistral::Model {
 //     fn forward(&mut self, tokens: &Tensor, position: usize, cache: &mut Cache) -> Result<Tensor> {
-//         candle_transformers::models::mistral::Model::forward(self, tokens, position, cache)
+//         candlelight::transformers::models::mistral::Model::forward(self, tokens, position, cache)
 //     }
 // }
 
 // Implement trait for Gemma (when needed)
-// impl TransformerModel for candle_transformers::models::gemma::Model {
+// impl TransformerModel for candlelight::transformers::models::gemma::Model {
 //     fn forward(&mut self, tokens: &Tensor, position: usize, cache: &mut Cache) -> Result<Tensor> {
-//         candle_transformers::models::gemma::Model::forward(self, tokens, position, cache)
+//         candlelight::transformers::models::gemma::Model::forward(self, tokens, position, cache)
 //     }
 // }
 

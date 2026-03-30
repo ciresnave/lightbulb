@@ -29,7 +29,10 @@
 //! ```
 
 use anyhow::Result;
-use candle_core::{DType, Device, Tensor};
+use std::sync::Arc;
+
+use candlelight::core::{DType, Device, Tensor};
+use parking_lot::Mutex;
 
 /// Configuration for chunked prefill strategy
 #[derive(Debug, Clone)]

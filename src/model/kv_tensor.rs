@@ -8,7 +8,7 @@
 //! dimensioned by max_batch_size (not actual batch size).
 
 use anyhow::Result;
-use candle_core::Tensor;
+use candlelight::core::Tensor;
 
 /// Wrapper for Key/Value tensors with canonical max_batch_size representation
 ///
@@ -214,7 +214,7 @@ impl KVTensor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use candle_core::{DType, Device};
+    use candlelight::core::{DType, Device};
 
     #[test]
     fn test_from_compact_expansion() {

@@ -2,7 +2,7 @@
 ///
 /// This struct caches intermediate tensors and state to minimize allocations
 /// and redundant operations during the decode phase of inference.
-use candle_core::{Result, Tensor};
+use candlelight::core::{Result, Tensor};
 
 /// Reusable state for optimized decode loops
 ///
@@ -74,14 +74,14 @@ impl DecodeState {
         &mut self,
         batch_size: usize,
         hidden_size: usize,
-        device: &candle_core::Device,
+        device: &candlelight::core::Device,
     ) -> Result<()> {
         if self.decode_buffer.is_none() {
             // Pre-allocate [batch_size, 1, hidden_size] buffer
             let shape = vec![batch_size, 1, hidden_size];
             self.decode_buffer = Some(Tensor::zeros(
                 shape.as_slice(),
-                candle_core::DType::F32,
+                candlelight::core::DType::F32,
                 device,
             )?);
         }
@@ -153,7 +153,7 @@ impl Default for DecodeState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use candle_core::Device;
+    use candlelight::core::Device;
 
     #[test]
     fn test_decode_state_initialization() -> anyhow::Result<()> {

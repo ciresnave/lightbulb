@@ -11,8 +11,8 @@
 //! previous `custom_mlp.rs` which had 400+ lines including debug code.
 
 use crate::model::quantizable_linear::QuantizableLinear;
-use candle_core::{Module, Result, Tensor};
-use candle_nn::VarBuilder;
+use candlelight::core::{Module, Result, Tensor};
+use candlelight::nn::VarBuilder;
 use std::io::{Read, Seek};
 
 /// Minimal MLP using Candle's components
@@ -50,19 +50,19 @@ impl Mlp {
         use_fused_kernels: bool,
     ) -> Result<Self> {
         // Use Candle's linear_b with bias=false (same as Candle's Llama for models without bias)
-        let gate_proj = QuantizableLinear::from_linear(candle_nn::linear_b(
+        let gate_proj = QuantizableLinear::from_linear(candlelight::nn::linear_b(
             hidden_size,
             intermediate_size,
             false,
             vb.pp("gate_proj"),
         )?);
-        let up_proj = QuantizableLinear::from_linear(candle_nn::linear_b(
+        let up_proj = QuantizableLinear::from_linear(candlelight::nn::linear_b(
             hidden_size,
             intermediate_size,
             false,
             vb.pp("up_proj"),
         )?);
-        let down_proj = QuantizableLinear::from_linear(candle_nn::linear_b(
+        let down_proj = QuantizableLinear::from_linear(candlelight::nn::linear_b(
             intermediate_size,
             hidden_size,
             false,
@@ -95,34 +95,43 @@ impl Mlp {
     /// * `device` - Device to load tensors on
     /// * `layer_idx` - Layer index for tensor naming (e.g., blk.0, blk.1, ...)
     /// * `use_fused_kernels` - Enable CPU kernel fusion for better performance
+    /// * `name_mapper` - Tensor name mapper for architecture-agnostic loading
     pub fn from_gguf<R: Read + Seek>(
         _hidden_size: usize,
         _intermediate_size: usize,
         gguf_content: &crate::gguf::Content,
         file: &mut R,
-        device: &candle_core::Device,
+        device: &candlelight::core::Device,
         layer_idx: usize,
         use_fused_kernels: bool,
+        name_mapper: &crate::pruning::name_mapping::TensorNameMapper,
     ) -> Result<Self> {
-        let prefix = format!("blk.{}", layer_idx);
+        // Map abstract names to concrete architecture-specific names
+        let gate_name = name_mapper
+            .map_name(&format!("layer_{}.ffn.gate", layer_idx))
+            .unwrap_or_else(|| format!("blk.{}.ffn_gate.weight", layer_idx));
+        let up_name = name_mapper
+            .map_name(&format!("layer_{}.ffn.up", layer_idx))
+            .unwrap_or_else(|| format!("blk.{}.ffn_up.weight", layer_idx));
+        let down_name = name_mapper
+            .map_name(&format!("layer_{}.ffn.down", layer_idx))
+            .unwrap_or_else(|| format!("blk.{}.ffn_down.weight", layer_idx));
 
         // Load quantized MLP tensors
         // GGUF naming: ffn_gate (w1), ffn_up (w3), ffn_down (w2)
-        let gate_tensor =
-            gguf_content.tensor(file, &format!("{}.ffn_gate.weight", prefix), device)?;
-        let up_tensor = gguf_content.tensor(file, &format!("{}.ffn_up.weight", prefix), device)?;
-        let down_tensor =
-            gguf_content.tensor(file, &format!("{}.ffn_down.weight", prefix), device)?;
+        let gate_tensor = gguf_content.tensor(file, &gate_name, device)?;
+        let up_tensor = gguf_content.tensor(file, &up_name, device)?;
+        let down_tensor = gguf_content.tensor(file, &down_name, device)?;
 
         // Convert QTensor to QMatMul and wrap in QuantizableLinear
         let gate_proj = QuantizableLinear::from_qmatmul(
-            candle_core::quantized::QMatMul::from_qtensor(gate_tensor)?,
+            candlelight::core::quantized::QMatMul::from_qtensor(gate_tensor)?,
         );
         let up_proj = QuantizableLinear::from_qmatmul(
-            candle_core::quantized::QMatMul::from_qtensor(up_tensor)?,
+            candlelight::core::quantized::QMatMul::from_qtensor(up_tensor)?,
         );
         let down_proj = QuantizableLinear::from_qmatmul(
-            candle_core::quantized::QMatMul::from_qtensor(down_tensor)?,
+            candlelight::core::quantized::QMatMul::from_qtensor(down_tensor)?,
         );
 
         Ok(Self {
@@ -150,14 +159,14 @@ impl Mlp {
 
         // M3.3: Fused kernels implementation
         // NOTE: Current implementation shows regression due to overhead of extracting
-        // weights from candle_nn::Linear. The weight() and bias() methods appear to
+        // weights from candlelight::nn::Linear. The weight() and bias() methods appear to
         // be expensive (possibly cloning or creating new tensors).
         //
         // Analysis from benchmark:
         // - Unfused: 21.7ms per forward pass
         // - Fused (attempted): 213.7ms per forward pass (10x slower!)
         //
-        // Root cause: candle_nn::Linear doesn't expose weights efficiently for
+        // Root cause: candlelight::nn::Linear doesn't expose weights efficiently for
         // external fusion. True kernel fusion would require:
         // 1. Custom linear layer with direct weight access, OR
         // 2. Candle upstream changes to provide fused matmul+activation ops
@@ -177,12 +186,12 @@ impl Mlp {
                 }
                 crate::model::quantizable_linear::QuantizableLinear::Quantized(_) => {
                     // Quantized path: use unfused (fusion doesn't apply to quantized ops)
-                    candle_nn::ops::silu(&self.gate_proj.forward(x)?)?
+                    candlelight::nn::ops::silu(&self.gate_proj.forward(x)?)?
                 }
             }
         } else {
             // Unfused path: separate gate_proj + silu
-            candle_nn::ops::silu(&self.gate_proj.forward(x)?)?
+            candlelight::nn::ops::silu(&self.gate_proj.forward(x)?)?
         };
 
         let up = self.up_proj.forward(x)?;

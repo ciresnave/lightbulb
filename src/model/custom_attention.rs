@@ -34,8 +34,8 @@
 use crate::engine::{ParallelCacheBuilder, ParallelKvCache};
 use crate::model::BatchMetadata;
 use crate::model::quantizable_linear::QuantizableLinear;
-use candle_core::{DType, Device, IndexOp, Module, Result, Tensor};
-use candle_nn::VarBuilder;
+use candlelight::core::{DType, Device, IndexOp, Module, Result, Tensor};
+use candlelight::nn::VarBuilder;
 use std::io::{Read, Seek};
 
 /// FlashAttention-2 wrapper with feature gating
@@ -50,12 +50,12 @@ fn flash_attn(
     softmax_scale: f32,
     causal: bool,
 ) -> Result<Tensor> {
-    candle_flash_attn::flash_attn(q, k, v, softmax_scale, causal)
+    candlelight::flash_attn::flash_attn(q, k, v, softmax_scale, causal)
 }
 
 #[cfg(not(feature = "flash-attn"))]
 fn flash_attn(_: &Tensor, _: &Tensor, _: &Tensor, _: f32, _: bool) -> Result<Tensor> {
-    candle_core::bail!("compile with '--features flash-attn'")
+    candlelight::bail!("compile with '--features flash-attn'")
 }
 
 /// Batched Multi-Head Attention Layer
@@ -105,22 +105,22 @@ impl BatchedAttention {
         let scale = 1.0 / (head_dim as f64).sqrt();
 
         // Load projection layers (no bias for Llama)
-        let q_proj = QuantizableLinear::from_linear(candle_nn::linear_no_bias(
+        let q_proj = QuantizableLinear::from_linear(candlelight::nn::linear_no_bias(
             hidden_size,
             num_heads * head_dim,
             vb.pp("q_proj"),
         )?);
-        let k_proj = QuantizableLinear::from_linear(candle_nn::linear_no_bias(
+        let k_proj = QuantizableLinear::from_linear(candlelight::nn::linear_no_bias(
             hidden_size,
             num_kv_heads * head_dim,
             vb.pp("k_proj"),
         )?);
-        let v_proj = QuantizableLinear::from_linear(candle_nn::linear_no_bias(
+        let v_proj = QuantizableLinear::from_linear(candlelight::nn::linear_no_bias(
             hidden_size,
             num_kv_heads * head_dim,
             vb.pp("v_proj"),
         )?);
-        let o_proj = QuantizableLinear::from_linear(candle_nn::linear_no_bias(
+        let o_proj = QuantizableLinear::from_linear(candlelight::nn::linear_no_bias(
             num_heads * head_dim,
             hidden_size,
             vb.pp("o_proj"),
@@ -156,6 +156,7 @@ impl BatchedAttention {
     /// * `file` - Open file handle for reading tensor data
     /// * `device` - Device to load tensors on
     /// * `layer_idx` - Layer index for tensor naming (e.g., blk.0, blk.1, ...)
+    /// * `name_mapper` - Tensor name mapper for architecture-agnostic loading
     pub fn from_gguf<R: Read + Seek>(
         hidden_size: usize,
         num_heads: usize,
@@ -164,31 +165,43 @@ impl BatchedAttention {
         file: &mut R,
         device: &Device,
         layer_idx: usize,
+        name_mapper: &crate::pruning::name_mapping::TensorNameMapper,
     ) -> Result<Self> {
         let head_dim = hidden_size / num_heads;
         let scale = 1.0 / (head_dim as f64).sqrt();
 
-        let prefix = format!("blk.{}", layer_idx);
+        // Map abstract names to concrete architecture-specific names
+        let q_name = name_mapper
+            .map_name(&format!("layer_{}.attention.query", layer_idx))
+            .unwrap_or_else(|| format!("blk.{}.attn_q.weight", layer_idx));
+        let k_name = name_mapper
+            .map_name(&format!("layer_{}.attention.key", layer_idx))
+            .unwrap_or_else(|| format!("blk.{}.attn_k.weight", layer_idx));
+        let v_name = name_mapper
+            .map_name(&format!("layer_{}.attention.value", layer_idx))
+            .unwrap_or_else(|| format!("blk.{}.attn_v.weight", layer_idx));
+        let o_name = name_mapper
+            .map_name(&format!("layer_{}.attention.output", layer_idx))
+            .unwrap_or_else(|| format!("blk.{}.attn_output.weight", layer_idx));
 
         // Load quantized projection tensors
-        let q_tensor = gguf_content.tensor(file, &format!("{}.attn_q.weight", prefix), device)?;
-        let k_tensor = gguf_content.tensor(file, &format!("{}.attn_k.weight", prefix), device)?;
-        let v_tensor = gguf_content.tensor(file, &format!("{}.attn_v.weight", prefix), device)?;
-        let o_tensor =
-            gguf_content.tensor(file, &format!("{}.attn_output.weight", prefix), device)?;
+        let q_tensor = gguf_content.tensor(file, &q_name, device)?;
+        let k_tensor = gguf_content.tensor(file, &k_name, device)?;
+        let v_tensor = gguf_content.tensor(file, &v_name, device)?;
+        let o_tensor = gguf_content.tensor(file, &o_name, device)?;
 
         // Convert QTensor to QMatMul and wrap in QuantizableLinear
         let q_proj = QuantizableLinear::from_qmatmul(
-            candle_core::quantized::QMatMul::from_qtensor(q_tensor)?,
+            candlelight::core::quantized::QMatMul::from_qtensor(q_tensor)?,
         );
         let k_proj = QuantizableLinear::from_qmatmul(
-            candle_core::quantized::QMatMul::from_qtensor(k_tensor)?,
+            candlelight::core::quantized::QMatMul::from_qtensor(k_tensor)?,
         );
         let v_proj = QuantizableLinear::from_qmatmul(
-            candle_core::quantized::QMatMul::from_qtensor(v_tensor)?,
+            candlelight::core::quantized::QMatMul::from_qtensor(v_tensor)?,
         );
         let o_proj = QuantizableLinear::from_qmatmul(
-            candle_core::quantized::QMatMul::from_qtensor(o_tensor)?,
+            candlelight::core::quantized::QMatMul::from_qtensor(o_tensor)?,
         );
 
         // Enable FlashAttention on CUDA with float16/bfloat16 when feature is available
@@ -321,7 +334,7 @@ impl BatchedAttention {
             let iam = cache_builder
                 .indices_and_mask_variable(&seq_lengths, &batch_mask)
                 .map_err(|e| {
-                    candle_core::Error::Msg(format!("Failed to get variable indices: {}", e))
+                    candlelight::core::Error::Msg(format!("Failed to get variable indices: {}", e))
                 })?;
 
             // Split and pad Q/K/V to create uniform batched tensors
@@ -432,19 +445,19 @@ impl BatchedAttention {
             let k_wrapped =
                 crate::model::KVTensor::from_compact(&k_batched, cache_builder.batch_size())
                     .map_err(|e| {
-                        candle_core::Error::Msg(format!("Failed to wrap batched K: {}", e))
+                        candlelight::core::Error::Msg(format!("Failed to wrap batched K: {}", e))
                     })?;
             let v_wrapped =
                 crate::model::KVTensor::from_compact(&v_batched, cache_builder.batch_size())
                     .map_err(|e| {
-                        candle_core::Error::Msg(format!("Failed to wrap batched V: {}", e))
+                        candlelight::core::Error::Msg(format!("Failed to wrap batched V: {}", e))
                     })?;
 
             // Append to cache
             let (k_cache, v_cache) = cache
                 .append(k_wrapped.as_full(), v_wrapped.as_full(), iam)
                 .map_err(|e| {
-                    candle_core::Error::Msg(format!("Failed to append batched KV: {}", e))
+                    candlelight::core::Error::Msg(format!("Failed to append batched KV: {}", e))
                 })?;
 
             (k_cache, v_cache)
@@ -462,19 +475,19 @@ impl BatchedAttention {
             let iam = cache_builder
                 .indices_and_mask(seq_len, &batch_mask)
                 .map_err(|e| {
-                    candle_core::Error::Msg(format!("Failed to get indices and mask: {}", e))
+                    candlelight::core::Error::Msg(format!("Failed to get indices and mask: {}", e))
                 })?;
 
             // Wrap K/V in KVTensor to expand batch dimension to max_batch_size
             let k_wrapped =
                 crate::model::KVTensor::from_compact(&k_batched, cache_builder.batch_size())
                     .map_err(|e| {
-                        candle_core::Error::Msg(format!("Failed to wrap K tensor: {}", e))
+                        candlelight::core::Error::Msg(format!("Failed to wrap K tensor: {}", e))
                     })?;
             let v_wrapped =
                 crate::model::KVTensor::from_compact(&v_batched, cache_builder.batch_size())
                     .map_err(|e| {
-                        candle_core::Error::Msg(format!("Failed to wrap V tensor: {}", e))
+                        candlelight::core::Error::Msg(format!("Failed to wrap V tensor: {}", e))
                     })?;
 
             if layer_idx == 0 {
@@ -482,8 +495,12 @@ impl BatchedAttention {
             }
 
             let (k_full, v_full) = cache
-                .append(k_wrapped.as_full(), v_wrapped.as_full(), &iam)
-                .map_err(|e| candle_core::Error::Msg(format!("Failed to append KV: {}", e)))?;
+                .append(
+                    k_wrapped.as_full(),
+                    v_wrapped.as_full(),
+                    &iam,
+                )
+                .map_err(|e| candlelight::core::Error::Msg(format!("Failed to append KV: {}", e)))?;
 
             if layer_idx == 0 {
                 // DEBUG output removed
@@ -518,7 +535,7 @@ impl BatchedAttention {
         let attention_mask = attention_mask
             .map(|mask| {
                 mask.narrow(3, 0, max_valid_len).map_err(|e| {
-                    candle_core::Error::Msg(format!("Failed to narrow attention mask: {}", e))
+                    candlelight::core::Error::Msg(format!("Failed to narrow attention mask: {}", e))
                 })
             })
             .transpose()?;
@@ -817,7 +834,7 @@ impl BatchedAttention {
         };
 
         // === Softmax ===
-        let attn_probs = candle_nn::ops::softmax_last_dim(&attn_weights)?;
+        let attn_probs = candlelight::nn::ops::softmax_last_dim(&attn_weights)?;
 
         // TODO: Handle NaN values that can occur when all attention weights in a row are -inf
         // (This happens for padding tokens that shouldn't attend to anything)

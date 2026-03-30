@@ -8,11 +8,13 @@
 //! Fused kernels reduce intermediate tensor allocations and memory round-trips:
 //! - `fused_linear_silu`: Combines linear projection + SiLU activation (~11% bandwidth reduction)
 //! - Expected throughput improvement: 10-15% on CPU
+//!
+//! Fused CUDA kernels for efficient inference operations.
 
-use candle_core::{Result, Tensor};
-use candle_nn::ops::silu;
+use candlelight::core::{Result, Tensor};
+use candlelight::nn::ops::silu;
 
-/// Fused linear projection + SiLU activation.
+/// Applies SwiGLU activation function.
 ///
 /// Computes: `silu(x @ weight.T + bias)`
 ///
@@ -38,7 +40,7 @@ use candle_nn::ops::silu;
 ///
 /// ```ignore
 /// use lightbulb::model::fused_kernels::fused_linear_silu;
-/// use candle_core::Tensor;
+/// use candlelight::core::Tensor;
 ///
 /// let input = Tensor::randn(0f32, 1f32, &[1, 128, 4096], &Device::Cpu)?;
 /// let weight = Tensor::randn(0f32, 1f32, &[11008, 4096], &Device::Cpu)?;
@@ -99,8 +101,8 @@ pub fn fused_matmul_add(input: &Tensor, weight: &Tensor, residual: &Tensor) -> R
 #[cfg(test)]
 mod tests {
     use super::*;
-    use candle_core::{DType, Device};
-    use candle_nn::ops::silu;
+    use candlelight::core::{DType, Device};
+    use candlelight::nn::ops::silu;
 
     fn assert_tensors_close(a: &Tensor, b: &Tensor, tolerance: f32) -> Result<()> {
         let diff = (a - b)?.abs()?;

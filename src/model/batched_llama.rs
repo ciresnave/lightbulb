@@ -1,6 +1,6 @@
 //! Batched Llama Inference using Candle's Built-in Model
 //!
-//! This module provides a thin wrapper around `candle_transformers::models::llama::Llama`
+//! This module provides a thin wrapper around `candlelight::transformers::models::llama::Llama`
 //! to handle batched inference with per-request KV caching.
 //!
 //! # Why Not Custom Implementation?
@@ -28,8 +28,8 @@
 //!   └─> Batch assembly/disassembly logic
 //! ```
 
-use candle_core::{DType, Device, Result, Tensor};
-use candle_transformers::models::llama::{Cache, Config as LlamaConfig, Llama};
+use candlelight::core::{DType, Device, Result, Tensor};
+use candlelight::transformers::models::llama::{Cache, Config as LlamaConfig, Llama};
 use std::collections::HashMap;
 
 /// Request identifier
@@ -153,7 +153,7 @@ impl BatchedLlama {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use candle_nn::VarBuilder;
+    use candlelight::nn::VarBuilder;
     
     #[test]
     #[ignore] // Requires model files

@@ -30,8 +30,8 @@
 use crate::engine::ParallelCacheBuilder;
 use crate::model::BatchMetadata;
 use anyhow::Result;
-use candle_core::{Device, IndexOp, Tensor};
-use candle_transformers::models::llama::{Cache, Llama};
+use candlelight::core::{Device, IndexOp, Tensor};
+use candlelight::transformers::models::llama::{Cache, Llama};
 
 /// Wrapper for batched inference with Candle Llama model
 ///
