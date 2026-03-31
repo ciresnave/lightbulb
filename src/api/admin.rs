@@ -270,7 +270,22 @@ async fn create_api_key(
     });
 
     // Insert into database
-    let client = match state.db_pool.get().await {
+    let db_pool = match &state.db_pool {
+        Some(pool) => pool,
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({
+                    "error": {
+                        "message": "Database not configured",
+                        "type": "service_unavailable",
+                    }
+                })),
+            )
+                .into_response();
+        }
+    };
+    let client = match db_pool.get().await {
         Ok(client) => client,
         Err(e) => {
             eprintln!("DB connection error: {}", e);

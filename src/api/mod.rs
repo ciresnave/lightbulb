@@ -49,8 +49,8 @@ use std::path::Path;
 /// API server configuration
 #[derive(Debug, Clone)]
 pub struct ApiConfig {
-    /// PostgreSQL connection string
-    pub database_url: String,
+    /// PostgreSQL connection string (optional — when None, auth/audit/rate-limiting are disabled)
+    pub database_url: Option<String>,
 
     /// Server bind address
     pub bind_address: String,
@@ -92,7 +92,7 @@ pub struct ApiConfig {
 impl Default for ApiConfig {
     fn default() -> Self {
         Self {
-            database_url: "postgresql://lightbulb:lightbulb@localhost:5432/lightbulb".to_string(),
+            database_url: None,
             bind_address: "0.0.0.0:8080".to_string(),
             enable_openai_api: true,
             enable_admin_api: true,
@@ -118,8 +118,8 @@ pub struct AppState {
     /// API configuration
     pub config: ApiConfig,
 
-    /// Database connection pool
-    pub db_pool: deadpool_postgres::Pool,
+    /// Database connection pool (None when running without PostgreSQL)
+    pub db_pool: Option<deadpool_postgres::Pool>,
 
     /// Sender to enqueue inference jobs to the model runner thread (if started)
     pub inference_tx: Option<std::sync::mpsc::Sender<crate::engine::model_runner::InferenceJob>>,
@@ -134,25 +134,32 @@ pub struct ApiServer {
 impl ApiServer {
     /// Create new API server
     pub async fn new(config: ApiConfig, scheduler: Arc<MemoryAwareScheduler>) -> Result<Self> {
-        // Parse PostgreSQL connection string
-        let mut pg_config: tokio_postgres::Config = config.database_url.parse()?;
+        // Set up database connection pool if DATABASE_URL is configured
+        let db_pool = if let Some(ref database_url) = config.database_url {
+            let mut pg_config: tokio_postgres::Config = database_url.parse()?;
 
-        // For trust auth, tokio-postgres still needs a password value (can be anything)
-        // This is a client-side requirement, not enforced by PostgreSQL with trust auth
-        if pg_config.get_password().is_none() {
-            pg_config.password("trust");
-        }
+            // For trust auth, tokio-postgres still needs a password value (can be anything)
+            if pg_config.get_password().is_none() {
+                pg_config.password("trust");
+            }
 
-        // Create connection pool
-        let manager = deadpool_postgres::Manager::new(pg_config, tokio_postgres::NoTls);
-        let db_pool = deadpool_postgres::Pool::builder(manager)
-            .max_size(10)
-            .build()?;
+            let manager = deadpool_postgres::Manager::new(pg_config, tokio_postgres::NoTls);
+            let pool = deadpool_postgres::Pool::builder(manager)
+                .max_size(10)
+                .build()?;
 
-        // Run migrations using refinery
-        let mut client = db_pool.get().await?;
-        refinery::embed_migrations!("./migrations");
-        migrations::runner().run_async(&mut **client).await?;
+            // Run migrations
+            let mut client = pool.get().await?;
+            refinery::embed_migrations!("./migrations");
+            migrations::runner().run_async(&mut **client).await?;
+
+            println!("Database connected and migrations applied");
+            Some(pool)
+        } else {
+            println!("No DATABASE_URL set — running without database (auth/audit/rate-limiting disabled)");
+            None
+        };
+
         let mut state = AppState {
             scheduler,
             config: config.clone(),

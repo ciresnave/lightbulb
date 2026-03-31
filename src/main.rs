@@ -21,7 +21,7 @@ async fn main() -> Result<()> {
         .init();
 
     // Load configuration from environment
-    let database_url = env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+    let database_url = env::var("DATABASE_URL").ok();
 
     let bind_address =
         env::var("LIGHTBULB_BIND_ADDRESS").unwrap_or_else(|_| "0.0.0.0:8080".to_string());
@@ -39,7 +39,7 @@ async fn main() -> Result<()> {
         database_url: database_url.clone(),
         bind_address,
         enable_openai_api: true,
-        enable_admin_api: true,
+        enable_admin_api: database_url.is_some(), // Disable admin API without database
         enable_lightbulb_extensions: true,
         jwt_secret,
         rate_limit_per_minute: 60,
@@ -47,12 +47,15 @@ async fn main() -> Result<()> {
         default_model,
         model_max_batch_size: 16,
         model_context_length: 4096,
-        enable_audit_log: true,
+        enable_audit_log: database_url.is_some(), // Disable audit logging without database
         tls: Default::default(), // TLS disabled by default
     };
 
     tracing::info!("Starting Lightbulb API server");
-    tracing::info!("Database: {}", database_url);
+    match &database_url {
+        Some(url) => tracing::info!("Database: {}", url),
+        None => tracing::info!("Database: none (auth/audit disabled)"),
+    }
     tracing::info!("Listening on: {}", config.bind_address);
 
     // Create memory-aware scheduler

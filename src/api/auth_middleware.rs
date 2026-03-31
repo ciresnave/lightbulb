@@ -35,6 +35,11 @@ pub async fn auth_middleware(
     mut request: Request,
     next: Next,
 ) -> Response {
+    // Skip authentication when no database is configured
+    if state.db_pool.is_none() {
+        return next.run(request).await;
+    }
+
     // Extract Bearer token from Authorization header
     let auth_header = request
         .headers()
@@ -63,7 +68,7 @@ pub async fn auth_middleware(
             .collect::<String>();
 
         // Query the database for a matching, non-expired key
-        let client = match state.db_pool.get().await {
+        let client = match state.db_pool.as_ref().unwrap().get().await {
             Ok(client) => client,
             Err(e) => {
                 eprintln!("DB connection error: {}", e);
@@ -154,6 +159,11 @@ pub async fn rate_limit_middleware(
     request: Request,
     next: Next,
 ) -> Response {
+    // Skip rate limiting when no database is configured
+    if state.db_pool.is_none() {
+        return next.run(request).await;
+    }
+
     // Get API key info from extensions
     let api_key_info = request.extensions().get::<ApiKeyInfo>().cloned();
 
@@ -163,7 +173,7 @@ pub async fn rate_limit_middleware(
         let api_key_id = key_info.api_key_id;
 
         // Perform an atomic upsert and return the new request_count for the current minute window
-        let client = match state.db_pool.get().await {
+        let client = match state.db_pool.as_ref().unwrap().get().await {
             Ok(client) => client,
             Err(e) => {
                 eprintln!("DB connection error: {}", e);
@@ -218,7 +228,7 @@ pub async fn audit_middleware(
     request: Request,
     next: Next,
 ) -> Response {
-    if !state.config.enable_audit_log {
+    if !state.config.enable_audit_log || state.db_pool.is_none() {
         return next.run(request).await;
     }
 
@@ -237,7 +247,7 @@ pub async fn audit_middleware(
 
     // Log to database asynchronously
     if state.config.enable_audit_log {
-        let db_pool = state.db_pool.clone();
+        let db_pool = state.db_pool.clone().unwrap();
         let api_key_id = api_key_info.map(|info| info.api_key_id);
 
         tokio::spawn(async move {
