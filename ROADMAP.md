@@ -1081,6 +1081,7 @@ M4 — Advanced scheduling (0.5)
     * Helper functions: create_checkpoint(), restore_kb_from_checkpoint()
     * 9 comprehensive tests (all passing): creation, save/load, listing, deletion, eviction, KB restoration, decomposition storage, metadata tracking
     * Enables: Graceful shutdown/restart, long-running iterative reasoning, debugging/replay, distributed inference with state migration
+    * **Integration with Segmented KV Cache**: `tensor_codec.rs` provides tensor↔bytes serialization; `TieredStorageManager` handles disk persistence; GPUDirect Storage (M5.6) would enable near-instant checkpoint/restore via DMA
     * Acceptance: ✅ Core infrastructure ready; enables production robustness and long-running workflows
   - Privacy-preserving state encryption with key-per-request
   - Graceful degradation on OOM (checkpoint → evict → resume)
@@ -1808,6 +1809,56 @@ M5.5 — CLI, Deployment & Operations (0.6+) **→ v1.0 Release Candidate**
   - Testing requirements: Any CUDA GPU
   - References: docs/AUTOMATIC_MIXED_PRECISION.md (to be created)
   - Acceptance: Training with AMP matches full-precision accuracy within 0.5%; memory usage reduced by 40%; easy enable/disable via config flag
+
+**GPU Direct Storage — Zero-Copy Disk↔VRAM Transfer (All GPUs)**:
+
+- **NVIDIA GPUDirect Storage (GDS)** (Highest priority — Linux, CUDA)
+  - Enables NVMe storage to read/write directly to GPU memory via DMA
+  - Bypasses CPU entirely — no CPU-mediated copies, no system memory staging
+  - Uses cuFile API (~10 functions, straightforward Rust FFI bindings)
+  - **Primary use case: Tiered KV cache promotion/demotion**
+    * Current path: Disk → CPU bytes → tensor_from_bytes(CPU) → to_device(GPU) (~50ms)
+    * GDS path: Disk → GPU VRAM directly via DMA (~5ms)
+    * Our tensor_codec format is raw float arrays — already DMA-compatible
+    * Implement as `GDSDiskStore` implementing existing `DiskStore` trait
+  - **Secondary use case: Model weight loading**
+    * Load SafeTensors/GGUF weights directly to VRAM
+    * Could reduce 14GB model load from seconds to <1 second on NVMe
+  - **Tertiary use case: KV cache checkpointing (M4.B)**
+    * Fast bidirectional GPU↔disk for session persistence
+    * Enables near-instant session save/restore
+  - Expected bandwidth: 2x-8x higher than CPU-mediated path
+  - Requirements: Linux, NVIDIA GPU, NVMe storage, cuFile driver
+  - Estimated effort: 2-3 weeks (FFI bindings + GDSDiskStore + integration)
+  - Feature gate: `gds` feature flag (compile-time opt-in)
+  - Fallback: Standard `FileDiskStore` on non-GDS systems (Windows, non-NVMe)
+  - References: NVIDIA Magnum IO documentation, cuFile API guide
+
+- **AMD ROCm RDMA / PeerDirect** (Parallel implementation — Linux, ROCm)
+  - Similar zero-copy semantics via ROCm's PeerDirect interfaces
+  - Allows NIC or storage to communicate directly with GPU memory
+  - Implementation pattern mirrors GDS but with ROCm APIs
+  - Implement as `RocmDirectStore` behind `rocm-gds` feature flag
+  - Requirements: Linux, AMD GPU, ROCm platform
+  - Estimated effort: 2-3 weeks (after GDS implementation provides the pattern)
+  - References: ROCm documentation, PeerDirect API
+
+- **Intel oneAPI Direct Storage** (Lower priority — Intel GPUs)
+  - oneAPI framework supports DirectStorage for Intel Arc GPUs
+  - Cross-architecture tools for direct data movement
+  - Consider only if Intel GPU deployment targets emerge
+  - Implement as `OneApiDirectStore` behind `oneapi-ds` feature flag
+  - Requirements: Intel Arc GPU, oneAPI runtime
+  - Estimated effort: 2-3 weeks
+  - References: Intel oneAPI documentation
+
+- **Integration architecture**:
+  - All three implementations share the `DiskStore` trait (already defined in `tiered_storage.rs`)
+  - Trait may need extension: current `load()` returns `Vec<u8>` (CPU memory)
+  - For direct-to-GPU, add `GpuDiskStore` trait returning `Tensor` directly
+  - `TieredStorageManager::promote_with_disk()` would skip CPU staging entirely
+  - Auto-detection at startup: probe for GDS/ROCm/oneAPI availability, fall back gracefully
+  - Acceptance: ≥2x bandwidth improvement over CPU-mediated path; transparent fallback on unsupported hardware; no correctness difference between direct and staged paths
 
 **Hardware Access Strategy**:
 
