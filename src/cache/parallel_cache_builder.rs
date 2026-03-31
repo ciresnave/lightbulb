@@ -841,7 +841,25 @@ impl ParallelCacheBuilder {
     /// cumulative attention scores per token for eviction decisions.
     pub fn update_attention_scores(&mut self, attention_weights: &[Vec<f32>]) {
         if let Some(ref mut h2o) = self.h2o_policy {
-            h2o.update_attention_scores(attention_weights, &self.slot_positions);
+            // The attention_weights matrix has shape [seq_q, seq_k] where seq_k
+            // is the context size. Each key_pos index (0..context) IS a cache
+            // position. We need to store attention data per cache position,
+            // not per batch slot.
+            //
+            // Build a per-cache-position mapping: position → position (identity)
+            // so H2O stores metadata keyed by cache position.
+            let key_len = attention_weights
+                .first()
+                .map(|row| row.len())
+                .unwrap_or(0);
+
+            let mut cache_position_map: std::collections::HashMap<usize, usize> =
+                std::collections::HashMap::with_capacity(key_len);
+            for pos in 0..key_len {
+                cache_position_map.insert(pos, pos);
+            }
+
+            h2o.update_attention_scores(attention_weights, &cache_position_map);
         }
     }
 

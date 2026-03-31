@@ -1792,4 +1792,14 @@ impl ParallelModelManager {
     pub fn tokenizer(&self) -> &Tokenizer {
         &self.tokenizer
     }
+
+    /// Get a reference to the cache builder (for inspection/diagnostics)
+    pub fn cache_builder(&self) -> &crate::engine::ParallelCacheBuilder {
+        &self.cache_builder
+    }
+
+    /// Get a mutable reference to the cache builder
+    pub fn cache_builder_mut(&mut self) -> &mut crate::engine::ParallelCacheBuilder {
+        &mut self.cache_builder
+    }
 }
