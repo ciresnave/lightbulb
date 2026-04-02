@@ -60,7 +60,7 @@
     futures            = "0.3"
     futures-util       = "0.3"
     hex                = "0.4"
-    reqwest            = { version = "0.12", features = ["json", "stream"] }
+    reqwest            = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls-manual-roots"] }
     tokio-postgres     = "0.7"
     deadpool-postgres  = "0.14"
     refinery           = { version = "0.9", features = ["tokio-postgres"] }
@@ -68,11 +68,12 @@
     tower-http         = { version = "0.6", features = ["cors", "trace"] }
 
     # TLS/Certificate dependencies
-    tokio-rustls       = "0.26"
-    rustls             = "0.23"
+    tokio-rustls       = { version = "0.26", default-features = false, features = ["ring", "logging", "tls12"] }
+    rustls             = { workspace = true }
+    ring               = { workspace = true }
     rustls-pemfile     = "2.1"
-    rcgen              = "0.14"
-    instant-acme       = "0.8"
+    rcgen              = { version = "0.14", default-features = false, features = ["ring"] }
+    instant-acme       = { version = "0.8", default-features = false, features = ["ring"] }
     x509-parser        = "0.18"
     time               = { version = "0.3", features = ["parsing", "formatting"] }
     base64             = "0.22"
