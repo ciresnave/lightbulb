@@ -442,9 +442,10 @@ mod tests {
     #[test]
     fn test_format_tool_result() {
         let result = format_tool_result("get_weather", "22°C and sunny in Paris");
-        assert!(result.contains("[TOOL_RESULT name=\"get_weather\"]"));
+        assert!(result.contains("<tool_result tool=\"get_weather\">"));
         assert!(result.contains("22°C and sunny in Paris"));
-        assert!(result.contains("[/TOOL_RESULT]"));
+        assert!(result.contains("</tool_result>"));
+        assert!(result.contains("Integrate the tool result"));
     }
 
     #[test]
