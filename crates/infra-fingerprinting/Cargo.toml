@@ -1,0 +1,42 @@
+[package]
+    description = "Multi-level fingerprinting system for DynAniML ecosystem"
+    edition     = "2021"
+    license     = "MIT OR Apache-2.0"
+    name        = "infra-fingerprinting"
+    version     = "0.1.0"
+
+[dependencies]
+    # Core dependencies
+    serde      = { version = "1.0", features = ["derive"] }
+    serde_json = "1.0"
+    thiserror  = "2.0.12"
+
+    # Hashing and crypto
+    ahash   = "0.8"
+    blake3  = "1.5"
+    hex     = "0.4"
+    seahash = "4.1"
+
+    # Graph processing
+    petgraph = "0.8.1"
+
+    # Workspace dependencies
+    dynctx = { path = "../dynctx" }
+    # TODO: Uncomment when knowledge-module-system is integrated
+    # dynaniml_knowledge_module_system = { path = "../dynaniml-knowledge-module-system" }
+
+[dev-dependencies]
+    criterion = { version = "0.6.0", features = ["html_reports"] }
+    proptest  = "1.0"
+
+[[bench]]
+    harness = false
+    name    = "fingerprinting_benchmarks"
+
+[features]
+    default  = []
+    parallel = ["rayon"]
+
+    [dependencies.rayon]
+        optional = true
+        version  = "1.8"

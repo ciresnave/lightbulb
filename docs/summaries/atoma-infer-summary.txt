@@ -1,0 +1,20 @@
+Key modules and additions in atoma-infer vs Candle (from filtered diff):
+
+- backends/vllm/src/:
+  - Comprehensive vLLM engine: scheduler.rs (token budget, fairness), sequence.rs, block_allocator.rs/manager.rs
+  - llm_engine.rs and llm_service.rs for orchestration and service layer
+  - sampling_params.rs, policy.rs, tokenizer.rs for request configuration
+  - model_executor.rs and worker.rs: execution loop, prefill/decode steps
+  - models/{llama.rs, llama_nccl.rs}: model wiring and multi-GPU/NCCL-aware paths
+- csrc/ (CUDA kernels + Rust FFI):
+  - cache_manager.cu/rs and flash attention kernels; ops.rs + tests
+- models/src/:
+  - model implementations (llama, mistral, phi3, multi_gpu, flash_attention)
+- server/:
+  - OpenAI-like server with request schema and streaming
+
+Likely motivations:
+- Provide a robust vLLM-style backend focused on scheduling, eviction, and multi-GPU scaling
+- Separate service layer and execution layer for clarity and testability
+- Include CUDA kernels with Rust FFI for cache management and flash attention
+- Ship an end-to-end server implementation with schema validation and integration tests

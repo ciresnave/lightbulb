@@ -1,0 +1,298 @@
+use super::backend::{StorageBackend, StorageConfig, StorageError, StorageResult, StorageStats, StorageTransactionCore};
+use super::backend::StorageTransactionCore as StorageTransaction;
+use serde::{Serialize, de::DeserializeOwned};
+use async_trait::async_trait;
+use libsql::Builder;
+use std::sync::Arc;
+use std::time::Duration;
+
+pub struct SQLiteBackend {
+    db: Arc<libsql::Database>,
+}
+
+pub struct SQLiteTransaction {
+    conn: libsql::Connection,
+    txn: Option<libsql::Transaction>,
+}
+
+#[async_trait]
+impl StorageBackend for SQLiteBackend {
+    async fn init(config: StorageConfig) -> StorageResult<Self> {
+        match config {
+            StorageConfig::SQLite { path, journal_mode } => {
+                // Build local database
+                let mut builder = Builder::new_local(&path);
+                
+                // Set journal mode via pragma
+                let db = builder.build().await
+                    .map_err(|e| StorageError::BackendError(e.to_string()))?;
+                
+                let conn = db.connect()
+                    .map_err(|e| StorageError::BackendError(e.to_string()))?;
+                    
+                conn.execute(&format!("PRAGMA journal_mode={}", journal_mode), ())
+                    .await
+                    .map_err(|e| StorageError::BackendError(e.to_string()))?;
+                
+                // Create key-value table if it doesn't exist
+                conn.execute(
+                    "CREATE TABLE IF NOT EXISTS kv_store (
+                        key TEXT PRIMARY KEY,
+                        value BLOB NOT NULL
+                    )",
+                    ()
+                ).await.map_err(|e| StorageError::BackendError(e.to_string()))?;
+                
+                Ok(Self {
+                    db: Arc::new(db)
+                })
+            }
+            _ => Err(StorageError::ConfigError("Expected SQLite config".into()))
+        }
+    }
+
+    async fn get<V>(&self, key: &str) -> StorageResult<Option<V>> 
+    where V: DeserializeOwned {
+        let conn = self.db.connect()
+            .map_err(|e| StorageError::BackendError(e.to_string()))?;
+        
+        let rows = conn.execute("SELECT value FROM kv_store WHERE key = ?", [key])
+            .await
+            .map_err(|e| StorageError::BackendError(e.to_string()))?;
+        
+        if let Some(row) = rows.next().await
+            .map_err(|e| StorageError::BackendError(e.to_string()))? 
+        {
+            let bytes: Vec<u8> = row.get(0)
+                .map_err(|e| StorageError::BackendError(e.to_string()))?;
+            let value = serde_json::from_slice(&bytes)?;
+            Ok(Some(value))
+        } else {
+            Ok(None)
+        }
+    }
+    
+    async fn set<V>(&self, key: &str, value: &V) -> StorageResult<()>
+    where V: Serialize + Send + Sync {
+        let conn = self.db.connect()
+            .map_err(|e| StorageError::BackendError(e.to_string()))?;
+            
+        let serialized = serde_json::to_vec(value)?;
+        
+        conn.execute(
+            "INSERT OR REPLACE INTO kv_store (key, value) VALUES (?, ?)",
+            [key, &serialized]
+        ).await.map_err(|e| StorageError::BackendError(e.to_string()))?;
+        
+        Ok(())
+    }
+    
+    async fn delete(&self, key: &str) -> StorageResult<()> {
+        let conn = self.db.connect()
+            .map_err(|e| StorageError::BackendError(e.to_string()))?;
+        
+        conn.execute(
+            "DELETE FROM kv_store WHERE key = ?",
+            [key]
+        ).await.map_err(|e| StorageError::BackendError(e.to_string()))?;
+        
+        Ok(())
+    }
+    
+    async fn exists(&self, key: &str) -> StorageResult<bool> {
+        let conn = self.db.connect()
+            .map_err(|e| StorageError::BackendError(e.to_string()))?;
+        
+        let rows = conn.execute(
+            "SELECT 1 FROM kv_store WHERE key = ?",
+            [key]
+        ).await.map_err(|e| StorageError::BackendError(e.to_string()))?;
+        
+        Ok(rows.next().await
+            .map_err(|e| StorageError::BackendError(e.to_string()))?
+            .is_some())
+    }
+
+    async fn begin_transaction(&self) -> StorageResult<Box<dyn StorageTransaction>> {
+        let conn = self.db.connect()
+            .map_err(|e| StorageError::BackendError(e.to_string()))?;
+        
+        let txn = conn.transaction()
+            .await
+            .map_err(|e| StorageError::BackendError(e.to_string()))?;
+            
+        Ok(Box::new(SQLiteTransaction {
+            conn,
+            txn: Some(txn)
+        }))
+    }
+
+    async fn list_keys(&self, prefix: &str) -> StorageResult<Vec<String>> {
+        let conn = self.db.connect()
+            .map_err(|e| StorageError::BackendError(e.to_string()))?;
+        
+        let rows = conn.execute(
+            "SELECT key FROM kv_store WHERE key LIKE ?",
+            [format!("{}%", prefix)]
+        ).await.map_err(|e| StorageError::BackendError(e.to_string()))?;
+        
+        let mut keys = Vec::new();
+        let mut stream = rows;
+        while let Some(row) = stream.next().await
+            .map_err(|e| StorageError::BackendError(e.to_string()))?
+        {
+            let key: String = row.get(0)
+                .map_err(|e| StorageError::BackendError(e.to_string()))?;
+            keys.push(key);
+        }
+        
+        Ok(keys)
+    }
+    
+    async fn get_stats(&self) -> StorageResult<StorageStats> {
+        let conn = self.db.connect()
+            .map_err(|e| StorageError::BackendError(e.to_string()))?;
+        
+        let rows = conn.execute(
+            "SELECT COUNT(*) as count, SUM(LENGTH(value)) as size FROM kv_store",
+            ()
+        ).await.map_err(|e| StorageError::BackendError(e.to_string()))?;
+        
+        if let Some(row) = rows.next().await
+            .map_err(|e| StorageError::BackendError(e.to_string()))?
+        {
+            Ok(StorageStats {
+                key_count: row.get::<i64>(0)
+                    .map_err(|e| StorageError::BackendError(e.to_string()))? as u64,
+                total_size_bytes: row.get::<i64>(1)
+                    .map_err(|e| StorageError::BackendError(e.to_string()))?.unwrap_or(0) as u64
+            })
+        } else {
+            Ok(StorageStats {
+                key_count: 0,
+                total_size_bytes: 0
+            })
+        }
+    }
+    
+    async fn clear(&self) -> StorageResult<()> {
+        let conn = self.db.connect()
+            .map_err(|e| StorageError::BackendError(e.to_string()))?;
+        
+        conn.execute("DELETE FROM kv_store", ())
+            .await
+            .map_err(|e| StorageError::BackendError(e.to_string()))?;
+            
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl StorageTransaction for SQLiteTransaction {
+    async fn get_raw(&self, key: &str) -> StorageResult<Option<Vec<u8>>> {
+        let txn = self.txn.as_ref()
+            .ok_or_else(|| StorageError::BackendError("Transaction already committed".into()))?;
+            
+        let rows = txn.execute(
+            "SELECT value FROM kv_store WHERE key = ?",
+            [key]
+        ).await.map_err(|e| StorageError::BackendError(e.to_string()))?;
+        
+        if let Some(row) = rows.next().await
+            .map_err(|e| StorageError::BackendError(e.to_string()))?
+        {
+            let bytes: Vec<u8> = row.get(0)
+                .map_err(|e| StorageError::BackendError(e.to_string()))?;
+            Ok(Some(bytes))
+        } else {
+            Ok(None)
+        }
+    }
+    
+    async fn set_raw(&mut self, key: &str, value: &[u8]) -> StorageResult<()> {
+        let txn = self.txn.as_ref()
+            .ok_or_else(|| StorageError::BackendError("Transaction already committed".into()))?;
+            
+        txn.execute(
+            "INSERT OR REPLACE INTO kv_store (key, value) VALUES (?, ?)",
+            [key, value]
+        ).await.map_err(|e| StorageError::BackendError(e.to_string()))?;
+        
+        Ok(())
+    }
+    
+    async fn delete(&mut self, key: &str) -> StorageResult<()> {
+        let txn = self.txn.as_ref()
+            .ok_or_else(|| StorageError::BackendError("Transaction already committed".into()))?;
+            
+        txn.execute(
+            "DELETE FROM kv_store WHERE key = ?",
+            [key]
+        ).await.map_err(|e| StorageError::BackendError(e.to_string()))?;
+        
+        Ok(())
+    }
+
+    async fn commit(mut self: Box<Self>) -> StorageResult<()> {
+        let txn = self.txn.take()
+            .ok_or_else(|| StorageError::BackendError("Transaction already committed".into()))?;
+            
+        txn.commit()
+            .await
+            .map_err(|e| StorageError::BackendError(e.to_string()))?;
+            
+        Ok(())
+    }
+    
+    async fn rollback(mut self: Box<Self>) -> StorageResult<()> {
+        let txn = self.txn.take()
+            .ok_or_else(|| StorageError::BackendError("Transaction already committed".into()))?;
+            
+        txn.rollback()
+            .await
+            .map_err(|e| StorageError::BackendError(e.to_string()))?;
+            
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+    
+    #[tokio::test]
+    async fn test_basic_operations() -> StorageResult<()> {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        
+        let backend = SQLiteBackend::init(StorageConfig::SQLite {
+            path: path.to_str().unwrap().to_string(),
+            journal_mode: "WAL".to_string(),
+        }).await?;
+        
+        // Test set/get
+        backend.set("test_key", &"test_value").await?;
+        let value: Option<String> = backend.get("test_key").await?;
+        assert_eq!(value, Some("test_value".to_string()));
+        
+        // Test delete
+        backend.delete("test_key").await?;
+        let value: Option<String> = backend.get("test_key").await?;
+        assert_eq!(value, None);
+        
+        // Test exists
+        backend.set("test_key", &"test_value").await?;
+        assert!(backend.exists("test_key").await?);
+        
+        // Test transaction
+        let mut txn = backend.begin_transaction().await?;
+        txn.set_raw("txn_key", b"txn_value").await?;
+        txn.commit().await?;
+        
+        let value: Option<String> = backend.get("txn_key").await?;
+        assert_eq!(value, Some("txn_value".to_string()));
+        
+        Ok(())
+    }
+}

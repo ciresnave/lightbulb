@@ -1,0 +1,90 @@
+[workspace]
+    members = [
+        # "crates/candlelight",  # Now published on GitHub
+        "crates/dynctx",
+        # "crates/infra-consensus",  # Temporarily disabled due to openraft-memstore incompatibility
+        "crates/infra-fingerprinting",
+        "crates/infra-network",
+        "crates/infra-storage",
+        "lightbulb",
+    ]
+    resolver = "3"
+
+    [workspace.package]
+        authors       = ["Eric Evans <ciresnave@gmail.com>", "Lightbulb Contributors"]
+        documentation = "https://github.com/ciresnave/lightbulb"
+        edition       = "2024"
+        homepage      = "https://github.com/ciresnave/lightbulb"
+        license       = "MIT OR Apache-2.0"
+        repository    = "https://github.com/ciresnave/lightbulb"
+        version       = "0.1.0"
+
+    [workspace.dependencies]
+        # Candlelight - Unified Candle ML framework wrapper (from GitHub)
+        candlelight = { git = "https://github.com/ciresnave/candlelight", default-features = false }
+
+        # DynAniML-sourced crate dependencies
+        dynctx = { path = "crates/dynctx" }
+        # infra-consensus      = { path = "crates/infra-consensus" }  # Temporarily disabled
+        infra-fingerprinting = { path = "crates/infra-fingerprinting" }
+        infra-network        = { path = "crates/infra-network" }
+        infra-storage        = { path = "crates/infra-storage" }
+
+        # TLS — force ring crypto provider across entire workspace (avoids aws-lc-sys build issues on Windows)
+        rustls      = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }
+
+        # Common dependencies from DynAniML
+        anyhow      = "1.0"
+        blake3      = "1.5"
+        capnp       = "0.23.0"
+        crossbeam   = "0.8"
+        memmap2     = "0.9"
+        parking_lot = "0.12"
+        ring        = "0.17"
+        serde       = { version = "1.0", features = ["derive"] }
+        serde_json  = "1.0"
+        sha2        = "0.10"
+        thiserror   = "2.0"
+        zstd        = "0.13"
+
+        # Async runtime
+        tokio = { version = "1.0", features = ["full"] }
+
+        # Networking
+        libp2p = "0.56"
+        tonic  = "0.14"
+
+        # Build dependencies
+        tonic-build = "0.14"
+
+        # Utilities
+        petgraph = "0.8"
+        tracing  = "0.1"
+        uuid     = { version = "1.0", features = ["serde", "v4"] }
+
+        # Storage backends
+        rocksdb = "0.24"
+
+        # Development dependencies
+        criterion          = "0.7"
+        pretty_assertions  = "1.0"
+        tempfile           = "3.0"
+        tracing-subscriber = "0.3"
+
+        # Hardware detection and system analysis
+        system-analysis = { version = "0.2", features = ["gpu-detection"] }
+
+        # Network service discovery
+        auto-discovery = { version = "0.2", features = ["mdns-sd", "upnp"] }
+
+        # Multi-agent coordination and coalition formation
+        coalescent = { version = "0.1" }
+
+        # Configuration management for distributed systems
+        distributed-config = { version = "0.1" }
+
+        # Model Context Protocol implementation (server and client)
+        mocopr = { version = "0.1" }
+
+        # Web server abstraction for REST API and WebSocket
+        web-server-abstraction = { version = "1.0" }

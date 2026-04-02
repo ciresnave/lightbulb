@@ -1,0 +1,15 @@
+{
+    // Automatically initialize MSVC environment when agent launches PowerShell terminals
+    "terminal.integrated.profiles.windows": {
+        "PowerShell with MSVC": {
+            "source": "PowerShell",
+            "args": [
+                "-NoExit",
+                "-Command",
+                "try { . '${workspaceFolder}\\lightbulb\\scripts\\activate_vsdev_env.ps1' } catch { Write-Warning 'Failed to load MSVC environment. Run manually: .\\lightbulb\\scripts\\activate_vsdev_env.ps1' }"
+            ],
+            "icon": "terminal-powershell"
+        }
+    },
+    "terminal.integrated.defaultProfile.windows": "PowerShell with MSVC"
+}

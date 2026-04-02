@@ -1,0 +1,50 @@
+[package]
+name = "infra-storage"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+description = "Multi-backend distributed storage system for DynAniml"
+keywords = ["storage", "distributed", "rocksdb", "sqlite", "backend"]
+categories = ["database", "distributed-systems", "data-structures"]
+
+[dependencies]
+# Core utilities
+uuid = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+async-trait = "0.1"
+
+# Async runtime
+tokio = { workspace = true, features = ["full"] }
+
+# Storage backends
+rocksdb = { workspace = true }
+libsql = { version = "0.9.9", features = ["core", "replication"], default-features = false }
+sled = { version = "0.34", optional = true }
+futures-util = "0.3.31"
+futures = "0.3.31"
+
+
+[features]
+default = ["all-backends"]
+all-backends = ["sqlite-backend", "sled-backend"]
+sqlite-backend = []  # Now using libsql instead of rusqlite
+sled-backend = ["sled"]
+
+[dev-dependencies]
+tokio-test = "0.4"
+criterion = { workspace = true }
+tempfile = "3.8"
+pretty_assertions = "1.4"
+tracing-subscriber = { workspace = true }
+
+[[bench]]
+name = "storage_benchmarks"
+harness = false

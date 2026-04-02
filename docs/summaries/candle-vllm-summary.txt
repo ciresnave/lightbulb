@@ -1,0 +1,28 @@
+Key modules and additions in candle-vllm vs Candle (from filtered diff):
+
+- kernels/ (CUDA):
+  - pagedattention.cu, reshape_and_cache_kernel.cu, copy_blocks_kernel.cu, sort.cu
+  - marlin_* (GEMM kernels for AWQ/GPTQ), gptq_cuda_kernel.cu
+  - attention dtype helpers and marlin dtype headers
+- metal-kernels/:
+  - pagedattention.metal, reshape_and_cache.metal, copy_blocks.metal, utils.rs
+- src/backend/:
+  - cache.rs: KV block/page cache management
+  - paged_attention.rs: host-side orchestration for paged attention kernels
+  - gguf.rs, gptq.rs, graph.rs: loaders/graph for quantized weights and compilation
+  - custom_ops/{moe.rs, sort.rs}
+- src/openai/:
+  - OpenAI-compatible server (requests, responses, streaming, sampling params)
+  - conversation helpers and model adapters
+- src/openai/models/ + layers/: 
+  - Family-specific wiring (gemma, deepseek, llama/mistral, qwen, yi, phi)
+  - Quantized variants and linear layers
+- src/paged_attention/: abstractions and metadata for paged attention inputs
+- src/scheduler/: block_engine, cache_engine, sequence management
+- examples and tests: benchmarking, chat, conversions
+
+Likely motivations:
+- Achieve vLLM-like throughput via paged KV cache and block-level scheduling
+- Support quantized and fused kernels (Marlin, GPTQ) for lower-precision inference
+- Provide OpenAI-compatible API and sampling controls for production usage
+- Cross-backend support: CUDA and Metal kernels for paged attention

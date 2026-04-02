@@ -1,0 +1,13 @@
+{
+	"folders": [
+		{
+			"path": "."
+		},
+		{
+			"path": "../../../Desktop/books and courses/Machine Learning"
+		}
+	],
+	"settings": {
+		"powershell.cwd": "lightbulb"
+	}
+}

@@ -1,0 +1,23 @@
+name: CI
+
+on:
+    push:
+        branches: [main]
+    pull_request:
+        branches: [main]
+
+jobs:
+    build:
+        name: Build (CPU-only)
+        runs-on: ${{ matrix.os }}
+        strategy:
+            matrix:
+                os: [windows-latest, ubuntu-latest]
+        steps:
+            - uses: actions/checkout@v4
+            - name: Install Rust (stable)
+              uses: dtolnay/rust-toolchain@stable
+            - name: Cargo build
+              run: cargo build -p lightbulb --locked
+            - name: Cargo test (unit only)
+              run: cargo test -p lightbulb --lib -- --nocapture

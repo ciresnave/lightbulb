@@ -1,0 +1,183 @@
+use super::backend::{StorageBackend, StorageConfig, StorageError, StorageResult, StorageStats, StorageTransactionCore};
+use super::backend::StorageTransaction;
+use async_trait::async_trait;
+use rocksdb::{Options, Transaction, TransactionDB, Direction, IteratorMode};
+use serde::{Serialize, de::DeserializeOwned};
+use std::sync::Arc;
+
+pub struct RocksDBBackend {
+    db: Arc<TransactionDB>,
+}
+
+pub struct RocksDBTransaction<'a> {
+    txn: Transaction<'a, TransactionDB>,
+}
+
+#[async_trait]
+impl StorageBackend for RocksDBBackend {
+    async fn init(config: StorageConfig) -> StorageResult<Self> {
+        match config {
+            StorageConfig::RocksDB { path, max_open_files, create_if_missing } => {
+                let mut opts = Options::default();
+                opts.set_max_open_files(max_open_files);
+                opts.create_if_missing(create_if_missing);
+                
+                let txn_opts = rocksdb::TransactionDBOptions::default();
+                let txn_db = TransactionDB::open(&opts, &txn_opts, &path)
+                    .map_err(|e| StorageError::BackendError(e.to_string()))?;
+                    
+                Ok(Self { db: Arc::new(txn_db) })
+            }
+            _ => Err(StorageError::ConfigError("Expected RocksDB config".into()))
+        }
+    }
+
+    async fn get_raw(&self, key: &str) -> StorageResult<Option<Vec<u8>>> {
+        match self.db.get(key.as_bytes())
+            .map_err(|e| StorageError::BackendError(e.to_string()))? {
+            Some(bytes) => Ok(Some(bytes.to_vec())),
+            None => Ok(None)
+        }
+    }
+    
+    async fn set_raw(&self, key: &str, value: &[u8]) -> StorageResult<()> {
+        self.db.put(key.as_bytes(), value)
+            .map_err(|e| StorageError::BackendError(e.to_string()))?;
+        Ok(())
+    }
+
+    async fn delete(&self, key: &str) -> StorageResult<()> {
+        self.db.delete(key.as_bytes())
+            .map_err(|e| StorageError::BackendError(e.to_string()))?;
+        Ok(())
+    }
+    
+    async fn exists(&self, key: &str) -> StorageResult<bool> {
+        let result = self.db.get(key.as_bytes())
+            .map_err(|e| StorageError::BackendError(e.to_string()))?;
+        Ok(result.is_some())
+    }
+    
+    async fn list_keys(&self, prefix: &str) -> StorageResult<Vec<String>> {
+        let mut result = Vec::new();
+        let iter = self.db.iterator(IteratorMode::From(prefix.as_bytes(), Direction::Forward));
+        for item in iter {
+            let (key, _) = item.map_err(|e| StorageError::BackendError(e.to_string()))?;
+            let key_str = String::from_utf8_lossy(&key).into_owned();
+            if !key_str.starts_with(prefix) {
+                break;
+            }
+            result.push(key_str);
+        }
+        Ok(result)
+    }
+    
+    async fn begin_transaction(&self) -> StorageResult<Box<dyn StorageTransactionCore>> {
+        let txn = self.db.transaction()
+            .map_err(|e| StorageError::BackendError(e.to_string()))?;
+        Ok(Box::new(RocksDBTransaction { txn }))
+    }
+    
+    async fn flush(&self) -> StorageResult<()> {
+        self.db.flush()
+            .map_err(|e| StorageError::BackendError(e.to_string()))?;
+        self.db.flush_wal(true)
+            .map_err(|e| StorageError::BackendError(e.to_string()))?;
+        Ok(())
+    }
+    
+    async fn stats(&self) -> StorageResult<StorageStats> {
+        // RocksDB doesn't provide exact stats through API, estimate them
+        let mut total_keys = 0u64;
+        let mut total_size = 0u64;
+        
+        let iter = self.db.iterator(IteratorMode::Start);
+        for item in iter {
+            let (key, value) = item.map_err(|e| StorageError::BackendError(e.to_string()))?;
+            total_keys += 1;
+            total_size += (key.len() + value.len()) as u64;
+        }
+        
+        Ok(StorageStats {
+            total_keys,
+            total_size,
+            is_compacting: false, // TODO: Check compaction status
+        })
+    }
+}
+
+#[async_trait]
+impl<'a> StorageTransactionCore for RocksDBTransaction<'a> {
+    async fn get_raw(&self, key: &str) -> StorageResult<Option<Vec<u8>>> {
+        match self.txn.get(key.as_bytes())
+            .map_err(|e| StorageError::BackendError(e.to_string()))? {
+            Some(bytes) => Ok(Some(bytes.to_vec())),
+            None => Ok(None)
+        }
+    }
+    
+    async fn set_raw(&mut self, key: &str, value: &[u8]) -> StorageResult<()> {
+        self.txn.put(key.as_bytes(), value)
+            .map_err(|e| StorageError::BackendError(e.to_string()))?;
+        Ok(())
+    }
+    
+    async fn delete(&mut self, key: &str) -> StorageResult<()> {
+        self.txn.delete(key.as_bytes())
+            .map_err(|e| StorageError::BackendError(e.to_string()))?;
+        Ok(())
+    }
+
+    async fn commit(self: Box<Self>) -> StorageResult<()> {
+        self.txn.commit()
+            .map_err(|e| StorageError::BackendError(e.to_string()))?;
+        Ok(())
+    }
+    
+    async fn rollback(self: Box<Self>) -> StorageResult<()> {
+        self.txn.rollback()
+            .map_err(|e| StorageError::BackendError(e.to_string()))?;
+        Ok(())
+    }
+}
+
+impl<'a> StorageTransaction for RocksDBTransaction<'a> {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[tokio::test]
+    async fn test_basic_operations() {
+        let temp_dir = tempdir().unwrap();
+        let config = StorageConfig::RocksDB {
+            path: temp_dir.path().to_str().unwrap().to_string(),
+            max_open_files: 1000,
+            create_if_missing: true,
+        };
+
+        let backend = RocksDBBackend::init(config).await.unwrap();
+
+        // Test set and get raw
+        let key = "test_key";
+        let value = b"test_value";
+        backend.set_raw(key, value).await.unwrap();
+        
+        let result = backend.get_raw(key).await.unwrap();
+        assert_eq!(result, Some(value.to_vec()));
+
+        // Test delete
+        backend.delete(key).await.unwrap();
+        let result = backend.get_raw(key).await.unwrap();
+        assert_eq!(result, None);
+
+        // Test transaction
+        let mut txn = backend.begin_transaction().await.unwrap();
+        txn.set_raw("txn_key", b"txn_value").await.unwrap();
+        txn.commit().await.unwrap();
+
+        let result = backend.get_raw("txn_key").await.unwrap();
+        assert_eq!(result, Some(b"txn_value".to_vec()));
+    }
+}

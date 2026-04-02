@@ -1,0 +1,318 @@
+use crate::backend::{StorageBackend, StorageError, StorageResult, StorageConfig, StorageTransactionCore, StorageTransactionExt, StorageStats};
+use std::sync::Arc;
+use libsql::{params, Database, Builder, Transaction};
+use async_trait::async_trait;// For map_err on futures
+
+/// SQLite-based storage backend implementation that uses libsql for database operations.
+/// 
+/// This backend provides:
+/// - ACID compliant transactions
+/// - Automatic write-ahead logging (WAL)
+/// - SQL-based prefix scanning
+/// - Efficient blob storage
+/// 
+/// The implementation uses a single table 'kv_store' with a key-value schema:
+/// - key: TEXT PRIMARY KEY
+/// - value: BLOB
+#[derive(Clone)]
+pub struct SQLiteBackend {
+    db: Arc<Database>,
+}
+
+/// Active transaction for the SQLite database.
+/// 
+/// Provides atomic operations and implements the StorageTransactionCore trait.
+/// All operations within a transaction are rolled back if the transaction is
+/// dropped without being committed.
+pub struct SQLiteTransaction {
+    txn: Transaction,
+}
+
+// Safety: libsql's Connection is Send + Sync when properly managed
+unsafe impl Send for SQLiteTransaction {}
+unsafe impl Sync for SQLiteTransaction {}
+
+#[async_trait]
+impl StorageTransactionCore for SQLiteTransaction {
+    async fn get_raw(&self, key: &str) -> StorageResult<Option<Vec<u8>>> {
+        let mut stmt = self.txn.prepare("SELECT value FROM kv_store WHERE key = ?")
+            .await
+            .map_err(|e| StorageError::BackendError(e.to_string()))?;
+
+        let mut rows = stmt.query(params![key])
+            .await
+            .map_err(|e| StorageError::BackendError(e.to_string()))?;
+
+        let value = if let Some(row) = rows.next().await
+            .map_err(|e| StorageError::BackendError(e.to_string()))? {
+            let value: Vec<u8> = row.get(0)
+                .map_err(|e| StorageError::BackendError(e.to_string()))?;
+            Some(value)
+        } else {
+            None
+        };
+
+        Ok(value)
+    }
+
+    async fn set_raw(&mut self, key: &str, value: &[u8]) -> StorageResult<()> {
+        self.txn.execute(
+            "INSERT OR REPLACE INTO kv_store (key, value) VALUES (?, ?)",
+            params![key, value],
+        )
+        .await
+        .map_err(|e| StorageError::BackendError(e.to_string()))?;
+
+        Ok(())
+    }
+
+    async fn delete(&mut self, key: &str) -> StorageResult<()> {
+        self.txn.execute("DELETE FROM kv_store WHERE key = ?", params![key])
+            .await
+            .map_err(|e| StorageError::BackendError(e.to_string()))?;
+
+        Ok(())
+    }
+
+    async fn commit(self: Box<Self>) -> StorageResult<()> {
+        self.txn.commit()
+            .await
+            .map_err(|e| StorageError::BackendError(e.to_string()))?;
+        Ok(())
+    }
+
+    async fn rollback(self: Box<Self>) -> StorageResult<()> {
+        self.txn.rollback()
+            .await
+            .map_err(|e| StorageError::BackendError(e.to_string()))?;
+        Ok(())
+    }
+}
+
+// Automatically implement the extension trait
+impl StorageTransactionExt for SQLiteTransaction {}
+
+#[async_trait]
+impl StorageBackend for SQLiteBackend {    
+    async fn init(config: StorageConfig) -> StorageResult<Self> {
+        let path = match config {
+            StorageConfig::SQLite { path, .. } => path,
+            _ => return Err(StorageError::ConfigError("Expected SQLite config".to_string())),
+        };
+
+        let db = Builder::new_local(&path)
+            .build()
+            .await
+            .map_err(|e| StorageError::BackendError(e.to_string()))?;
+
+        // Initialize connection pool
+        let mut conn_pool = Vec::new();
+        for _ in 0..4 { // Start with 4 connections in the pool
+            let conn = db.connect()
+                .map_err(|e| StorageError::BackendError(e.to_string()))?;
+            conn_pool.push(conn);
+        }
+
+        let backend = Self { 
+            db: Arc::new(db),
+            conn_pool: Arc::new(Mutex::new(conn_pool)),
+        };
+
+        // Create table if it doesn't exist
+        let conn = backend.get_connection().await?;
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS kv_store (key TEXT PRIMARY KEY, value BLOB)",
+            params![],
+        )
+        .await
+        .map_err(|e| StorageError::BackendError(e.to_string()))?;
+
+        // Return connection to pool
+        backend.return_connection(conn).await;
+
+        Ok(backend)
+    }
+
+    /// Get raw bytes by key from the SQLite store.
+    ///    /// Uses prepared statements and parameterized queries for safety and performance.
+    /// 
+    /// Returns None if the key doesn't exist, avoiding the need for KeyNotFound errors
+    /// in the common case of optional values.
+    async fn get_raw(&self, key: &str) -> StorageResult<Option<Vec<u8>>> {
+        let conn = self.get_connection().await?;
+            
+        let mut stmt = conn
+            .prepare("SELECT value FROM kv_store WHERE key = ?")
+            .await
+            .map_err(|e| StorageError::BackendError(e.to_string()))?;
+
+        let mut rows = stmt
+            .query(params![key])
+            .await
+            .map_err(|e| StorageError::BackendError(e.to_string()))?;
+
+        let value = if let Some(row) = rows.next().await
+            .map_err(|e| StorageError::BackendError(e.to_string()))? {
+            let value: Vec<u8> = row
+                .get(0)
+                .map_err(|e| StorageError::BackendError(e.to_string()))?;
+            Some(value)
+        } else {
+            None
+        };
+
+        self.return_connection(conn).await;
+        Ok(value)
+    }
+
+    async fn set_raw(&self, key: &str, value: &[u8]) -> StorageResult<()> {
+        let conn = self.get_connection().await?;
+            
+        conn.execute(
+            "INSERT OR REPLACE INTO kv_store (key, value) VALUES (?, ?)",
+            params![key, value],
+        )
+        .await
+        .map_err(|e| StorageError::BackendError(e.to_string()))?;
+
+        self.return_connection(conn).await;
+        Ok(())
+    }
+
+    async fn delete(&self, key: &str) -> StorageResult<()> {
+        let conn = self.get_connection().await?;
+            
+        conn.execute("DELETE FROM kv_store WHERE key = ?", params![key])
+            .await
+            .map_err(|e| StorageError::BackendError(e.to_string()))?;
+
+        self.return_connection(conn).await;
+        Ok(())
+    }
+
+    async fn exists(&self, key: &str) -> StorageResult<bool> {
+        let conn = self.get_connection().await?;
+            
+        let mut stmt = conn
+            .prepare("SELECT 1 FROM kv_store WHERE key = ? LIMIT 1")
+            .await
+            .map_err(|e| StorageError::BackendError(e.to_string()))?;
+
+        let mut rows = stmt
+            .query(params![key])
+            .await
+            .map_err(|e| StorageError::BackendError(e.to_string()))?;
+
+        let exists = rows.next().await
+            .map_err(|e| StorageError::BackendError(e.to_string()))?.is_some();
+
+        self.return_connection(conn).await;
+        Ok(exists)
+    }
+
+    async fn list_keys(&self, prefix: &str) -> StorageResult<Vec<String>> {
+        let conn = self.get_connection().await?;
+            
+        let query = if prefix.is_empty() {
+            "SELECT key FROM kv_store"
+        } else {
+            "SELECT key FROM kv_store WHERE key LIKE ?"
+        };
+
+        let mut stmt = conn
+            .prepare(query)
+            .await
+            .map_err(|e| StorageError::BackendError(e.to_string()))?;
+            
+        let mut rows = if prefix.is_empty() {
+            stmt.query(params![]).await
+        } else {
+            stmt.query(params![format!("{}%", prefix)]).await
+        }
+        .map_err(|e| StorageError::BackendError(e.to_string()))?;
+
+        let mut keys = Vec::new();
+        while let Some(row) = rows.next().await
+            .map_err(|e| StorageError::BackendError(e.to_string()))? {
+            let key: String = row
+                .get(0)
+                .map_err(|e| StorageError::BackendError(e.to_string()))?;
+            keys.push(key);
+        }
+
+        self.return_connection(conn).await;
+        Ok(keys)
+    }
+
+    async fn begin_transaction(&self) -> StorageResult<Box<dyn StorageTransactionCore>> {
+        let conn = self.get_connection().await?;
+        let txn = conn.transaction()
+            .await
+            .map_err(|e| StorageError::BackendError(e.to_string()))?;
+
+        Ok(Box::new(SQLiteTransaction { conn, txn }))
+    }
+
+    async fn stats(&self) -> StorageResult<StorageStats> {
+        let conn = self.get_connection().await?;
+
+        // Get total size from database properties
+        let mut stmt = conn.prepare("SELECT page_count * page_size FROM pragma_page_count, pragma_page_size")
+            .map_err(|e| StorageError::BackendError(format!("Failed to prepare size query: {}", e)))?;
+
+        let total_size: i64 = stmt.query_row([], |row| row.get(0))
+            .map_err(|e| StorageError::BackendError(format!("Failed to get size: {}", e)))?;
+
+        // Get total keys from entries table
+        let mut stmt = conn.prepare("SELECT COUNT(*) FROM entries")
+            .map_err(|e| StorageError::BackendError(format!("Failed to prepare count query: {}", e)))?;
+
+        let total_keys: i64 = stmt.query_row([], |row| row.get(0))
+            .map_err(|e| StorageError::BackendError(format!("Failed to get count: {}", e)))?;
+
+        self.return_connection(conn).await;
+
+        Ok(StorageStats {
+            total_size: total_size as u64,
+            total_keys: total_keys as u64,
+            is_compacting: false, // SQLite handles compaction automatically
+        })
+    }
+
+    /// Force WAL checkpoint to ensure durability.
+    /// 
+    /// SQLite automatically flushes after each transaction, but this method
+    /// can be used to force a full WAL checkpoint if immediate durability
+    /// is required.
+    async fn flush(&self) -> StorageResult<()> {
+        let conn = self.get_connection().await?;
+
+        // Flush by forcing a checkpoint
+        conn.execute("PRAGMA wal_checkpoint(FULL)", params![])
+            .await
+            .map_err(|e| StorageError::BackendError(e.to_string()))?;
+
+        self.return_connection(conn).await;
+        Ok(())
+    }
+}
+
+impl SQLiteBackend {
+    /// Get a connection from the pool
+    pub(crate) async fn get_connection(&self) -> StorageResult<Connection> {
+        let mut pool = self.conn_pool.lock().await;
+        if let Some(conn) = pool.pop() {
+            Ok(conn)
+        } else {
+            // Create new connection if pool is empty
+            self.db.connect()
+                .map_err(|e| StorageError::BackendError(e.to_string()))
+        }
+    }
+
+    /// Return a connection to the pool
+    pub(crate) async fn return_connection(&self, conn: Connection) {
+        let mut pool = self.conn_pool.lock().await;
+        pool.push(conn);
+    }
+}

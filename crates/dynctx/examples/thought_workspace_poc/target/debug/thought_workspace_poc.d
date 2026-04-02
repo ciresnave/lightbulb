@@ -1,0 +1,1 @@
+c:\Users\cires\OneDrive\Documents\projects\dynaniml\crates\dynctx\examples\thought_workspace_poc\target\debug\thought_workspace_poc.exe: c:\Users\cires\OneDrive\Documents\projects\dynaniml\crates\dynctx\examples\thought_workspace_poc\src\main.rs

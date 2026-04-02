@@ -1,0 +1,29 @@
+[package]
+name = "dynctx"
+version = "0.1.0"
+authors = ["DynAniml Contributors"]
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Core arena-based memory management and context handling for DynAniml"
+keywords = ["arena", "memory", "context", "rope", "snapshot"]
+categories = ["data-structures", "memory-management"]
+build = "build.rs"
+
+[dependencies]
+crossbeam = "0.8"
+ring = "0.17"
+capnp = "0.21"
+zstd = "0.13.3"
+serde = { version = "1.0", features = ["derive"] }
+memmap2 = "0.9"
+thiserror = "2.0"
+parking_lot = "0.12.4"
+
+# Needed by some examples (hitl_hook)
+rand = "0.8"
+
+[dev-dependencies]
+tempfile = "3.0"
+
+[build-dependencies]
+capnpc = "0.21"

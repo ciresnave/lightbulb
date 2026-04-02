@@ -1,0 +1,25 @@
+# Root repo ignores (until we decide on submodules/workspace layout)
+/idea_sources/
+/candle/
+/compare/
+/target/
+
+# OS/editor cruft
+.DS_Store
+Thumbs.db
+*.swp
+
+# Profiling data
+*.profraw
+
+# Model weights (large binary files)
+/models/
+
+# Build/test output
+cargo_check_output.txt
+cargo_test_output.txt
+lightbulb/
+# Example build artifacts
+crates/dynctx/examples/*/target/
+# Disabled crate
+crates/infra-consensus/

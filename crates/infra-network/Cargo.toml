@@ -1,0 +1,61 @@
+[package]
+name = "infra-network"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+description = "Network topology management and routing for DynAniml distributed systems"
+keywords = ["network", "topology", "routing", "discovery", "mesh"]
+categories = ["network-programming", "distributed-systems"]
+
+[dependencies]
+# Core utilities
+uuid = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Network dependencies
+libp2p = { workspace = true }
+petgraph = { workspace = true }
+tonic = { workspace = true }
+tonic-build = { workspace = true }
+
+# Async runtime
+tokio = { workspace = true }
+
+# Time handling
+chrono = { version = "0.4", features = ["serde"] }
+
+[dev-dependencies]
+tokio-test = "0.4"
+criterion = { workspace = true }
+tempfile = { workspace = true }
+pretty_assertions = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[build-dependencies]
+tonic-build = { workspace = true }
+
+[[bench]]
+name = "network_benchmarks"
+harness = false
+
+[features]
+default = ["std", "mesh-topology"]
+std = []
+# Topology types
+mesh-topology = []
+star-topology = []
+ring-topology = []
+# Discovery mechanisms
+dns-discovery = []
+multicast-discovery = []
+# Security features
+tls-encryption = []
+# Monitoring and metrics
+topology-metrics = []
