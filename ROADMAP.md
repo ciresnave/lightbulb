@@ -22,6 +22,10 @@ Foundation for a best-in-class, production-ready inference server. Covers contin
 
 Experimental optimizations and frontier techniques: KV cache compression, reasoning controls, federated retrieval, tool orchestration. **Dependencies**: Requires stable M0-M5 core; features are opt-in with feature flags.
 
+### **SECTION II.5: CONTINUOUS REASONING & COPROGRAMMER** → *Intelligent Inference (v2.5)*
+
+Mid-reasoning context injection, continuous inference engine, logic-transformation coprogrammer, grounded expert training. **Dependencies**: Builds on M5 KV cache compression (COMPLETE) and segmented KV cache (COMPLETE); some features require M8 training infrastructure.
+
 ### **SECTION III: COGNITIVE ARCHITECTURE (M7-M8)** → *Identity-Aware Systems (v3.0+)*
 
 Sentience infrastructure and modular training for AI partnership: identity graphs, autonomous rewards, developmental progression, compositional architectures. **Dependencies**: Requires federated infrastructure (M6) and distributed coordination primitives.
@@ -2537,6 +2541,198 @@ curl http://localhost:8080/v1/completions \
 - **SCS Research**: `semantic_coordinates_paper.md` (original research proposal)
 - **Multi-Model Support**: `src/engine/model_runner.rs` (existing multi-model infrastructure)
 - **Cache Patterns**: `src/cache/` (KV cache implementations as reference)
+
+---
+
+## SECTION II.5: CONTINUOUS REASONING & COPROGRAMMER ARCHITECTURE
+
+**Goals**: Continuous inference with mid-reasoning context injection, logic-transformation-based code generation, grounded expert training with causal understanding
+
+**Status**: PLANNED (research-grade capabilities building on M5 KV cache infrastructure)
+
+**Dependencies**: M5 KV cache compression (COMPLETE), segmented KV cache with tiered storage (COMPLETE), M4.B state persistence (COMPLETE)
+
+**Origin**: Design session March-April 2026, consolidated from multi-session architecture exploration
+
+---
+
+### CR.1 — Mid-Reasoning Context Injection (Highest Priority)
+
+**Status**: PLANNED
+**Dependencies**: Segmented KV cache (COMPLETE), attention weight capture (COMPLETE)
+**Estimated effort**: 2-4 weeks
+
+The core problem: every current tool use system discards reasoning state at the tool call boundary. The model reads tool results as narrative reports rather than experiencing them as sensory feedback arriving mid-thought.
+
+**CR.1.1 — KV Cache Preservation Across Tool Calls (Immediate)**
+- When the model generates a tool call, preserve the full KV cache state
+- Append tool result tokens and process them against the preserved cache
+- The model processes results in the full attentional context of prior reasoning
+- This is significantly better than current systems where tool results start a fresh forward pass
+- **Infrastructure exists**: ParallelKvCache + ParallelCacheBuilder already support this
+- **Integration point**: ModelRunner inference loop — detect tool call tokens, pause generation, inject result, resume
+- Acceptance: Tool use accuracy improves on cases where LLM prediction and tool result diverge
+
+**CR.1.2 — Attention-Weighted State Save**
+- At tool call moment, capture attention weights on the generating token
+- Attention weights identify exactly which prior context the model was actively using
+- Save attention-weighted value vectors (smaller, more meaningful than full state)
+- Already computed as part of normal inference — `capture_attention` flag in BatchedAttention
+- Merge saved state with tool result processing at the appropriate layer depth
+- Acceptance: Reasoning coherence maintained across tool calls as measured by task completion rate
+
+**CR.1.3 — General Mid-Reasoning Injection**
+- The mechanism is not specific to tool results. Same capability enables:
+  * Async tool completion — long-running tools inject results into still-active reasoning
+  * User interruption without context loss — clarifications arrive into active reasoning
+  * Inter-LLM communication — one LLM's response injects into another's mid-thought
+  * Streaming sensor data — continuous updates into active reasoning
+  * Memory retrieval mid-thought — KnowledgeBase facts injected at moment of maximum relevance
+  * Notifications and events — any external event delivered into active reasoning when relevant
+- **Connection to segmented KV cache**: Injected context creates new CacheSpans with appropriate tags
+- Acceptance: Multiple injection types demonstrated; reasoning quality maintained across injections
+
+---
+
+### CR.2 — Continuous Reasoning Engine
+
+**Status**: PLANNED
+**Dependencies**: CR.1 (mid-reasoning injection), M5 KV cache compression (COMPLETE), segmented KV cache (COMPLETE)
+**Estimated effort**: 4-8 weeks
+
+With KV cache compression handling the memory problem (already solved), there is no fundamental reason for the model to stop running between episodes.
+
+**CR.2.1 — Confidence Gating (No Retraining Required)**
+- Token probability entropy — already computed at every generation step:
+  * Low entropy → model confident; sustained low entropy → converged on something worth surfacing
+  * High entropy → model uncertain, still processing
+- Attention coherence — detectable from existing attention patterns:
+  * Diffuse, exploratory attention → still reasoning
+  * Focused, coherent, stable attention → ready to output
+- Small classifier on attention pattern snapshots to gate output surfacing
+- Training data: existing model outputs labeled by informativeness
+- **Infrastructure exists**: `capture_attention` on BatchedAttention, attention weight aggregation in H2O
+- Acceptance: Output gating reliably distinguishes thinking from ready-to-surface states
+
+**CR.2.2 — Continuous Operation Loop**
+- Model runs continuously; world events arrive via CR.1 injection
+- Reasoning integrates events; outputs emerge when confidence gate opens
+- Thinking time becomes a resource — model reasons as long as needed
+- Model can surface observations unprompted when they become salient
+- **KV cache management**: Segmented eviction (COMPLETE) handles memory; tiered demotion preserves reasoning history
+- Acceptance: Model maintains coherent reasoning across hours with injected events
+
+**CR.2.3 — Think/Say Split (Future Enhancement)**
+- `[THINK]` internal reasoning tokens / `[SAY]` user-visible tokens
+- Requires lightweight fine-tuning, not architectural change
+- Training data from existing chain-of-thought examples
+- Enables: efficient communication, auditable reasoning, meta-communication
+- **Not a prerequisite** — thinking out loud works fine for initial implementation
+- Acceptance: Model correctly segregates internal reasoning from output; reasoning quality maintained
+
+---
+
+### CR.3 — Logic Transformation Coprogrammer
+
+**Status**: PLANNED (research)
+**Dependencies**: CR.1 (mid-reasoning injection), CR.2 (continuous reasoning)
+**Estimated effort**: 3-6 months
+
+Rather than generating code directly, separate semantic intent from syntactic generation. A logic bridge reasons about transformations between program states; the LLM handles syntax within bounded scopes.
+
+**CR.3.1 — Recursive Bisection Planning**
+- Given codebase A and formal spec B, recursively ask: "What must be logically true at the midpoint?"
+- "Only what I'm certain about" — logical invariants derivable from pure reasoning about A and B
+- Continue until no new certainties can be generated
+- Result: constraint lattice of logical invariants bounding each transformation interval
+- Step properties for constraint propagation: dependency ordering, scope, blast radius, reversibility, test binding, type delta, confidence score
+- Acceptance: Constraint lattice produces more reliable transformation plans than direct generation
+
+**CR.3.2 — Receding Horizon Replanning (Model Predictive Control)**
+- After each step, discard all midpoints and replan from new actual state
+- Each replan is cheaper: distance to B shrinks, current state is more specifically shaped toward B
+- Midpoints are reasoning scaffolds, not plans — reality supersedes them
+- Acceptance: Multi-step transformations complete with higher correctness than single-pass generation
+
+**CR.3.3 — Logic Bridge Work Order Generation**
+- Logic bridge generates structured work orders per transformation step:
+  * Goal, preconditions, postconditions
+  * Scope boundaries (files/modules touched)
+  * Must-not-touch constraints
+  * Success criteria (specific tests)
+- LLM generates code within work order constraints — narrow, well-scoped question
+- Acceptance: LLM generates correct code within work order bounds more reliably than unconstrained generation
+
+**CR.3.4 — Formal Spec Generation via LLM Dialogue**
+- LLM excels at disambiguating developer intent through dialogue
+- Identify ambiguity in natural language requirements
+- Ask targeted clarifying questions
+- Produce formal specification defining endpoint B
+- Acceptance: Formal specs produced via dialogue are sufficiently precise for bisection planning
+
+---
+
+### CR.4 — Grounded Expert Training (Research)
+
+**Status**: PLANNED (long-term research)
+**Dependencies**: CR.2 (continuous reasoning for training loop), M8 (modular training infrastructure)
+**Estimated effort**: 6-12 months
+
+Current LLMs learn grounding secondhand — statistical patterns over descriptions of causal reality. A grounded expert develops genuine causal representations through self-directed exploration.
+
+**CR.4.1 — Curiosity-Driven Exploration**
+- Learning progress drive: reward improvement in predictive accuracy over recent window
+- Not reward for achieving goals — drives to understand, not to accomplish
+- Preference emerges from accumulated experience: consistent action-consequence pairs build strong models
+- Natural migration to boundary of own competence (almost-understood territory)
+- **Connection to M7**: Extends existing curiosity-driven exploration concepts with concrete training methodology
+
+**CR.4.2 — State Machine Expert (First Environment)**
+- Small number of states and actions, immediate deterministic feedback
+- Teaches state, transition, reachability, irreversibility — foundation of computation
+- Representations transfer naturally to programming expert
+- **Validation**: Representational distance correlates with behavioral similarity, not syntactic similarity
+  * Perturbation sensitivity: semantic changes → large representational shifts; syntactic changes → small shifts
+  * Clustering: programs cluster by behavioral properties, not surface features
+  * Behavioral prediction probe: tiny network predicts execution properties from representations alone
+
+**CR.4.3 — Compiler Environment Expert**
+- Text editor (action space) + compiler (structured feedback) + execution environment (observable behavior)
+- No examples, no language spec, no reward for "good" code
+- Expected progression: random text → error structure → syntax emergence → execution → semantic structure → goal crystallization
+- Read-only example library as environment enrichment (not instruction)
+
+**CR.4.4 — Language Network Attachment**
+- **Option A** (ideal): Train fresh language network in presence of expert representations
+  * Language learns to predict tokens with causal grounding from the start
+  * Falls out for free: accurate execution prediction, ambiguity detection, epistemic humility
+- **Option B** (practical): Small pre-trained LLM + trained translation layers
+  * Expert frozen, LLM frozen, only small translation layers trained
+  * Front/back translation layers on (natural language, code behavior) pairs
+  * Fits in 12GB VRAM: 7B LLM at 4-bit (4GB) + small expert + translation layers
+
+**CR.4.5 — Multi-Expert Architecture (MoE With Grounded Understanding)**
+- Multiple grounded experts in different domains, shared language network
+- Each expert has different *kind* of understanding, not just different knowledge
+- Cross-domain reasoning emerges when language network activates multiple experts
+- New domains added without retraining: train expert → train translation layers → fine-tune language network
+- **Connection to M8**: Natural extension of modular training infrastructure
+
+---
+
+### CR — Build Sequence
+
+**Stage 1**: Mid-reasoning injection (CR.1) — immediate, existing hardware, independently valuable
+**Stage 2**: Confidence gating + continuous operation (CR.2.1, CR.2.2) — immediate, existing hardware
+**Stage 3**: State machine grounded expert (CR.4.2) — weeks-months, existing hardware
+  * **Key validation milestone**: representational distance correlates with behavioral similarity
+**Stage 4**: Translation layer attachment (CR.4.4) — months, modest cloud compute
+**Stage 5**: Programming expert (CR.4.3) — months, existing + cloud hardware
+**Stage 6**: Full coprogrammer (CR.3) — builds on all prior stages
+
+**Hardware fit**: Stages 1-3 fit on existing hardware (RTX 4070 12GB VRAM). Stages 4-6 need cloud compute for training, not inference.
+
+**IP note**: Mid-reasoning injection mechanism (CR.1) is separately patentable — specific, novel, implementable, applicable across many systems.
 
 ---
 
