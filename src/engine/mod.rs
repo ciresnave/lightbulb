@@ -26,6 +26,7 @@ pub mod slot_pool;
 pub mod speculative;
 pub mod state_persistence;
 pub mod streaming_context;
+pub mod tool_call;
 
 pub use adaptive_selection::{
     ProviderMetrics, ProviderSelector, RegisteredProvider, SelectionConfig, SelectionStrategy,
@@ -113,11 +114,37 @@ pub struct Request {
 }
 
 /// Legacy RequestState enum
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub enum RequestState {
     Pending,
     Decoding,
+    /// Generation paused, waiting for tool result. KV cache is preserved.
+    /// Call `inject_tool_result()` to resume generation with the result.
+    AwaitingToolResult {
+        tool_name: String,
+        tool_args: String,
+        /// Cache position at which the tool call was detected.
+        cache_position: usize,
+        /// Attention snapshot at the moment of the tool call (if captured).
+        attention_snapshot: Option<tool_call::AttentionSnapshot>,
+    },
     Completed,
+}
+
+impl PartialEq for RequestState {
+    fn eq(&self, other: &Self) -> bool {
+        // Compare variant discriminants only (ignore data fields)
+        std::mem::discriminant(self) == std::mem::discriminant(other)
+    }
+}
+
+impl Eq for RequestState {}
+
+impl RequestState {
+    /// Check if this state is AwaitingToolResult (any variant data).
+    pub fn is_awaiting_tool_result(&self) -> bool {
+        matches!(self, RequestState::AwaitingToolResult { .. })
+    }
 }
 
 /// Legacy RequestContext (to be replaced by SlotPool's internal state)
@@ -161,8 +188,29 @@ impl RequestContext {
     }
 
     pub fn should_continue(&self) -> bool {
-        (self.state == RequestState::Decoding)
+        matches!(self.state, RequestState::Decoding)
             && self.tokens_generated < self.request.max_new_tokens
+    }
+
+    /// Transition to AwaitingToolResult state, preserving KV cache position.
+    pub fn await_tool_result(
+        &mut self,
+        tool_name: String,
+        tool_args: String,
+        attention_snapshot: Option<tool_call::AttentionSnapshot>,
+    ) {
+        let cache_position = self.position;
+        self.state = RequestState::AwaitingToolResult {
+            tool_name,
+            tool_args,
+            cache_position,
+            attention_snapshot,
+        };
+    }
+
+    /// Resume decoding after tool result injection.
+    pub fn resume_decoding(&mut self) {
+        self.state = RequestState::Decoding;
     }
 }
 

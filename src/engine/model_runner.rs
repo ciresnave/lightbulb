@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender};
 use tokio::sync::{mpsc as async_mpsc, oneshot};
 
-use crate::engine::{Request, RequestContext};
+use crate::engine::{Request, RequestContext, RequestState};
 use crate::model::ParallelModelManager;
 
 /// Response mode for inference jobs
@@ -115,6 +115,28 @@ impl ModelRunner {
                                 loop {
                                     match manager.forward_batch(&mut batch) {
                                         Ok(_) => {
+                                            // Check if a tool call was detected (CR.1)
+                                            if batch[0].state.is_awaiting_tool_result() {
+                                                // Tool call detected — KV cache is preserved.
+                                                // For now, log and resume without tool execution.
+                                                // Future: execute tool via callback, then inject result.
+                                                if let RequestState::AwaitingToolResult {
+                                                    ref tool_name,
+                                                    ref tool_args,
+                                                    ..
+                                                } = batch[0].state
+                                                {
+                                                    eprintln!(
+                                                        "Tool call detected (no executor registered): {}({})",
+                                                        tool_name, tool_args
+                                                    );
+                                                }
+                                                // Resume decoding — model continues without tool result
+                                                // (graceful degradation when no tool executor is available)
+                                                batch[0].resume_decoding();
+                                                continue;
+                                            }
+
                                             // Get the most recent token and decode it
                                             if let Some(&last_token) =
                                                 batch[0].generated_tokens.last()
@@ -151,6 +173,13 @@ impl ModelRunner {
                                 loop {
                                     match manager.forward_batch(&mut batch) {
                                         Ok(_) => {
+                                            // Check if a tool call was detected (CR.1)
+                                            if batch[0].state.is_awaiting_tool_result() {
+                                                // Graceful degradation: resume without tool result
+                                                batch[0].resume_decoding();
+                                                continue;
+                                            }
+
                                             if !batch[0].should_continue() {
                                                 break;
                                             }

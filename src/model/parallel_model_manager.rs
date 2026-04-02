@@ -92,6 +92,8 @@ pub struct ParallelModelManager {
     tiered_storage: Option<crate::cache::TieredStorageManager>,
     /// Per-token tracker for hybrid eviction (Phase 4). Only one active at a time.
     per_token_tracker: Option<crate::cache::PerTokenTracker>,
+    /// Tool call detector for mid-reasoning context injection (CR.1).
+    tool_call_detector: Option<crate::engine::tool_call::ToolCallDetector>,
 }
 
 impl ParallelModelManager {
@@ -209,6 +211,7 @@ impl ParallelModelManager {
             active_generation_spans: std::collections::HashMap::new(),
             tiered_storage: None,
             per_token_tracker: None,
+            tool_call_detector: None,
         })
     }
 
@@ -494,6 +497,7 @@ impl ParallelModelManager {
             active_generation_spans: std::collections::HashMap::new(),
             tiered_storage: None,
             per_token_tracker: None,
+            tool_call_detector: None,
         })
     }
     /// Load a model with hardware-adaptive configuration
@@ -855,6 +859,146 @@ impl ParallelModelManager {
         }
     }
 
+    // === Mid-Reasoning Context Injection (CR.1) ===
+
+    /// Enable tool call detection with default patterns.
+    ///
+    /// Registers common tool call patterns (<tool_call>, [TOOL_CALL], <|tool_call|>)
+    /// and enables detection in the decode loop.
+    pub fn enable_tool_call_detection(&mut self) {
+        self.tool_call_detector =
+            Some(crate::engine::tool_call::ToolCallDetector::with_defaults());
+        println!("Tool call detection enabled (3 default patterns)");
+    }
+
+    /// Enable tool call detection with a custom detector.
+    pub fn set_tool_call_detector(
+        &mut self,
+        detector: crate::engine::tool_call::ToolCallDetector,
+    ) {
+        self.tool_call_detector = Some(detector);
+    }
+
+    /// Disable tool call detection.
+    pub fn disable_tool_call_detection(&mut self) {
+        self.tool_call_detector = None;
+    }
+
+    /// Inject a tool result into an active request's KV cache.
+    ///
+    /// The request must be in `AwaitingToolResult` state (paused after detecting
+    /// a tool call, KV cache preserved). The tool result is tokenized and processed
+    /// as a mini-prefill against the preserved cache, then the request transitions
+    /// back to `Decoding` state.
+    ///
+    /// This is the core mechanism of CR.1 — the model processes the tool result
+    /// in the full attentional context of the reasoning that requested it.
+    ///
+    /// # Arguments
+    ///
+    /// * `batch` - The request batch (must contain the paused request)
+    /// * `request_idx` - Index of the request in the batch
+    /// * `tool_result` - The formatted tool result text to inject
+    ///
+    /// # How It Works
+    ///
+    /// 1. Tokenizes the tool result text
+    /// 2. Creates a ToolOutput CacheSpan
+    /// 3. Runs a mini-prefill: forward pass of result tokens against preserved cache
+    /// 4. Advances cache positions by the result token count
+    /// 5. Transitions request back to Decoding
+    ///
+    /// The model's next generated token will attend to both its prior reasoning
+    /// AND the injected tool result — as if the result arrived mid-thought.
+    pub fn inject_tool_result(
+        &mut self,
+        batch: &mut [RequestContext],
+        request_idx: usize,
+        tool_result: &str,
+    ) -> Result<()> {
+        let ctx = &batch[request_idx];
+
+        // Verify request is in the right state
+        if !ctx.state.is_awaiting_tool_result() {
+            anyhow::bail!(
+                "Request {} is not awaiting tool result (state: {:?})",
+                ctx.request.id,
+                ctx.state
+            );
+        }
+
+        let cache_idx = ctx
+            .cache_index
+            .ok_or_else(|| anyhow::anyhow!("Request has no cache index assigned"))?;
+
+        // Tokenize the tool result
+        let result_tokens = self.tokenize(tool_result, false)?;
+        if result_tokens.is_empty() {
+            // Empty result — just resume decoding
+            batch[request_idx].resume_decoding();
+            return Ok(());
+        }
+
+        let result_len = result_tokens.len();
+
+        // Create ToolOutput span
+        if self.is_segmented_cache_enabled() {
+            let _ = self.cache_builder.begin_span(
+                cache_idx,
+                crate::cache::CacheTag::ToolOutput,
+                None,
+            );
+        }
+
+        // Create input tensor for mini-prefill
+        let input_ids = Tensor::new(result_tokens.as_slice(), &self.device)?;
+
+        // Create metadata for this mini-prefill
+        // We're processing result_len tokens for a single request at the current position
+        let metadata = crate::model::BatchMetadata::from_chunked_prefill_batch(
+            vec![cache_idx],
+            vec![result_len],
+            vec![result_len],
+        );
+
+        // Forward pass: process result tokens against preserved cache
+        // This is identical to chunked prefill — tokens processed, KV cache updated,
+        // no token generation (we just want the cache populated)
+        let _logits = self.model.forward(
+            &input_ids,
+            &mut self.cache_builder,
+            &mut self.caches,
+            &metadata,
+        )?;
+
+        // Advance cache position by the number of injected tokens
+        let old_pos = self.cache_builder.get_position(cache_idx);
+        let new_pos = old_pos + result_len;
+        self.cache_builder.set_position(cache_idx, new_pos);
+
+        // End ToolOutput span
+        if self.is_segmented_cache_enabled() {
+            // Find the most recent open span for this slot and close it
+            let spans = self.cache_builder.spans_for_slot(cache_idx);
+            if let Some(last_span) = spans.last() {
+                let span_id = last_span.id;
+                let _ = self.cache_builder.end_span(span_id);
+            }
+        }
+
+        // Update request context
+        let ctx = &mut batch[request_idx];
+        ctx.position += result_len;
+        ctx.resume_decoding();
+
+        println!(
+            "Injected {} tool result tokens at position {}..{} for request {}",
+            result_len, old_pos, new_pos, ctx.request.id
+        );
+
+        Ok(())
+    }
+
     /// Disable the segmented KV cache system.
     pub fn disable_segmented_cache(&mut self) {
         self.model.set_capture_attention(false, false);
@@ -1159,6 +1303,12 @@ impl ParallelModelManager {
                 RequestState::Completed => {
                     // In continuous batching, we need to include Completed slots too
                     // They'll be masked out, but we need the full batch size
+                    decode_requests.push(idx);
+                }
+                RequestState::AwaitingToolResult { .. } => {
+                    // CR.1: Request is paused waiting for tool result.
+                    // KV cache is preserved. Include in decode batch as inactive
+                    // (will be masked out, but slot must be present for batch sizing).
                     decode_requests.push(idx);
                 }
             }
@@ -1593,6 +1743,41 @@ impl ParallelModelManager {
                 ctx.generated_tokens.push(next_token);
                 ctx.record_token();
                 self.stats.total_tokens_generated += 1;
+
+                // CR.1: Tool call detection — check for tool call patterns in output
+                if let Some(ref mut detector) = self.tool_call_detector {
+                    if let Some(cache_idx) = ctx.cache_index {
+                        detector.push_token(cache_idx, next_token);
+
+                        if let Some(detected) = detector.check_for_tool_call(
+                            cache_idx,
+                            &self.tokenizer,
+                            ctx.generated_tokens.len(),
+                        ) {
+                            println!(
+                                "Tool call detected: {}({}) at tokens {}..{}",
+                                detected.tool_name,
+                                detected.tool_args,
+                                detected.token_start,
+                                detected.token_end
+                            );
+
+                            // Transition to AwaitingToolResult — KV cache preserved
+                            ctx.await_tool_result(
+                                detected.tool_name,
+                                detected.tool_args,
+                                None, // TODO: capture attention snapshot
+                            );
+
+                            // Clear the token buffer for this slot
+                            detector.clear_slot(cache_idx);
+
+                            // Signal caller (skip EOS check, don't generate more)
+                            results[idx] = Some(next_token);
+                            continue;
+                        }
+                    }
+                }
 
                 // Segmented cache: check for <RETRIEVE:key> token pattern
                 if self.is_segmented_cache_enabled() {
