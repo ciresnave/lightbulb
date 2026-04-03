@@ -45,7 +45,7 @@
     serde_json         = "1"
     sha2               = "0.10"
     thiserror          = "2"
-    tokenizers         = "0.22"
+    tokenizers         = { workspace = true }
     tokio              = { version = "1", features = ["macros", "rt-multi-thread"] }
     tokio-stream       = "0.1"
     tracing            = "0.1"
