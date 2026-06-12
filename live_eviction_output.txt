@@ -1,0 +1,346 @@
+   Compiling lightbulb v0.1.0 (C:\Users\cires\OneDrive\Documents\projects\lightbulb\lightbulb)
+warning: unused import: `Response`
+  --> lightbulb\src\api\admin.rs:10:30
+   |
+10 |     response::{IntoResponse, Response},
+   |                              ^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `chrono::NaiveDateTime`
+  --> lightbulb\src\api\admin.rs:13:5
+   |
+13 | use chrono::NaiveDateTime;
+   |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `post`
+  --> lightbulb\src\api\mod.rs:38:20
+   |
+38 |     routing::{get, post},
+   |                    ^^^^
+
+warning: unused import: `PrivateKeyDer`
+   --> lightbulb\src\api\mod.rs:279:53
+    |
+279 |             use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+    |                                                     ^^^^^^^^^^^^^
+
+warning: unused imports: `DType` and `Device`
+  --> lightbulb\src\loaders\awq.rs:12:25
+   |
+12 | use candlelight::core::{DType, Device, Tensor};
+   |                         ^^^^^  ^^^^^^
+
+warning: unused import: `std::collections::HashMap`
+  --> lightbulb\src\loaders\awq.rs:14:5
+   |
+14 | use std::collections::HashMap;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::gguf`
+   --> lightbulb\src\loaders\mod.rs:132:9
+    |
+132 |     use crate::gguf;
+    |         ^^^^^^^^^^^
+
+warning: unused import: `D`
+ --> lightbulb\src\model\awq_qwen3.rs:6:25
+  |
+6 | use candlelight::core::{D, DType, Device, Module, Result, Tensor};
+  |                         ^
+
+warning: unnecessary parentheses around block return value
+   --> lightbulb\src\model\awq_qwen3.rs:134:5
+    |
+134 |     (x.broadcast_mul(cos)? + x_rotated.broadcast_mul(sin)?)
+    |     ^                                                     ^
+    |
+    = note: `#[warn(unused_parens)]` (part of `#[warn(unused)]`) on by default
+help: remove these parentheses
+    |
+134 -     (x.broadcast_mul(cos)? + x_rotated.broadcast_mul(sin)?)
+134 +     x.broadcast_mul(cos)? + x_rotated.broadcast_mul(sin)?
+    |
+
+warning: unused import: `std::sync::Arc`
+  --> lightbulb\src\model\chunked_prefill.rs:32:5
+   |
+32 | use std::sync::Arc;
+   |     ^^^^^^^^^^^^^^
+
+warning: unused import: `parking_lot::Mutex`
+  --> lightbulb\src\model\chunked_prefill.rs:35:5
+   |
+35 | use parking_lot::Mutex;
+   |     ^^^^^^^^^^^^^^^^^^
+
+warning: variant `N_M` should have an upper camel case name
+   --> lightbulb\src\pruning\mod.rs:126:5
+    |
+126 |     N_M { n: usize, m: usize },
+    |     ^^^ help: convert the identifier to upper camel case: `NM`
+    |
+    = note: `#[warn(non_camel_case_types)]` (part of `#[warn(nonstandard_style)]`) on by default
+
+warning: use of deprecated function `rand::thread_rng`: Renamed to `rng`
+   --> lightbulb\src\api\admin.rs:252:29
+    |
+252 |         let mut rng = rand::thread_rng();
+    |                             ^^^^^^^^^^
+    |
+    = note: `#[warn(deprecated)]` on by default
+
+warning: use of deprecated method `rand::Rng::gen_range`: Renamed to `random_range`
+  --> lightbulb\src\sampling.rs:94:20
+   |
+94 |         return rng.gen_range(0..logits.len());
+   |                    ^^^^^^^^^
+
+warning: unused import: `Module`
+  --> lightbulb\src\model\custom_transformer_block.rs:76:40
+   |
+76 | use candlelight::core::{DType, Device, Module, Result, Tensor};
+   |                                        ^^^^^^
+
+warning: unused variable: `scheduler`
+  --> lightbulb\src\api\admin.rs:53:9
+   |
+53 |     let scheduler = &state.scheduler;
+   |         ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_scheduler`
+   |
+   = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `cache_size`
+   --> lightbulb\src\cache\h2o_policy.rs:146:9
+    |
+146 |         cache_size: usize,
+    |         ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_cache_size`
+
+warning: unused variable: `ctx`
+   --> lightbulb\src\cache\kv_compression.rs:428:47
+    |
+428 |     fn compute_scales(&self, tensor: &Tensor, ctx: &CompressionCtx) -> Result<Tensor> {
+    |                                               ^^^ help: if this is intentional, prefix it with an underscore: `_ctx`
+
+warning: unused variable: `group_size`
+   --> lightbulb\src\cache\kv_compression.rs:443:42
+    |
+443 |             QuantGranularity::PerGroup { group_size } => {
+    |                                          ^^^^^^^^^^ help: try ignoring the field: `group_size: _`
+
+warning: unused variable: `keys`
+   --> lightbulb\src\cache\kv_compression.rs:603:34
+    |
+603 |     fn compute_redundancy(&self, keys: &Tensor, ctx: &CompressionCtx) -> Result<Vec<f32>> {
+    |                                  ^^^^ help: if this is intentional, prefix it with an underscore: `_keys`
+
+warning: unused variable: `num_reps`
+   --> lightbulb\src\cache\kv_compression.rs:610:13
+    |
+610 |         let num_reps = (seq_len + alpha - 1) / alpha;
+    |             ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_num_reps`
+
+warning: unused variable: `keep_mask`
+   --> lightbulb\src\cache\kv_compression.rs:688:13
+    |
+688 |         let keep_mask = self.select_tokens(&joint_scores, ctx.seq_len);
+    |             ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_keep_mask`
+
+warning: unused variable: `keys`
+   --> lightbulb\src\cache\kv_compression.rs:767:45
+    |
+767 |     fn compute_semantic_clusters(&mut self, keys: &Tensor, ctx: &CompressionCtx) -> Result<()> {
+    |                                             ^^^^ help: if this is intentional, prefix it with an underscore: `_keys`
+
+warning: unused variable: `reshaped`
+    --> lightbulb\src\cache\kv_compression.rs:1085:13
+     |
+1085 |         let reshaped = tensor.reshape((batch_size * num_heads, seq_len, head_dim))?;
+     |             ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_reshaped`
+
+warning: unused variable: `query_text`
+   --> lightbulb\src\engine\adaptive_selection.rs:153:9
+    |
+153 |         query_text: &str,
+    |         ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_query_text`
+
+warning: unused variable: `order`
+   --> lightbulb\src\engine\decomposition.rs:355:13
+    |
+355 |         let order = self.execution_order()?;
+    |             ^^^^^ help: if this is intentional, prefix it with an underscore: `_order`
+
+warning: unused variable: `sub_queries`
+   --> lightbulb\src\engine\query_analysis.rs:670:9
+    |
+670 |         sub_queries: &[SubQuery],
+    |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_sub_queries`
+
+warning: unused variable: `start`
+   --> lightbulb\src\engine\speculative.rs:217:13
+    |
+217 |         let start = std::time::Instant::now();
+    |             ^^^^^ help: if this is intentional, prefix it with an underscore: `_start`
+
+warning: unused variable: `input`
+   --> lightbulb\src\loaders\awq.rs:186:27
+    |
+186 |     pub fn forward(&self, input: &Tensor) -> Result<Tensor> {
+    |                           ^^^^^ help: if this is intentional, prefix it with an underscore: `_input`
+
+warning: unused variable: `use_flash_attn`
+   --> lightbulb\src\loaders\mod.rs:284:5
+    |
+284 |     use_flash_attn: bool,
+    |     ^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_use_flash_attn`
+
+warning: unused variable: `layer_idx`
+   --> lightbulb\src\multi_gpu\distributed_cache.rs:130:9
+    |
+130 |         layer_idx: usize,
+    |         ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_layer_idx`
+
+warning: unused variable: `batch_idx`
+   --> lightbulb\src\multi_gpu\distributed_cache.rs:131:9
+    |
+131 |         batch_idx: usize,
+    |         ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_batch_idx`
+
+warning: unused variable: `cache_builder`
+   --> lightbulb\src\multi_gpu\distributed_cache.rs:138:30
+    |
+138 |                 for (gpu_id, cache_builder) in self.local_caches.iter_mut().enumerate() {
+    |                              ^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_cache_builder`
+
+warning: unused variable: `new_idx`
+   --> lightbulb\src\pruning\mod.rs:693:29
+    |
+693 |         for (original_idx, &new_idx) in kept_layers.iter().enumerate() {
+    |                             ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_new_idx`
+
+warning: unused variable: `calibration_data`
+   --> lightbulb\src\quantization\norm_tweaking.rs:100:9
+    |
+100 |         calibration_data: &Tensor,
+    |         ^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_calibration_data`
+
+warning: unused variable: `model`
+   --> lightbulb\src\quantization\norm_tweaking.rs:243:5
+    |
+243 |     model: &mut M,
+    |     ^^^^^ help: if this is intentional, prefix it with an underscore: `_model`
+
+warning: field `optional_tags` is never read
+   --> lightbulb\src\engine\metadata_scheduling.rs:299:5
+    |
+294 | struct RoutingRule {
+    |        ----------- field in this struct
+...
+299 |     optional_tags: HashSet<RequestTag>,
+    |     ^^^^^^^^^^^^^
+    |
+    = note: `RoutingRule` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: fields `config` and `execution_order` are never read
+   --> lightbulb\src\engine\pipeline.rs:316:5
+    |
+302 | pub struct Pipeline {
+    |            -------- fields in this struct
+...
+316 |     config: PipelineConfig,
+    |     ^^^^^^
+...
+322 |     execution_order: Vec<StageId>,
+    |     ^^^^^^^^^^^^^^^
+
+warning: field `timestamp` is never read
+  --> lightbulb\src\engine\slot_monitor.rs:62:5
+   |
+61 | struct MemorySample {
+   |        ------------ field in this struct
+62 |     timestamp: Instant,
+   |     ^^^^^^^^^
+   |
+   = note: `MemorySample` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: field `head_dim` is never read
+  --> lightbulb\src\model\awq_qwen3.rs:70:5
+   |
+67 | struct Qwen3RotaryEmbedding {
+   |        -------------------- field in this struct
+...
+70 |     head_dim: usize,
+   |     ^^^^^^^^
+   |
+   = note: `Qwen3RotaryEmbedding` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: field `config` is never read
+   --> lightbulb\src\pruning\mod.rs:286:5
+    |
+285 | pub struct WandaScorer {
+    |            ----------- field in this struct
+286 |     config: WandaConfig,
+    |     ^^^^^^
+
+warning: method `get_activation_norms` is never used
+   --> lightbulb\src\pruning\mod.rs:340:8
+    |
+293 | impl WandaScorer {
+    | ---------------- method in this implementation
+...
+340 |     fn get_activation_norms(&self) -> Result<Tensor> {
+    |        ^^^^^^^^^^^^^^^^^^^^
+
+warning: field `patterns` is never read
+  --> lightbulb\src\pruning\name_mapping.rs:61:5
+   |
+50 | pub struct TensorNameMapper {
+   |            ---------------- field in this struct
+...
+61 |     patterns: ArchitecturePatterns,
+   |     ^^^^^^^^
+   |
+   = note: `TensorNameMapper` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: field `device` is never read
+  --> lightbulb\src\quantization\norm_tweaking.rs:81:5
+   |
+79 | pub struct NormTweaker {
+   |            ----------- field in this struct
+80 |     config: NormTweakingConfig,
+81 |     device: Device,
+   |     ^^^^^^
+
+warning: `lightbulb` (lib) generated 44 warnings (run `cargo fix --lib -p lightbulb` to apply 32 suggestions)
+error: linking with `lld-link.exe` failed: exit code: 1
+  |
+  = note: "lld-link.exe" "-flavor" "link" "/NOLOGO" "C:\\Users\\cires\\OneDrive\\Documents\\projects\\lightbulb\\target\\release\\examples\\rustcZw0XsF\\symbols.o" "<14 object files omitted>" "C:\\Users\\cires\\OneDrive\\Documents\\projects\\lightbulb\\target\\release\\deps/{liblightbulb-5a1c33b5fc59f048,libmlmf-4d2d5bd5577fd9dd,libsafetensors-7b5d69553f03f6ac,libprost-8f47bac97053762f,libindicatif-a0cab7cd07449f0b,libunit_prefix-63f74e3fc571c8a0,libconsole-d5ffb560e58fc584,librustls_pemfile-d39c631dfa26ce77,libdeadpool_postgres-de97de53fd50ca82,libdeadpool-080a32ea9f114a0c,libdeadpool_runtime-8b946defb1ac9233,libhex-c69164f226341ea4,librefinery-3fa9f35897296cd0,librefinery_core-3f3cc97b36ddcd4c,libpostgres_native_tls-492834644a4a3a2d,libtoml-cfd05bffb833bff9,libtoml_edit-d7e8bbea0acab23d,libserde_spanned-4dfda51b0ff65462,libwinnow-77e04a5ec0077a26,libtoml_write-57752392e5609e6b,libtoml_datetime-70247de583fd4c82,libwalkdir-b73e893be90f785d,libsame_file-f76c94a8029f6916,libwinapi_util-272f9515117b0def,libtokio_postgres-be11e71e26c3bb5e,libphf-75c810f29191197d,libphf_shared-3993f6d7491caaea,libsiphasher-070e2026f6c7342b,libwhoami-9fc030f2e8f5fe02,libpostgres_types-9cba5fc793406ac6,libuuid-0dd115e2a412d9aa,libpostgres_protocol-f7033090d4c18c86,libstringprep-012c06b0ac617306,libunicode_properties-2c2cd5426815e96b,libunicode_normalization-64b090ceae140ca6,libtinyvec-6515243592cc1464,libtinyvec_macros-504ecb6ad5c3e90a,libunicode_bidi-2cea22a2ad6948e0,libhmac-aa0e1a239b118f81,libmd5-f0b25183401203d1,libfallible_iterator-4c31deb4866e78ce,libx509_parser-e8faaae3800f1fd6,libdata_encoding-477463f8a0643dfa,liblazy_static-91d8729a373bf5b5,liboid_registry-943c907aaac8ea3a,libder_parser-84a2e664f312c4d4,libasn1_rs-88d50287dd536685,librusticata_macros-5b99704c8949c9b8,librcgen-5cbf7b93bf1c7640,libyasna-e7369a89515f3070,libtime-c264ccadfb447068,libtime_core-d978b7de1d0e9895,libnum_conv-b4e39dca5c53193d,libderanged-6327cc20c4449386,libpowerfmt-f4313fe8a46f93e3,libpem-f370138e8491ea75,libggml_quants-08dc652e9c7d27dc,libdigit_layout-2ccafedfe2273062,libsystem_analysis-49f5f13fa5c52981,libdashmap-e4e6dd2e5f9b5158,libsysinfo-6e7c5872bb9fa524,libhardware_query-b53128470c17d51b,libwmi-87f2f7f815f2398b,libwindows-f9d61c0b7ec2e1f7,libwindows_core-3ba192ba6a0c5dd9,libnvml_wrapper-1dd256ccacd20e4a,libnvml_wrapper_sys-71b7c41fec4cdab4,libsysinfo-4858f47b8ef5cce4,libntapi-dba13667cb18c94e,liblibc-019b782cdf9f3902,libwindows-fd6a1d501b60fbcb,libwindows_core-3e5c7ce0c17bacbc,libwindows_strings-15a42d7aac2878cb,libwindows_result-9406e234398ec342,libwindows_link-223d0e7fe9e36648,libcandlelight-2d2bbd74378d6aa9,libtokenizers-aa47af7d5c4166a9,libesaxx_rs-8d402968f096858b,libregex-1e7479120dbfd342,libunicode_normalization_alignments-3e1ecb6447aca727,libspm_precompiled-00b7f85028c4f168,libbase64-19f8ae4016ea9edb,libunicode_segmentation-ac2c274f3f9e5b36,libnom-58a4be61f5866b8d,libunicode_categories-cc967b5351643de9,libdary_heap-5e8786fd9702fb09,libcompact_str-db2215519c186a84,libcastaway-63d0e1ddea4fac87,libmonostate-defdf5b2cf88a6bf,libmacro_rules_attribute-b76c3e3bda168faf,librayon_cond-2f74c79b4f318c20,libitertools-650788766d09a17f,libonig-9ae40419e966a34a,libonig_sys-16c9644818fa8822,libderive_builder-46ef2c8c3b245ee3,libcandle_bhop-f7bd9404ba8f1c92,librand_xoshiro-4e138c6fc0e08dc5,librand-b2ee538406819c1d,librand_chacha-938dca674a7017bc,librand_core-2d57c8afa1e19280,libcandle_optimisers-bf52b4cacc16fb1e,libcandle_nn-063e808707121a58,libcandle_core-60e89ab443d338eb,liblibm-8e278fb720c2ddb7,libcandle_optimisers-f74addd9ce8d9c34,libcandle_datasets-3242fe6fec26dc88,libimage-6567c919aac1e991,libmoxcms-f84401dfbff86d38,libpxfm-42bb1c248129bed5,libbyteorder_lite-b778ff9493ffa2a0,libpng-bcb39ad3f9420fb6,libfdeflate-c58c3e69227ea712,libzune_jpeg-4b8a5dea82f9840b,libzune_core-035e80bccbd04c81,libparquet-46415b4bf6b4ec83,libzstd-a7bd5908be47f3b1,libzstd_safe-7aa5ccec5c820065,libzstd_sys-0733a914c9c4ccf3,liblz4_flex-e8b727540498e180,libtwox_hash-54a4109ba9b3c35e,libbrotli-eead84d15323ee6d,libbrotli_decompressor-dd90e0df5909033d,liballoc_stdlib-951f40d4162a482a,liballoc_no_stdlib-307952cc489991c2,libarrow_cast-00c797dc5b5ee3c2,libatoi-7207d7b49a45e29b,liblexical_core-30f31ea2e281e007,liblexical_write_float-0acb8b4b5ea1929b,liblexical_write_integer-a6a8a00d3c06a0c3,liblexical_parse_float-99526d5260168709,liblexical_parse_integer-9bde9113bb8cb753,liblexical_util-86df171aa992390b,libsnap-90a882f908284dd2,libarrow_ipc-6677cd1a55581d12,libflatbuffers-976bf0b4c383d51b,libbitflags-fb0469607ad92cbf,libtwox_hash-f5057c93bc234140,libstatic_assertions-6c1c27ddb35380e4,libarrow_select-f1dede3f9299a891,libarrow_array-5e2a105ddee67849,libhashbrown-4957307711f36967,libahash-2fdd1896f279d06c,liballocator_api2-a726cdb190287b3d,libarrow_data-ec7710dc5a57e11f,libarrow_buffer-e87c60b39b52aca0,libthrift-bc90156bfcdc8001,libordered_float-2de4807b40f2e937,libinteger_encoding-84fad7c1d3edbb9b,libarrow_schema-5c7412822e3e5508,libhf_hub-8bf22403bdd87825,libdirs-bdc79c21fb8fb69d,libdirs_sys-1ca745b3bdb1cb2b,liboption_ext-3c7e66878f6f4b7c,libureq-0fc7e51c97c9d795,libwebpki_roots-2893160d1998e69c,libsocks-056221b490179893,libwinapi-b6322dd68605e426,libflate2-fe886ff3a2fef076,libminiz_oxide-4f913f02d7bcbf38,libsimd_adler32-ead2316634e9190d,libthiserror-b9ed1908294676c9,libreqwest-8adee1c1d9df4648,libhyper_rustls-c25bc97d314740f2,libwebpki_roots-c91c1b647ab40282,libhyper_tls-141ecfd84a69ac83,libtokio_native_tls-624f4bc9b9f64fd7,libencoding_rs-232ee43da650eb1b,libnative_tls-1e26a8e19a8fc8e7,libschannel-0be83feb90d35b2f,liburl-ba4c9ceab2d41b8f,libidna-d0b6ee778ab3ee9e,libutf8_iter-8fe2ae02a4cd0848,libidna_adapter-50b81d74f4f076a7,libicu_properties-590d1c6ce35f76fa,libicu_properties_data-9c7aebaab68c6a93,libicu_normalizer-075d5d7e24625e71,libicu_normalizer_data-b810a959c4097e96,libicu_collections-041c391ca6c7a7a2,libpotential_utf-fb6c0c767ceac981,libicu_provider-05db1f9dd0bd3f02,libicu_locale_core-f6a11595b9d754d3,libtinystr-8623b9023d44d21c,liblitemap-f6e989a9db257380,libwriteable-09bf83d78b0b6e9f,libzerovec-7ace5886020934d5,libzerotrie-ea134f57285aa34e,libyoke-5ee74d99f90b2437,libindicatif-9f20f3caaa42f2fb,libportable_atomic-ac46deb9ed02f91a,libnumber_prefix-c6a52a9d2ceacb78,libconsole-f30fcb64bc959952,libencode_unicode-614620cbb8b68bbf,libunicode_width-fafa82361dba5a7f,libwindows_sys-9cf2962af5c217ad,libwindows_targets-1f33f7431b9ba489,libcandle_layer_norm-2e0d9e6070a9fbd7,libcandle_flash_attn-aee3d1d748c4bfce,libcandle_transformers-77eb363d3c02bc27,libserde_plain-d7f496af66f9bee6,libfancy_regex-100b33f4c8aaedac,libbit_set-07071f0ae9cbd7ab,libbit_vec-74de243916da95f1,libregex_automata-184e7d6051217ff2,libaho_corasick-fd1911e19003fbea,libregex_syntax-66a198d6a38810b7,libcandle_nn-0049006a31bd5a34,libcandle_core-0cdb600439d46ecb,libzip-83def3defaa2ddbc,libnum_enum-987f4a39e4b4b3b8,libcrc32fast-24a0e3c68c96d7e4,libug_cuda-6558511f0438de6d,libug-078ee5213458dd46,libmemmap2-59cbf12a44442ec1,libnum-d04c979800d72388,libnum_iter-5c4f00030c17fbf2,libnum_rational-4a670153ffdf0198,libnum_bigint-2ccd41b5daae8b6d,libnum_integer-64d2c77659b4b285,libyoke-b77313b3d745d999,libzerofrom-8bd50da910a5a40c,libstable_deref_trait-ac7f5df852c6ec8a,libthiserror-8c8d5aca1c4d71f5,libsafetensors-0052c533c6d267bf,libcandle_kernels-8edcbe0a1bc2a03e,libgemm-72b20fefe1b5b74c,libgemm_c32-6e27fb895644417e,libgemm_c64-ff31e9ce28bd841a,libgemm_f64-c08afe036c6c2f8f,libgemm_f16-025530a0faed554c,libgemm_f32-1ce3335692dcf82a,libgemm_common-56678487cdd5dd86,libpulp-e49c7a19dcb1db59,libnum_complex-5bdaa27fd4f1815f,libdyn_stack-bdad2bcab72cc5b7,libraw_cpuid-b64f7d3f630487df,librayon-34cbef458fef807a,librayon_core-b3345ea0368a94ab,libcrossbeam_deque-c06942d4f024aca8,libcrossbeam_epoch-61cb2c7babe8bd0f,libcrossbeam_utils-bca63d3f15d83c5e,libeither-eb0c13498e8a3ed5,libbyteorder-7082794841808d2c,libfloat8-758a08da09829eb0,libcudarc-fd9d15b5cb19ef56,libfloat8-7eaf5d011f65f831,liblibloading-64e75be9ff939be1,libhalf-ddd0028c3c9ea42d,libbytemuck-9c407b5faf0b4cab,librand_distr-ddfffbc552820932,libtokio_rustls-a266b2fa2c1e5da2,librustls-f3c964c34c358eeb,libwebpki-2baaae4352db2f7a,libring-bacf16824412d372,libgetrandom-bda730ad823d80f6,libuntrusted-e5a1dfa0062b92ac,librustls_pki_types-e952872af9481e56,libzeroize-30da59060a1f44f5,libtower_http-0766670110899c69,libbitflags-42e0ed69b1785dc1,libiri_string-d224b0505d63b644,libtokio_stream-4f4618f79d0dc446,libfutures-cc2a6a76ad3f7dfe,libfutures_executor-2a24a14c0b987fef,libnum_cpus-f6e267e7b3f5369f,libsha2-8eb1fd2cd5455ac6,libcpufeatures-45a012601e94f363,libdigest-ea1a7221cc4d9eaf,libsubtle-f41a1bf1d4fa0407,libblock_buffer-4abdb0d11bd0ba02,libcrypto_common-786ec7d7ea4191ad,libgeneric_array-422b72c2dbabc189,libtypenum-9649d54ead815874,librand-14f71df63401e57a,librand_chacha-94887f8a2b839cf6,libppv_lite86-7c25b262682d1921,libzerocopy-f34fc2c1ef480b08,librand_core-b9cc5a3af1ee21f5,libgetrandom-06f6aed20b4d7034,libchrono-07b79c7e70d0207e,libnum_traits-a052d0cbd73f1439,libaxum-f8959778db385585,libserde_json-383f5df1ac192ec3,libserde_path_to_error-a72e29de5b21dfce,libserde_urlencoded-a7cac9605c118301,libryu-8fb0e6da824736d1,libform_urlencoded-0a8afb3456dd39e1,libhyper_util-0d6436d635f96fd6,libwindows_registry-01d732eae1e2fbcd,libwindows_strings-cc86b58b4ad6e624,libwindows_result-d688f58a5d600a62,libbase64-618ca47e2ffd873c,libpercent_encoding-26f1bd644ec455e9,libipnet-4fa546bab46b303c,libhyper-562ee9c12449a20c,libwant-e9b7328bf43d4eba,libtry_lock-b37ced3fef15a744,libhttparse-4192494f99d0dc8c,libh2-5b6611cc25f0ea95,libfnv-a913686830af9d36,libatomic_waker-e9060ecb65d4e673,libhttpdate-e4208bf448e5fcf1,libmatchit-bd159f33d8c3d415,libaxum_core-c815d6e6aaa08935,libmime-2bbda0acf890448b,libhttp_body_util-f8500a57376034bc,libhttp_body-666926a13883f519,libhttp-10984df7bfd7fcde,libitoa-28d233c36a121d7c,libtower-cb52f46678448228,libsync_wrapper-00b338a21b55af04,libindexmap-2a78f0d56590c658,libequivalent-4b2ff3c63ed93b4a,libhashbrown-979a344ec6cd2eac,libtokio_util-cb80c0ff3e10e91a,libtokio-860f0badf5aa6f7a,libsocket2-263056d4de5c1633,libwindows_sys-09664d21874a509a,libwindows_targets-5b0c4aa9aa229943,libbytes-f1066c600a2c9c03,libmio-d96b21ac0c9b6853,libwindows_sys-ca47a53ad9c1c46d,libparking_lot-18e0bfb6ab4e4563,libparking_lot_core-82591ad999fc4bf9,libwindows_link-05621b16ee37cca1,libcfg_if-70a2f39d4b21e33f,libsmallvec-c43a2a7f68ea818a,libserde-6f6503ee00b56bc5,libserde_core-a20ba6cf79371afc,liblock_api-48de67954ad30875,libscopeguard-6daf2bb2ae782c21,libtracing-5b9fa40438be6a54,liblog-075f460b844d42b5,libtracing_core-a2742527468f0cac,libonce_cell-b849ffe72edc125c,libfutures_util-0157b8085795c7d0,libmemchr-c92296ffa4b0c0d5,libfutures_io-5217e259cc95f4d5,libslab-27a89fc347952af7,libfutures_channel-dec20204ea256e27,libfutures_sink-8b490a96581783bb,libfutures_task-b87a01d369d625e6,libpin_utils-c35d71629f6667d4,libtower_service-c18f1e6659298980,libpin_project_lite-40e51ff0a0d32a55,libfutures_core-df767e7654f87de1,libtower_layer-d3b2ee1d717eaa9e,libanyhow-71c2a4ed15a23e68}.rlib" "<sysroot>\\lib\\rustlib\\x86_64-pc-windows-msvc\\lib/{libstd-*,libpanic_unwind-*,libcfg_if-*,libwindows_targets-*,librustc_demangle-*,libstd_detect-*,libhashbrown-*,librustc_std_workspace_alloc-*,libunwind-*,librustc_std_workspace_core-*,liballoc-*,libcore-*,libcompiler_builtins-*}.rlib" "secur32.lib" "advapi32.lib" "kernel32.lib" "ntdll.lib" "legacy_stdio_definitions.lib" "advapi32.lib" "cfgmgr32.lib" "credui.lib" "gdi32.lib" "kernel32.lib" "msimg32.lib" "oleaut32.lib" "opengl32.lib" "pdh.lib" "powrprof.lib" "secur32.lib" "user32.lib" "winspool.lib" "ws2_32.lib" "C:\\Users\\cires\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\windows_x86_64_msvc-0.52.6\\lib\\windows.0.52.0.lib" "C:\\Users\\cires\\OneDrive\\Documents\\projects\\lightbulb\\target\\release\\build\\candle-layer-norm-19cebbaf7a02273e\\out\\liblayernorm.a" "C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v13.0\\lib/x64\\cudart.lib" "C:\\Users\\cires\\OneDrive\\Documents\\projects\\lightbulb\\target\\release\\build\\candle-flash-attn-f50bab16d3fc700a\\out\\libflashattention.a" "C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v13.0\\lib/x64\\cudart.lib" "C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v13.0\\lib/x64\\cuda.lib" "C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v13.0\\lib/x64\\nvrtc.lib" "C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v13.0\\lib/x64\\curand.lib" "C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v13.0\\lib/x64\\cublas.lib" "C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v13.0\\lib/x64\\cublasLt.lib" "C:\\Program Files\\NVIDIA\\CUDNN\\v9.16\\lib\\12.9\\x64\\cudnn.lib" "bcrypt.lib" "advapi32.lib" "C:\\Users\\cires\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\windows_x86_64_msvc-0.53.1\\lib\\windows.0.53.0.lib" "kernel32.lib" "kernel32.lib" "kernel32.lib" "ntdll.lib" "userenv.lib" "ws2_32.lib" "dbghelp.lib" "/defaultlib:msvcrt" "/NXCOMPAT" "/LIBPATH:C:\\Users\\cires\\OneDrive\\Documents\\projects\\lightbulb\\target\\release\\build\\ring-9e5917a799279f89\\out" "/LIBPATH:C:\\Users\\cires\\OneDrive\\Documents\\projects\\lightbulb\\target\\release\\build\\zstd-sys-5e71091cf2b61bd0\\out" "/LIBPATH:C:\\Users\\cires\\OneDrive\\Documents\\projects\\lightbulb\\target\\release\\build\\esaxx-rs-aeb8b94f88f5619f\\out" "/LIBPATH:C:\\Users\\cires\\OneDrive\\Documents\\projects\\lightbulb\\target\\release\\build\\onig_sys-c601c7709d729a17\\out" "/LIBPATH:C:\\Users\\cires\\OneDrive\\Documents\\projects\\lightbulb\\target\\release\\build\\candle-flash-attn-f50bab16d3fc700a\\out" "/LIBPATH:C:\\Users\\cires\\OneDrive\\Documents\\projects\\lightbulb\\target\\release\\build\\candle-layer-norm-19cebbaf7a02273e\\out" "/LIBPATH:C:\\Users\\cires\\OneDrive\\Documents\\projects\\lightbulb\\target\\release\\build\\alloca-05eabefb45b45c3e\\out" "/LIBPATH:C:\\Program Files\\NVIDIA\\CUDNN\\v9.16\\lib\\12.9\\x64" "/LIBPATH:C:\\Users\\cires\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\windows_x86_64_msvc-0.53.1\\lib" "/LIBPATH:C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v13.0\\lib" "/LIBPATH:C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v13.0\\lib/x64" "/LIBPATH:C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v13.0\\lib/Win32" "/LIBPATH:C:\\Users\\cires\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\windows_x86_64_msvc-0.52.6\\lib" "/LIBPATH:C:\\Users\\cires\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\windows_x86_64_msvc-0.48.5\\lib" "/OUT:C:\\Users\\cires\\OneDrive\\Documents\\projects\\lightbulb\\target\\release\\examples\\test_live_eviction.exe" "/OPT:REF,ICF" "/DEBUG" "/PDBALTPATH:%_PDB%" "/NATVIS:<sysroot>\\lib\\rustlib\\etc\\intrinsic.natvis" "/NATVIS:<sysroot>\\lib\\rustlib\\etc\\liballoc.natvis" "/NATVIS:<sysroot>\\lib\\rustlib\\etc\\libcore.natvis" "/NATVIS:<sysroot>\\lib\\rustlib\\etc\\libstd.natvis" "/NATVIS:C:\\Users\\cires\\OneDrive\\Documents\\projects\\lightbulb\\target\\release\\examples\\rustcZw0XsF\\test_live_eviction-0.natvis" "/NATVIS:C:\\Users\\cires\\OneDrive\\Documents\\projects\\lightbulb\\target\\release\\examples\\rustcZw0XsF\\test_live_eviction-1.natvis" "/NATVIS:C:\\Users\\cires\\OneDrive\\Documents\\projects\\lightbulb\\target\\release\\examples\\rustcZw0XsF\\test_live_eviction-2.natvis" "/libpath:C:\\Program Files (x86)\\Windows Kits\\10\\Lib\\10.0.26100.0\\ucrt\\x64" "/libpath:C:\\Program Files (x86)\\Windows Kits\\10\\Lib\\10.0.26100.0\\um\\x64" "/libpath:C:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\VC\\Tools\\MSVC\\14.44.35207\\lib\\x64"
+  = note: some arguments are omitted. use `--verbose` to show all linker arguments
+  = note: lld-link: warning: libonig_sys-16c9644818fa8822.rlib(2dc0da2129e760c5-regexec.o): locally defined symbol imported: realloc (defined in libucrt.lib(realloc.obj)) [LNK4217]
+          lld-link: warning: libonig_sys-16c9644818fa8822.rlib(2dc0da2129e760c5-regexec.o): locally defined symbol imported: malloc (defined in libucrt.lib(malloc.obj)) [LNK4217]
+          lld-link: warning: libonig_sys-16c9644818fa8822.rlib(2dc0da2129e760c5-regexec.o): locally defined symbol imported: free (defined in libucrt.lib(free.obj)) [LNK4217]
+          lld-link: warning: libonig_sys-16c9644818fa8822.rlib(2dc0da2129e760c5-regexec.o): locally defined symbol imported: __acrt_iob_func (defined in libucrt.lib(_file.obj)) [LNK4217]
+          lld-link: warning: libonig_sys-16c9644818fa8822.rlib(2dc0da2129e760c5-regexec.o): locally defined symbol imported: fflush (defined in libucrt.lib(fflush.obj)) [LNK4217]
+          lld-link: warning: libonig_sys-16c9644818fa8822.rlib(2dc0da2129e760c5-regexec.o): locally defined symbol imported: __stdio_common_vsprintf_s (defined in libucrt.lib(output.obj)) [LNK4217]
+          lld-link: warning: libonig_sys-16c9644818fa8822.rlib(2dc0da2129e760c5-regexec.o): locally defined symbol imported: __stdio_common_vfprintf (defined in libucrt.lib(output.obj)) [LNK4217]
+          lld-link: warning: libonig_sys-16c9644818fa8822.rlib(2dc0da2129e760c5-regerror.o): locally defined symbol imported: __stdio_common_vsnprintf_s (defined in libucrt.lib(output.obj)) [LNK4217]
+          lld-link: warning: libonig_sys-16c9644818fa8822.rlib(2dc0da2129e760c5-regerror.o): locally defined symbol imported: __stdio_common_vsprintf_s (defined in libucrt.lib(output.obj)) [LNK4217]
+          lld-link: warning: libonig_sys-16c9644818fa8822.rlib(2dc0da2129e760c5-regcomp.o): locally defined symbol imported: free (defined in libucrt.lib(free.obj)) [LNK4217]
+          lld-link: warning: libonig_sys-16c9644818fa8822.rlib(2dc0da2129e760c5-regcomp.o): locally defined symbol imported: realloc (defined in libucrt.lib(realloc.obj)) [LNK4217]
+          lld-link: warning: libonig_sys-16c9644818fa8822.rlib(2dc0da2129e760c5-regcomp.o): locally defined symbol imported: malloc (defined in libucrt.lib(malloc.obj)) [LNK4217]
+          lld-link: warning: libonig_sys-16c9644818fa8822.rlib(2dc0da2129e760c5-regparse.o): locally defined symbol imported: malloc (defined in libucrt.lib(malloc.obj)) [LNK4217]
+          lld-link: warning: libonig_sys-16c9644818fa8822.rlib(2dc0da2129e760c5-regparse.o): locally defined symbol imported: free (defined in libucrt.lib(free.obj)) [LNK4217]
+          lld-link: warning: libonig_sys-16c9644818fa8822.rlib(2dc0da2129e760c5-regparse.o): locally defined symbol imported: realloc (defined in libucrt.lib(realloc.obj)) [LNK4217]
+          lld-link: warning: libonig_sys-16c9644818fa8822.rlib(2dc0da2129e760c5-unicode.o): locally defined symbol imported: malloc (defined in libucrt.lib(malloc.obj)) [LNK4217]
+          lld-link: warning: libonig_sys-16c9644818fa8822.rlib(2dc0da2129e760c5-unicode.o): locally defined symbol imported: free (defined in libucrt.lib(free.obj)) [LNK4217]
+          lld-link: warning: libonig_sys-16c9644818fa8822.rlib(2dc0da2129e760c5-regversion.o): locally defined symbol imported: __stdio_common_vsprintf_s (defined in libucrt.lib(output.obj)) [LNK4217]
+          lld-link: warning: libonig_sys-16c9644818fa8822.rlib(2dc0da2129e760c5-regenc.o): locally defined symbol imported: malloc (defined in libucrt.lib(malloc.obj)) [LNK4217]
+          lld-link: warning: libonig_sys-16c9644818fa8822.rlib(2dc0da2129e760c5-st.o): locally defined symbol imported: malloc (defined in libucrt.lib(malloc.obj)) [LNK4217]
+          lld-link: warning: libonig_sys-16c9644818fa8822.rlib(2dc0da2129e760c5-st.o): locally defined symbol imported: calloc (defined in libucrt.lib(calloc.obj)) [LNK4217]
+          lld-link: warning: libonig_sys-16c9644818fa8822.rlib(2dc0da2129e760c5-st.o): locally defined symbol imported: free (defined in libucrt.lib(free.obj)) [LNK4217]
+          lld-link: error: undefined symbol: __declspec(dllimport) strcat_s
+          >>> referenced by libonig_sys-16c9644818fa8822.rlib(2dc0da2129e760c5-regerror.o):(onig_snprintf_with_pattern)
+          
+
+error: could not compile `lightbulb` (example "test_live_eviction") due to 1 previous error

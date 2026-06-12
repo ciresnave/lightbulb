@@ -1,0 +1,879 @@
+warning: unused variable: `old_pos`
+   --> lightbulb\src\cache\parallel_cache_builder.rs:588:13
+    |
+588 |         let old_pos = self.positions[batch_index];
+    |             ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_old_pos`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `old_idx`
+   --> lightbulb\src\cache\parallel_cache_builder.rs:589:13
+    |
+589 |         let old_idx = self.indices[batch_index];
+    |             ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_old_idx`
+
+warning: unused variable: `old_pos`
+   --> lightbulb\src\cache\parallel_cache_builder.rs:637:17
+    |
+637 |             let old_pos = self.positions[slot];
+    |                 ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_old_pos`
+
+warning: unused variable: `idx_vec`
+    --> lightbulb\src\cache\parallel_cache_builder.rs:1069:19
+     |
+1069 |         if let Ok(idx_vec) = indices.to_vec2::<u32>() {
+     |                   ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_idx_vec`
+
+warning: unused variable: `indices_vec`
+   --> lightbulb\src\engine.rs:597:23
+    |
+597 |             if let Ok(indices_vec) = iam.indices.to_vec2::<u32>() {
+    |                       ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_indices_vec`
+
+warning: unused variable: `tokenizer_model`
+   --> lightbulb\src\gguf\mod.rs:112:13
+    |
+112 |         let tokenizer_model = self
+    |             ^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_tokenizer_model`
+
+warning: unused variable: `q_vec`
+   --> lightbulb\src\model\custom_attention.rs:163:17
+    |
+163 |             let q_vec = q.flatten_all()?.to_vec1::<f32>()?;
+    |                 ^^^^^ help: if this is intentional, prefix it with an underscore: `_q_vec`
+
+warning: unused variable: `k_vec`
+   --> lightbulb\src\model\custom_attention.rs:164:17
+    |
+164 |             let k_vec = k.flatten_all()?.to_vec1::<f32>()?;
+    |                 ^^^^^ help: if this is intentional, prefix it with an underscore: `_k_vec`
+
+warning: unused variable: `cos_vec`
+   --> lightbulb\src\model\custom_attention.rs:165:17
+    |
+165 |             let cos_vec = cos.flatten_all()?.to_vec1::<f32>()?;
+    |                 ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_cos_vec`
+
+warning: unused variable: `sin_vec`
+   --> lightbulb\src\model\custom_attention.rs:166:17
+    |
+166 |             let sin_vec = sin.flatten_all()?.to_vec1::<f32>()?;
+    |                 ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_sin_vec`
+
+warning: unused variable: `q_vec`
+   --> lightbulb\src\model\custom_attention.rs:187:17
+    |
+187 |             let q_vec = q.flatten_all()?.to_vec1::<f32>()?;
+    |                 ^^^^^ help: if this is intentional, prefix it with an underscore: `_q_vec`
+
+warning: unused variable: `k_vec`
+   --> lightbulb\src\model\custom_attention.rs:188:17
+    |
+188 |             let k_vec = k.flatten_all()?.to_vec1::<f32>()?;
+    |                 ^^^^^ help: if this is intentional, prefix it with an underscore: `_k_vec`
+
+warning: unused variable: `mask`
+   --> lightbulb\src\model\custom_attention.rs:403:29
+    |
+403 |             if let Some(ref mask) = attention_mask {
+    |                             ^^^^ help: if this is intentional, prefix it with an underscore: `_mask`
+
+warning: unused variable: `q_vec`
+   --> lightbulb\src\model\custom_attention.rs:490:17
+    |
+490 |             let q_vec = q_batched.flatten_all()?.to_vec1::<f32>()?;
+    |                 ^^^^^ help: if this is intentional, prefix it with an underscore: `_q_vec`
+
+warning: unused variable: `k_vec`
+   --> lightbulb\src\model\custom_attention.rs:491:17
+    |
+491 |             let k_vec = k_for_attn.flatten_all()?.to_vec1::<f32>()?;
+    |                 ^^^^^ help: if this is intentional, prefix it with an underscore: `_k_vec`
+
+warning: unused variable: `v_vec`
+   --> lightbulb\src\model\custom_attention.rs:492:17
+    |
+492 |             let v_vec = v_for_attn.flatten_all()?.to_vec1::<f32>()?;
+    |                 ^^^^^ help: if this is intentional, prefix it with an underscore: `_v_vec`
+
+warning: unused variable: `attn_vec`
+   --> lightbulb\src\model\custom_attention.rs:509:17
+    |
+509 |             let attn_vec = attn_output.flatten_all()?.to_vec1::<f32>()?;
+    |                 ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_attn_vec`
+
+warning: unused variable: `output_vec`
+   --> lightbulb\src\model\custom_attention.rs:551:17
+    |
+551 |             let output_vec = output.flatten_all()?.to_vec1::<f32>()?;
+    |                 ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_output_vec`
+
+warning: unused variable: `attn_w_vec`
+   --> lightbulb\src\model\custom_attention.rs:646:13
+    |
+646 |         let attn_w_vec = attn_weights.flatten_all()?.to_vec1::<f32>()?;
+    |             ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_attn_w_vec`
+
+warning: unused variable: `scaled_vec`
+   --> lightbulb\src\model\custom_attention.rs:653:13
+    |
+653 |         let scaled_vec = attn_weights.flatten_all()?.to_vec1::<f32>()?;
+    |             ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_scaled_vec`
+
+warning: unused variable: `probs_vec`
+   --> lightbulb\src\model\custom_attention.rs:688:13
+    |
+688 |         let probs_vec = attn_probs.flatten_all()?.to_vec1::<f32>()?;
+    |             ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_probs_vec`
+
+warning: unused variable: `output_vec`
+   --> lightbulb\src\model\custom_attention.rs:704:13
+    |
+704 |         let output_vec = attn_output.flatten_all()?.to_vec1::<f32>()?;
+    |             ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_output_vec`
+
+warning: unused variable: `emb_w_mean`
+   --> lightbulb\src\model\custom_transformer.rs:246:17
+    |
+246 |             let emb_w_mean: f32 = emb_w_vec.iter().sum::<f32>() / emb_w_vec.len() as f32;
+    |                 ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_emb_w_mean`
+
+warning: unused variable: `emb_mean`
+   --> lightbulb\src\model\custom_transformer.rs:335:13
+    |
+335 |         let emb_mean: f32 = emb_vec.iter().sum::<f32>() / emb_vec.len() as f32;
+    |             ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_emb_mean`
+
+warning: unused variable: `emb_max`
+   --> lightbulb\src\model\custom_transformer.rs:336:13
+    |
+336 |         let emb_max = emb_vec.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+    |             ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_emb_max`
+
+warning: unused variable: `emb_min`
+   --> lightbulb\src\model\custom_transformer.rs:337:13
+    |
+337 |         let emb_min = emb_vec.iter().cloned().fold(f32::INFINITY, f32::min);
+    |             ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_emb_min`
+
+warning: unused variable: `mean`
+   --> lightbulb\src\model\custom_transformer.rs:397:21
+    |
+397 |                 let mean: f32 = hs_vec.iter().sum::<f32>() / hs_vec.len() as f32;
+    |                     ^^^^ help: if this is intentional, prefix it with an underscore: `_mean`
+
+warning: unused variable: `max`
+   --> lightbulb\src\model\custom_transformer.rs:398:21
+    |
+398 |                 let max = hs_vec.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+    |                     ^^^ help: if this is intentional, prefix it with an underscore: `_max`
+
+warning: unused variable: `min`
+   --> lightbulb\src\model\custom_transformer.rs:399:21
+    |
+399 |                 let min = hs_vec.iter().cloned().fold(f32::INFINITY, f32::min);
+    |                     ^^^ help: if this is intentional, prefix it with an underscore: `_min`
+
+warning: unused variable: `hs_mean`
+   --> lightbulb\src\model\custom_transformer.rs:409:13
+    |
+409 |         let hs_mean: f32 = hs_vec.iter().sum::<f32>() / hs_vec.len() as f32;
+    |             ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_hs_mean`
+
+warning: unused variable: `hs_max`
+   --> lightbulb\src\model\custom_transformer.rs:410:13
+    |
+410 |         let hs_max = hs_vec.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+    |             ^^^^^^ help: if this is intentional, prefix it with an underscore: `_hs_max`
+
+warning: unused variable: `hs_min`
+   --> lightbulb\src\model\custom_transformer.rs:411:13
+    |
+411 |         let hs_min = hs_vec.iter().cloned().fold(f32::INFINITY, f32::min);
+    |             ^^^^^^ help: if this is intentional, prefix it with an underscore: `_hs_min`
+
+warning: unused variable: `dim0`
+   --> lightbulb\src\model\custom_transformer.rs:417:14
+    |
+417 |         let (dim0, dim1, hidden_dim) = hidden_states.dims3()?;
+    |              ^^^^ help: if this is intentional, prefix it with an underscore: `_dim0`
+
+warning: unused variable: `dim1`
+   --> lightbulb\src\model\custom_transformer.rs:417:20
+    |
+417 |         let (dim0, dim1, hidden_dim) = hidden_states.dims3()?;
+    |                    ^^^^ help: if this is intentional, prefix it with an underscore: `_dim1`
+
+warning: unused variable: `hidden_dim`
+   --> lightbulb\src\model\custom_transformer.rs:417:26
+    |
+417 |         let (dim0, dim1, hidden_dim) = hidden_states.dims3()?;
+    |                          ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_hidden_dim`
+
+warning: unused variable: `logits_mean`
+   --> lightbulb\src\model\custom_transformer.rs:444:13
+    |
+444 |         let logits_mean: f32 = logits_vec.iter().sum::<f32>() / logits_vec.len() as f32;
+    |             ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_logits_mean`
+
+warning: unused variable: `logits_max`
+   --> lightbulb\src\model\custom_transformer.rs:445:13
+    |
+445 |         let logits_max = logits_vec.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+    |             ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_logits_max`
+
+warning: unused variable: `logits_min`
+   --> lightbulb\src\model\custom_transformer.rs:446:13
+    |
+446 |         let logits_min = logits_vec.iter().cloned().fold(f32::INFINITY, f32::min);
+    |             ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_logits_min`
+
+warning: unused variable: `raw_mean`
+   --> lightbulb\src\model\custom_transformer_block.rs:235:17
+    |
+235 |             let raw_mean: f32 = raw_vec.iter().sum::<f32>() / raw_vec.len() as f32;
+    |                 ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_raw_mean`
+
+warning: unused variable: `raw_max`
+   --> lightbulb\src\model\custom_transformer_block.rs:236:17
+    |
+236 |             let raw_max = raw_vec.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+    |                 ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_raw_max`
+
+warning: unused variable: `norm_mean`
+   --> lightbulb\src\model\custom_transformer_block.rs:246:17
+    |
+246 |             let norm_mean: f32 = norm_vec.iter().sum::<f32>() / norm_vec.len() as f32;
+    |                 ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_norm_mean`
+
+warning: unused variable: `norm_max`
+   --> lightbulb\src\model\custom_transformer_block.rs:247:17
+    |
+247 |             let norm_max = norm_vec.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+    |                 ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_norm_max`
+
+warning: unused variable: `attn_mean`
+   --> lightbulb\src\model\custom_transformer_block.rs:265:17
+    |
+265 |             let attn_mean: f32 = attn_vec.iter().sum::<f32>() / attn_vec.len() as f32;
+    |                 ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_attn_mean`
+
+warning: unused variable: `attn_max`
+   --> lightbulb\src\model\custom_transformer_block.rs:266:17
+    |
+266 |             let attn_max = attn_vec.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+    |                 ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_attn_max`
+
+warning: unused variable: `hs_mean`
+   --> lightbulb\src\model\custom_transformer_block.rs:271:17
+    |
+271 |             let hs_mean: f32 = hs_vec.iter().sum::<f32>() / hs_vec.len() as f32;
+    |                 ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_hs_mean`
+
+warning: unused variable: `hs_mean`
+   --> lightbulb\src\model\custom_transformer_block.rs:282:17
+    |
+282 |             let hs_mean: f32 = hs_vec.iter().sum::<f32>() / hs_vec.len() as f32;
+    |                 ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_hs_mean`
+
+warning: unused variable: `hs_max`
+   --> lightbulb\src\model\custom_transformer_block.rs:283:17
+    |
+283 |             let hs_max = hs_vec.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+    |                 ^^^^^^ help: if this is intentional, prefix it with an underscore: `_hs_max`
+
+warning: unused variable: `norm_mlp_mean`
+   --> lightbulb\src\model\custom_transformer_block.rs:294:17
+    |
+294 |             let norm_mlp_mean: f32 = norm_mlp_vec.iter().sum::<f32>() / norm_mlp_vec.len() as f32;
+    |                 ^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_norm_mlp_mean`
+
+warning: unused variable: `norm_mlp_max`
+   --> lightbulb\src\model\custom_transformer_block.rs:295:17
+    |
+295 |             let norm_mlp_max = norm_mlp_vec
+    |                 ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_norm_mlp_max`
+
+warning: unused variable: `mlp_mean`
+   --> lightbulb\src\model\custom_transformer_block.rs:308:17
+    |
+308 |             let mlp_mean: f32 = mlp_vec.iter().sum::<f32>() / mlp_vec.len() as f32;
+    |                 ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_mlp_mean`
+
+warning: unused variable: `mlp_max`
+   --> lightbulb\src\model\custom_transformer_block.rs:309:17
+    |
+309 |             let mlp_max = mlp_vec.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+    |                 ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_mlp_max`
+
+warning: unused variable: `mlp_min`
+   --> lightbulb\src\model\custom_transformer_block.rs:310:17
+    |
+310 |             let mlp_min = mlp_vec.iter().cloned().fold(f32::INFINITY, f32::min);
+    |                 ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_mlp_min`
+
+warning: unused variable: `final_mean`
+   --> lightbulb\src\model\custom_transformer_block.rs:320:17
+    |
+320 |             let final_mean: f32 = final_vec.iter().sum::<f32>() / final_vec.len() as f32;
+    |                 ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_final_mean`
+
+warning: unused variable: `final_max`
+   --> lightbulb\src\model\custom_transformer_block.rs:321:17
+    |
+321 |             let final_max = final_vec.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+    |                 ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_final_max`
+
+warning: unused variable: `final_min`
+   --> lightbulb\src\model\custom_transformer_block.rs:322:17
+    |
+322 |             let final_min = final_vec.iter().cloned().fold(f32::INFINITY, f32::min);
+    |                 ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_final_min`
+
+warning: unused variable: `gate_mean`
+  --> lightbulb\src\model\mlp_wrapper.rs:52:13
+   |
+52 |         let gate_mean: f32 = gate_vec.iter().sum::<f32>() / gate_vec.len() as f32;
+   |             ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_gate_mean`
+
+warning: unused variable: `gate_max`
+  --> lightbulb\src\model\mlp_wrapper.rs:53:13
+   |
+53 |         let gate_max = gate_vec.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+   |             ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_gate_max`
+
+warning: unused variable: `gate_min`
+  --> lightbulb\src\model\mlp_wrapper.rs:54:13
+   |
+54 |         let gate_min = gate_vec.iter().cloned().fold(f32::INFINITY, f32::min);
+   |             ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_gate_min`
+
+warning: unused variable: `down_mean`
+  --> lightbulb\src\model\mlp_wrapper.rs:57:13
+   |
+57 |         let down_mean: f32 = down_vec.iter().sum::<f32>() / down_vec.len() as f32;
+   |             ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_down_mean`
+
+warning: unused variable: `down_max`
+  --> lightbulb\src\model\mlp_wrapper.rs:58:13
+   |
+58 |         let down_max = down_vec.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+   |             ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_down_max`
+
+warning: unused variable: `down_min`
+  --> lightbulb\src\model\mlp_wrapper.rs:59:13
+   |
+59 |         let down_min = down_vec.iter().cloned().fold(f32::INFINITY, f32::min);
+   |             ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_down_min`
+
+warning: unused variable: `input_max`
+  --> lightbulb\src\model\mlp_wrapper.rs:79:13
+   |
+79 |         let input_max = input_vec.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+   |             ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_input_max`
+
+warning: unused variable: `input_mean`
+  --> lightbulb\src\model\mlp_wrapper.rs:80:13
+   |
+80 |         let input_mean: f32 = input_vec.iter().sum::<f32>() / input_vec.len() as f32;
+   |             ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_input_mean`
+
+warning: unused variable: `gate_max`
+  --> lightbulb\src\model\mlp_wrapper.rs:87:13
+   |
+87 |         let gate_max = gate_vec.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+   |             ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_gate_max`
+
+warning: unused variable: `up_max`
+  --> lightbulb\src\model\mlp_wrapper.rs:89:13
+   |
+89 |         let up_max = up_vec.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+   |             ^^^^^^ help: if this is intentional, prefix it with an underscore: `_up_max`
+
+warning: unused variable: `inter_max`
+  --> lightbulb\src\model\mlp_wrapper.rs:95:13
+   |
+95 |         let inter_max = inter_vec.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+   |             ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_inter_max`
+
+warning: unused variable: `inter_mean`
+  --> lightbulb\src\model\mlp_wrapper.rs:96:13
+   |
+96 |         let inter_mean: f32 = inter_vec.iter().sum::<f32>() / inter_vec.len() as f32;
+   |             ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_inter_mean`
+
+warning: unused variable: `out_max`
+   --> lightbulb\src\model\mlp_wrapper.rs:103:13
+    |
+103 |         let out_max = out_vec.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+    |             ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_out_max`
+
+warning: unused variable: `out_min`
+   --> lightbulb\src\model\mlp_wrapper.rs:104:13
+    |
+104 |         let out_min = out_vec.iter().cloned().fold(f32::INFINITY, f32::min);
+    |             ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_out_min`
+
+warning: unused variable: `cache`
+   --> lightbulb\src\model\model_manager.rs:179:21
+    |
+179 |         let (model, cache, config, device) = load_local_llama(
+    |                     ^^^^^ help: if this is intentional, prefix it with an underscore: `_cache`
+
+warning: unused variable: `batch_start`
+   --> lightbulb\src\model\model_manager.rs:259:13
+    |
+259 |         let batch_start = Instant::now();
+    |             ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_batch_start`
+
+warning: unused variable: `i`
+   --> lightbulb\src\model\model_manager.rs:427:22
+    |
+427 |                 for (i, seq) in metadata.sequences.iter().enumerate() {
+    |                      ^ help: if this is intentional, prefix it with an underscore: `_i`
+
+warning: unused variable: `seq`
+   --> lightbulb\src\model\model_manager.rs:427:25
+    |
+427 |                 for (i, seq) in metadata.sequences.iter().enumerate() {
+    |                         ^^^ help: if this is intentional, prefix it with an underscore: `_seq`
+
+warning: unused variable: `i`
+   --> lightbulb\src\model\model_manager.rs:453:22
+    |
+453 |                 for (i, &cache_idx) in numeric_ids.iter().enumerate() {
+    |                      ^ help: if this is intentional, prefix it with an underscore: `_i`
+
+warning: unused variable: `num_heads`
+   --> lightbulb\src\model\parallel_model_manager.rs:126:13
+    |
+126 |         let num_heads = config.num_attention_heads;
+    |             ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_num_heads`
+
+warning: unused variable: `batch_start`
+   --> lightbulb\src\model\parallel_model_manager.rs:435:13
+    |
+435 |         let batch_start = Instant::now();
+    |             ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_batch_start`
+
+warning: field `max_batch_size` is never read
+   --> lightbulb\src\engine.rs:248:5
+    |
+247 | pub struct BatchManager {
+    |            ------------ field in this struct
+248 |     max_batch_size: usize,
+    |     ^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: fields `batch_size`, `context`, and `dtype` are never read
+   --> lightbulb\src\engine.rs:328:5
+    |
+322 | pub struct BatchExecutor {
+    |            ------------- fields in this struct
+...
+328 |     batch_size: usize,
+    |     ^^^^^^^^^^
+329 |     context: usize,
+    |     ^^^^^^^
+330 |     dtype: DType,
+    |     ^^^^^
+
+warning: associated function `get_total_memory` is never used
+  --> lightbulb\src\hardware\mod.rs:91:8
+   |
+88 | impl HardwareProfile {
+   | -------------------- associated function in this implementation
+...
+91 |     fn get_total_memory() -> u64 {
+   |        ^^^^^^^^^^^^^^^^
+
+warning: fields `hidden_size` and `dtype` are never read
+  --> lightbulb\src\model\custom_attention.rs:54:5
+   |
+43 | pub struct BatchedAttention {
+   |            ---------------- fields in this struct
+...
+54 |     hidden_size: usize,
+   |     ^^^^^^^^^^^
+...
+61 |     dtype: DType,
+   |     ^^^^^
+   |
+   = note: `BatchedAttention` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+warning: `lightbulb` (lib) generated 80 warnings
+warning: unused variable: `step`
+   --> lightbulb\tests\parallel_model_manager_integration.rs:224:9
+    |
+224 |     for step in 0..20 {
+    |         ^^^^ help: if this is intentional, prefix it with an underscore: `_step`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `assembler`
+   --> lightbulb\tests\parallel_model_manager_integration.rs:351:9
+    |
+351 |     let assembler = BatchAssembler::new(batch_config);
+    |         ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_assembler`
+
+warning: `lightbulb` (test "parallel_model_manager_integration") generated 2 warnings
+    Finished `release` profile [optimized] target(s) in 1.03s
+     Running tests\parallel_model_manager_integration.rs (target\release\deps\parallel_model_manager_integration-0fcfd100dc7e0b08.exe)
+
+running 1 test
+Hardware detected: CPU: AMD AMD Ryzen 9 7940HX with Radeon Graphics (16 cores, 32 threads)
+RAM: 15.2 GB total, 3.6 GB available
+GPU: NVIDIA GeForce RTX 4070 Laptop GPU (4.0 GB VRAM, Cuda)
+ML Score: 3.3/10
+Loading model on device: Cuda(CudaDevice(DeviceId(1)))
+Adaptive batch size: 52 (GPU: NVIDIA GeForce RTX 4070 Laptop GPU, 4 GB VRAM)
+Loading model on device: Cuda(CudaDevice(DeviceId(2)))
+
+=== Performance Metrics Test with Adaptive Batch Sizing ===
+Requests to process: 100
+Adaptive batch size: 52
+[PREFIX_CACHE] get_best_prefix: tokens.len()=5, searching range [1, 5], cache has 0 entries
+[PREFIX_CACHE] MISS: no match found for tokens.len()=5
+[PREFIX_CACHE] get_best_prefix: tokens.len()=4, searching range [1, 4], cache has 0 entries
+[PREFIX_CACHE] MISS: no match found for tokens.len()=4
+[PREFIX_CACHE] get_best_prefix: tokens.len()=2, searching range [1, 2], cache has 0 entries
+[PREFIX_CACHE] MISS: no match found for tokens.len()=2
+[PREFIX_CACHE] get_best_prefix: tokens.len()=5, searching range [1, 5], cache has 0 entries
+[PREFIX_CACHE] MISS: no match found for tokens.len()=5
+[PREFIX_CACHE] get_best_prefix: tokens.len()=4, searching range [1, 4], cache has 0 entries
+[PREFIX_CACHE] MISS: no match found for tokens.len()=4
+[PREFIX_CACHE] get_best_prefix: tokens.len()=2, searching range [1, 2], cache has 0 entries
+[PREFIX_CACHE] MISS: no match found for tokens.len()=2
+[PREFIX_CACHE] get_best_prefix: tokens.len()=5, searching range [1, 5], cache has 0 entries
+[PREFIX_CACHE] MISS: no match found for tokens.len()=5
+[PREFIX_CACHE] get_best_prefix: tokens.len()=4, searching range [1, 4], cache has 0 entries
+[PREFIX_CACHE] MISS: no match found for tokens.len()=4
+[PREFIX_CACHE] get_best_prefix: tokens.len()=2, searching range [1, 2], cache has 0 entries
+[PREFIX_CACHE] MISS: no match found for tokens.len()=2
+[PREFIX_CACHE] get_best_prefix: tokens.len()=5, searching range [1, 5], cache has 0 entries
+[PREFIX_CACHE] MISS: no match found for tokens.len()=5
+[PREFIX_CACHE] get_best_prefix: tokens.len()=4, searching range [1, 4], cache has 0 entries
+[PREFIX_CACHE] MISS: no match found for tokens.len()=4
+[PREFIX_CACHE] get_best_prefix: tokens.len()=2, searching range [1, 2], cache has 0 entries
+[PREFIX_CACHE] MISS: no match found for tokens.len()=2
+[PREFIX_CACHE] get_best_prefix: tokens.len()=5, searching range [1, 5], cache has 0 entries
+[PREFIX_CACHE] MISS: no match found for tokens.len()=5
+[PREFIX_CACHE] get_best_prefix: tokens.len()=4, searching range [1, 4], cache has 0 entries
+[PREFIX_CACHE] MISS: no match found for tokens.len()=4
+[PREFIX_CACHE] get_best_prefix: tokens.len()=2, searching range [1, 2], cache has 0 entries
+[PREFIX_CACHE] MISS: no match found for tokens.len()=2
+[PREFIX_CACHE] get_best_prefix: tokens.len()=5, searching range [1, 5], cache has 0 entries
+[PREFIX_CACHE] MISS: no match found for tokens.len()=5
+[PREFIX_CACHE] get_best_prefix: tokens.len()=4, searching range [1, 4], cache has 0 entries
+[PREFIX_CACHE] MISS: no match found for tokens.len()=4
+[PREFIX_CACHE] get_best_prefix: tokens.len()=2, searching range [1, 2], cache has 0 entries
+[PREFIX_CACHE] MISS: no match found for tokens.len()=2
+[PREFIX_CACHE] get_best_prefix: tokens.len()=5, searching range [1, 5], cache has 0 entries
+[PREFIX_CACHE] MISS: no match found for tokens.len()=5
+[PREFIX_CACHE] get_best_prefix: tokens.len()=4, searching range [1, 4], cache has 0 entries
+[PREFIX_CACHE] MISS: no match found for tokens.len()=4
+[PREFIX_CACHE] get_best_prefix: tokens.len()=2, searching range [1, 2], cache has 0 entries
+[PREFIX_CACHE] MISS: no match found for tokens.len()=2
+[PREFIX_CACHE] get_best_prefix: tokens.len()=5, searching range [1, 5], cache has 0 entries
+[PREFIX_CACHE] MISS: no match found for tokens.len()=5
+[PREFIX_CACHE] get_best_prefix: tokens.len()=4, searching range [1, 4], cache has 0 entries
+[PREFIX_CACHE] MISS: no match found for tokens.len()=4
+[PREFIX_CACHE] get_best_prefix: tokens.len()=2, searching range [1, 2], cache has 0 entries
+[PREFIX_CACHE] MISS: no match found for tokens.len()=2
+[PREFIX_CACHE] get_best_prefix: tokens.len()=5, searching range [1, 5], cache has 0 entries
+[PREFIX_CACHE] MISS: no match found for tokens.len()=5
+[PREFIX_CACHE] get_best_prefix: tokens.len()=4, searching range [1, 4], cache has 0 entries
+[PREFIX_CACHE] MISS: no match found for tokens.len()=4
+[PREFIX_CACHE] get_best_prefix: tokens.len()=2, searching range [1, 2], cache has 0 entries
+[PREFIX_CACHE] MISS: no match found for tokens.len()=2
+[PREFIX_CACHE] get_best_prefix: tokens.len()=5, searching range [1, 5], cache has 0 entries
+[PREFIX_CACHE] MISS: no match found for tokens.len()=5
+[PREFIX_CACHE] get_best_prefix: tokens.len()=4, searching range [1, 4], cache has 0 entries
+[PREFIX_CACHE] MISS: no match found for tokens.len()=4
+[PREFIX_CACHE] get_best_prefix: tokens.len()=2, searching range [1, 2], cache has 0 entries
+[PREFIX_CACHE] MISS: no match found for tokens.len()=2
+[PREFIX_CACHE] get_best_prefix: tokens.len()=5, searching range [1, 5], cache has 0 entries
+[PREFIX_CACHE] MISS: no match found for tokens.len()=5
+[PREFIX_CACHE] get_best_prefix: tokens.len()=4, searching range [1, 4], cache has 0 entries
+[PREFIX_CACHE] MISS: no match found for tokens.len()=4
+[PREFIX_CACHE] get_best_prefix: tokens.len()=2, searching range [1, 2], cache has 0 entries
+[PREFIX_CACHE] MISS: no match found for tokens.len()=2
+[PREFIX_CACHE] get_best_prefix: tokens.len()=5, searching range [1, 5], cache has 0 entries
+[PREFIX_CACHE] MISS: no match found for tokens.len()=5
+[PREFIX_CACHE] get_best_prefix: tokens.len()=4, searching range [1, 4], cache has 0 entries
+[PREFIX_CACHE] MISS: no match found for tokens.len()=4
+[PREFIX_CACHE] get_best_prefix: tokens.len()=2, searching range [1, 2], cache has 0 entries
+[PREFIX_CACHE] MISS: no match found for tokens.len()=2
+[PREFIX_CACHE] get_best_prefix: tokens.len()=5, searching range [1, 5], cache has 0 entries
+[PREFIX_CACHE] MISS: no match found for tokens.len()=5
+[PREFIX_CACHE] get_best_prefix: tokens.len()=4, searching range [1, 4], cache has 0 entries
+[PREFIX_CACHE] MISS: no match found for tokens.len()=4
+[PREFIX_CACHE] get_best_prefix: tokens.len()=2, searching range [1, 2], cache has 0 entries
+[PREFIX_CACHE] MISS: no match found for tokens.len()=2
+[PREFIX_CACHE] get_best_prefix: tokens.len()=5, searching range [1, 5], cache has 0 entries
+[PREFIX_CACHE] MISS: no match found for tokens.len()=5
+[PREFIX_CACHE] get_best_prefix: tokens.len()=4, searching range [1, 4], cache has 0 entries
+[PREFIX_CACHE] MISS: no match found for tokens.len()=4
+[PREFIX_CACHE] get_best_prefix: tokens.len()=2, searching range [1, 2], cache has 0 entries
+[PREFIX_CACHE] MISS: no match found for tokens.len()=2
+[PREFIX_CACHE] get_best_prefix: tokens.len()=5, searching range [1, 5], cache has 0 entries
+[PREFIX_CACHE] MISS: no match found for tokens.len()=5
+[PREFIX_CACHE] get_best_prefix: tokens.len()=4, searching range [1, 4], cache has 0 entries
+[PREFIX_CACHE] MISS: no match found for tokens.len()=4
+[PREFIX_CACHE] get_best_prefix: tokens.len()=2, searching range [1, 2], cache has 0 entries
+[PREFIX_CACHE] MISS: no match found for tokens.len()=2
+[PREFIX_CACHE] get_best_prefix: tokens.len()=5, searching range [1, 5], cache has 0 entries
+[PREFIX_CACHE] MISS: no match found for tokens.len()=5
+[PREFIX_CACHE] get_best_prefix: tokens.len()=4, searching range [1, 4], cache has 0 entries
+[PREFIX_CACHE] MISS: no match found for tokens.len()=4
+[PREFIX_CACHE] get_best_prefix: tokens.len()=2, searching range [1, 2], cache has 0 entries
+[PREFIX_CACHE] MISS: no match found for tokens.len()=2
+[PREFIX_CACHE] get_best_prefix: tokens.len()=5, searching range [1, 5], cache has 0 entries
+[PREFIX_CACHE] MISS: no match found for tokens.len()=5
+[PREFIX_CACHE] get_best_prefix: tokens.len()=4, searching range [1, 4], cache has 0 entries
+[PREFIX_CACHE] MISS: no match found for tokens.len()=4
+[PREFIX_CACHE] get_best_prefix: tokens.len()=2, searching range [1, 2], cache has 0 entries
+[PREFIX_CACHE] MISS: no match found for tokens.len()=2
+[PREFIX_CACHE] get_best_prefix: tokens.len()=5, searching range [1, 5], cache has 0 entries
+[PREFIX_CACHE] MISS: no match found for tokens.len()=5
+[CACHE_INSERT] req_id=perf-0, cache_idx=0, prompt_len=5, tokens_to_cache.len()=5
+[CACHE_INSERT] not cached yet, extracting KV for slot 0 (len=5)
+[CACHE_INSERT] extracted KV, attempting insert for req_id=perf-0
+[PREFIX_CACHE] insert: tokens.len()=5, hash=669771446a7323f8
+[PREFIX_CACHE] insert complete: cache now has 1 entries, 230400 bytes
+[CACHE_INSERT] insert succeeded for req_id=perf-0, prompt_len=5 (cache entries=1)
+[CACHE_INSERT] req_id=perf-1, cache_idx=1, prompt_len=4, tokens_to_cache.len()=4
+[CACHE_INSERT] not cached yet, extracting KV for slot 1 (len=4)
+[CACHE_INSERT] extracted KV, attempting insert for req_id=perf-1
+[PREFIX_CACHE] insert: tokens.len()=4, hash=b8d0502611e74d7f
+[PREFIX_CACHE] insert complete: cache now has 2 entries, 414720 bytes
+[CACHE_INSERT] insert succeeded for req_id=perf-1, prompt_len=4 (cache entries=2)
+[CACHE_INSERT] req_id=perf-2, cache_idx=2, prompt_len=2, tokens_to_cache.len()=2
+[CACHE_INSERT] not cached yet, extracting KV for slot 2 (len=2)
+[CACHE_INSERT] extracted KV, attempting insert for req_id=perf-2
+[PREFIX_CACHE] insert: tokens.len()=2, hash=d57e0f7a6d7aeaed
+[PREFIX_CACHE] insert complete: cache now has 3 entries, 506880 bytes
+[CACHE_INSERT] insert succeeded for req_id=perf-2, prompt_len=2 (cache entries=3)
+[CACHE_INSERT] req_id=perf-3, cache_idx=3, prompt_len=5, tokens_to_cache.len()=5
+[CACHE_INSERT] would_hit() returned true, skipping insert for req_id=perf-3
+[CACHE_INSERT] req_id=perf-4, cache_idx=4, prompt_len=4, tokens_to_cache.len()=4
+[CACHE_INSERT] would_hit() returned true, skipping insert for req_id=perf-4
+[CACHE_INSERT] req_id=perf-5, cache_idx=5, prompt_len=2, tokens_to_cache.len()=2
+[CACHE_INSERT] would_hit() returned true, skipping insert for req_id=perf-5
+[CACHE_INSERT] req_id=perf-6, cache_idx=6, prompt_len=5, tokens_to_cache.len()=5
+[CACHE_INSERT] would_hit() returned true, skipping insert for req_id=perf-6
+[CACHE_INSERT] req_id=perf-7, cache_idx=7, prompt_len=4, tokens_to_cache.len()=4
+[CACHE_INSERT] would_hit() returned true, skipping insert for req_id=perf-7
+[CACHE_INSERT] req_id=perf-8, cache_idx=8, prompt_len=2, tokens_to_cache.len()=2
+[CACHE_INSERT] would_hit() returned true, skipping insert for req_id=perf-8
+[CACHE_INSERT] req_id=perf-9, cache_idx=9, prompt_len=5, tokens_to_cache.len()=5
+[CACHE_INSERT] would_hit() returned true, skipping insert for req_id=perf-9
+[CACHE_INSERT] req_id=perf-10, cache_idx=10, prompt_len=4, tokens_to_cache.len()=4
+[CACHE_INSERT] would_hit() returned true, skipping insert for req_id=perf-10
+[CACHE_INSERT] req_id=perf-11, cache_idx=11, prompt_len=2, tokens_to_cache.len()=2
+[CACHE_INSERT] would_hit() returned true, skipping insert for req_id=perf-11
+[CACHE_INSERT] req_id=perf-12, cache_idx=12, prompt_len=5, tokens_to_cache.len()=5
+[CACHE_INSERT] would_hit() returned true, skipping insert for req_id=perf-12
+[CACHE_INSERT] req_id=perf-13, cache_idx=13, prompt_len=4, tokens_to_cache.len()=4
+[CACHE_INSERT] would_hit() returned true, skipping insert for req_id=perf-13
+[CACHE_INSERT] req_id=perf-14, cache_idx=14, prompt_len=2, tokens_to_cache.len()=2
+[CACHE_INSERT] would_hit() returned true, skipping insert for req_id=perf-14
+[CACHE_INSERT] req_id=perf-15, cache_idx=15, prompt_len=5, tokens_to_cache.len()=5
+[CACHE_INSERT] would_hit() returned true, skipping insert for req_id=perf-15
+[CACHE_INSERT] req_id=perf-16, cache_idx=16, prompt_len=4, tokens_to_cache.len()=4
+[CACHE_INSERT] would_hit() returned true, skipping insert for req_id=perf-16
+[CACHE_INSERT] req_id=perf-17, cache_idx=17, prompt_len=2, tokens_to_cache.len()=2
+[CACHE_INSERT] would_hit() returned true, skipping insert for req_id=perf-17
+[CACHE_INSERT] req_id=perf-18, cache_idx=18, prompt_len=5, tokens_to_cache.len()=5
+[CACHE_INSERT] would_hit() returned true, skipping insert for req_id=perf-18
+[CACHE_INSERT] req_id=perf-19, cache_idx=19, prompt_len=4, tokens_to_cache.len()=4
+[CACHE_INSERT] would_hit() returned true, skipping insert for req_id=perf-19
+[CACHE_INSERT] req_id=perf-20, cache_idx=20, prompt_len=2, tokens_to_cache.len()=2
+[CACHE_INSERT] would_hit() returned true, skipping insert for req_id=perf-20
+[CACHE_INSERT] req_id=perf-21, cache_idx=21, prompt_len=5, tokens_to_cache.len()=5
+[CACHE_INSERT] would_hit() returned true, skipping insert for req_id=perf-21
+[CACHE_INSERT] req_id=perf-22, cache_idx=22, prompt_len=4, tokens_to_cache.len()=4
+[CACHE_INSERT] would_hit() returned true, skipping insert for req_id=perf-22
+[CACHE_INSERT] req_id=perf-23, cache_idx=23, prompt_len=2, tokens_to_cache.len()=2
+[CACHE_INSERT] would_hit() returned true, skipping insert for req_id=perf-23
+[CACHE_INSERT] req_id=perf-24, cache_idx=24, prompt_len=5, tokens_to_cache.len()=5
+[CACHE_INSERT] would_hit() returned true, skipping insert for req_id=perf-24
+[CACHE_INSERT] req_id=perf-25, cache_idx=25, prompt_len=4, tokens_to_cache.len()=4
+[CACHE_INSERT] would_hit() returned true, skipping insert for req_id=perf-25
+[CACHE_INSERT] req_id=perf-26, cache_idx=26, prompt_len=2, tokens_to_cache.len()=2
+[CACHE_INSERT] would_hit() returned true, skipping insert for req_id=perf-26
+[CACHE_INSERT] req_id=perf-27, cache_idx=27, prompt_len=5, tokens_to_cache.len()=5
+[CACHE_INSERT] would_hit() returned true, skipping insert for req_id=perf-27
+[CACHE_INSERT] req_id=perf-28, cache_idx=28, prompt_len=4, tokens_to_cache.len()=4
+[CACHE_INSERT] would_hit() returned true, skipping insert for req_id=perf-28
+[CACHE_INSERT] req_id=perf-29, cache_idx=29, prompt_len=2, tokens_to_cache.len()=2
+[CACHE_INSERT] would_hit() returned true, skipping insert for req_id=perf-29
+[CACHE_INSERT] req_id=perf-30, cache_idx=30, prompt_len=5, tokens_to_cache.len()=5
+[CACHE_INSERT] would_hit() returned true, skipping insert for req_id=perf-30
+[CACHE_INSERT] req_id=perf-31, cache_idx=31, prompt_len=4, tokens_to_cache.len()=4
+[CACHE_INSERT] would_hit() returned true, skipping insert for req_id=perf-31
+[CACHE_INSERT] req_id=perf-32, cache_idx=32, prompt_len=2, tokens_to_cache.len()=2
+[CACHE_INSERT] would_hit() returned true, skipping insert for req_id=perf-32
+[CACHE_INSERT] req_id=perf-33, cache_idx=33, prompt_len=5, tokens_to_cache.len()=5
+[CACHE_INSERT] would_hit() returned true, skipping insert for req_id=perf-33
+[CACHE_INSERT] req_id=perf-34, cache_idx=34, prompt_len=4, tokens_to_cache.len()=4
+[CACHE_INSERT] would_hit() returned true, skipping insert for req_id=perf-34
+[CACHE_INSERT] req_id=perf-35, cache_idx=35, prompt_len=2, tokens_to_cache.len()=2
+[CACHE_INSERT] would_hit() returned true, skipping insert for req_id=perf-35
+[CACHE_INSERT] req_id=perf-36, cache_idx=36, prompt_len=5, tokens_to_cache.len()=5
+[CACHE_INSERT] would_hit() returned true, skipping insert for req_id=perf-36
+[CACHE_INSERT] req_id=perf-37, cache_idx=37, prompt_len=4, tokens_to_cache.len()=4
+[CACHE_INSERT] would_hit() returned true, skipping insert for req_id=perf-37
+[CACHE_INSERT] req_id=perf-38, cache_idx=38, prompt_len=2, tokens_to_cache.len()=2
+[CACHE_INSERT] would_hit() returned true, skipping insert for req_id=perf-38
+[CACHE_INSERT] req_id=perf-39, cache_idx=39, prompt_len=5, tokens_to_cache.len()=5
+[CACHE_INSERT] would_hit() returned true, skipping insert for req_id=perf-39
+[CACHE_INSERT] req_id=perf-40, cache_idx=40, prompt_len=4, tokens_to_cache.len()=4
+[CACHE_INSERT] would_hit() returned true, skipping insert for req_id=perf-40
+[CACHE_INSERT] req_id=perf-41, cache_idx=41, prompt_len=2, tokens_to_cache.len()=2
+[CACHE_INSERT] would_hit() returned true, skipping insert for req_id=perf-41
+[CACHE_INSERT] req_id=perf-42, cache_idx=42, prompt_len=5, tokens_to_cache.len()=5
+[CACHE_INSERT] would_hit() returned true, skipping insert for req_id=perf-42
+[CACHE_INSERT] req_id=perf-43, cache_idx=43, prompt_len=4, tokens_to_cache.len()=4
+[CACHE_INSERT] would_hit() returned true, skipping insert for req_id=perf-43
+[CACHE_INSERT] req_id=perf-44, cache_idx=44, prompt_len=2, tokens_to_cache.len()=2
+[CACHE_INSERT] would_hit() returned true, skipping insert for req_id=perf-44
+[CACHE_INSERT] req_id=perf-45, cache_idx=45, prompt_len=5, tokens_to_cache.len()=5
+[CACHE_INSERT] would_hit() returned true, skipping insert for req_id=perf-45
+[CACHE_INSERT] req_id=perf-46, cache_idx=46, prompt_len=4, tokens_to_cache.len()=4
+[CACHE_INSERT] would_hit() returned true, skipping insert for req_id=perf-46
+[CACHE_INSERT] req_id=perf-47, cache_idx=47, prompt_len=2, tokens_to_cache.len()=2
+[CACHE_INSERT] would_hit() returned true, skipping insert for req_id=perf-47
+[CACHE_INSERT] req_id=perf-48, cache_idx=48, prompt_len=5, tokens_to_cache.len()=5
+[CACHE_INSERT] would_hit() returned true, skipping insert for req_id=perf-48
+[CACHE_INSERT] req_id=perf-49, cache_idx=49, prompt_len=4, tokens_to_cache.len()=4
+[CACHE_INSERT] would_hit() returned true, skipping insert for req_id=perf-49
+[CACHE_INSERT] req_id=perf-50, cache_idx=50, prompt_len=2, tokens_to_cache.len()=2
+[CACHE_INSERT] would_hit() returned true, skipping insert for req_id=perf-50
+[CACHE_INSERT] req_id=perf-51, cache_idx=51, prompt_len=5, tokens_to_cache.len()=5
+[CACHE_INSERT] would_hit() returned true, skipping insert for req_id=perf-51
+[PREFIX_CACHE] get_best_prefix: tokens.len()=4, searching range [1, 4], cache has 3 entries
+[PREFIX_CACHE] HIT: len=4, hash=b8d0502611e74d7f
+[PREFIX_CACHE] get_best_prefix: tokens.len()=2, searching range [1, 2], cache has 3 entries
+[PREFIX_CACHE] HIT: len=2, hash=d57e0f7a6d7aeaed
+[PREFIX_CACHE] get_best_prefix: tokens.len()=5, searching range [1, 5], cache has 3 entries
+[PREFIX_CACHE] HIT: len=5, hash=669771446a7323f8
+[PREFIX_CACHE] get_best_prefix: tokens.len()=4, searching range [1, 4], cache has 3 entries
+[PREFIX_CACHE] HIT: len=4, hash=b8d0502611e74d7f
+[PREFIX_CACHE] get_best_prefix: tokens.len()=2, searching range [1, 2], cache has 3 entries
+[PREFIX_CACHE] HIT: len=2, hash=d57e0f7a6d7aeaed
+[PREFIX_CACHE] get_best_prefix: tokens.len()=5, searching range [1, 5], cache has 3 entries
+[PREFIX_CACHE] HIT: len=5, hash=669771446a7323f8
+[PREFIX_CACHE] get_best_prefix: tokens.len()=4, searching range [1, 4], cache has 3 entries
+[PREFIX_CACHE] HIT: len=4, hash=b8d0502611e74d7f
+[PREFIX_CACHE] get_best_prefix: tokens.len()=2, searching range [1, 2], cache has 3 entries
+[PREFIX_CACHE] HIT: len=2, hash=d57e0f7a6d7aeaed
+[PREFIX_CACHE] get_best_prefix: tokens.len()=5, searching range [1, 5], cache has 3 entries
+[PREFIX_CACHE] HIT: len=5, hash=669771446a7323f8
+[PREFIX_CACHE] get_best_prefix: tokens.len()=4, searching range [1, 4], cache has 3 entries
+[PREFIX_CACHE] HIT: len=4, hash=b8d0502611e74d7f
+[PREFIX_CACHE] get_best_prefix: tokens.len()=2, searching range [1, 2], cache has 3 entries
+[PREFIX_CACHE] HIT: len=2, hash=d57e0f7a6d7aeaed
+[PREFIX_CACHE] get_best_prefix: tokens.len()=5, searching range [1, 5], cache has 3 entries
+[PREFIX_CACHE] HIT: len=5, hash=669771446a7323f8
+[PREFIX_CACHE] get_best_prefix: tokens.len()=4, searching range [1, 4], cache has 3 entries
+[PREFIX_CACHE] HIT: len=4, hash=b8d0502611e74d7f
+[PREFIX_CACHE] get_best_prefix: tokens.len()=2, searching range [1, 2], cache has 3 entries
+[PREFIX_CACHE] HIT: len=2, hash=d57e0f7a6d7aeaed
+[PREFIX_CACHE] get_best_prefix: tokens.len()=5, searching range [1, 5], cache has 3 entries
+[PREFIX_CACHE] HIT: len=5, hash=669771446a7323f8
+[PREFIX_CACHE] get_best_prefix: tokens.len()=4, searching range [1, 4], cache has 3 entries
+[PREFIX_CACHE] HIT: len=4, hash=b8d0502611e74d7f
+[PREFIX_CACHE] get_best_prefix: tokens.len()=2, searching range [1, 2], cache has 3 entries
+[PREFIX_CACHE] HIT: len=2, hash=d57e0f7a6d7aeaed
+[PREFIX_CACHE] get_best_prefix: tokens.len()=5, searching range [1, 5], cache has 3 entries
+[PREFIX_CACHE] HIT: len=5, hash=669771446a7323f8
+[PREFIX_CACHE] get_best_prefix: tokens.len()=4, searching range [1, 4], cache has 3 entries
+[PREFIX_CACHE] HIT: len=4, hash=b8d0502611e74d7f
+[PREFIX_CACHE] get_best_prefix: tokens.len()=2, searching range [1, 2], cache has 3 entries
+[PREFIX_CACHE] HIT: len=2, hash=d57e0f7a6d7aeaed
+[PREFIX_CACHE] get_best_prefix: tokens.len()=5, searching range [1, 5], cache has 3 entries
+[PREFIX_CACHE] HIT: len=5, hash=669771446a7323f8
+[PREFIX_CACHE] get_best_prefix: tokens.len()=4, searching range [1, 4], cache has 3 entries
+[PREFIX_CACHE] HIT: len=4, hash=b8d0502611e74d7f
+[PREFIX_CACHE] get_best_prefix: tokens.len()=2, searching range [1, 2], cache has 3 entries
+[PREFIX_CACHE] HIT: len=2, hash=d57e0f7a6d7aeaed
+[PREFIX_CACHE] get_best_prefix: tokens.len()=5, searching range [1, 5], cache has 3 entries
+[PREFIX_CACHE] HIT: len=5, hash=669771446a7323f8
+[PREFIX_CACHE] get_best_prefix: tokens.len()=4, searching range [1, 4], cache has 3 entries
+[PREFIX_CACHE] HIT: len=4, hash=b8d0502611e74d7f
+[PREFIX_CACHE] get_best_prefix: tokens.len()=2, searching range [1, 2], cache has 3 entries
+[PREFIX_CACHE] HIT: len=2, hash=d57e0f7a6d7aeaed
+[PREFIX_CACHE] get_best_prefix: tokens.len()=5, searching range [1, 5], cache has 3 entries
+[PREFIX_CACHE] HIT: len=5, hash=669771446a7323f8
+[PREFIX_CACHE] get_best_prefix: tokens.len()=4, searching range [1, 4], cache has 3 entries
+[PREFIX_CACHE] HIT: len=4, hash=b8d0502611e74d7f
+[PREFIX_CACHE] get_best_prefix: tokens.len()=2, searching range [1, 2], cache has 3 entries
+[PREFIX_CACHE] HIT: len=2, hash=d57e0f7a6d7aeaed
+[PREFIX_CACHE] get_best_prefix: tokens.len()=5, searching range [1, 5], cache has 3 entries
+[PREFIX_CACHE] HIT: len=5, hash=669771446a7323f8
+[PREFIX_CACHE] get_best_prefix: tokens.len()=4, searching range [1, 4], cache has 3 entries
+[PREFIX_CACHE] HIT: len=4, hash=b8d0502611e74d7f
+[PREFIX_CACHE] get_best_prefix: tokens.len()=2, searching range [1, 2], cache has 3 entries
+[PREFIX_CACHE] HIT: len=2, hash=d57e0f7a6d7aeaed
+[PREFIX_CACHE] get_best_prefix: tokens.len()=5, searching range [1, 5], cache has 3 entries
+[PREFIX_CACHE] HIT: len=5, hash=669771446a7323f8
+[PREFIX_CACHE] get_best_prefix: tokens.len()=4, searching range [1, 4], cache has 3 entries
+[PREFIX_CACHE] HIT: len=4, hash=b8d0502611e74d7f
+[PREFIX_CACHE] get_best_prefix: tokens.len()=2, searching range [1, 2], cache has 3 entries
+[PREFIX_CACHE] HIT: len=2, hash=d57e0f7a6d7aeaed
+[PREFIX_CACHE] get_best_prefix: tokens.len()=5, searching range [1, 5], cache has 3 entries
+[PREFIX_CACHE] HIT: len=5, hash=669771446a7323f8
+[PREFIX_CACHE] get_best_prefix: tokens.len()=4, searching range [1, 4], cache has 3 entries
+[PREFIX_CACHE] HIT: len=4, hash=b8d0502611e74d7f
+[PREFIX_CACHE] get_best_prefix: tokens.len()=2, searching range [1, 2], cache has 3 entries
+[PREFIX_CACHE] HIT: len=2, hash=d57e0f7a6d7aeaed
+[PREFIX_CACHE] get_best_prefix: tokens.len()=5, searching range [1, 5], cache has 3 entries
+[PREFIX_CACHE] HIT: len=5, hash=669771446a7323f8
+[PREFIX_CACHE] get_best_prefix: tokens.len()=4, searching range [1, 4], cache has 3 entries
+[PREFIX_CACHE] HIT: len=4, hash=b8d0502611e74d7f
+[PREFIX_CACHE] get_best_prefix: tokens.len()=2, searching range [1, 2], cache has 3 entries
+[PREFIX_CACHE] HIT: len=2, hash=d57e0f7a6d7aeaed
+[PREFIX_CACHE] get_best_prefix: tokens.len()=5, searching range [1, 5], cache has 3 entries
+[PREFIX_CACHE] HIT: len=5, hash=669771446a7323f8
+[PREFIX_CACHE] get_best_prefix: tokens.len()=4, searching range [1, 4], cache has 3 entries
+[PREFIX_CACHE] HIT: len=4, hash=b8d0502611e74d7f
+[PREFIX_CACHE] get_best_prefix: tokens.len()=2, searching range [1, 2], cache has 3 entries
+[PREFIX_CACHE] HIT: len=2, hash=d57e0f7a6d7aeaed
+[PREFIX_CACHE] get_best_prefix: tokens.len()=5, searching range [1, 5], cache has 3 entries
+[PREFIX_CACHE] HIT: len=5, hash=669771446a7323f8
+[PREFIX_CACHE] get_best_prefix: tokens.len()=4, searching range [1, 4], cache has 3 entries
+[PREFIX_CACHE] HIT: len=4, hash=b8d0502611e74d7f
+[PREFIX_CACHE] get_best_prefix: tokens.len()=2, searching range [1, 2], cache has 3 entries
+[PREFIX_CACHE] HIT: len=2, hash=d57e0f7a6d7aeaed
+[PREFIX_CACHE] get_best_prefix: tokens.len()=5, searching range [1, 5], cache has 3 entries
+[PREFIX_CACHE] HIT: len=5, hash=669771446a7323f8
+All requests completed at step 20
+
+=== Performance Statistics ===
+Total wall time: 7.81s
+Total batches: 32
+  Prefill batches: 13
+  Decode batches: 19
+  Chunked prefill batches: 13
+Max concurrent batch size: 52
+Total tokens generated: 1000
+Total requests processed: 100
+Average batch size: 3.12
+Forward time: 2000.00ms
+Throughput: 500.00 tokens/sec
+Padding efficiency: 93.6%
+
+=== Prefix Cache Statistics ===
+Cache hits: 48
+Cache misses: 52
+Hit rate: 48.0%
+Tokens saved: 176 (3.7 avg per hit)
+Potential TTFT improvement: 24.0% (if KV caching enabled)
+
+Γ£ô Performance test complete with 500.00 tokens/sec
+test test_parallel_performance_metrics ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 9.50s
+

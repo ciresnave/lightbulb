@@ -1,0 +1,65 @@
+[package]
+    authors.workspace       = true
+    categories              = ["algorithms", "distributed-systems", "network-programming"]
+    description             = "Distributed consensus algorithms for DynAniml cluster coordination"
+    documentation.workspace = true
+    edition.workspace       = true
+    homepage.workspace      = true
+    keywords                = ["cluster", "consensus", "coordination", "distributed", "raft"]
+    license.workspace       = true
+    name                    = "infra-consensus"
+    repository.workspace    = true
+    version.workspace       = true
+
+[dependencies]
+    # Internal dependencies
+    infra-network = { workspace = true }
+
+    # Core utilities
+    anyhow     = { workspace = true }
+    serde      = { workspace = true }
+    serde_json = { workspace = true }
+    thiserror  = { workspace = true }
+    tracing    = { workspace = true }
+    uuid       = { workspace = true }
+
+    # Async runtime
+    tokio = { workspace = true }
+
+    # Networking
+    tonic = { workspace = true }
+
+    # Time handling
+    chrono = { version = "0.4", features = ["serde"] }
+
+    # OpenRaft integration
+    async-trait = { version = "0.1" }
+    bincode     = { version = "2.0.1", features = ["serde"] }
+    openraft    = { version = "0.9", features = ["serde"] }
+
+[dev-dependencies]
+    criterion = { workspace = true }
+    # openraft-memstore  = "0.9.18"  # Disabled due to storage-v2 compatibility issues
+    pretty_assertions  = { workspace = true }
+    tempfile           = { workspace = true }
+    tokio-test         = "0.4"
+    tracing-subscriber = { workspace = true }
+
+[build-dependencies]
+    tonic-build = { workspace = true }
+
+[[bench]]
+    harness = false
+    name    = "consensus_benchmarks"
+
+[features]
+    default = ["raft", "std"]
+    std     = []
+    # Enable Raft consensus algorithm
+    raft = []
+    # Enable PBFT consensus algorithm
+    pbft = []
+    # Enable custom consensus protocols
+    custom-protocols = []
+    # Enable consensus metrics and monitoring
+    metrics = []

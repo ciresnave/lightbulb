@@ -1,0 +1,626 @@
+    Blocking waiting for file lock on build directory
+warning: variable does not need to be mutable
+   --> crates\infra-storage\src\sqlite.rs:101:13
+    |
+101 |         let mut stmt = self
+    |             ----^^^^
+    |             |
+    |             help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+   --> crates\infra-storage\src\sqlite.rs:125:13
+    |
+125 |         let mut stmt = self
+    |             ----^^^^
+    |             |
+    |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> crates\infra-storage\src\sqlite.rs:159:13
+    |
+159 |         let mut stmt = self
+    |             ----^^^^
+    |             |
+    |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> crates\infra-storage\src\sqlite.rs:173:13
+    |
+173 |         let mut stmt = self
+    |             ----^^^^
+    |             |
+    |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> crates\infra-storage\src\sqlite.rs:187:13
+    |
+187 |         let mut stmt = self
+    |             ----^^^^
+    |             |
+    |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> crates\infra-storage\src\sqlite.rs:206:13
+    |
+206 |         let mut stmt = self
+    |             ----^^^^
+    |             |
+    |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> crates\infra-storage\src\sqlite.rs:233:13
+    |
+233 |         let mut stmt = self
+    |             ----^^^^
+    |             |
+    |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> crates\infra-storage\src\sqlite.rs:255:13
+    |
+255 |         let mut stmt = self
+    |             ----^^^^
+    |             |
+    |             help: remove this `mut`
+
+warning: unused variable: `result`
+   --> crates\infra-network\src\network.rs:413:13
+    |
+413 |         let result = manager.add_peer(peer_info.clone()).await;
+    |             ^^^^^^ help: if this is intentional, prefix it with an underscore: `_result`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `local_node_id` is never read
+  --> crates\infra-network\src\topology.rs:28:5
+   |
+18 | pub struct NetworkTopology {
+   |            --------------- field in this struct
+...
+28 |     local_node_id: NodeId,
+   |     ^^^^^^^^^^^^^
+   |
+   = note: `NetworkTopology` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `tcp_listener` is never read
+   --> crates\infra-network\src\discovery.rs:137:5
+    |
+129 | pub struct NodeDiscovery {
+    |            ------------- field in this struct
+...
+137 |     tcp_listener: Option<Arc<TcpListener>>,
+    |     ^^^^^^^^^^^^
+    |
+    = note: `NodeDiscovery` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+warning: field `local_node` is never read
+  --> crates\infra-network\src\connection.rs:15:5
+   |
+13 | pub struct ConnectionManager {
+   |            ----------------- field in this struct
+14 |     /// Local node information
+15 |     local_node: NodeId,
+   |     ^^^^^^^^^^
+   |
+   = note: `ConnectionManager` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+warning: field `node_id` is never read
+  --> crates\infra-network\src\monitoring.rs:15:5
+   |
+13 | pub struct NetworkMonitor {
+   |            -------------- field in this struct
+14 |     /// Node being monitored
+15 |     node_id: NodeId,
+   |     ^^^^^^^
+   |
+   = note: `NetworkMonitor` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: field `local_node` is never read
+  --> crates\infra-network\src\network.rs:18:5
+   |
+16 | pub struct NetworkManager {
+   |            -------------- field in this struct
+17 |     /// Local node information
+18 |     local_node: PeerInfo,
+   |     ^^^^^^^^^^
+   |
+   = note: `NetworkManager` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+warning: unused import: `Response`
+  --> lightbulb\src\api\admin.rs:10:30
+   |
+10 |     response::{IntoResponse, Response},
+   |                              ^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `chrono::NaiveDateTime`
+  --> lightbulb\src\api\admin.rs:13:5
+   |
+13 | use chrono::NaiveDateTime;
+   |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `post`
+  --> lightbulb\src\api\mod.rs:38:20
+   |
+38 |     routing::{get, post},
+   |                    ^^^^
+
+warning: unused import: `PrivateKeyDer`
+   --> lightbulb\src\api\mod.rs:272:53
+    |
+272 |             use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+    |                                                     ^^^^^^^^^^^^^
+
+warning: unused import: `std::path::PathBuf`
+    --> lightbulb\src\engine\decomposition.rs:1106:13
+     |
+1106 |         use std::path::PathBuf;
+     |             ^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `QueryIntent`
+   --> lightbulb\src\engine\performance_optimization.rs:443:56
+    |
+443 |     use crate::engine::query_analysis::{QueryAnalyzer, QueryIntent};
+    |                                                        ^^^^^^^^^^^
+
+warning: unused import: `QueryIntent`
+   --> lightbulb\src\engine\streaming_context.rs:315:56
+    |
+315 |     use crate::engine::query_analysis::{QueryAnalyzer, QueryIntent};
+    |                                                        ^^^^^^^^^^^
+
+warning: unused imports: `DType` and `Device`
+  --> lightbulb\src\loaders\awq.rs:12:25
+   |
+12 | use candlelight::core::{DType, Device, Tensor};
+   |                         ^^^^^  ^^^^^^
+
+warning: unused import: `std::collections::HashMap`
+  --> lightbulb\src\loaders\awq.rs:14:5
+   |
+14 | use std::collections::HashMap;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::gguf`
+   --> lightbulb\src\loaders\mod.rs:132:9
+    |
+132 |     use crate::gguf;
+    |         ^^^^^^^^^^^
+
+warning: unused import: `D`
+ --> lightbulb\src\model\awq_qwen3.rs:6:25
+  |
+6 | use candlelight::core::{D, DType, Device, Module, Result, Tensor};
+  |                         ^
+
+warning: unnecessary parentheses around block return value
+   --> lightbulb\src\model\awq_qwen3.rs:134:5
+    |
+134 |     (x.broadcast_mul(cos)? + x_rotated.broadcast_mul(sin)?)
+    |     ^                                                     ^
+    |
+    = note: `#[warn(unused_parens)]` (part of `#[warn(unused)]`) on by default
+help: remove these parentheses
+    |
+134 -     (x.broadcast_mul(cos)? + x_rotated.broadcast_mul(sin)?)
+134 +     x.broadcast_mul(cos)? + x_rotated.broadcast_mul(sin)?
+    |
+
+warning: unused import: `super::*`
+   --> lightbulb\src\model\batch_manager.rs:238:9
+    |
+238 |     use super::*;
+    |         ^^^^^^^^
+
+warning: unused import: `super::*`
+   --> lightbulb\src\model\batched_llama_wrapper.rs:263:9
+    |
+263 |     use super::*;
+    |         ^^^^^^^^
+
+warning: unused import: `std::sync::Arc`
+  --> lightbulb\src\model\chunked_prefill.rs:32:5
+   |
+32 | use std::sync::Arc;
+   |     ^^^^^^^^^^^^^^
+
+warning: unused import: `parking_lot::Mutex`
+  --> lightbulb\src\model\chunked_prefill.rs:35:5
+   |
+35 | use parking_lot::Mutex;
+   |     ^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `DType`
+   --> lightbulb\src\model\fused_kernels.rs:104:29
+    |
+104 |     use candlelight::core::{DType, Device};
+    |                             ^^^^^
+
+warning: variant `N_M` should have an upper camel case name
+   --> lightbulb\src\pruning\mod.rs:126:5
+    |
+126 |     N_M { n: usize, m: usize },
+    |     ^^^ help: convert the identifier to upper camel case: `NM`
+    |
+    = note: `#[warn(non_camel_case_types)]` (part of `#[warn(nonstandard_style)]`) on by default
+
+warning: unused import: `super::*`
+   --> lightbulb\src\pruning\gguf_application.rs:212:9
+    |
+212 |     use super::*;
+    |         ^^^^^^^^
+
+warning: unused imports: `Next` and `response::Response`
+   --> lightbulb\src\tls.rs:667:28
+    |
+667 |         middleware::{self, Next},
+    |                            ^^^^
+668 |         response::Response,
+    |         ^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `DType`, `Device`, and `Tensor`
+   --> lightbulb\src\tools\mod.rs:316:29
+    |
+316 |     use candlelight::core::{DType, Device, Tensor};
+    |                             ^^^^^  ^^^^^^  ^^^^^^
+
+warning: unused import: `DType`
+   --> lightbulb\src\utils\tensor_ops.rs:212:29
+    |
+212 |     use candlelight::core::{DType, Device};
+    |                             ^^^^^
+
+warning: use of deprecated function `rand::thread_rng`: Renamed to `rng`
+   --> lightbulb\src\api\admin.rs:252:29
+    |
+252 |         let mut rng = rand::thread_rng();
+    |                             ^^^^^^^^^^
+    |
+    = note: `#[warn(deprecated)]` on by default
+
+warning: use of deprecated method `rand::Rng::gen_range`: Renamed to `random_range`
+  --> lightbulb\src\sampling.rs:94:20
+   |
+94 |         return rng.gen_range(0..logits.len());
+   |                    ^^^^^^^^^
+
+warning: unused import: `Module`
+  --> lightbulb\src\model\custom_transformer_block.rs:76:40
+   |
+76 | use candlelight::core::{DType, Device, Module, Result, Tensor};
+   |                                        ^^^^^^
+
+warning: unused variable: `scheduler`
+  --> lightbulb\src\api\admin.rs:53:9
+   |
+53 |     let scheduler = &state.scheduler;
+   |         ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_scheduler`
+   |
+   = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `scores`
+   --> lightbulb\src\cache\eviction_policy.rs:281:13
+    |
+281 |         let scores = aggregator.compute_aggregated_scores(5, 5, &cache_positions);
+    |             ^^^^^^ help: if this is intentional, prefix it with an underscore: `_scores`
+
+warning: unused variable: `cache_size`
+   --> lightbulb\src\cache\h2o_policy.rs:146:9
+    |
+146 |         cache_size: usize,
+    |         ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_cache_size`
+
+warning: unused variable: `ctx`
+   --> lightbulb\src\cache\kv_compression.rs:428:47
+    |
+428 |     fn compute_scales(&self, tensor: &Tensor, ctx: &CompressionCtx) -> Result<Tensor> {
+    |                                               ^^^ help: if this is intentional, prefix it with an underscore: `_ctx`
+
+warning: unused variable: `group_size`
+   --> lightbulb\src\cache\kv_compression.rs:443:42
+    |
+443 |             QuantGranularity::PerGroup { group_size } => {
+    |                                          ^^^^^^^^^^ help: try ignoring the field: `group_size: _`
+
+warning: unused variable: `keys`
+   --> lightbulb\src\cache\kv_compression.rs:603:34
+    |
+603 |     fn compute_redundancy(&self, keys: &Tensor, ctx: &CompressionCtx) -> Result<Vec<f32>> {
+    |                                  ^^^^ help: if this is intentional, prefix it with an underscore: `_keys`
+
+warning: unused variable: `num_reps`
+   --> lightbulb\src\cache\kv_compression.rs:610:13
+    |
+610 |         let num_reps = (seq_len + alpha - 1) / alpha;
+    |             ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_num_reps`
+
+warning: unused variable: `keep_mask`
+   --> lightbulb\src\cache\kv_compression.rs:688:13
+    |
+688 |         let keep_mask = self.select_tokens(&joint_scores, ctx.seq_len);
+    |             ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_keep_mask`
+
+warning: unused variable: `keys`
+   --> lightbulb\src\cache\kv_compression.rs:767:45
+    |
+767 |     fn compute_semantic_clusters(&mut self, keys: &Tensor, ctx: &CompressionCtx) -> Result<()> {
+    |                                             ^^^^ help: if this is intentional, prefix it with an underscore: `_keys`
+
+warning: unused variable: `reshaped`
+    --> lightbulb\src\cache\kv_compression.rs:1085:13
+     |
+1085 |         let reshaped = tensor.reshape((batch_size * num_heads, seq_len, head_dim))?;
+     |             ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_reshaped`
+
+warning: unused variable: `rkv_original`
+    --> lightbulb\src\cache\kv_compression.rs:1861:30
+     |
+1861 |         let (rkv_compressed, rkv_original, rkv_reduction) = rkv.memory_savings(&ctx);
+     |                              ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_rkv_original`
+
+warning: unused variable: `lr_original`
+    --> lightbulb\src\cache\kv_compression.rs:1868:29
+     |
+1868 |         let (lr_compressed, lr_original, lr_reduction) = lowrank.memory_savings(&ctx);
+     |                             ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_lr_original`
+
+warning: unused variable: `rel_original`
+    --> lightbulb\src\cache\kv_compression.rs:1872:30
+     |
+1872 |         let (rel_compressed, rel_original, rel_reduction) = rel.memory_savings(&ctx);
+     |                              ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_rel_original`
+
+warning: unused variable: `device`
+    --> lightbulb\src\cache\kv_compression.rs:1922:13
+     |
+1922 |         let device = Device::Cpu;
+     |             ^^^^^^ help: if this is intentional, prefix it with an underscore: `_device`
+
+warning: unused variable: `span_id`
+    --> lightbulb\src\cache\parallel_cache_builder.rs:2467:13
+     |
+2467 |         let span_id =
+     |             ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_span_id`
+
+warning: unused variable: `result`
+    --> lightbulb\src\cache\parallel_cache_builder.rs:2630:13
+     |
+2630 |         let result = builder.insert_context_at(0, 50)?;
+     |             ^^^^^^ help: if this is intentional, prefix it with an underscore: `_result`
+
+warning: unused variable: `query_text`
+   --> lightbulb\src\engine\adaptive_selection.rs:153:9
+    |
+153 |         query_text: &str,
+    |         ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_query_text`
+
+warning: unused variable: `order`
+   --> lightbulb\src\engine\decomposition.rs:355:13
+    |
+355 |         let order = self.execution_order()?;
+    |             ^^^^^ help: if this is intentional, prefix it with an underscore: `_order`
+
+warning: unused variable: `sub_queries`
+   --> lightbulb\src\engine\query_analysis.rs:670:9
+    |
+670 |         sub_queries: &[SubQuery],
+    |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_sub_queries`
+
+warning: unused variable: `start`
+   --> lightbulb\src\engine\speculative.rs:217:13
+    |
+217 |         let start = std::time::Instant::now();
+    |             ^^^^^ help: if this is intentional, prefix it with an underscore: `_start`
+
+warning: unused variable: `branch1_2`
+   --> lightbulb\src\engine\state_persistence.rs:895:13
+    |
+895 |         let branch1_2 = manager.branch(&branch1, "refinement2").unwrap();
+    |             ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_branch1_2`
+
+warning: unused variable: `input`
+   --> lightbulb\src\loaders\awq.rs:186:27
+    |
+186 |     pub fn forward(&self, input: &Tensor) -> Result<Tensor> {
+    |                           ^^^^^ help: if this is intentional, prefix it with an underscore: `_input`
+
+warning: unused variable: `use_flash_attn`
+   --> lightbulb\src\loaders\mod.rs:284:5
+    |
+284 |     use_flash_attn: bool,
+    |     ^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_use_flash_attn`
+
+warning: unused variable: `num_kv_heads`
+    --> lightbulb\src\model\custom_attention.rs:1045:13
+     |
+1045 |         let num_kv_heads = 8;
+     |             ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_num_kv_heads`
+
+warning: unused variable: `device`
+    --> lightbulb\src\model\custom_attention.rs:1148:13
+     |
+1148 |         let device = Device::Cpu;
+     |             ^^^^^^ help: if this is intentional, prefix it with an underscore: `_device`
+
+warning: unused variable: `max_seq_len`
+    --> lightbulb\src\model\custom_attention.rs:1429:13
+     |
+1429 |         let max_seq_len = *metadata.sequence_lengths().iter().max().unwrap();
+     |             ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_max_seq_len`
+
+warning: unused variable: `sum`
+    --> lightbulb\src\model\custom_transformer.rs:1015:13
+     |
+1015 |         let sum = (cos_sq + sin_sq)?;
+     |             ^^^ help: if this is intentional, prefix it with an underscore: `_sum`
+
+warning: variable does not need to be mutable
+   --> lightbulb\src\model\custom_transformer_block.rs:607:13
+    |
+607 |         let mut contexts: Vec<RequestContext> = request_ids
+    |             ----^^^^^^^^
+    |             |
+    |             help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `contexts`
+   --> lightbulb\src\model\custom_transformer_block.rs:607:13
+    |
+607 |         let mut contexts: Vec<RequestContext> = request_ids
+    |             ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_contexts`
+
+warning: variable does not need to be mutable
+   --> lightbulb\src\model\model_manager.rs:615:13
+    |
+615 |         let mut ctx = RequestContext::new(req);
+    |             ----^^^
+    |             |
+    |             help: remove this `mut`
+
+warning: unused variable: `layer_idx`
+   --> lightbulb\src\multi_gpu\distributed_cache.rs:130:9
+    |
+130 |         layer_idx: usize,
+    |         ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_layer_idx`
+
+warning: unused variable: `batch_idx`
+   --> lightbulb\src\multi_gpu\distributed_cache.rs:131:9
+    |
+131 |         batch_idx: usize,
+    |         ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_batch_idx`
+
+warning: unused variable: `cache_builder`
+   --> lightbulb\src\multi_gpu\distributed_cache.rs:138:30
+    |
+138 |                 for (gpu_id, cache_builder) in self.local_caches.iter_mut().enumerate() {
+    |                              ^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_cache_builder`
+
+warning: unused variable: `new_idx`
+   --> lightbulb\src\pruning\mod.rs:693:29
+    |
+693 |         for (original_idx, &new_idx) in kept_layers.iter().enumerate() {
+    |                             ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_new_idx`
+
+warning: unused variable: `mask_2d`
+    --> lightbulb\src\pruning\mod.rs:1192:13
+     |
+1192 |         let mask_2d = mask.to_vec2::<f32>().unwrap();
+     |             ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_mask_2d`
+
+warning: unused variable: `calibration_data`
+   --> lightbulb\src\quantization\norm_tweaking.rs:100:9
+    |
+100 |         calibration_data: &Tensor,
+    |         ^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_calibration_data`
+
+warning: unused variable: `model`
+   --> lightbulb\src\quantization\norm_tweaking.rs:243:5
+    |
+243 |     model: &mut M,
+    |     ^^^^^ help: if this is intentional, prefix it with an underscore: `_model`
+
+warning: field `optional_tags` is never read
+   --> lightbulb\src\engine\metadata_scheduling.rs:299:5
+    |
+294 | struct RoutingRule {
+    |        ----------- field in this struct
+...
+299 |     optional_tags: HashSet<RequestTag>,
+    |     ^^^^^^^^^^^^^
+    |
+    = note: `RoutingRule` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `timestamp` is never read
+  --> lightbulb\src\engine\slot_monitor.rs:62:5
+   |
+61 | struct MemorySample {
+   |        ------------ field in this struct
+62 |     timestamp: Instant,
+   |     ^^^^^^^^^
+   |
+   = note: `MemorySample` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: field `config` is never read
+   --> lightbulb\src\pruning\mod.rs:286:5
+    |
+285 | pub struct WandaScorer {
+    |            ----------- field in this struct
+286 |     config: WandaConfig,
+    |     ^^^^^^
+
+warning: field `patterns` is never read
+  --> lightbulb\src\pruning\name_mapping.rs:61:5
+   |
+50 | pub struct TensorNameMapper {
+   |            ---------------- field in this struct
+...
+61 |     patterns: ArchitecturePatterns,
+   |     ^^^^^^^^
+   |
+   = note: `TensorNameMapper` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: field `device` is never read
+  --> lightbulb\src\quantization\norm_tweaking.rs:81:5
+   |
+79 | pub struct NormTweaker {
+   |            ----------- field in this struct
+80 |     config: NormTweakingConfig,
+81 |     device: Device,
+   |     ^^^^^^
+
+warning: `infra-storage` (lib test) generated 8 warnings (run `cargo fix --lib -p infra-storage --tests` to apply 8 suggestions)
+warning: `infra-network` (lib test) generated 6 warnings (run `cargo fix --lib -p infra-network --tests` to apply 1 suggestion)
+warning: `lightbulb` (lib test) generated 67 warnings (run `cargo fix --lib -p lightbulb --tests` to apply 58 suggestions)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 6m 24s
+     Running unittests src\lib.rs (target\debug\deps\dynctx-800b034eac200e81.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 55 filtered out; finished in 0.00s
+
+     Running unittests src\lib.rs (target\debug\deps\infra_fingerprinting-f455bdc8bbd4dda5.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 15 filtered out; finished in 0.00s
+
+     Running unittests src\lib.rs (target\debug\deps\infra_network-97ad7e9d55bfbe7f.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 43 filtered out; finished in 0.00s
+
+     Running unittests src\lib.rs (target\debug\deps\infra_storage-fc4dff7195b32b6b.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 18 filtered out; finished in 0.00s
+
+     Running unittests src\lib.rs (target\debug\deps\lightbulb-21b8499ffbb40e2b.exe)
+
+running 16 tests
+test contracts::validation::tests::require_all_gate ... ok
+test contracts::validation::tests::inject_prepends_when_no_system_message ... ok
+test contracts::validation::tests::inject_amends_existing_system_message ... ok
+test contracts::validation::tests::try_parse_tagged_fields ... ok
+test contracts::tagged_fields::tests::completeness ... ok
+test contracts::enum_choice::tests::word_boundary_respected ... ok
+test contracts::enum_choice::tests::no_match ... ok
+test contracts::enum_choice::tests::exact_last_line ... ok
+test contracts::enum_choice::tests::inline_word ... ok
+test contracts::enum_choice::tests::case_insensitive ... ok
+test contracts::enum_choice::tests::prefers_last_line ... ok
+test contracts::tagged_fields::tests::missing_field_absent_from_map ... ok
+test contracts::validation::tests::try_parse_enum_choice ... ok
+test contracts::tagged_fields::tests::last_occurrence_wins ... ok
+test contracts::tagged_fields::tests::basic_parse ... ok
+test contracts::tagged_fields::tests::case_insensitive_tags ... ok
+
+test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 492 filtered out; finished in 0.01s
+

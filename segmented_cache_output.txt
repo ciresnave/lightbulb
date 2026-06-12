@@ -1,0 +1,674 @@
+   Compiling lightbulb v0.1.0 (C:\Users\cires\OneDrive\Documents\projects\lightbulb\lightbulb)
+warning: unused import: `Response`
+  --> lightbulb\src\api\admin.rs:10:30
+   |
+10 |     response::{IntoResponse, Response},
+   |                              ^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `chrono::NaiveDateTime`
+  --> lightbulb\src\api\admin.rs:13:5
+   |
+13 | use chrono::NaiveDateTime;
+   |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `post`
+  --> lightbulb\src\api\mod.rs:38:20
+   |
+38 |     routing::{get, post},
+   |                    ^^^^
+
+warning: unused import: `PrivateKeyDer`
+   --> lightbulb\src\api\mod.rs:272:53
+    |
+272 |             use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+    |                                                     ^^^^^^^^^^^^^
+
+warning: unused imports: `DType` and `Device`
+  --> lightbulb\src\loaders\awq.rs:12:25
+   |
+12 | use candlelight::core::{DType, Device, Tensor};
+   |                         ^^^^^  ^^^^^^
+
+warning: unused import: `std::collections::HashMap`
+  --> lightbulb\src\loaders\awq.rs:14:5
+   |
+14 | use std::collections::HashMap;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::gguf`
+   --> lightbulb\src\loaders\mod.rs:132:9
+    |
+132 |     use crate::gguf;
+    |         ^^^^^^^^^^^
+
+warning: unused import: `D`
+ --> lightbulb\src\model\awq_qwen3.rs:6:25
+  |
+6 | use candlelight::core::{D, DType, Device, Module, Result, Tensor};
+  |                         ^
+
+warning: unnecessary parentheses around block return value
+   --> lightbulb\src\model\awq_qwen3.rs:134:5
+    |
+134 |     (x.broadcast_mul(cos)? + x_rotated.broadcast_mul(sin)?)
+    |     ^                                                     ^
+    |
+    = note: `#[warn(unused_parens)]` (part of `#[warn(unused)]`) on by default
+help: remove these parentheses
+    |
+134 -     (x.broadcast_mul(cos)? + x_rotated.broadcast_mul(sin)?)
+134 +     x.broadcast_mul(cos)? + x_rotated.broadcast_mul(sin)?
+    |
+
+warning: unused import: `std::sync::Arc`
+  --> lightbulb\src\model\chunked_prefill.rs:32:5
+   |
+32 | use std::sync::Arc;
+   |     ^^^^^^^^^^^^^^
+
+warning: unused import: `parking_lot::Mutex`
+  --> lightbulb\src\model\chunked_prefill.rs:35:5
+   |
+35 | use parking_lot::Mutex;
+   |     ^^^^^^^^^^^^^^^^^^
+
+warning: variant `N_M` should have an upper camel case name
+   --> lightbulb\src\pruning\mod.rs:126:5
+    |
+126 |     N_M { n: usize, m: usize },
+    |     ^^^ help: convert the identifier to upper camel case: `NM`
+    |
+    = note: `#[warn(non_camel_case_types)]` (part of `#[warn(nonstandard_style)]`) on by default
+
+warning: use of deprecated function `rand::thread_rng`: Renamed to `rng`
+   --> lightbulb\src\api\admin.rs:252:29
+    |
+252 |         let mut rng = rand::thread_rng();
+    |                             ^^^^^^^^^^
+    |
+    = note: `#[warn(deprecated)]` on by default
+
+warning: use of deprecated method `rand::Rng::gen_range`: Renamed to `random_range`
+  --> lightbulb\src\sampling.rs:94:20
+   |
+94 |         return rng.gen_range(0..logits.len());
+   |                    ^^^^^^^^^
+
+warning: unused import: `Module`
+  --> lightbulb\src\model\custom_transformer_block.rs:76:40
+   |
+76 | use candlelight::core::{DType, Device, Module, Result, Tensor};
+   |                                        ^^^^^^
+
+warning: unused variable: `scheduler`
+  --> lightbulb\src\api\admin.rs:53:9
+   |
+53 |     let scheduler = &state.scheduler;
+   |         ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_scheduler`
+   |
+   = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `cache_size`
+   --> lightbulb\src\cache\h2o_policy.rs:146:9
+    |
+146 |         cache_size: usize,
+    |         ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_cache_size`
+
+warning: unused variable: `ctx`
+   --> lightbulb\src\cache\kv_compression.rs:428:47
+    |
+428 |     fn compute_scales(&self, tensor: &Tensor, ctx: &CompressionCtx) -> Result<Tensor> {
+    |                                               ^^^ help: if this is intentional, prefix it with an underscore: `_ctx`
+
+warning: unused variable: `group_size`
+   --> lightbulb\src\cache\kv_compression.rs:443:42
+    |
+443 |             QuantGranularity::PerGroup { group_size } => {
+    |                                          ^^^^^^^^^^ help: try ignoring the field: `group_size: _`
+
+warning: unused variable: `keys`
+   --> lightbulb\src\cache\kv_compression.rs:603:34
+    |
+603 |     fn compute_redundancy(&self, keys: &Tensor, ctx: &CompressionCtx) -> Result<Vec<f32>> {
+    |                                  ^^^^ help: if this is intentional, prefix it with an underscore: `_keys`
+
+warning: unused variable: `num_reps`
+   --> lightbulb\src\cache\kv_compression.rs:610:13
+    |
+610 |         let num_reps = (seq_len + alpha - 1) / alpha;
+    |             ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_num_reps`
+
+warning: unused variable: `keep_mask`
+   --> lightbulb\src\cache\kv_compression.rs:688:13
+    |
+688 |         let keep_mask = self.select_tokens(&joint_scores, ctx.seq_len);
+    |             ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_keep_mask`
+
+warning: unused variable: `keys`
+   --> lightbulb\src\cache\kv_compression.rs:767:45
+    |
+767 |     fn compute_semantic_clusters(&mut self, keys: &Tensor, ctx: &CompressionCtx) -> Result<()> {
+    |                                             ^^^^ help: if this is intentional, prefix it with an underscore: `_keys`
+
+warning: unused variable: `reshaped`
+    --> lightbulb\src\cache\kv_compression.rs:1085:13
+     |
+1085 |         let reshaped = tensor.reshape((batch_size * num_heads, seq_len, head_dim))?;
+     |             ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_reshaped`
+
+warning: unused variable: `query_text`
+   --> lightbulb\src\engine\adaptive_selection.rs:153:9
+    |
+153 |         query_text: &str,
+    |         ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_query_text`
+
+warning: unused variable: `order`
+   --> lightbulb\src\engine\decomposition.rs:355:13
+    |
+355 |         let order = self.execution_order()?;
+    |             ^^^^^ help: if this is intentional, prefix it with an underscore: `_order`
+
+warning: unused variable: `sub_queries`
+   --> lightbulb\src\engine\query_analysis.rs:670:9
+    |
+670 |         sub_queries: &[SubQuery],
+    |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_sub_queries`
+
+warning: unused variable: `start`
+   --> lightbulb\src\engine\speculative.rs:217:13
+    |
+217 |         let start = std::time::Instant::now();
+    |             ^^^^^ help: if this is intentional, prefix it with an underscore: `_start`
+
+warning: unused variable: `input`
+   --> lightbulb\src\loaders\awq.rs:186:27
+    |
+186 |     pub fn forward(&self, input: &Tensor) -> Result<Tensor> {
+    |                           ^^^^^ help: if this is intentional, prefix it with an underscore: `_input`
+
+warning: unused variable: `use_flash_attn`
+   --> lightbulb\src\loaders\mod.rs:284:5
+    |
+284 |     use_flash_attn: bool,
+    |     ^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_use_flash_attn`
+
+warning: unused variable: `layer_idx`
+   --> lightbulb\src\multi_gpu\distributed_cache.rs:130:9
+    |
+130 |         layer_idx: usize,
+    |         ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_layer_idx`
+
+warning: unused variable: `batch_idx`
+   --> lightbulb\src\multi_gpu\distributed_cache.rs:131:9
+    |
+131 |         batch_idx: usize,
+    |         ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_batch_idx`
+
+warning: unused variable: `cache_builder`
+   --> lightbulb\src\multi_gpu\distributed_cache.rs:138:30
+    |
+138 |                 for (gpu_id, cache_builder) in self.local_caches.iter_mut().enumerate() {
+    |                              ^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_cache_builder`
+
+warning: unused variable: `new_idx`
+   --> lightbulb\src\pruning\mod.rs:693:29
+    |
+693 |         for (original_idx, &new_idx) in kept_layers.iter().enumerate() {
+    |                             ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_new_idx`
+
+warning: unused variable: `calibration_data`
+   --> lightbulb\src\quantization\norm_tweaking.rs:100:9
+    |
+100 |         calibration_data: &Tensor,
+    |         ^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_calibration_data`
+
+warning: unused variable: `model`
+   --> lightbulb\src\quantization\norm_tweaking.rs:243:5
+    |
+243 |     model: &mut M,
+    |     ^^^^^ help: if this is intentional, prefix it with an underscore: `_model`
+
+warning: field `optional_tags` is never read
+   --> lightbulb\src\engine\metadata_scheduling.rs:299:5
+    |
+294 | struct RoutingRule {
+    |        ----------- field in this struct
+...
+299 |     optional_tags: HashSet<RequestTag>,
+    |     ^^^^^^^^^^^^^
+    |
+    = note: `RoutingRule` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: fields `config` and `execution_order` are never read
+   --> lightbulb\src\engine\pipeline.rs:316:5
+    |
+302 | pub struct Pipeline {
+    |            -------- fields in this struct
+...
+316 |     config: PipelineConfig,
+    |     ^^^^^^
+...
+322 |     execution_order: Vec<StageId>,
+    |     ^^^^^^^^^^^^^^^
+
+warning: field `timestamp` is never read
+  --> lightbulb\src\engine\slot_monitor.rs:62:5
+   |
+61 | struct MemorySample {
+   |        ------------ field in this struct
+62 |     timestamp: Instant,
+   |     ^^^^^^^^^
+   |
+   = note: `MemorySample` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: field `head_dim` is never read
+  --> lightbulb\src\model\awq_qwen3.rs:70:5
+   |
+67 | struct Qwen3RotaryEmbedding {
+   |        -------------------- field in this struct
+...
+70 |     head_dim: usize,
+   |     ^^^^^^^^
+   |
+   = note: `Qwen3RotaryEmbedding` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: field `config` is never read
+   --> lightbulb\src\pruning\mod.rs:286:5
+    |
+285 | pub struct WandaScorer {
+    |            ----------- field in this struct
+286 |     config: WandaConfig,
+    |     ^^^^^^
+
+warning: method `get_activation_norms` is never used
+   --> lightbulb\src\pruning\mod.rs:340:8
+    |
+293 | impl WandaScorer {
+    | ---------------- method in this implementation
+...
+340 |     fn get_activation_norms(&self) -> Result<Tensor> {
+    |        ^^^^^^^^^^^^^^^^^^^^
+
+warning: field `patterns` is never read
+  --> lightbulb\src\pruning\name_mapping.rs:61:5
+   |
+50 | pub struct TensorNameMapper {
+   |            ---------------- field in this struct
+...
+61 |     patterns: ArchitecturePatterns,
+   |     ^^^^^^^^
+   |
+   = note: `TensorNameMapper` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: field `device` is never read
+  --> lightbulb\src\quantization\norm_tweaking.rs:81:5
+   |
+79 | pub struct NormTweaker {
+   |            ----------- field in this struct
+80 |     config: NormTweakingConfig,
+81 |     device: Device,
+   |     ^^^^^^
+
+warning: `lightbulb` (lib) generated 44 warnings (run `cargo fix --lib -p lightbulb` to apply 32 suggestions)
+    Finished `release` profile [optimized] target(s) in 41.32s
+     Running `target\release\examples\test_segmented_cache.exe`
+
+=== Segmented KV Cache Shadow Mode Validation ===
+
+Model: models/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf
+Loading quantized model...
+  🎮 Using CUDA GPU (device 0)
+  ✓ Detected model config:
+    - hidden_size: 2048
+    - num_layers: 22
+    - num_heads: 32 (kv_heads: 4)
+    - vocab_size: 32000
+    - intermediate_size: 5632
+    - context_length: 2048
+    - rope_theta: 10000
+
+🔍 Detected model architecture: LLaMA
+
+Model loaded in 1.30s (layers=22, heads=32, hidden=2048)
+
+Enabling segmented cache (shadow mode)...
+  attention_power: 2
+  base_decay_rate: 0.02
+  eviction_pressure_threshold: 0.8
+  h2o_update_interval: 4
+
+--- Turn 1: First user prompt ---
+=== Span Attention Summary ===
+  Span   1 | UserInput |    0 tokens | total_attn:   0.0000 | avg_attn: 0.000000
+  Span   2 | ModelGeneration |    0 tokens | total_attn:   0.0000 | avg_attn: 0.000000
+==============================
+=== Eviction Candidates (shadow mode, pressure=0.11) ===
+  #1: Span 1 | UserInput [0..24] (24 tokens) | relevance: 0.480000
+  #2: Span 2 | ModelGeneration [25..25] (0 tokens) | relevance: 0.480000
+========================================================
+=== Span Attention Summary ===
+  Span   1 | UserInput |    0 tokens | total_attn:   0.0000 | avg_attn: 0.000000
+  Span   2 | ModelGeneration |    0 tokens | total_attn:   0.0000 | avg_attn: 0.000000
+==============================
+=== Eviction Candidates (shadow mode, pressure=0.12) ===
+  #1: Span 1 | UserInput [0..24] (24 tokens) | relevance: 0.480000
+  #2: Span 2 | ModelGeneration [25..25] (0 tokens) | relevance: 0.480000
+========================================================
+=== Span Attention Summary ===
+  Span   1 | UserInput |   24 tokens | total_attn:   0.7601 | avg_attn: 0.031672
+  Span   2 | ModelGeneration |    0 tokens | total_attn:   0.0000 | avg_attn: 0.000000
+==============================
+=== Eviction Candidates (shadow mode, pressure=0.14) ===
+  #1: Span 2 | ModelGeneration [25..25] (0 tokens) | relevance: 0.480000
+  #2: Span 1 | UserInput [0..24] (24 tokens) | relevance: 0.514794
+========================================================
+=== Span Attention Summary ===
+  Span   1 | UserInput |   24 tokens | total_attn:   0.7601 | avg_attn: 0.031672
+  Span   2 | ModelGeneration |    0 tokens | total_attn:   0.0000 | avg_attn: 0.000000
+==============================
+=== Eviction Candidates (shadow mode, pressure=0.16) ===
+  #1: Span 2 | ModelGeneration [25..25] (0 tokens) | relevance: 0.480000
+  #2: Span 1 | UserInput [0..24] (24 tokens) | relevance: 0.514794
+========================================================
+=== Span Attention Summary ===
+  Span   1 | UserInput |   24 tokens | total_attn:   1.3328 | avg_attn: 0.055532
+  Span   2 | ModelGeneration |    0 tokens | total_attn:   0.0000 | avg_attn: 0.000000
+==============================
+=== Eviction Candidates (shadow mode, pressure=0.17) ===
+  #1: Span 2 | ModelGeneration [25..25] (0 tokens) | relevance: 0.480000
+  #2: Span 1 | UserInput [0..24] (24 tokens) | relevance: 0.617517
+========================================================
+=== Span Attention Summary ===
+  Span   1 | UserInput |   24 tokens | total_attn:   1.3328 | avg_attn: 0.055532
+  Span   2 | ModelGeneration |    0 tokens | total_attn:   0.0000 | avg_attn: 0.000000
+==============================
+=== Eviction Candidates (shadow mode, pressure=0.19) ===
+  #1: Span 2 | ModelGeneration [25..25] (0 tokens) | relevance: 0.480000
+  #2: Span 1 | UserInput [0..24] (24 tokens) | relevance: 0.617517
+========================================================
+=== Span Attention Summary ===
+  Span   1 | UserInput |   24 tokens | total_attn:   1.3328 | avg_attn: 0.055532
+  Span   2 | ModelGeneration |    0 tokens | total_attn:   0.0000 | avg_attn: 0.000000
+==============================
+=== Eviction Candidates (shadow mode, pressure=0.20) ===
+  #1: Span 2 | ModelGeneration [25..25] (0 tokens) | relevance: 0.480000
+  #2: Span 1 | UserInput [0..24] (24 tokens) | relevance: 0.617517
+========================================================
+Turn 1 complete in 0.79s (30 decode steps)
+
+--- Turn 2: Second user prompt ---
+=== Span Attention Summary ===
+  Span   1 | UserInput |   23 tokens | total_attn:   1.1686 | avg_attn: 0.050808
+  Span   2 | ModelGeneration |   28 tokens | total_attn:   0.9470 | avg_attn: 0.033820
+  Span   3 | UserInput |   12 tokens | total_attn:   0.6112 | avg_attn: 0.050933
+  Span   4 | ModelGeneration |    0 tokens | total_attn:   0.0000 | avg_attn: 0.000000
+==============================
+=== Eviction Candidates (shadow mode, pressure=0.06) ===
+  #1: Span 4 | ModelGeneration [14..14] (0 tokens) | relevance: 0.480000
+  #2: Span 3 | UserInput [0..13] (13 tokens) | relevance: 0.485308
+  #3: Span 1 | UserInput [0..24] (24 tokens) | relevance: 0.485308
+  #4: Span 2 | ModelGeneration [25..53] (28 tokens) | relevance: 0.488695
+========================================================
+=== Span Attention Summary ===
+  Span   1 | UserInput |   23 tokens | total_attn:   1.1686 | avg_attn: 0.050808
+  Span   2 | ModelGeneration |   28 tokens | total_attn:   0.9470 | avg_attn: 0.033820
+  Span   3 | UserInput |   12 tokens | total_attn:   0.6112 | avg_attn: 0.050933
+  Span   4 | ModelGeneration |    0 tokens | total_attn:   0.0000 | avg_attn: 0.000000
+==============================
+=== Eviction Candidates (shadow mode, pressure=0.08) ===
+  #1: Span 4 | ModelGeneration [14..14] (0 tokens) | relevance: 0.480000
+  #2: Span 3 | UserInput [0..13] (13 tokens) | relevance: 0.485308
+  #3: Span 1 | UserInput [0..24] (24 tokens) | relevance: 0.485308
+  #4: Span 2 | ModelGeneration [25..53] (28 tokens) | relevance: 0.488695
+========================================================
+=== Span Attention Summary ===
+  Span   1 | UserInput |   24 tokens | total_attn:   2.1161 | avg_attn: 0.088169
+  Span   3 | UserInput |   13 tokens | total_attn:   1.0873 | avg_attn: 0.083639
+  Span   2 | ModelGeneration |   28 tokens | total_attn:   0.9470 | avg_attn: 0.033820
+  Span   4 | ModelGeneration |    0 tokens | total_attn:   0.0000 | avg_attn: 0.000000
+==============================
+=== Eviction Candidates (shadow mode, pressure=0.09) ===
+  #1: Span 4 | ModelGeneration [14..14] (0 tokens) | relevance: 0.480000
+  #2: Span 2 | ModelGeneration [25..53] (28 tokens) | relevance: 0.488695
+  #3: Span 3 | UserInput [0..13] (13 tokens) | relevance: 0.491986
+  #4: Span 1 | UserInput [0..24] (24 tokens) | relevance: 0.491986
+========================================================
+=== Span Attention Summary ===
+  Span   1 | UserInput |   24 tokens | total_attn:   2.1161 | avg_attn: 0.088169
+  Span   3 | UserInput |   13 tokens | total_attn:   1.0873 | avg_attn: 0.083639
+  Span   2 | ModelGeneration |   28 tokens | total_attn:   0.9470 | avg_attn: 0.033820
+  Span   4 | ModelGeneration |    0 tokens | total_attn:   0.0000 | avg_attn: 0.000000
+==============================
+=== Eviction Candidates (shadow mode, pressure=0.11) ===
+  #1: Span 4 | ModelGeneration [14..14] (0 tokens) | relevance: 0.480000
+  #2: Span 2 | ModelGeneration [25..53] (28 tokens) | relevance: 0.488695
+  #3: Span 3 | UserInput [0..13] (13 tokens) | relevance: 0.491986
+  #4: Span 1 | UserInput [0..24] (24 tokens) | relevance: 0.491986
+========================================================
+=== Span Attention Summary ===
+  Span   1 | UserInput |   24 tokens | total_attn:   2.7543 | avg_attn: 0.114762
+  Span   3 | UserInput |   13 tokens | total_attn:   1.3564 | avg_attn: 0.104338
+  Span   2 | ModelGeneration |   28 tokens | total_attn:   1.1467 | avg_attn: 0.040954
+  Span   4 | ModelGeneration |    0 tokens | total_attn:   0.0000 | avg_attn: 0.000000
+==============================
+=== Eviction Candidates (shadow mode, pressure=0.12) ===
+  #1: Span 4 | ModelGeneration [14..14] (0 tokens) | relevance: 0.480000
+  #2: Span 2 | ModelGeneration [25..53] (28 tokens) | relevance: 0.493301
+  #3: Span 1 | UserInput [0..24] (24 tokens) | relevance: 0.508333
+  #4: Span 3 | UserInput [0..13] (13 tokens) | relevance: 0.508333
+========================================================
+=== Span Attention Summary ===
+  Span   1 | UserInput |   24 tokens | total_attn:   2.7543 | avg_attn: 0.114762
+  Span   3 | UserInput |   13 tokens | total_attn:   1.3564 | avg_attn: 0.104338
+  Span   2 | ModelGeneration |   28 tokens | total_attn:   1.1467 | avg_attn: 0.040954
+  Span   4 | ModelGeneration |    0 tokens | total_attn:   0.0000 | avg_attn: 0.000000
+==============================
+=== Eviction Candidates (shadow mode, pressure=0.14) ===
+  #1: Span 4 | ModelGeneration [14..14] (0 tokens) | relevance: 0.480000
+  #2: Span 2 | ModelGeneration [25..53] (28 tokens) | relevance: 0.493301
+  #3: Span 1 | UserInput [0..24] (24 tokens) | relevance: 0.508333
+  #4: Span 3 | UserInput [0..13] (13 tokens) | relevance: 0.508333
+========================================================
+=== Span Attention Summary ===
+  Span   1 | UserInput |   24 tokens | total_attn:   2.7543 | avg_attn: 0.114762
+  Span   3 | UserInput |   13 tokens | total_attn:   1.3564 | avg_attn: 0.104338
+  Span   2 | ModelGeneration |   28 tokens | total_attn:   1.1467 | avg_attn: 0.040954
+  Span   4 | ModelGeneration |    0 tokens | total_attn:   0.0000 | avg_attn: 0.000000
+==============================
+=== Eviction Candidates (shadow mode, pressure=0.16) ===
+  #1: Span 4 | ModelGeneration [14..14] (0 tokens) | relevance: 0.480000
+  #2: Span 2 | ModelGeneration [25..53] (28 tokens) | relevance: 0.493301
+  #3: Span 3 | UserInput [0..13] (13 tokens) | relevance: 0.508333
+  #4: Span 1 | UserInput [0..24] (24 tokens) | relevance: 0.508333
+========================================================
+Turn 2 complete in 0.72s (30 decode steps)
+
+--- Turn 3: Third user prompt ---
+=== Span Attention Summary ===
+  Span   4 | ModelGeneration |   28 tokens | total_attn:   2.9987 | avg_attn: 0.107097
+  Span   1 | UserInput |   23 tokens | total_attn:   2.9373 | avg_attn: 0.127709
+  Span   5 | UserInput |   21 tokens | total_attn:   2.7278 | avg_attn: 0.129897
+  Span   2 | ModelGeneration |   28 tokens | total_attn:   1.4288 | avg_attn: 0.051029
+  Span   3 | UserInput |   12 tokens | total_attn:   1.2475 | avg_attn: 0.103955
+  Span   6 | ModelGeneration |    0 tokens | total_attn:   0.0000 | avg_attn: 0.000000
+==============================
+=== Eviction Candidates (shadow mode, pressure=0.09) ===
+  #1: Span 6 | ModelGeneration [23..23] (0 tokens) | relevance: 0.480000
+  #2: Span 2 | ModelGeneration [25..53] (28 tokens) | relevance: 0.495534
+  #3: Span 3 | UserInput [0..13] (13 tokens) | relevance: 0.498792
+  #4: Span 4 | ModelGeneration [14..42] (28 tokens) | relevance: 0.504334
+  #5: Span 1 | UserInput [0..24] (24 tokens) | relevance: 0.514068
+========================================================
+=== Span Attention Summary ===
+  Span   4 | ModelGeneration |   28 tokens | total_attn:   2.9987 | avg_attn: 0.107097
+  Span   1 | UserInput |   23 tokens | total_attn:   2.9373 | avg_attn: 0.127709
+  Span   5 | UserInput |   21 tokens | total_attn:   2.7278 | avg_attn: 0.129897
+  Span   2 | ModelGeneration |   28 tokens | total_attn:   1.4288 | avg_attn: 0.051029
+  Span   3 | UserInput |   12 tokens | total_attn:   1.2475 | avg_attn: 0.103955
+  Span   6 | ModelGeneration |    0 tokens | total_attn:   0.0000 | avg_attn: 0.000000
+==============================
+=== Eviction Candidates (shadow mode, pressure=0.11) ===
+  #1: Span 6 | ModelGeneration [23..23] (0 tokens) | relevance: 0.480000
+  #2: Span 2 | ModelGeneration [25..53] (28 tokens) | relevance: 0.495534
+  #3: Span 3 | UserInput [0..13] (13 tokens) | relevance: 0.498792
+  #4: Span 4 | ModelGeneration [14..42] (28 tokens) | relevance: 0.504334
+  #5: Span 1 | UserInput [0..24] (24 tokens) | relevance: 0.514068
+========================================================
+=== Span Attention Summary ===
+  Span   1 | UserInput |   24 tokens | total_attn:   3.5117 | avg_attn: 0.146320
+  Span   4 | ModelGeneration |   28 tokens | total_attn:   3.4715 | avg_attn: 0.123981
+  Span   5 | UserInput |   22 tokens | total_attn:   3.2186 | avg_attn: 0.146299
+  Span   2 | ModelGeneration |   28 tokens | total_attn:   1.6298 | avg_attn: 0.058208
+  Span   3 | UserInput |   13 tokens | total_attn:   1.5704 | avg_attn: 0.120803
+  Span   6 | ModelGeneration |    0 tokens | total_attn:   0.0000 | avg_attn: 0.000000
+==============================
+=== Eviction Candidates (shadow mode, pressure=0.12) ===
+  #1: Span 6 | ModelGeneration [23..23] (0 tokens) | relevance: 0.480000
+  #2: Span 2 | ModelGeneration [25..53] (28 tokens) | relevance: 0.502264
+  #3: Span 3 | UserInput [0..13] (13 tokens) | relevance: 0.504275
+  #4: Span 4 | ModelGeneration [14..42] (28 tokens) | relevance: 0.507407
+  #5: Span 5 | UserInput [0..22] (22 tokens) | relevance: 0.518369
+========================================================
+=== Span Attention Summary ===
+  Span   1 | UserInput |   24 tokens | total_attn:   3.5117 | avg_attn: 0.146320
+  Span   4 | ModelGeneration |   28 tokens | total_attn:   3.4715 | avg_attn: 0.123981
+  Span   5 | UserInput |   22 tokens | total_attn:   3.2186 | avg_attn: 0.146299
+  Span   2 | ModelGeneration |   28 tokens | total_attn:   1.6298 | avg_attn: 0.058208
+  Span   3 | UserInput |   13 tokens | total_attn:   1.5704 | avg_attn: 0.120803
+  Span   6 | ModelGeneration |    0 tokens | total_attn:   0.0000 | avg_attn: 0.000000
+==============================
+=== Eviction Candidates (shadow mode, pressure=0.14) ===
+  #1: Span 6 | ModelGeneration [23..23] (0 tokens) | relevance: 0.480000
+  #2: Span 2 | ModelGeneration [25..53] (28 tokens) | relevance: 0.502264
+  #3: Span 3 | UserInput [0..13] (13 tokens) | relevance: 0.504275
+  #4: Span 4 | ModelGeneration [14..42] (28 tokens) | relevance: 0.507407
+  #5: Span 5 | UserInput [0..22] (22 tokens) | relevance: 0.518369
+========================================================
+=== Span Attention Summary ===
+  Span   1 | UserInput |   24 tokens | total_attn:   3.5117 | avg_attn: 0.146320
+  Span   4 | ModelGeneration |   28 tokens | total_attn:   3.4715 | avg_attn: 0.123981
+  Span   5 | UserInput |   22 tokens | total_attn:   3.2186 | avg_attn: 0.146299
+  Span   2 | ModelGeneration |   28 tokens | total_attn:   1.6298 | avg_attn: 0.058208
+  Span   3 | UserInput |   13 tokens | total_attn:   1.5704 | avg_attn: 0.120803
+  Span   6 | ModelGeneration |    0 tokens | total_attn:   0.0000 | avg_attn: 0.000000
+==============================
+=== Eviction Candidates (shadow mode, pressure=0.16) ===
+  #1: Span 6 | ModelGeneration [23..23] (0 tokens) | relevance: 0.480000
+  #2: Span 2 | ModelGeneration [25..53] (28 tokens) | relevance: 0.502264
+  #3: Span 3 | UserInput [0..13] (13 tokens) | relevance: 0.504275
+  #4: Span 4 | ModelGeneration [14..42] (28 tokens) | relevance: 0.507407
+  #5: Span 1 | UserInput [0..24] (24 tokens) | relevance: 0.518369
+========================================================
+=== Span Attention Summary ===
+  Span   4 | ModelGeneration |   28 tokens | total_attn:   3.9701 | avg_attn: 0.141790
+  Span   1 | UserInput |   24 tokens | total_attn:   3.8724 | avg_attn: 0.161348
+  Span   5 | UserInput |   22 tokens | total_attn:   3.5109 | avg_attn: 0.159587
+  Span   2 | ModelGeneration |   28 tokens | total_attn:   1.9763 | avg_attn: 0.070583
+  Span   3 | UserInput |   13 tokens | total_attn:   1.8087 | avg_attn: 0.139130
+  Span   6 | ModelGeneration |    0 tokens | total_attn:   0.0000 | avg_attn: 0.000000
+==============================
+=== Eviction Candidates (shadow mode, pressure=0.17) ===
+  #1: Span 6 | ModelGeneration [23..23] (0 tokens) | relevance: 0.480000
+  #2: Span 4 | ModelGeneration [14..42] (28 tokens) | relevance: 0.509558
+  #3: Span 2 | ModelGeneration [25..53] (28 tokens) | relevance: 0.509558
+  #4: Span 3 | UserInput [0..13] (13 tokens) | relevance: 0.514472
+  #5: Span 5 | UserInput [0..22] (22 tokens) | relevance: 0.519021
+========================================================
+=== Span Attention Summary ===
+  Span   4 | ModelGeneration |   28 tokens | total_attn:   3.9701 | avg_attn: 0.141790
+  Span   1 | UserInput |   24 tokens | total_attn:   3.8724 | avg_attn: 0.161348
+  Span   5 | UserInput |   22 tokens | total_attn:   3.5109 | avg_attn: 0.159587
+  Span   2 | ModelGeneration |   28 tokens | total_attn:   1.9763 | avg_attn: 0.070583
+  Span   3 | UserInput |   13 tokens | total_attn:   1.8087 | avg_attn: 0.139130
+  Span   6 | ModelGeneration |    0 tokens | total_attn:   0.0000 | avg_attn: 0.000000
+==============================
+=== Eviction Candidates (shadow mode, pressure=0.19) ===
+  #1: Span 6 | ModelGeneration [23..23] (0 tokens) | relevance: 0.480000
+  #2: Span 4 | ModelGeneration [14..42] (28 tokens) | relevance: 0.509558
+  #3: Span 2 | ModelGeneration [25..53] (28 tokens) | relevance: 0.509558
+  #4: Span 3 | UserInput [0..13] (13 tokens) | relevance: 0.514472
+  #5: Span 5 | UserInput [0..22] (22 tokens) | relevance: 0.519021
+========================================================
+=== Span Attention Summary ===
+  Span   4 | ModelGeneration |   28 tokens | total_attn:   4.3313 | avg_attn: 0.154689
+  Span   1 | UserInput |   24 tokens | total_attn:   4.1312 | avg_attn: 0.172134
+  Span   5 | UserInput |   22 tokens | total_attn:   3.7121 | avg_attn: 0.168730
+  Span   2 | ModelGeneration |   28 tokens | total_attn:   2.3713 | avg_attn: 0.084689
+  Span   3 | UserInput |   13 tokens | total_attn:   1.9887 | avg_attn: 0.152979
+  Span   6 | ModelGeneration |    0 tokens | total_attn:   0.0000 | avg_attn: 0.000000
+==============================
+=== Eviction Candidates (shadow mode, pressure=0.20) ===
+  #1: Span 6 | ModelGeneration [23..23] (0 tokens) | relevance: 0.480000
+  #2: Span 4 | ModelGeneration [14..42] (28 tokens) | relevance: 0.519239
+  #3: Span 2 | ModelGeneration [25..53] (28 tokens) | relevance: 0.519239
+  #4: Span 5 | UserInput [0..22] (22 tokens) | relevance: 0.558115
+  #5: Span 3 | UserInput [0..13] (13 tokens) | relevance: 0.558115
+========================================================
+=== Span Attention Summary ===
+  Span   4 | ModelGeneration |   28 tokens | total_attn:   4.3313 | avg_attn: 0.154689
+  Span   1 | UserInput |   24 tokens | total_attn:   4.1312 | avg_attn: 0.172134
+  Span   5 | UserInput |   22 tokens | total_attn:   3.7121 | avg_attn: 0.168730
+  Span   2 | ModelGeneration |   28 tokens | total_attn:   2.3713 | avg_attn: 0.084689
+  Span   3 | UserInput |   13 tokens | total_attn:   1.9887 | avg_attn: 0.152979
+  Span   6 | ModelGeneration |    0 tokens | total_attn:   0.0000 | avg_attn: 0.000000
+==============================
+=== Eviction Candidates (shadow mode, pressure=0.22) ===
+  #1: Span 6 | ModelGeneration [23..23] (0 tokens) | relevance: 0.480000
+  #2: Span 4 | ModelGeneration [14..42] (28 tokens) | relevance: 0.519239
+  #3: Span 2 | ModelGeneration [25..53] (28 tokens) | relevance: 0.519239
+  #4: Span 1 | UserInput [0..24] (24 tokens) | relevance: 0.558115
+  #5: Span 3 | UserInput [0..13] (13 tokens) | relevance: 0.558115
+========================================================
+=== Span Attention Summary ===
+  Span   4 | ModelGeneration |   28 tokens | total_attn:   4.3313 | avg_attn: 0.154689
+  Span   1 | UserInput |   24 tokens | total_attn:   4.1312 | avg_attn: 0.172134
+  Span   5 | UserInput |   22 tokens | total_attn:   3.7121 | avg_attn: 0.168730
+  Span   2 | ModelGeneration |   28 tokens | total_attn:   2.3713 | avg_attn: 0.084689
+  Span   3 | UserInput |   13 tokens | total_attn:   1.9887 | avg_attn: 0.152979
+  Span   6 | ModelGeneration |    0 tokens | total_attn:   0.0000 | avg_attn: 0.000000
+==============================
+=== Eviction Candidates (shadow mode, pressure=0.23) ===
+  #1: Span 6 | ModelGeneration [23..23] (0 tokens) | relevance: 0.480000
+  #2: Span 2 | ModelGeneration [25..53] (28 tokens) | relevance: 0.519239
+  #3: Span 4 | ModelGeneration [14..42] (28 tokens) | relevance: 0.519239
+  #4: Span 3 | UserInput [0..13] (13 tokens) | relevance: 0.558115
+  #5: Span 1 | UserInput [0..24] (24 tokens) | relevance: 0.558115
+========================================================
+Turn 3 complete in 0.97s (40 decode steps)
+
+=== Validation Summary ===
+
+Cache utilization: 23.8%
+Active spans: 6
+
+Span Attention Rankings (most attended first):
+   ID |                Tag | Tokens |   Total Attn |     Avg Attn
+-----------------------------------------------------------------
+    4 | ModelGeneration |     28 |       4.6082 |     0.164579
+    1 | UserInput |     24 |       4.3450 |     0.181041
+    5 | UserInput |     22 |       3.8644 |     0.175653
+    6 | ModelGeneration |     38 |       3.3681 |     0.088635
+    2 | ModelGeneration |     28 |       2.6613 |     0.095045
+    3 | UserInput |     13 |       2.1378 |     0.164448
+
+Eviction candidates (shadow mode — no actual eviction):
+=== Eviction Candidates (shadow mode, pressure=0.24) ===
+  #1: Span 2 | ModelGeneration [25..53] (28 tokens) | relevance: 0.531986
+  #2: Span 6 | ModelGeneration [23..61] (38 tokens) | relevance: 0.531986
+  #3: Span 4 | ModelGeneration [14..42] (28 tokens) | relevance: 0.531986
+  #4: Span 1 | UserInput [0..24] (24 tokens) | relevance: 0.620988
+  #5: Span 3 | UserInput [0..13] (13 tokens) | relevance: 0.620988
+  #6: Span 5 | UserInput [0..22] (22 tokens) | relevance: 0.620988
+========================================================
+
+Timing:
+  Model load:  1.30s
+  Turn 1:      0.79s
+  Turn 2:      0.72s
+  Turn 3:      0.97s
+  Total:       3.78s
+
+Validation complete.

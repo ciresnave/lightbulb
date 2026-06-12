@@ -21,7 +21,7 @@
 
     [workspace.dependencies]
         # Candlelight - Unified Candle ML framework wrapper (from GitHub)
-        candlelight = { git = "https://github.com/ciresnave/candlelight", default-features = false }
+        candlelight = { git = "https://github.com/ciresnave/candlelight", default-features = false, features = ["cuda"] }
 
         # DynAniML-sourced crate dependencies
         dynctx = { path = "crates/dynctx" }
@@ -32,6 +32,9 @@
 
         # TLS — force ring crypto provider across entire workspace (avoids aws-lc-sys build issues on Windows)
         rustls      = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }
+
+        # Tokenizers — disable onig (Oniguruma) feature to avoid onig_sys C linking issues with lld-link on Windows
+        tokenizers  = { version = "0.22", default-features = false }
 
         # Common dependencies from DynAniML
         anyhow      = "1.0"
