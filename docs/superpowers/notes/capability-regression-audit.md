@@ -285,6 +285,47 @@ session as a RoPE risk is *already* a stated invariant on both `SegmentMeta` and
 Two independent designs converged on carrying position ranges through tier moves, which is
 decent evidence it is the right invariant rather than a Lightbulb quirk.
 
+### The mmap decision collapses Cpu and Disk — but not yet
+
+**Eric: "In Fuel, we had decided that all storage on the host would be memory mapped to a file.
+That means that the file tier may not be separate from the host tier any more. What is in host
+memory is on disk."**
+
+**Status, checked rather than assumed** — the distinction matters because it changes whether
+the entry above is current:
+
+| | State |
+| --- | --- |
+| Decided | **Yes** (Eric), recorded as a session-memory project entry `project_unified_durable_tensor_store` |
+| Implemented | **No.** `fuel_memory::Storage` is `{ inner: BackendStorage, dtype, bundle, stype }` — *"Backend variant + the bytes themselves"*. No file mapping. `inference_context.rs:1038` says the persistent map is *"today a simple in-memory HashMap"* with the mmap-backed store as future work |
+| In Fuel's architecture docs | **No.** `storage-unification.md:778` explicitly scopes it out: *"Storage on disk / memory mapping. Out of scope here."* |
+
+**So the disk-tier entry above describes today accurately, and has a shelf life.** Once the
+durable store lands, host and disk stop being distinct *locations* and become one mapping at
+differing *residency*.
+
+**Three consequences worth designing for now:**
+
+1. **`TieredStore`'s three-tier model becomes two tiers plus residency.** `Tier::Cpu` and
+   `Tier::Disk` would describe the same bytes, so `cpu_used`/`disk_used` stop being independent
+   budgets and `demote(key, Tier::Disk)` stops being a byte-moving operation. The tier model
+   would want revisiting rather than reinterpreting.
+
+2. **It collides with C-1, and this is the part that matters to an inference host.** C-1
+   requires Fuel to report headroom *in the consumer's admission unit*. If host residency is
+   the kernel's page-cache decision, resident bytes become an **observation, not a budget** —
+   we cannot admit sessions against a quantity we do not control. The control surface shifts
+   from allocation to `mlock`/`madvise`, and "free host bytes" stops being answerable in the
+   way admission needs. **This should be raised at the seam before the durable store lands**,
+   because it changes what C-1 can promise for host-tier KV.
+
+3. **Our `FileDiskStore` probably becomes unnecessary** — a good outcome, and it narrows
+   "distinctively ours" further, to just the `fact_key` KnowledgeBase link.
+
+**What does not change**: position preservation across tier moves. A promoted segment still
+needs its original positions for correct RoPE phase whether the bytes moved or merely became
+resident.
+
 ### Structured output contracts — no Fuel bearing, one pre-existing gap
 
 Entirely host-side: parses generated *text*, no tensors anywhere. Fuel is irrelevant to it, so
