@@ -134,21 +134,73 @@ Stated because the conjecture deserves its falsifiers:
   v, [softmax_lse], [alibi])"). Auxiliary attention statistics are an *established* shape
   for these kernels, so a column-sum alongside the output is a backend ask with precedent,
   not an invention.
-- **Runtime-offset accumulate may not compose with capture.** If the write offsets vary per
-  step in a way that forces a graph rebuild, the capture requirement is violated by the fix.
+- **~~Runtime-offset accumulate may not compose with capture.~~ DISSOLVED on paper —
+  2026-07-29.** **[verified by Fuel, by reading; not executed]** Three legs:
+  (1) the `CapturedRun` invariant is **zero `cuMemAlloc` on *replay***, not "no
+  runtime-varying values" (`baracuda/attention.rs:1386`) — allocating on first launch is
+  fine; (2) `Op::WriteSliceDoff` takes its write start from a **device-resident rank-0 `I64`
+  operand**, so a captured graph replays at the host-updated position — this is how KV append
+  already works inside captured decode; (3) `affine_inplace_{f32,f64}` is bound to baracuda
+  single-pointer kernels (`baracuda_dispatch.rs:1959–1963`).
+
+  **Stronger: the accumulator needs no offset machinery at all.** Against the
+  **capacity-shaped** KV buffer (fixed capacity + runtime valid length), the column-sum is
+  naturally `[max_slots]`-shaped, with masked positions contributing zero post-softmax. So
+  `a_t` is fixed-shape, `c_t = c_{t-1}·decay + a_t` is a fixed-shape in-place elementwise
+  affine, and there is **no dynamic extent, no slice, no offset** in the recurrence. `c` is
+  allocated once and reused forever, satisfying the invariant trivially.
+
+  **Still unexecuted.** The decisive test — build the accumulator, launch twice, assert
+  `allocation_count == 1` — needs a **live CUDA device**, because the invariant is about
+  `cuMemAlloc` and CPU cannot answer it.
+
+- **Slot reuse breaks the naive fixed-shape form — a correctness requirement, found
+  2026-07-29.** **[verified]** `h2o_policy.rs:209`'s `clear_slot` is called from
+  `parallel_cache_builder.rs:1909` because **a cache slot is reused when its occupant is
+  evicted.** The `HashMap` form removes the entry; the fixed-shape form has no removal, so a
+  new token would inherit the previous occupant's decayed history. Worse for `n_t`: a reused
+  slot would report the prior tenure, inflating the denominator in `avg = c/n` so a
+  brand-new token looks long-lived and low-attention — exactly the profile H2O evicts first,
+  risking immediate re-eviction of freshly-admitted tokens.
+
+  **Fix, preserving everything above** — an occupancy mask, elementwise and fixed-shape:
+
+  ```
+  c_t = (c_{t-1} · decay + a_t) ⊙ occ_t
+  ```
+
+  `occ_t` is `[max_slots]` 0/1, zeroed at a slot on admission. No offsets, no dynamic extent,
+  so the zero-`cuMemAlloc` argument is undisturbed. **This also sharpens the `n_t` collapse**:
+  if `insertion_step` is a `[max_slots]` tensor written on admission, then `n_t` is derived
+  *and* `occ_t` is `insertion_step ≥ 0` — one buffer solves both. **The mask term is itself
+  unvalidated**; admission may already zero the region, making it redundant.
+
 - **Decay may need to be per-slot rather than uniform**, if slots age independently — that
-  changes `inplace_affine` into something with a per-element scale vector.
+  changes `inplace_affine` into something with a per-element scale vector. **Downgraded, not
+  resolved**: it changes *which op*, not whether capture holds, since it stays fixed-shape,
+  elementwise, and in-place-able.
 
 ## Next step — revised 2026-07-29
 
 Falsifier #1 is answered, so the ordering changes. **Do not start with H2O.**
 
-**Experiment 1 (cheapest, decisive, no backend work).** Take the **decomposed** attention
-arm, add the column-sum, and check whether `CapturedRun` still captures the step. This tests
-falsifier #2 — runtime-offset accumulate vs. capture — *independently* of the arm question.
-If capture breaks on a runtime-offset accumulate, the arm question is moot and the whole
-route dies early and cheaply. One variable at a time. (Experiment design credit: Fuel's seam
-owner; it is better than the ordering this document originally proposed.)
+**Experiment 1 — SUPERSEDED 2026-07-29.** Falsifier #2 was answered on paper (see above),
+so the capture question is no longer the gate. It still wants executing on a live CUDA
+device eventually — build the `[max_slots]` accumulator, launch twice, assert
+`allocation_count == 1`, following the existing
+`fused_rope_is_capture_safe_zero_alloc_on_reuse` pattern — but the analysis says it will
+pass, and it is no longer the cheapest way to kill the route.
+
+**Experiment 1 (revised) — the arm question. This is now the gate.** Determine whether
+`a_t` is obtainable on the arm we actually intend to run. The matrix is materialized on the
+decomposed arm and not on the fused arm, so this decides whether attention-driven eviction
+survives the port at all. **Run this before any `model_fuel/` code exists.**
+
+**Consequence to design for if the answer is "decomposed only":** Lightbulb must choose
+between attention-driven eviction and the fused arm *per deployment*. That makes it a **C-5
+constraint the consumer sets**, not an arm Fuel picks — which is a configuration surface
+this project would need to design, and is much cheaper to know now than to discover after
+the rewrite.
 
 **Experiment 2.** Express the H2O recurrence as graph nodes. Confirm the
 `n_t = t − insertion_step[k]` collapse early — it is the difference between one fused update
