@@ -175,8 +175,16 @@ Tier 2 covers production dimensions with small real slices.
 
 **Tier 1 inputs must include real numeric edge cases** — NaN, −0.0, subnormals, a
 large-magnitude pre-softmax row. Graph-construction bugs and numeric-handling bugs surface
-on *different* inputs, and toy scale makes it affordable to test both. kiss-ref is landing a
-`Node::ConstBits` leaf so a recipe can carry those exact bit patterns.
+on *different* inputs, and toy scale makes it affordable to test both. kiss-ref's
+`Node::ConstBits(u64)` carries an exact bit pattern (sNaN payload, −0, subnormal, FP8 raw
+code) through a recipe verbatim. **[verified with owner 2026-07-29]** it is on kiss-ref
+`main` at `721d03b` but **not in the published 0.1.0** — it rides into a future 0.1.1. If
+tier 1 needs it before that release, pin a git rev at or after `721d03b` rather than the
+crates.io version.
+
+Related API note: `ScalarFloat::from_bits` is now a **required** trait method. No impact
+unless Lightbulb implements `ScalarFloat` for its own scalar types, which it should not need
+to as a purely differential consumer.
 
 **The attention block is the fragment to build first** — softmax-over-scores, the causal
 mask, and the KV gather are where graph-construction bugs hide, and all three are
