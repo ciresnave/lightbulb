@@ -155,13 +155,38 @@ Stated because the conjecture deserves its falsifiers:
   `cuMemAlloc` and CPU cannot answer it.
 
 - **Slot reuse breaks the naive fixed-shape form — a correctness requirement, found
-  2026-07-29.** **[verified]** `h2o_policy.rs:209`'s `clear_slot` is called from
-  `parallel_cache_builder.rs:1909` because **a cache slot is reused when its occupant is
-  evicted.** The `HashMap` form removes the entry; the fixed-shape form has no removal, so a
-  new token would inherit the previous occupant's decayed history. Worse for `n_t`: a reused
-  slot would report the prior tenure, inflating the denominator in `avg = c/n` so a
-  brand-new token looks long-lived and low-attention — exactly the profile H2O evicts first,
-  risking immediate re-eviction of freshly-admitted tokens.
+  2026-07-29 and then corrected.** The fixed-shape form has no removal, so a recycled slot's
+  new occupant inherits the previous occupant's decayed history. Worse for `n_t`: it would
+  report the prior tenure, inflating the denominator in `avg = c/n` so a brand-new token
+  looks long-lived and low-attention — exactly the profile H2O evicts first, risking
+  immediate re-eviction of freshly-admitted tokens. That is a correctness failure, not drift.
+
+  **Correction — this repairs a semantic that does NOT exist today, in either form.**
+  I originally cited `h2o_policy.rs:209`'s `clear_slot`, called from
+  `parallel_cache_builder.rs:1909`, as evidence that token-level slot reuse is live. It is
+  not. **[verified]** That call sits inside `reset_batch_index`, whose doc reads *"Request in
+  slot 0 finished, starting new request"* over `0..batch_size` — **sequence-level** reuse of
+  a batch row. The token-level path is `should_clear_slot` → KV `clear_slot()`, and `:2048`
+  states *"CURRENT STATUS: Not actually used yet since `clear_slot()` is a stub."*
+
+  **Consequence: Lightbulb's current implementation is not an oracle for this.** The mask
+  needs its own test, not a differential comparison against present behaviour.
+
+  **Open question, not a claim:** `update_attention_scores` keys `slot_metadata` by
+  `slot_id` from `cache_positions` (slot → seq_position), while `reset_batch_index` calls
+  `clear_slot(batch_index)` keyed by batch row. If those index spaces differ, `clear_slot`
+  clears the wrong entries. They may coincide — the `[max_batch, heads, seq, head_dim]`
+  cache shape hints at one row per batch slot. **Unresolved; resolve during the port.** If
+  they diverge, the existing reset behaviour is wrong rather than merely incomplete, and the
+  in-graph form must not inherit its structure.
+
+  **The generalization (Fuel's, and larger than the mask):** token-level slot reuse goes
+  live *precisely when the block-pool allocator lands* — refcount-aware evict plus block
+  reuse **is** that mechanism. So **any per-slot side buffer above the allocator inherits
+  stale state unless slot-recycle is observable at the allocator boundary.** That is a
+  mechanism obligation; "which slots recycled" is information only the allocator has, and it
+  composes with `{freed, still_shared}`. Prefix-cache hit accounting and per-slot C-4
+  attribution have the same exposure. Routed to the allocator session as part-2 input.
 
   **Fix, preserving everything above** — an occupancy mask, elementwise and fixed-shape:
 
