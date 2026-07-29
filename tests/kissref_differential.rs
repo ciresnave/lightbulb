@@ -53,6 +53,47 @@ fn activation_probe_values() -> Vec<f32> {
     ]
 }
 
+/// The tolerance kiss-ref *declares* for `op`, rather than one we guessed.
+///
+/// `Op::ulp_ceiling()` returns the §6.8 bound where the spec defines one
+/// (`Sqrt` 2.0, `Exp`/`Log`/`Sin`/`Cos`/`Atan`/`Erf`/`Atan2` 4.0, `Lgamma` 8.0)
+/// and `None` otherwise.
+///
+/// **`None` does not always mean "exact".** For an exact atom it does. But a
+/// *transcendental non-primitive* — `Silu`, `Sigmoid` — also returns `None`,
+/// because the ceiling is a per-op spec bound and **does not compose**: the
+/// spec declares no ceiling for an op it defines by decomposition. Demanding
+/// bit-equality there would be asserting something the spec never promised.
+///
+/// So there are two honest cases, and callers must say which they are in:
+///
+/// - the op declares a ceiling → use it ([`declared_tolerance`]);
+/// - the op decomposes through a transcendental atom → use *that atom's*
+///   declared ceiling ([`tolerance_via`]), which is derived rather than guessed.
+///
+/// A bare `unwrap_or(Exact)` would be wrong for the second case: it asserts
+/// bit-equality the spec never promised.
+fn declared_tolerance(op: Op) -> Tolerance {
+    match op.ulp_ceiling() {
+        Some(ulp) => Tolerance::Ulp(ulp as u64),
+        // Genuinely exact atoms have no declared ceiling because none is needed.
+        None => Tolerance::Exact,
+    }
+}
+
+/// Tolerance for an op with no declared ceiling, derived from the transcendental
+/// atom it decomposes through. `atom` must itself declare one, or the derivation
+/// is meaningless and this panics rather than silently guessing.
+fn tolerance_via(atom: Op) -> Tolerance {
+    match atom.ulp_ceiling() {
+        Some(ulp) => Tolerance::Ulp(ulp as u64),
+        None => panic!(
+            "{atom:?} declares no ULP ceiling, so it cannot ground a derived bound — \
+             pick an atom that does, or state a judgment bound explicitly"
+        ),
+    }
+}
+
 /// Run `op` through kiss-ref and through Lightbulb's Candle path, and compare.
 ///
 /// `candidate` is produced by the caller so each test states plainly which
@@ -99,10 +140,10 @@ fn silu_matches_kiss_ref() -> anyhow::Result<()> {
 
     assert_eq!(candidate.len(), inputs.len(), "silu changed element count");
 
-    // SiLU is a transcendental (sigmoid), so exact bit-equality is not the right
-    // bar across two independent implementations. A tight ULP bound still
-    // catches a wrong formula, a wrong branch, or a sign error.
-    assert_matches_reference(Op::Silu, &inputs, &candidate, Tolerance::Ulp(4));
+    // SiLU declares no §6.8 ceiling (it is a non-primitive), so the bound is
+    // DERIVED from the transcendental it decomposes through: sigmoid → exp.
+    // Not a guessed 4 — exp's own declared ceiling.
+    assert_matches_reference(Op::Silu, &inputs, &candidate, tolerance_via(Op::Exp));
     Ok(())
 }
 
@@ -117,7 +158,8 @@ fn sigmoid_matches_kiss_ref() -> anyhow::Result<()> {
     // sigmoid(x) = 1 / (1 + exp(-x)), via Candle's own ops.
     let candidate = candlelight::nn::ops::sigmoid(&t)?.to_vec1::<f32>()?;
 
-    assert_matches_reference(Op::Sigmoid, &inputs, &candidate, Tolerance::Ulp(4));
+    // Same derivation: sigmoid(x) = 1/(1+exp(-x)), so exp grounds the bound.
+    assert_matches_reference(Op::Sigmoid, &inputs, &candidate, tolerance_via(Op::Exp));
     Ok(())
 }
 
@@ -314,4 +356,28 @@ fn harness_detects_a_wrong_candidate() -> anyhow::Result<()> {
          a passing differential would be meaningless"
     );
     Ok(())
+}
+
+/// What does the spec actually declare for the ops this file tests?
+///
+/// Not an assertion about Lightbulb — an assertion about our *understanding* of
+/// kiss-ref's tolerance model, so a change in it is caught here rather than
+/// silently loosening or tightening every differential above.
+#[test]
+fn declared_ceilings_are_what_we_think() {
+    // Declared §6.8 bounds.
+    assert_eq!(Op::Sqrt.ulp_ceiling(), Some(2.0));
+    assert_eq!(Op::Exp.ulp_ceiling(), Some(4.0));
+
+    // Transcendental NON-primitives: no declared ceiling, because the bound is
+    // per-op and does not compose. `None` here means "the spec makes no promise",
+    // NOT "bit-exact".
+    assert_eq!(Op::Silu.ulp_ceiling(), None);
+    assert_eq!(Op::Sigmoid.ulp_ceiling(), None);
+
+    // declared_tolerance() is for ops that declare a ceiling.
+    assert_eq!(declared_tolerance(Op::Sqrt), Tolerance::Ulp(2));
+    // For the non-primitives the bound is derived from the atom they decompose
+    // through, which is what the SiLU/sigmoid tests above actually use.
+    assert_eq!(tolerance_via(Op::Exp), Tolerance::Ulp(4));
 }
