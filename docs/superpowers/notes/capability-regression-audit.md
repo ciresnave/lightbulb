@@ -101,27 +101,54 @@ checking before anything depends on it.
 
 ---
 
+## Audited 2026-07-29 (second pass)
+
+### Speculative decoding — no regression, and the thing that could have broken it didn't
+
+`SpeculativeModel::forward_logits(&mut self, tokens, position) -> Result<Tensor>` plus
+`reset_cache`; `SpeculativeDecoder` drives two implementors (draft + target), each with its own
+KV cache.
+
+**The risk was graph affinity, not the trait.** Every Fuel `from_*` constructor mints a new
+graph, and tensors from different graphs cannot be combined — so two resident models are two
+graphs. Speculative decoding survives because **draft and target never meet at the tensor
+level**: the accept/reject test compares *logits*, and
+`DecodeModel::forward_with_kv_context_persistent` returns **`Vec<f32>`** — already realized.
+The comparison is host-side arithmetic over two independent graphs' outputs.
+
+So: two `DecodeModel` implementors, two `InferenceContext`s, comparison after realize. **The
+realize-at-logits boundary is what makes multi-model arrangements work**, which is worth
+knowing before designing anything else wanting two models resident.
+
+### Pruning — no regression, but it is a **C-6 consumer**, and that matters
+
+`PruningMask::apply(weights)`, `score_weights(weights, activations)`, and
+`WandaScorer::accumulate_activations(&mut self, activations: &Tensor)`.
+
+Wanda-style scoring is `|weight| x ||activation||`, so it **needs activations from a forward
+pass** — observability of an intermediate, structurally the *same shape* as the H2O finding.
+
+**But it is the other C-6 regime.** Pruning is offline one-time calibration, not per-token
+per-layer. That is exactly the "occasional" case §15's original C-6 anticipated: observation
+changes the plan, the cost is reported through C-4, and paying for one broken fusion is an
+evaluable trade.
+
+**So Lightbulb now has one consumer in each C-6 regime** — pruning (occasional, already served)
+and H2O/R-KV (hot-path, which forced the v0.3 amendment). Having both named makes the regime
+split concrete rather than hypothetical, and shows it was not invented for a single awkward
+case.
+
+---
+
 ## NOT yet audited
 
 Listed so coverage is honest rather than implied:
 
-- **Speculative decoding** — two models in one process/graph, draft-then-verify. `fuel-inference`
-  has `verify_draft`; whether the *two-model* arrangement is expressible is unchecked.
 - **Chunked prefill** at production shapes.
 - **Tiered storage's disk tier** — `DeviceKvPool` evict/restore is byte-exact, but whether an
   `Externalized` handle can back onto consumer-supplied disk storage is unconfirmed.
 - **KV compression** (KIVI, low-rank) as graph transforms — R-KV is covered by the attention gap;
   the other two are unexamined.
-- **Structured output contracts**, **pruning** — believed host-side and tensor-free, unverified.
+- **Structured output contracts** — believed host-side and tensor-free, unverified.
 - **Anything reaching past Candle's public API** the way attention observability reached into
   `probs`. That is the shape to look for, and it is not enumerable by reading module lists.
-
----
-
-## Method note
-
-The one confirmed regression was found by chasing a specific falsifier. That is not a method.
-A better one: for each Lightbulb capability, ask **"what did this need from Candle that was
-not a tensor operation?"** — observability of an intermediate, a custom kernel, a device
-placement decision, a dtype choice. Those are the places where a lazy, optimizer-owning
-framework legitimately differs, and therefore where regressions live.
