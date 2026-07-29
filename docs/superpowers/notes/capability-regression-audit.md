@@ -111,6 +111,40 @@ is in the spec's D3.
 *and is verified*.** Deleting on the strength of a plan is the same error one step removed
 from deleting on the strength of a module name.
 
+**CORRECTED 2026-07-29 (twice).** Fuel's seam owner first reported *"zero implementation hits"*
+for sharding, having grepped `fuel-dispatch`/`fuel-core`/`fuel-graph`. **They missed an entire
+crate named for it**: `fuel-parallel`, 1,808 LOC, *"Multi-GPU parallelism primitives for the
+Fuel ML framework"* — `tensor_parallel.rs`, `pipeline_parallel.rs`, `distributed_cache.rs`,
+`comm.rs`, `topology.rs`. Gate zero clean. A near-mirror of our `multi_gpu/`.
+
+**Then their characterisation of *our* side needed correcting.** They equated our collectives
+with Fuel's `IdentityComm`. **[verified]** `TensorShard::all_reduce` moves each shard across
+devices (`shard.to_device(result.device())`) and sums them — a **real single-process,
+multi-device all-reduce**. `IdentityComm` returns `tensor.clone()` with `world_size: 1`.
+
+| | Single-node multi-GPU | Multi-node |
+| --- | --- | --- |
+| Lightbulb `multi_gpu/` | **works** | absent (NCCL is an enum variant + doc aspiration) |
+| Fuel `fuel-parallel` | **placeholder** (`IdentityComm` reduces nothing) | absent |
+
+**So the row splits.** The **multi-node collective** is absent-in-both — a genuine ecosystem
+gap, not a port regression, and per rubric rule 4 a transport/kernel concern (a backend ask)
+rather than Fuel-internal work. The **single-node collective** is present-in-ours,
+placeholder-in-Fuel — which *is* a regression risk if we delete, and strengthens the
+don't-delete case rather than weakening it: replacing a working cross-device all-reduce with
+`IdentityComm` would be a straightforward capability loss.
+
+**Guide value, refined**: not in tensor-sharding arithmetic (both have it and both are real),
+but in `pipeline_parallel`, `distributed_cache`, **and `comm.rs`** — our cross-device path is a
+working reference for what `IdentityComm` needs to become for the single-node case, which is a
+far smaller step than full NCCL.
+
+**Method note added to the rubric.** Both misses share a shape neither "search wider" nor gate
+zero catches: **we each searched where we expected the thing to live rather than where it would
+be *named*.** A name-based sweep — `ls */`, or reading crate descriptions — is a different and
+cheaper probe than a content grep. One `ls` at the Fuel workspace root would have found
+`fuel-parallel`, and I had been reading that workspace all day without running one.
+
 **How it was caught**: reclassifying it from "resolved" to "uncertain". Had it stayed
 "resolved", the deletion would have proceeded on an assumption nobody had tested.
 
