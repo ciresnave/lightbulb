@@ -107,6 +107,32 @@ Lightbulb's existing correctness suites (`batched_transformer_correctness.rs`,
 parity gate rather than being rewritten. The old path stays runnable until the new one
 passes, which is what makes a rewrite of this size safe.
 
+> **BLOCKED — discovered 2026-07-29, and it undercuts the premise above.**
+> **Lightbulb does not currently build in this environment.** `cargo test` fails with
+> *"error inheriting `candlelight` from workspace root manifest… failed to find a workspace
+> root."* Seven dependencies are `{ workspace = true }` (`candlelight`, `tokenizers`,
+> `rustls`, `ring`, `distributed-config`, `mocopr`, `system-analysis`) and **no cargo
+> workspace root exists** — `lightbulb.code-workspace` is a VS Code file, there is no
+> `[workspace]` in the tracked repo, and none of the referenced local crates are present
+> under `C:\Projects`. There is no `target/` directory: this checkout has never been built.
+>
+> **Consequence: the parity oracle does not currently exist.** D1's safety property — run
+> both implementations, switch when they agree — assumed a runnable Candle path.
+>
+> **All dependencies are obtainable** **[verified]**: `distributed-config` (0.1.0),
+> `mocopr` (0.1.0), `system-analysis` (0.2.1), and `mlmf` (0.2.0) are on crates.io;
+> `candlelight` is **not** on crates.io but `github.com/ciresnave/candlelight` resolves
+> (`HEAD = d70a03f3`). So the fix is either reconstructing the workspace root or
+> de-workspacing the manifest — **pending a decision from the owner**, because only he knows
+> whether a real root exists elsewhere with authoritative pins. Reconstructing pins by guess
+> is worse than not touching it.
+>
+> **Standing caveat until a build succeeds:** "the Candle path works" is itself an
+> unverified claim of exactly the class that failed repeatedly in this project. Task 1's
+> baseline run is the first real test of whether D1 is achievable at all, and it must
+> precede any `model_fuel/` work — a rewrite with no working oracle is a materially
+> different and riskier project than the one specified here.
+
 ### D2 — Batched decode is the first end-to-end target
 
 Chosen over a single-sequence greedy slice. Batched multi-sequence decode over a shared
