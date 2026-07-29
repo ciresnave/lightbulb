@@ -2455,11 +2455,6 @@ impl ParallelCacheBuilder {
         .to_dtype(self.dtype)?;
         let indices = Tensor::new(cache_indices, self.device())?;
 
-        // Debug: log final IAM before returning
-        if let Ok(_idx_vec) = indices.to_vec2::<u32>() {
-            // DEBUG output removed
-        }
-        // DEBUG output removed
 
         Ok(IndicesAndMask {
             indices,

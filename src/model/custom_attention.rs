@@ -671,11 +671,6 @@ impl BatchedAttention {
         // Final output projection
         let output = self.o_proj.forward(&attn_output_for_proj)?;
 
-        if layer_idx == 0 {
-            let _output_vec = output.flatten_all()?.to_vec1::<f32>()?;
-            // DEBUG output removed
-        }
-
         Ok((output, attn_weights))
     }
 
