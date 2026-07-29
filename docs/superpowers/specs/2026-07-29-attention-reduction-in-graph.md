@@ -13,6 +13,51 @@ This document specifies the reductions.
 
 ---
 
+## REVISED 2026-07-29 — the reduction is moving into the kernel
+
+**This document was written assuming Lightbulb would express the column-sum itself as an
+in-graph reduction over a materialised `probs`. That is no longer the plan for the fused arm.**
+
+Baracuda is adding it as a **second output of the FlashDecoding kernel**, opt-in, deterministic:
+
+| Output | Shape | Notes |
+| --- | --- | --- |
+| `a` | `Option<[B, H_q, Sk]>` | per-head; **free** — each Q-head is its own thread-block (grid.y = H_q), so writes are disjoint, no atomics. Built, 10/10 correct incl. multi-split + GQA |
+| `a_mean` | `Option<[B, Sk]>` | separate deterministic head-mean kernel (fixed-order sum over H ÷ H). **Drop-in for `custom_transformer.rs:565`, which already does `.mean(1)`** |
+
+`None` = zero cost. **Mean, not sum** (÷H in-kernel) — do not re-divide by H on the consumer
+side. Batch-mean stays host-side (B=1 at decode makes `.mean(0)` a no-op).
+
+**Determinism is why the head-mean is a second kernel rather than an atomicAdd.** A statistic
+that varies between identical runs is not a reference: it would make eviction trajectories
+unreproducible and undebuggable, and break tier-3 goldens. Fixed-order summation preserves
+reproducibility; atomics would have destroyed it silently.
+
+### What this changes in the design below
+
+**The reduction half is no longer ours.** `a_t` arrives as a kernel output. What remains on the
+Lightbulb side is **only the accumulation**:
+
+```
+c_t = (c_{t-1} · decay + a_t) ⊙ occ_t
+```
+
+— a fixed-shape `[max_slots]` elementwise in-place affine plus an occupancy mask, which is the
+`inplace_affine` + persistent-buffer shape §"What this asks of Fuel" already identified. **No
+`probs` observation, no fusion break, no arm dependence for the accumulator itself.**
+
+**So the falsifier-#1 conclusion narrows to a cost question.** Whether attention-driven eviction
+is affordable on the fused arm is now three measured configs on a 4070 (baseline / per-head
+a-store / + head-mean), not an argument. If the combined cost is small, H2O stops being
+arm-gated and the C-5 constraint softens; if large, deployments choose.
+
+**What is still correct below**: the H2O recurrence, the per-step-vs-on-eviction split, the
+occupancy-mask requirement for slot reuse, `insertion_step` unifying `n_t` and `occ_t`, and the
+whole in-graph-reduction route **for the decomposed arm**, where `probs` is a real node and no
+kernel change is needed.
+
+---
+
 ## The central observation
 
 **The accumulation runs every step. The scoring runs only when evicting.**
