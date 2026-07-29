@@ -212,13 +212,69 @@ of this**, and it is now the first thing to run on any module proposed for upstr
 
 ---
 
+## Audited 2026-07-29 (fourth pass) — the named items are complete
+
+**Gate zero first, per the rubric.** Lightbulb: `chunked_prefill.rs` clean,
+`tiered_storage.rs` clean, `contracts/` one hit. Fuel: `chunked_prefill.rs`,
+`tiered_storage.rs`, `kv_block_pool_device.rs` all clean.
+
+**And gate zero on the third upstreaming claim, which had never been run.** A.4's
+*"dominant outcome is upstreaming"* rested on three claimed gains; two were withdrawn above.
+**`h2o_policy.rs` passes gate zero — no stubs — and it is genuinely wired**:
+`custom_transformer.rs:590`/`:745` feed `update_attention_scores` from the real forward pass
+(the two extraction sites deliberately preserved when the dead-debug realizes were removed),
+through `parallel_cache_builder.rs:862` and `segmented_eviction_policy.rs:597`. **So stateful
+H2O accumulation is real**, the surviving upstream candidate is verified rather than assumed,
+and the attention-observability finding that drove §15 v0.3 and Baracuda's kernel prototype
+rests on an implemented capability.
+
+### Chunked prefill — no regression, expressible
+
+Complementary as the diff recorded (Fuel: zero-copy single-sequence iterator; ours:
+cross-request batch scheduling + tensor materialization). The open question was *"at production
+shapes"* — i.e. whether Fuel supports **incremental** prefill into a live KV cache.
+
+It does. `DecodeModel::forward_with_kv_context_persistent(tokens, cache, ctx, session)` takes
+`tokens: &[u32]` documented as *"full prompt on prefill, the last token on decode"* and mutates
+the cache in place. Chunked prefill is therefore repeated calls over successive slices — no new
+mechanism required.
+
+### Tiered storage's disk tier — expressible, but not through `Externalized`
+
+**`Externalized` is the wrong hook and this is worth knowing before designing against it.**
+Its doc: *"In the pure core it carries the logical structure; the device-backed integration
+carries the block bytes keyed by the same handle."* The struct holds `fidelity`, `covers`,
+`filled_tokens`, `externalized_slots`, `resident_slots` — **no bytes and no backing-store
+reference.** There is no consumer-supplied-storage parameter, and asking for one would have
+been the wrong ask.
+
+**The actual mechanism is `read_block` / `write_block`** on `DeviceKvPool`:
+`read_block(layer, kind, phys) -> Result<Vec<f32>>` and
+`write_block(layer, kind, phys, data: &[f32])`. So the consumer reads a block's bytes, stores
+them wherever it likes (our `FileDiskStore`), and writes them back to restore. **Fuel moves
+bytes; the consumer owns the storage** — the clean §15 split, and better than a Fuel-side disk
+backend would have been.
+
+**Caveat: f32-only today.** Both methods reject a non-F32 pool, with a byte/dtype-generic form
+tracked as follow-up for the CUDA bf16 pool. That constrains a disk tier to f32 pools for now —
+which our F32-at-load path already satisfies, for the fourth independent time.
+
+### Structured output contracts — no Fuel bearing, one pre-existing gap
+
+Entirely host-side: parses generated *text*, no tensors anywhere. Fuel is irrelevant to it, so
+no regression is possible.
+
+Gate zero did find a gap **in Lightbulb, pre-dating the port**:
+`OutputContractSpec::Json => None` (`validation.rs:117`) — the `Json` variant is declared and
+always fails to parse. `EnumChoice`, `TaggedFields`, and `CommitBlock` are real. Recorded here
+because the audit found it, but it is a Lightbulb TODO rather than a port risk, and per the
+absence-in-both-systems rule it is not the audit's business to fix.
+
+---
+
 ## NOT yet audited
 
 Listed so coverage is honest rather than implied:
 
-- **Chunked prefill** at production shapes.
-- **Tiered storage's disk tier** — `DeviceKvPool` evict/restore is byte-exact, but whether an
-  `Externalized` handle can back onto consumer-supplied disk storage is unconfirmed.
-- **Structured output contracts** — believed host-side and tensor-free, unverified.
 - **Anything reaching past Candle's public API** the way attention observability reached into
   `probs`. That is the shape to look for, and it is not enumerable by reading module lists.
