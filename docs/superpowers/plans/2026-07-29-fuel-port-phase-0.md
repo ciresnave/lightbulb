@@ -1,49 +1,55 @@
-# Fuel Port Phase 0: Pre-Port Cleanup and Substrate Validation — Implementation Plan
+# Fuel Port Phase 0 (reissued): Cleanup, Environment, and Oracle Foundation
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Remove the dead-debug realize sites that would destroy Fuel's fusion, establish a buildable current Fuel checkout, and produce a written record of Fuel's *actual* API surface — the input Plan 2 (the `model_fuel/` rewrite) cannot be written without.
+**Supersedes** `2026-07-29-fuel-port-phase-0.md` (the pre-oracle version). That plan gated Task 1 on `batched_transformer_correctness` / `model_correctness`, which **do not compile**, and assumed D1's freeze-the-Candle-path oracle, which was replaced. See [the spec](../specs/2026-07-28-fuel-port-design.md#the-oracle-three-tiers).
 
-**Architecture:** Three independent deliverables in dependency order. Task 1 is pure Lightbulb cleanup with zero Fuel dependency and standalone value (it fixes a latent performance bug today). Task 2 unblocks building Fuel at all. Task 3 is a spike whose deliverable is a *document* of verified signatures, not code. Task 4 runs the one experiment that could kill the attention-reduction route early and cheaply.
+**Goal:** Reach the state where `model_fuel/` work can start safely — dead-debug realizes gone, a buildable Fuel tree, Fuel's real API surface recorded, and a *working* tier-1 oracle mechanism proven on a simple fragment.
 
-**Tech Stack:** Rust 2024 edition, `candlelight` (outgoing), Fuel (`fuel`, `fuel-core`, `fuel-ir`, `fuel-dispatch`, `fuel-inference`), `cargo`, PowerShell/Git Bash on Windows.
+**Architecture:** Five tasks in dependency order. Task 1 is pure Lightbulb cleanup with standalone value. Tasks 2–3 establish the Fuel environment and replace inference with recorded fact. Tasks 4–5 build the oracle bottom-up — a single-op differential first to prove the harness, then a subgraph recipe to prove the mechanism that actually matters.
+
+**Tech Stack:** Rust 2024, `candlelight` (outgoing), Fuel, `kiss-ref-core` 0.1.0 (dev-dep), `cargo`, Git Bash / PowerShell on Windows.
 
 ## Global Constraints
 
-- **`C:\Projects\fuel` is a shared working tree across three sessions — read-only. Never run mutating git operations there.** Read-only queries (`git log`, `git show`, `git diff`, `git worktree list`) are fine.
-- **Never run workspace-wide `cargo check` / `cargo test` in the Fuel repo.** `tensor-tools` has a standing break and is a default member, so a bare root invocation fails for unrelated reasons. Always `-p <crate>`.
-- **One cargo invocation at a time.** The build-directory lock serializes; parallel invocations thrash.
-- **CPU is an F32-only world for weights in Fuel.** Mixed `[F32, BF16, F32]` matmul is CUDA-only. All CPU work casts weights to F32 at load.
-- **Do not modify files under `C:\Projects\fuel`.** Fuel-side changes are requested from peer sessions (`2eymo83p` for dispatch/allocator, `trpe1mc5` for contract/seam), never made directly.
-- **Evidence standard:** a claim is `[verified]` only when it was executed or read from source. "The file exists" is never evidence that "it works."
+- **`C:\Projects\fuel` is a shared working tree across three sessions — read-only.** No mutating git operations. Read-only queries (`git log`, `git show`, `git diff`, `git worktree list`) are fine.
+- **Never run workspace-wide `cargo check`/`test` in the Fuel repo** — `tensor-tools` has a standing break and is a default member. Always `-p <crate>`. One cargo invocation at a time.
+- **CPU is an F32-only world for weights in Fuel** (no `[F32, BF16, F32]` kernel). All CPU work casts weights to F32 at load. This is also required for kiss-ref differentials — see below.
+- **Never trust a background task's exit code.** Piping to `tail` masks failures; three runs this session reported exit 0 while failing or doing nothing. **Read the output.**
+- **Evidence standard.** `[verified]` means executed or read from source. "The file exists" is never evidence that "it works." Before reporting a `head`/`grep` result as a total, confirm it is one. Before reporting your own past actions, check the transcript, not your recollection.
+- **kiss-ref is a differential target, never a verdict source.** A disagreement means "determine which of us is wrong."
+- **Do not modify files under `C:\Projects\fuel`.** Fuel-side changes are requested from peers: `2eymo83p` (dispatch/allocator), `trpe1mc5` (contract/seam), `3vgwagtz` (kiss-ref).
 
 ---
 
 ### Task 1: Remove dead-debug realize sites
 
-Vestigial `to_vec1` calls whose consuming statistic was deleted when a debug print was removed. Each forces a full tensor realize and discards the result. Under Candle they are wasteful copies; under Fuel they would break the graph and make capture-shaped decode impossible. **This task has standalone value independent of the port** — `mlp_wrapper.rs:156` runs on every MLP call, every layer, every token.
+Vestigial `to_vec1` calls whose consuming statistic was deleted when a debug print was removed. Each forces a full tensor realize and discards the result — a wasteful copy under Candle, fusion-and-capture-destroying under Fuel. **Standalone value:** `mlp_wrapper.rs:156` realizes the entire activation tensor on every MLP call, every layer, every token.
 
 **Files:**
-- Modify: `src/model/mlp_wrapper.rs:155-159`
-- Modify: `src/model/custom_transformer.rs:262-266`, `:548-552`
-- Modify: `src/model/custom_attention.rs:673-677`
-- Modify: `src/cache/parallel_cache_builder.rs:2459`
-- Test: existing suites — `tests/batched_transformer_correctness.rs`, `tests/model_correctness.rs`, `tests/fused_rmsnorm_parity.rs`
+- Modify: `src/model/mlp_wrapper.rs`, `src/model/custom_transformer.rs`, `src/model/custom_attention.rs`, `src/cache/parallel_cache_builder.rs`
+- Test: the 11 test targets that compile (see Step 1)
 
 **Interfaces:**
 - Consumes: nothing.
-- Produces: no API change. Behaviour must be bit-identical — every deleted binding was already unused, so this is provably a no-op on output.
+- Produces: no API change. Every deleted binding was already unused, so this is provably a no-op on output.
 
-- [ ] **Step 1: Establish the green baseline**
+- [ ] **Step 1: Establish the baseline from the suites that actually compile**
 
-Record the current pass/fail state so any later failure is attributable.
+The three suites the old plan named do not compile. Use the 11 that do:
 
 ```bash
 cd C:/Projects/lightbulb
-cargo test --test batched_transformer_correctness --test model_correctness 2>&1 | tail -30
+cargo test --test contracts_integration --test decomposition \
+  --test enhanced_correctness_tests --test fused_rmsnorm_parity \
+  --test m4_integration --test m5_integration_tests \
+  --test multi_gpu_validation --test parallel_model_manager_integration \
+  2>&1 | tee /tmp/baseline.txt | tail -40
 ```
 
-Expected: note the exact pass/fail counts. If anything already fails, record it — do **not** fix it in this task.
+Omitted deliberately: `contracts_live`, `fused_rmsnorm_perf`, `integration_local_model` — they plausibly need a live server, a model file, or are perf-only. Run them separately if curious; do not gate on them.
+
+**Record the exact pass/fail counts per suite.** If anything already fails, record it and do **not** fix it here.
 
 - [ ] **Step 2: Delete the `mlp_wrapper.rs` site**
 
@@ -56,11 +62,11 @@ In `src/model/mlp_wrapper.rs`, inside `MlpWrapper::forward`, delete these four l
         let _input_mean: f32 = input_vec.iter().sum::<f32>() / input_vec.len() as f32;
 ```
 
-Both `_input_max` and `_input_mean` are unused. Nothing downstream reads `input_vec`.
+Both consumers are unused; nothing downstream reads `input_vec`.
 
 - [ ] **Step 3: Delete the `custom_transformer.rs` sites**
 
-At `:262-266` (load-time, in the embedding constructor) delete:
+Delete this block (embedding constructor, load-time):
 
 ```rust
             // DEBUG: Verify weight shapes
@@ -69,51 +75,53 @@ At `:262-266` (load-time, in the embedding constructor) delete:
             let _emb_w_mean: f32 = emb_w_vec.iter().sum::<f32>() / emb_w_vec.len() as f32;
 ```
 
-At `:548-552` (inside the per-layer loop) delete the `if layer_idx < 3 || layer_idx >= self.blocks.len() - 3` block containing:
+And delete the `if layer_idx < 3 || layer_idx >= self.blocks.len() - 3 {` block containing:
 
 ```rust
                 let hs_vec = hidden_states.flatten_all()?.to_vec1::<f32>()?;
                 let _mean: f32 = hs_vec.iter().sum::<f32>() / hs_vec.len() as f32;
 ```
 
-Delete the enclosing `if` as well — with the body gone it has no effect.
+Delete the enclosing `if` too — with the body gone it has no effect.
 
-**Do NOT touch `:593` or `:749`.** Those feed the H2O policy and are load-bearing; they are Plan 2's problem.
+**Do NOT touch the `agg`/`attn_weights` extractions further down.** Those feed the H2O policy and are load-bearing; they belong to the attention-reduction work.
 
 - [ ] **Step 4: Delete the `custom_attention.rs` site**
 
-At `:673-677`, delete the `if layer_idx == 0` block containing:
+Delete the `if layer_idx == 0 {` block containing:
 
 ```rust
             let _output_vec = output.flatten_all()?.to_vec1::<f32>()?;
             // DEBUG output removed
 ```
 
-Delete the enclosing `if` too. **Do NOT touch `:919`** — that is H2O-related.
+Delete the enclosing `if`. **Do NOT touch the `scores.to_vec2` site** — H2O-related.
 
 - [ ] **Step 5: Inspect and handle the `parallel_cache_builder.rs` site**
-
-Read `src/cache/parallel_cache_builder.rs` around line 2459:
 
 ```bash
 sed -n '2450,2470p' src/cache/parallel_cache_builder.rs
 ```
 
-The site is `if let Ok(_idx_vec) = indices.to_vec2::<u32>() { … }` — the binding is unused. **If the `if let` body is empty or only contains further unused bindings, delete the whole block.** If the body does real work, leave it and record why in the commit message. Judgment is required here; do not delete blind.
+The site is `if let Ok(_idx_vec) = indices.to_vec2::<u32>() { … }` with an unused binding. **If the body is empty or contains only further unused bindings, delete the whole block.** If it does real work, leave it and say why in the commit message. Judgment required — do not delete blind.
 
-- [ ] **Step 6: Verify the build and confirm behaviour is unchanged**
+- [ ] **Step 6: Verify build and unchanged behaviour**
 
 ```bash
-cargo build 2>&1 | tail -20
-cargo test --test batched_transformer_correctness --test model_correctness 2>&1 | tail -30
+cargo check --lib 2>&1 | tail -20
+cargo test --test contracts_integration --test decomposition \
+  --test enhanced_correctness_tests --test fused_rmsnorm_parity \
+  --test m4_integration --test m5_integration_tests \
+  --test multi_gpu_validation --test parallel_model_manager_integration \
+  2>&1 | tail -40
 ```
 
-Expected: builds clean; pass/fail counts **identical to Step 1**. Any new failure means a deleted binding was not actually dead — revert and investigate.
+Expected: builds clean; counts **identical to Step 1**. Any new failure means a deleted binding was not dead — revert and investigate.
 
 - [ ] **Step 7: Confirm no dead sites remain**
 
 ```bash
-grep -n "DEBUG output removed\|DEBUG: Check input stats\|DEBUG: Verify weight shapes" src/ -r
+grep -rn "DEBUG output removed\|DEBUG: Check input stats\|DEBUG: Verify weight shapes" src/
 ```
 
 Expected: no matches.
@@ -122,132 +130,78 @@ Expected: no matches.
 
 ```bash
 git add src/model/mlp_wrapper.rs src/model/custom_transformer.rs src/model/custom_attention.rs src/cache/parallel_cache_builder.rs
-git commit -m "perf: Remove dead-debug tensor realizes from the decode hot path
-
-Vestigial to_vec1 calls whose consuming statistics were deleted when
-their debug prints were removed. Each forced a full tensor realize and
-discarded the result.
-
-mlp_wrapper.rs:156 was the worst — realizing the entire activation
-tensor on every MLP call, every layer, every token, to compute two
-unused floats. A wasteful copy under Candle; under Fuel's lazy graph it
-would break fusion at every MLP and make capture-shaped decode
-impossible.
-
-Provably a no-op on output: every deleted binding was already unused."
+git commit -m "perf: Remove dead-debug tensor realizes from the decode hot path"
 ```
 
 ---
 
-### Task 2: Establish a buildable current Fuel checkout
+### Task 2: Establish a buildable Fuel checkout
 
-Nothing Fuel-facing can be verified until there is a tree at current `origin/main` that is safe to build in. `C:\Projects\fuel` is a deliberately-stale shared mirror and is off-limits for git operations.
+**Files:** creates a git worktree; path recorded as `$FUEL_TREE`.
 
-**Files:**
-- Create: a git worktree at `C:\Projects\fuel-lightbulb-port` (path may change per Step 2's answer)
-- Modify: none
+**Interfaces:** Produces `$FUEL_TREE` — a tree at current `origin/main`, safe to run `cargo` in. Tasks 3 and 5 depend on it.
 
-**Interfaces:**
-- Consumes: nothing.
-- Produces: a filesystem path, referred to hereafter as `$FUEL_TREE`, containing current `origin/main` and safe to run `cargo` in. Tasks 3 and 4 depend on it.
-
-- [ ] **Step 1: Confirm the shared tree is still stale**
+- [ ] **Step 1: Check whether the shared tree was fast-forwarded**
 
 ```bash
 cd C:/Projects/fuel && git log --oneline -1 && git log --oneline origin/main -1
 ```
 
-If HEAD already equals `origin/main`, a peer fast-forwarded it — **skip to Step 4** and set `$FUEL_TREE=C:/Projects/fuel`.
+If HEAD equals `origin/main`, set `$FUEL_TREE=C:/Projects/fuel` and skip to Step 4.
 
-- [ ] **Step 2: Ask the peer sessions for the correct convention**
+- [ ] **Step 2: Ask before creating a worktree in a shared repo**
 
-Do not create a worktree in a shared repo unilaterally. Send via `mcp__claude-peers__send_message` to `2eymo83p`:
+Message `2eymo83p` via `mcp__claude-peers__send_message`:
 
-> I need a buildable tree at current origin/main to verify the dispatch fix and capture Fuel's API surface. `C:/Projects/fuel` is stale and read-only per your convention. Is the convention for me to `git worktree add C:/Projects/fuel-lightbulb-port origin/main` from the shared repo, or would you prefer a different path/branch, or to fast-forward the shared checkout? I don't want to add a worktree to a repo three sessions share without asking.
+> I need a buildable tree at current origin/main to verify the dispatch + dtype fixes and record Fuel's API surface. `C:/Projects/fuel` is stale and read-only per your convention. Is it fine for me to `git worktree add C:/Projects/fuel-lightbulb-port origin/main` from the shared repo, or would you prefer a different path, or to fast-forward the shared checkout?
 
-Wait for the answer. **This is a genuine block — do not guess.**
+**Genuine block — do not guess.**
 
 - [ ] **Step 3: Create the worktree as directed**
 
-Using whatever the peer specifies. If they approve the proposed form:
+- [ ] **Step 4: Verify currency and the landed fixes**
 
 ```bash
-cd C:/Projects/fuel && git worktree add C:/Projects/fuel-lightbulb-port origin/main
-```
-
-- [ ] **Step 4: Verify the tree is current and contains the expected fixes**
-
-```bash
-cd $FUEL_TREE
-git log --oneline -1
+cd $FUEL_TREE && git log --oneline -1
 grep -n "coverage_diagnostic" fuel-dispatch/src/plan.rs | head -3
 ls fuel-core/src/kv_block_pool.rs
 ```
 
-Expected: HEAD matches `origin/main`; `plan.rs` calls `coverage_diagnostic()`; `kv_block_pool.rs` exists (it is on `origin/main` per the allocator session).
+- [ ] **Step 5: Confirm `llama-lazy` now runs**
 
-- [ ] **Step 5: Confirm it builds, scoped**
-
-```bash
-cd $FUEL_TREE && cargo build --release -p fuel-lazy-examples --bin llama-lazy 2>&1 | tail -15
-```
-
-Expected: `Finished` with warnings. If it fails, that is a Fuel-side regression — report it to `2eymo83p` with the exact error rather than working around it.
-
-- [ ] **Step 6: Record the tree location**
-
-Append to `docs/superpowers/notes/fuel-environment.md` (create it if absent):
-
-```markdown
-# Fuel environment
-
-- `$FUEL_TREE` = <the path>  — current origin/main, safe to build in.
-- `C:\Projects\fuel` — shared stale mirror, READ-ONLY, never run git ops.
-- Always `cargo -p <crate>`; never workspace-wide. One cargo at a time.
-```
-
-- [ ] **Step 7: Commit**
+The dtype-reconciliation pass should have unblocked it.
 
 ```bash
-git add docs/superpowers/notes/fuel-environment.md
-git commit -m "docs: Record the Fuel build tree convention for the port"
+cd $FUEL_TREE && cargo build --release -p fuel-lazy-examples --bin llama-lazy 2>&1 | tail -10
+./target/release/llama-lazy.exe "TinyLlama/TinyLlama-1.1B-Chat-v1.0" "Once upon a time" 8 2>&1 | tail -20
 ```
+
+Expected: tokens. **Report the result to `2eymo83p` either way** — they asked to have the fix confirmed against this exact repro. If it still fails, that is a real finding, not a setback.
+
+- [ ] **Step 6: Record the environment and commit**
+
+Write `docs/superpowers/notes/fuel-environment.md` with `$FUEL_TREE`, the read-only rule, and the `-p`/one-at-a-time cargo rules. Commit.
 
 ---
 
-### Task 3: Capture Fuel's real API surface (spike)
+### Task 3: Record Fuel's real API surface
 
-**The deliverable is a document of verified signatures, not code.** Plan 2 cannot be written without it, because every prior structural claim about Fuel in this project has required correction on contact. This task exists to replace inference with evidence.
+**The deliverable is a document of verified signatures, not code.** Every prior structural claim about Fuel in this project required correction on contact.
 
-**Files:**
-- Create: `docs/superpowers/notes/fuel-api-surface.md`
-- Modify: none
+**Files:** Create `docs/superpowers/notes/fuel-api-surface.md`.
 
-**Interfaces:**
-- Consumes: `$FUEL_TREE` from Task 2.
-- Produces: verified signatures for weight loading, model construction, forward, realize, and KV cache — the exact names Plan 2's tasks will call.
+**Interfaces:** Consumes `$FUEL_TREE`. Produces the exact signatures later plans call.
 
-- [ ] **Step 1: Confirm the diagnostic fix by reproducing the original failure**
-
-```bash
-cd $FUEL_TREE && ./target/release/llama-lazy.exe "TinyLlama/TinyLlama-1.1B-Chat-v1.0" "Once upon a time" 8 2>&1 | tail -20
-```
-
-Expected: it still **fails** (the capability gap is unfixed) but the message now names `Cpu` and lists real `(op, dtypes)` coverage showing `[F32,F32,F32]` present and `[F32,BF16,F32]` absent — rather than the old `available backends: []`. Record the exact output verbatim.
-
-Report the confirmation to `2eymo83p`, who asked to have it validated against this repro.
-
-- [ ] **Step 2: Extract the weight-loading surface**
+- [ ] **Step 1: Weight loading**
 
 ```bash
 cd $FUEL_TREE
 grep -n "pub fn\|pub struct" fuel-core/src/lazy_nn_varbuilder.rs | head -40
-grep -n "pub fn from_mmaped_safetensors\|pub fn from_tensors\|pub fn get\b\|pub fn to_dtype" fuel-core/src/lazy_nn_varbuilder.rs
 ```
 
-Record every signature needed to load safetensors and fetch a named tensor, **including how to request F32** (the CPU constraint).
+Record how to load safetensors and fetch a named tensor, **including how to request F32** (the CPU constraint).
 
-- [ ] **Step 3: Extract the model-construction and forward surface**
+- [ ] **Step 2: Model construction and forward**
 
 ```bash
 grep -n "pub struct LlamaModel\|pub struct LlamaConfig\|pub struct LlamaWeights" fuel-core/src/lazy.rs
@@ -255,99 +209,115 @@ grep -n "pub fn forward\|pub fn forward_hidden\|pub fn run_backbone_with_rope_ta
 grep -n "pub fn from_hf_json_str\|pub struct LlamaFullConfig\|pub struct Llama3Model" fuel-core/src/lazy_llama_full.rs
 ```
 
-- [ ] **Step 4: Extract the realize and KV-cache surface**
+- [ ] **Step 3: Realize, KV cache, allocator**
 
 ```bash
-grep -n "pub fn realize\|pub fn to_vec1\|pub fn to_scalar" fuel-core/src/lazy.rs | head -20
-grep -n "pub fn with_capacity\|pub fn with_dims\|pub struct KvCache\|pub struct InferenceContext" fuel-core/src/inference_context.rs
+grep -n "pub fn realize" fuel-core/src/lazy.rs | head -20
+grep -n "pub fn with_capacity\|pub struct KvCache\|pub struct InferenceContext" fuel-core/src/inference_context.rs
 grep -n "pub fn evict_blocks\|pub fn evict_range\|pub fn restore\|pub fn blocks_required_batch\|pub struct KvGeometry\|pub struct EvictReport" fuel-core/src/kv_block_pool.rs
 ```
 
-- [ ] **Step 5: Write the API surface document**
+Note `KvGeometry` now carries `n_layers` (shared block-table model: one physical block addresses the same slot in every layer's K/V).
 
-Create `docs/superpowers/notes/fuel-api-surface.md` recording, for each of the four areas above: the **exact** signature, the **file:line** it came from, and a `[verified: read from source]` or `[verified: executed]` marker. Where a needed capability appears absent, record it as an explicit **gap** rather than inventing a plausible name.
-
-Include a header stating the tree's commit hash, so the document's staleness is checkable later.
-
-- [ ] **Step 6: Commit**
+- [ ] **Step 4: Read the graph-affinity doc**
 
 ```bash
-git add docs/superpowers/notes/fuel-api-surface.md
-git commit -m "docs: Record Fuel's verified API surface for the port
-
-Signatures read from source at a known commit, each marked with its
-file:line and evidence level. Written because every prior structural
-claim about Fuel in this project needed correction on contact — Plan 2
-is written against this document, not against inference."
+grep -n -A 30 "graph-affine" fuel-core/src/lazy.rs | head -40
 ```
+
+**Constructors mint new graphs; use `const_*_like` to build on an existing one.** Record the rule explicitly — it is the constraint that shapes all weight loading.
+
+- [ ] **Step 5: Write and commit the document**
+
+For each area: exact signature, `file:line`, and `[verified: read from source]` or `[verified: executed]`. Record absent capabilities as **gaps**, never as invented names. Header records the tree's commit hash so staleness is checkable.
 
 ---
 
-### Task 4: Capture-vs-accumulate experiment
+### Task 4: Prove the kiss-ref differential harness on one op
 
-The cheapest decisive test of the attention-reduction route (`docs/superpowers/specs/2026-07-29-attention-reduction-in-graph.md`). Tests falsifier #2 — whether a runtime-offset accumulate composes with `CapturedRun` — **independently** of the arm question. If capture breaks here, the route dies before any H2O work is done.
+Smallest thing that proves the tier-2 mechanism. If this doesn't work, tiers 1 and 2 both fail and it is better to know now.
 
 **Files:**
-- Create: `docs/superpowers/notes/capture-accumulate-experiment.md`
-- Create: a scratch binary or test under `$FUEL_TREE` **only if** the peer sessions approve adding one; otherwise drive it from a Lightbulb-side test.
+- Modify: `Cargo.toml` (dev-dependency)
+- Create: `tests/kissref_differential.rs`
 
-**Interfaces:**
-- Consumes: `$FUEL_TREE` (Task 2), the realize/KV signatures from Task 3.
-- Produces: a yes/no on whether runtime-offset accumulate survives capture. Gates Plan 3 (the attention reduction).
+**Interfaces:** Produces a working pattern for "compute X in Lightbulb, compute X in kiss-ref, compare within tolerance" that Task 5 generalizes.
 
-- [ ] **Step 1: Locate the CapturedRun entry points**
+- [ ] **Step 1: Read kiss-ref's API before writing anything**
 
 ```bash
-cd $FUEL_TREE
-grep -rn "CapturedRun" fuel-core/src/lazy.rs fuel-core/src/inference_context.rs | head -20
+cargo add kiss-ref-core@0.1.0 --dev --dry-run
 ```
 
-Record how a run is captured and replayed, and what invalidates a capture.
+Then read the published docs for `reference_*`, `diff_*`, `ulp_distance`, and the `DetClass` type. **Record the actual signatures before writing code** — do not infer them. If the crate's own docs are thin, `cargo doc --open -p kiss-ref-core` after adding it.
 
-- [ ] **Step 2: Find an existing capture test to model the experiment on**
+- [ ] **Step 2: Add the dev-dependency**
+
+```toml
+[dev-dependencies]
+kiss-ref-core = "0.1.0"
+```
+
+Note: `ConstBits` and `ScalarFloat::from_bits` ship in **0.2.0**, not 0.1.0. Pathological bit patterns need a git rev at/after `721d03b`. Not required for this task.
+
+- [ ] **Step 3: Write the failing test**
+
+Pick **RMSNorm** — small, deterministic, and Lightbulb has `fused_rmsnorm.rs` plus a `fused_rmsnorm_parity` suite that already compiles and passes.
+
+Compute an RMSNorm over a small F32 tensor two ways: Lightbulb's implementation, and kiss-ref's reference. Assert agreement within tolerance.
+
+**Write the exact code only after Step 1 records the real signatures.** Deliberately not pre-written — inventing kiss-ref API names is the failure mode this plan exists to avoid.
+
+**Constraints:** diff in **f32** (kiss-ref accumulates at storage precision; narrow lanes diverge structurally, not in ULPs). Honor `DetClass` — tolerance-compare anything nondeterministic, never bit-compare.
+
+- [ ] **Step 4: Run it, expect failure, then make it pass**
 
 ```bash
-grep -rln "CapturedRun" fuel-core/tests/ | head
+cargo test --test kissref_differential 2>&1 | tail -20
 ```
 
-Read the closest existing test. **Model the experiment on a known-good pattern rather than inventing a harness** — the goal is to test one variable, not to debug scaffolding.
-
-- [ ] **Step 3: Build the minimal graph**
-
-A graph containing: a matmul, a reduce-sum over one axis, and a runtime-offset accumulate (`c = c * decay + a`) into a persistent buffer. Use the `Op::WriteSlice` / `inplace_affine` shapes confirmed to exist. **Write the exact code only after Task 3 has recorded the real signatures** — this step is deliberately not pre-written, because pre-writing it against unverified signatures is the failure mode this plan exists to avoid.
-
-- [ ] **Step 4: Capture, replay, and compare**
-
-Capture the step, replay it, and assert the accumulator advances identically across replays and matches an uncaptured reference run.
-
-- [ ] **Step 5: Record the result**
-
-Write `docs/superpowers/notes/capture-accumulate-experiment.md` with the verdict, the code used, and the exact output. **If capture breaks, say so plainly and state the observed failure mode** — a negative result is the valuable outcome here, and it redirects to §15's preference #4.
-
-- [ ] **Step 6: Report to the seam owner**
-
-Send the result to `trpe1mc5`, who is tracking the falsifiers in §15 and Annex A.3. This is the first of the three to be settled by execution rather than reading.
-
-- [ ] **Step 7: Commit**
-
-```bash
-git add docs/superpowers/notes/capture-accumulate-experiment.md
-git commit -m "test: Capture-vs-accumulate experiment result
-
-Falsifier #2 from the attention-reduction spec, tested independently of
-the arm question."
-```
+- [ ] **Step 5: Commit**
 
 ---
 
-## What this plan deliberately does NOT cover
+### Task 5: Tier-1 toy-scale subgraph recipe
 
-Each becomes its own plan, written **after** Task 3 delivers verified signatures:
+Proves the mechanism that actually matters: an independent reference for a **graph fragment**, which is where construction bugs live.
 
-- **Plan 2 — `model_fuel/` vertical slice.** Load weights (F32-cast), build a lazy Llama forward, realize logits, greedy-sample one token, parity-test against the frozen `candlelight` path.
-- **Plan 3 — attention reduction**, gated on Task 4's result.
-- **Plan 4 — batched decode on the KV allocator** (`evict_blocks`/`evict_range`/`EvictReport`), the first end-to-end target.
-- **Plan 5 — upstreaming** to Fuel: stateful H2O accumulation, KIVI granularity control, relationship-aware compression, routing observability.
-- **Plan 6 — deletion**: `multi_gpu/`, Marlin FFI, `awq_qwen3.rs`, the frozen `model/`, `candlelight`, `mlmf`.
+**Files:** Extend `tests/kissref_differential.rs`.
 
-**Why the split:** Plans 2 and 4 require exact Fuel signatures that do not yet exist in verified form. Writing them now would mean inventing plausible names — the exact failure this project has corrected repeatedly. Task 3 exists to make them writable.
+**Interfaces:** Produces the pattern the attention block will follow in Phase 1.
+
+- [ ] **Step 1: Read the recipe API**
+
+`eval_recipe(FlatDag, inputs, params, indices)` returns per-node `DetClass`. Record the exact construction of a `FlatDag` from source or docs before writing.
+
+- [ ] **Step 2: Build the simplest multi-op fragment**
+
+**RMSNorm followed by a matmul** — two ops, one data dependency. Toy dimensions (hidden 64). Express as a kiss-ref recipe; compute the same fragment in Lightbulb; diff.
+
+This proves composition, which single-op differentials cannot.
+
+- [ ] **Step 3: Add numeric edge cases**
+
+Per kiss-ref's owner: graph-construction bugs and numeric-handling bugs surface on **different inputs**. Include a −0.0, a subnormal, and a large-magnitude row. (True bit-pattern pinning needs `ConstBits` from 0.2.0; approximate with constructible values for now and record the limitation.)
+
+- [ ] **Step 4: Run, fix, commit**
+
+- [ ] **Step 5: Report friction to `3vgwagtz`**
+
+They explicitly asked for where the recipe grammar fights the shape rather than a workaround. Report it even if everything works — a clean run is also signal.
+
+---
+
+## What Phase 0 deliberately does NOT cover
+
+Each becomes its own plan, written **after** Task 3 records verified signatures:
+
+- **Phase 1 — the attention-block recipe.** The interesting fragment: softmax-over-scores, causal mask (prefer the additive −inf form), KV gather (`Node::Gather` with an `IndexRef`; a computed index escalates `DetClass` to `OrderInvariantNondeterministic`, so tolerance-compare downstream).
+- **Phase 2 — falsifier #1**, the gating experiment: is the attention column-sum obtainable on the fused arm? Decides whether attention-driven eviction survives the port.
+- **Phase 3 — `model_fuel/` vertical slice**, capture-shaped from the first commit.
+- **Phase 4 — batched decode on the KV allocator.**
+- **Phase 5 — upstreaming** to Fuel: stateful H2O, KIVI granularity, relationship-aware compression, routing observability.
+- **Phase 6 — deletion**: `multi_gpu/`, Marlin FFI, `awq_qwen3.rs`, frozen `model/`, `candlelight`.
+- **Tier 3 goldens** — the Candle-captured regression net. Cheap once the library compiles (it does), but explicitly *not* independent, so it is not a Phase 0 gate.
