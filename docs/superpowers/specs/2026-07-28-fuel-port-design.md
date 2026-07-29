@@ -187,8 +187,20 @@ unless Lightbulb implements `ScalarFloat` for its own scalar types, which it sho
 to as a purely differential consumer.
 
 **The attention block is the fragment to build first** — softmax-over-scores, the causal
-mask, and the KV gather are where graph-construction bugs hide, and all three are
-expressible (softmax op, a select/where for the mask, gather for the KV).
+mask, and the KV gather are where graph-construction bugs hide. Design input from kiss-ref's
+owner:
+
+- **Causal mask** — two expressible forms: `Op::Select` over a comparison-built boolean, or a
+  precomputed **additive −inf mask** added before softmax. The additive form "usually
+  expresses cleaner in the recipe grammar and matches what most kernels actually do" — prefer
+  it.
+- **KV gather** — `Node::Gather` with an `IndexRef` along the sequence axis.
+- **DetClass trap, worth knowing before it bites**: a gather consuming a **non-`ExactByte`
+  index producer escalates the node to `OrderInvariantNondeterministic`.** So anything
+  downstream of a *computed* index must be tolerance-compared, never bit-compared. Bit-diffing
+  there would produce failures that look like port bugs and aren't.
+- **Expected friction, to report rather than work around**: broadcasting the mask across
+  heads, and whether the KV axis wants a gather or a strided view.
 
 **Numeric profile — load-bearing.** kiss-ref's float reductions use ascending-index order
 with the accumulator at **storage** precision. A real FP16/BF16 model on a GPU accumulates
