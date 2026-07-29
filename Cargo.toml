@@ -106,6 +106,21 @@
     # goes through candlelight's `VarBuilder::from_mmaped_safetensors`, the
     # pattern `load_awq_llama` already used. See src/loaders/mod.rs.
 
+    # Fuel — the ML framework Lightbulb is porting ONTO. Lives alongside
+    # candlelight during the port; candlelight is deleted once model_fuel/
+    # reaches parity (see docs/superpowers/specs/2026-07-28-fuel-port-design.md).
+    #
+    # MUST be the git dependency: `fuel-core` on crates.io is an UNRELATED
+    # project (the Fuel blockchain client, v0.48.x). `cargo add fuel-core`
+    # silently pulls the wrong crate.
+    # PATH deps to a local worktree during the port, deliberately: the git
+    # dependency works but re-clones a very large workspace into cargo's cache,
+    # and this tree is already on disk and tracks origin/main. Switch to the git
+    # form (`{ git = "https://github.com/ciresnave/fuel", package = "fuel-core" }`)
+    # before anything is published or built elsewhere.
+    fuel             = { path = "C:/Projects/fuel-lightbulb-port/fuel-core", package = "fuel-core" }
+    fuel-cpu-backend = { path = "C:/Projects/fuel-lightbulb-port/fuel-cpu-backend" }
+
 [[bin]]
 name = "lightbulb-cli"
 path = "src/bin/lightbulb-cli.rs"
