@@ -140,6 +140,35 @@ passes, which is what makes a rewrite of this size safe.
 > in-house test shares whatever bugs that implementation has. See
 > [The oracle](#the-oracle-three-tiers) for the replacement.
 
+### F32-at-load is load-bearing — do not trade it away for memory
+
+The port loads weights as **F32**, not BF16. That began as a workaround and is now supported
+by three independent reasons. Recorded together because the property is easy to lose and the
+cost of losing it is invisible.
+
+1. **It was originally forced.** Fuel's CPU backend had no `[F32, BF16, F32]` matmul kernel
+   (**[verified by execution 2026-07-28]** — a controlled pair: F32×BF16 failed, F32×cast(BF16→F32)
+   realized correct values).
+2. **It removes a confound from the oracle.** BF16 rounding would otherwise be mixed into
+   every Candle-vs-Fuel comparison, obscuring genuine divergence.
+3. **It keeps the goldens out of the promoted regime — by construction, not luck.**
+   **[verified 2026-07-29, `fuel-dispatch/src/optimize.rs:394`/`:471`]** Fuel now auto-inserts a
+   promoting cast when no native kernel serves a dtype key. That cast is **value-lossless but
+   *not* accumulation-preserving**: the promoted op accumulates in higher precision, so the
+   *same graph* can differ numerically by which arm ran (CPU upcast vs. a native mixed kernel,
+   and already CPU-vs-CUDA). Loading F32 keeps the key at `[F32, F32, F32]`, which is natively
+   supported, so **no fixup runs and tier-3 goldens are captured on a path the pass never
+   touches**.
+
+**Therefore: an argument for BF16-at-load on memory grounds carries a hidden cost.** It moves
+the goldens into the accumulation-differing path and makes the oracle's numerics depend on
+which backend and which kernel-coverage state happened to be present at capture time. If that
+trade is ever made, it must be made knowingly.
+
+Fuel tracks **C-5 forbiddability** (letting a determinism-constrained consumer refuse a
+promoting cast) and **C-4 accounting** (a BF16→F32 promotion doubles resident weight bytes) as
+roadmap follow-ups. Until C-5 lands, F32-at-load *is* our forbiddance mechanism.
+
 ### The oracle: three tiers
 
 D1's original single oracle (freeze the Candle path, diff against it) is replaced. Eric
@@ -314,7 +343,7 @@ this constraint from its first commit.
 | **Eager→lazy semantics** | The largest single risk, and it is ours, not a Fuel gap. The 70 extraction sites are where hidden host-side control flow lives. Step 4 exists to find them before they become silent correctness bugs. |
 | **D2 makes the KV allocator critical path** | **Substantially de-risked 2026-07-28**: Increment 2 part 1 landed at `cae56435` — refcount-aware partial evict with an honest `{freed, still_shared}` report, geometry-keyed `PoolCapacity` for C-1, and a born-red splice×evict hazard test. Part 2 (device-backed pools, materializing `block_table` for `Op::PagedAttn`) is next. Read `kv_block_pool.rs`'s module doc before designing cache policies onto it. Remaining exposure is part 2's timing, not the allocator's existence. |
 | **`fuel-inference` has zero consumers** | Unit-tested, never integrated. We will find the integration defects. Budget for it; report them upstream rather than forking. Confirmed by the diff: it is a policy layer standing on unbuilt Foundation mechanisms. |
-| **CPU is an F32-only world for weights** | **[verified 2026-07-28 by Fuel]** Mixed `[F32, BF16, F32]` matmul is a CUDA-only capability; the CPU backend registered only uniform `[T,T,T]`. Nothing states this — the `matmul` builder and `apply_linear`'s docstring imply it's valid and it fails at realize. **Consequence for D1**: the parity oracle casts weights to F32 at load. This is arguably *better* for parity anyway — it removes BF16 rounding as a confound when isolating genuine Candle-vs-Fuel divergence — so we take it regardless of whether general CPU mixed precision lands. |
+| **CPU is an F32-only world for weights** | **Superseded 2026-07-29** — Fuel's optimizer now inserts a promoting cast automatically (`insert_dtype_fixups`). See **F32-at-load is load-bearing** below; the decision stands for three independent reasons. |
 | **No runnable reference for the path we need** | `llama-lazy` exercises `lazy::LlamaModel::forward` (via a documented thin wrapper) with **no KV cache**, and never touches `Llama3Model` RoPE scaling, `InferenceContext`, `KvCache`, or `CapturedRun`. So the *decoder* has a smoke test; the *serving* path — KV cache, batched decode, capture-shaped replay — has **no runnable example at all**. That is the path this port needs, and we will be writing the first one. |
 | **`fuel-core` is being renamed under us** | Import paths will move. Don't hard-code deep paths; prefer re-exported surfaces and check before pinning. |
 | **Marlin performance parity is unproven** | Downgraded 2026-07-28. Fuel ships the *same* Marlin kernel natively (`marlin_gemm_f16`) plus a native AWQ path, so this is no longer "does a capability exist" but only "does it match on our shapes." Benchmark before deleting; no fallback path needs designing. |
