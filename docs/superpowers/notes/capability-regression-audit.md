@@ -155,6 +155,63 @@ case.
 
 ---
 
+## Audited 2026-07-29 (third pass) — and it corrects an earlier recommendation
+
+### KV compression — the public surface substantially overstates what is implemented
+
+**This is the most consequential finding in the audit, because it invalidates advice I gave
+Fuel.** My 13-module `fuel-inference` diff classified `kv_compression` as *"compose — adopt
+Fuel's traits, upstream our KIVI granularity control and relationship-aware strategy."* That
+verdict was read off the public surface. The implementations do not back it.
+
+**[verified] Low-rank compression does not compute a low-rank approximation.**
+`compute_low_rank` (`:1070`) says so in its own comment — *"we'll use random projection as a
+proxy. TODO: Replace with proper SVD when available in Candle"* — and returns
+`Tensor::randn(...)` for `U`, `Tensor::ones(...)` for `S`, and `Tensor::randn(...)` for `Vt`.
+**The input tensor is discarded.** It is not an approximation of anything; it is noise with the
+right shape.
+
+**[verified] KIVI's `PerGroup` granularity panics.** `todo!("Grouped quantization not yet
+implemented")` (`:446`). `PerHead` and `PerChannel` are real. **`PerGroup` is precisely the
+option that made our config look richer than Fuel's `bits`-only `KiviConfig`** — and it is the
+one I recommended upstreaming.
+
+**[verified] KIVI has a suspected correctness bug in the real path too.** `compute_scales`
+derives a symmetric scale (`abs().max / (2^bits − 1)`), so `tensor / scale` spans
+`[−max_val, +max_val]`. `quantize` then applies `clamp(0.0, max_val)` with
+`zero_points: None` (`:492`). On signed KV activations that **clamps every negative value to
+zero**, discarding half the range. Flagged as suspected rather than asserted — I have not
+traced every path — but the symmetric-scale/asymmetric-clamp mismatch is visible in the code.
+
+**[verified] Relationship-aware compression is scaffolding.** Its clustering is *"TODO:
+Implement more sophisticated clustering (DBSCAN, hierarchical)"* (`:772`) and its causal
+analysis *"TODO: Implement proper causal graph analysis"* (`:839`). Also
+*"TODO: Implement proper chaining of multiple compressors"* (`:145`), so composing strategies
+is unimplemented.
+
+**Consequences:**
+
+1. **The upstreaming offer is withdrawn** for KIVI granularity and relationship-aware. Offering
+   Fuel a `todo!()` and a TODO-scaffolded strategy would have been worse than offering nothing.
+   Corrected to Fuel directly.
+2. **`kv_compression.rs`'s 1,998 LOC vs Fuel's 742 is not depth — it is unfinished breadth.**
+   The size delta I cited as evidence of richer capability partly measures stubs.
+3. **No regression to record**: a capability that never worked cannot be lost. Low-rank and
+   `PerGroup` are *absences in both systems*, not port casualties.
+4. **SVD is absent from Fuel and from KISS's op vocabulary** (checked both). So if low-rank KV
+   compression is ever wanted for real, the decomposition has to come from somewhere — per the
+   placement rubric, an op vocabulary question for KISS and a numerics question for a backend,
+   not something Lightbulb should hand-roll again.
+
+**The method lesson, which generalises past this module.** The diff's stated limitation was
+*"this establishes capability differences, not behavioural ones."* That limitation is exactly
+what bit. A module can expose a rich, well-documented, plausibly-typed API and do nothing
+behind it — and reading the API cannot tell you which. **`grep -n "todo!\|unimplemented!"` over
+a module before claiming it as a capability is a five-second check that would have caught all
+of this**, and it is now the first thing to run on any module proposed for upstreaming.
+
+---
+
 ## NOT yet audited
 
 Listed so coverage is honest rather than implied:
@@ -162,8 +219,6 @@ Listed so coverage is honest rather than implied:
 - **Chunked prefill** at production shapes.
 - **Tiered storage's disk tier** — `DeviceKvPool` evict/restore is byte-exact, but whether an
   `Externalized` handle can back onto consumer-supplied disk storage is unconfirmed.
-- **KV compression** (KIVI, low-rank) as graph transforms — R-KV is covered by the attention gap;
-  the other two are unexamined.
 - **Structured output contracts** — believed host-side and tensor-free, unverified.
 - **Anything reaching past Candle's public API** the way attention observability reached into
   `probs`. That is the shape to look for, and it is not enumerable by reading module lists.
