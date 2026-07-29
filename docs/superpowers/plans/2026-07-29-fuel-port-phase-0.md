@@ -310,6 +310,55 @@ They explicitly asked for where the recipe grammar fights the shape rather than 
 
 ---
 
+## Phase 0: COMPLETE (2026-07-29)
+
+All five tasks done. Dead-debug realizes removed (verified no-op); Fuel worktree at
+`origin/main` generating tokens; API surface recorded with evidence markers; tier-2 and tier-1
+oracles green with corruption controls on both.
+
+**Plus, unplanned but higher-value:** falsifier #1 resolved end-to-end (four-way discussion,
+kernel prototype scoped), and a capability-regression audit completed — which caught a
+category error one decision away from deleting 1,767 lines of working tensor/pipeline
+parallelism.
+
+## References that did NOT exist when this plan was written
+
+Whoever starts Phase 1+ should begin from these rather than inventing shapes. All landed
+2026-07-29, after the plan.
+
+**Fuel — a parity-gated paged decode reference:**
+- `LlamaModel::forward_paged_step` (`fuel-core/src/lazy.rs:7450`)
+- `fuel-core/tests/paged_decode_parity.rs` — sessions' KV physically in `DeviceKvPool` blocks,
+  decoded via `Op::PagedAttn`, ε-close to the contiguous forward
+- `fuel-core/tests/paged_attn_oracle.rs`
+- **Caveats**: `Op::PagedAttn` is decode-only (Sq=1), so the test feeds every token one at a
+  time and leans on the one-at-a-time ≡ batched-prefill identity — **paged prefill remains
+  unreferenced**. Tiny deterministic weights, f32-only.
+- **Read `tests/`, not `examples/`** — Fuel's serving machinery is exercised by tests. This
+  plan's Task 3 said so; I still checked `examples/` and wrongly concluded no reference existed.
+
+**kiss-ref — canonical recipe fragments (R10–R14), the decoder-layer building blocks:**
+- **R10** RMSNorm · **R11** SwiGLU MLP · **R12** single-head causal SDPA · **R13** RoPE ·
+  **R14** pre-norm residual block
+- **Model on these rather than inventing DAG shapes.** R12 uses the additive −inf causal mask
+  (not `Select`+comparison) and pre-transposed Kᵀ. R13 builds `rotate_half` via `Node::Flip`
+  × a `[-1,1]` sign — **the sign placement is the called-out bug site**. R14's bug site is
+  threading the same `x` into both the norm and the residual add; mis-wiring silently drops
+  the skip connection **and still runs**.
+- `Node::ConstBits` (pathological bit patterns) ships in **0.2.0**, not 0.1.0 — git rev at or
+  after `721d03b` if needed sooner.
+
+**Two gate-zero probes, before claiming any module as a capability:**
+1. `grep -n "todo!\|unimplemented!"` — catches *declared*-unimplemented.
+2. Synthetic constructors (`Tensor::randn` etc.) outside `#[cfg(test)]` — catches
+   **silently**-unimplemented, the dangerous form: it type-checks, runs, and returns
+   plausibly-shaped output.
+
+Both approximate the real question: **does this function's output actually depend on its
+input?** A stub cannot fake that; a signature cannot show it.
+
+---
+
 ## What Phase 0 deliberately does NOT cover
 
 Each becomes its own plan, written **after** Task 3 records verified signatures:
