@@ -178,13 +178,17 @@ large-magnitude pre-softmax row. Graph-construction bugs and numeric-handling bu
 on *different* inputs, and toy scale makes it affordable to test both. kiss-ref's
 `Node::ConstBits(u64)` carries an exact bit pattern (sNaN payload, −0, subnormal, FP8 raw
 code) through a recipe verbatim. **[verified with owner 2026-07-29]** it is on kiss-ref
-`main` at `721d03b` but **not in the published 0.1.0** — it rides into a future 0.1.1. If
-tier 1 needs it before that release, pin a git rev at or after `721d03b` rather than the
-crates.io version.
+`main` at `721d03b` but **not in the published 0.1.0** — it ships in **0.2.0** (not 0.1.1;
+corrected by the owner). `ConstBits`, the new required `ScalarFloat::from_bits`, and a
+`ScalarFloat` seal are semver-breaking as a set. If tier 1 needs `ConstBits` before that
+release, pin a git rev at or after `721d03b`; otherwise wait for 0.2.0 on crates.io.
 
-Related API note: `ScalarFloat::from_bits` is now a **required** trait method. No impact
-unless Lightbulb implements `ScalarFloat` for its own scalar types, which it should not need
-to as a purely differential consumer.
+**The `ScalarFloat` seal is load-bearing for this oracle, not incidental.** It closes the
+trait to external implementations, which is what prevents kiss-ref from evaluating a
+*consumer's own* arithmetic and reflecting it back as agreement. Tiers 1 and 2 are only
+independent because of that property — an oracle a consumer can inject its own float
+semantics into is a mirror, not a reference. Zero impact on Lightbulb, which uses the
+built-in types.
 
 **The attention block is the fragment to build first** — softmax-over-scores, the causal
 mask, and the KV gather are where graph-construction bugs hide. Design input from kiss-ref's
