@@ -255,16 +255,45 @@ KV pool is Lightbulb's reason to exist, so the first thing proven is the thing t
 matters. **This makes Fuel's in-flight KV block-pool allocator a critical-path
 dependency** rather than a later adoption step — see Risks.
 
-### D3 — Multi-GPU placement goes to Fuel
+### D3 — ~~Multi-GPU placement goes to Fuel~~ **WITHDRAWN 2026-07-29 — category error**
 
-`multi_gpu/` (1,767 LOC of tensor parallelism, pipeline parallelism, distributed cache)
-is deleted rather than ported. Lightbulb supplies the device set as a C-5 constraint and
-Fuel's optimizer decides sharding and placement. Placement among equivalent
-implementations is squarely Fuel's under §15.
-
-Caveat: Fuel's multi-device coherence protocol is a placeholder today (`authority` and
-`version` fields exist in `inference_context.rs`, activated in Phase J). Single-device
-correctness lands first regardless; this decision governs what we *don't* rebuild.
+> **The original decision was wrong and would have silently deleted a capability.**
+> It said: delete `multi_gpu/` (1,767 LOC), supply the device set as a C-5 constraint, let
+> Fuel's optimizer decide "sharding and placement."
+>
+> **"Multi-GPU" conflates two different capabilities.** Fuel's multi-device story is **op
+> placement** — distributing *operations* across a supplied device set. Lightbulb's
+> `multi_gpu/` is **model sharding** — splitting a *single layer's weights* across GPUs.
+> The optimizer subsumes the first and has nothing to say about the second.
+>
+> **[verified]** Lightbulb's is unambiguously model sharding:
+> `tensor_parallel.rs` has `ShardingStrategy::{ColumnWise, RowWise, Hybrid}`,
+> `TensorShard { local_shard, device, rank, world_size }`, and
+> `TensorShard::all_reduce(&[Tensor])` (`:119`) called after a sharded matmul (`:336`) —
+> textbook Megatron-style tensor parallelism with a collective. `pipeline_parallel.rs`
+> (728 LOC) partitions *layers* across stages.
+>
+> **[verified by Fuel]** greps for `multi_gpu` / `tensor_parallel` / `data_parallel` across
+> `fuel-dispatch`, `fuel-core`, `fuel-graph` return **zero implementation hits**. What exists
+> is device *topology* — `topology.rs`'s `devices: Vec<DeviceLocation>`,
+> `plan.rs:1049` `distinct_devices`, `pipelined.rs` `sync_active_cuda_devices`.
+>
+> **Consequence**: deleting `multi_gpu/` would remove the ability to run a model larger than
+> one GPU. That is not a simplification; the capability has no counterpart on the other side.
+>
+> **Revised decision — DEFER.** `multi_gpu/` is **not** deleted and **not** in the port's
+> first pass. Single-device correctness lands first. What happens to it afterwards is a
+> genuine open question with at least three answers, and it is not Lightbulb's alone to pick:
+> port the sharding onto Fuel tensors as consumer code; propose model sharding as a Fuel
+> capability (it is arguably mechanism — "how to shard across a supplied device set" is in
+> §15's *Fuel* column); or keep it consumer-side permanently. Route through the same
+> four-way discussion as the attention gap.
+>
+> **How this was nearly missed**: the original decision was made from a module *name* and a
+> plausible-sounding principle ("placement is the optimizer's job"), without checking what the
+> module did or whether Fuel implemented the same thing. Fuel's seam owner caught it by
+> separating the two meanings. It is the sixth entry in the capability-regression audit and
+> the only one that was one decision away from destroying working code.
 
 ---
 
