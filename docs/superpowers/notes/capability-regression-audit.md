@@ -409,6 +409,36 @@ signature.
 
 ---
 
+## Probe zero — run before the stub probes
+
+Added after `fuel-parallel` was missed independently by two people.
+
+> **Before asserting a capability is absent, run a name-based sweep** — `ls */`, workspace
+> members, crate descriptions. A content grep answers *"does this text appear where I looked"*,
+> not *"does this exist."*
+
+It goes **ahead** of the two stub probes, because those test whether a *found* implementation
+is real and neither helps when it is never found.
+
+### The asymmetry that makes absence claims dangerous
+
+Fuel's seam owner's framing, and the best thing to come out of the audit's method work:
+
+**An absence claim carries a higher burden than a presence claim.** A presence claim is
+falsified by the next person who looks. **An absence claim stands unchallenged — nobody goes
+looking for something they have been told isn't there.** Ordinary work tests positives
+constantly and negatives never.
+
+Concretely here: *"Fuel has no sharding"* survived until Eric asked a direct question;
+*"the serving path has no runnable reference"* survived hours **after** the convention that
+disproved it had already been explained to me. Neither was caught by work.
+
+**Operational consequence: every `absent` verdict in this document should be re-tested before
+anything is deleted on its strength**, and a deletion decision should cite the *date and method*
+of the absence check, not just the verdict.
+
+---
+
 ## NOT yet audited
 
 Listed so coverage is honest rather than implied:
