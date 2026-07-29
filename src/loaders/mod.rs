@@ -81,28 +81,23 @@ pub fn load_local_llama(
 
     let dtype = parse_dtype(dtype)?;
 
-    // Use MLMF v0.2.0 for optimized loading with progress callback
-    let options = mlmf::LoadOptions {
-        device: device.clone(),
-        dtype,
-        use_mmap: true,
-        validate_cuda: false,
-        preserve_quantization: false,
-        progress: Some(mlmf::progress::default_progress()),
-        smart_mapping_oracle: None,
-    };
+    // Load weights through candlelight's own mmap VarBuilder — the same
+    // pattern `load_awq_llama` uses below.
+    //
+    // This replaced MLMF, which could never have worked here: MLMF (all
+    // published versions, including the v0.2.1 tag the old comment named as
+    // "compatible") depends on candle-core/candle-nn 0.9.2 *directly*, while
+    // candlelight is on 0.10.2. `loaded.var_builder` was therefore a
+    // different `VarBuilder` type than `Llama::load` accepts. MLMF also
+    // requires `protoc` at build time, which broke the build outright.
+    let vb = unsafe { VarBuilder::from_mmaped_safetensors(&files, dtype, &device)? };
 
-    let loaded = mlmf::loader::load_safetensors(model_dir, options)
-        .context("Failed to load model with MLMF")?;
-
-    //  TODO: Add architecture detection using TensorNameMapper
-    // For now, skip architecture detection to simplify MLMF integration
+    // TODO: Add architecture detection using TensorNameMapper
     let name_mapper = None;
 
     let cache =
         candlelight::transformers::models::llama::Cache::new(use_kv_cache, dtype, &cfg, &device)?;
 
-    let vb = loaded.var_builder;
     let model = Llama::load(vb, &cfg)?;
     Ok((model, cache, cfg, device, name_mapper))
 }
