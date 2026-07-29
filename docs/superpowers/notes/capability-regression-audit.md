@@ -239,25 +239,51 @@ It does. `DecodeModel::forward_with_kv_context_persistent(tokens, cache, ctx, se
 the cache in place. Chunked prefill is therefore repeated calls over successive slices — no new
 mechanism required.
 
-### Tiered storage's disk tier — expressible, but not through `Externalized`
+### Tiered storage's disk tier — **already largely built in Fuel**; corrected 2026-07-29
 
-**`Externalized` is the wrong hook and this is worth knowing before designing against it.**
-Its doc: *"In the pure core it carries the logical structure; the device-backed integration
-carries the block bytes keyed by the same handle."* The struct holds `fidelity`, `covers`,
-`filled_tokens`, `externalized_slots`, `resident_slots` — **no bytes and no backing-store
-reference.** There is no consumer-supplied-storage parameter, and asking for one would have
-been the wrong ask.
+**My first answer under-credited what exists, and Eric caught it.** I had said the disk tier
+was "expressible via `read_block`/`write_block`, consumer owns storage," which implied Fuel
+carried only byte-level primitives. It carries much more than that.
 
-**The actual mechanism is `read_block` / `write_block`** on `DeviceKvPool`:
-`read_block(layer, kind, phys) -> Result<Vec<f32>>` and
-`write_block(layer, kind, phys, data: &[f32])`. So the consumer reads a block's bytes, stores
-them wherever it likes (our `FileDiskStore`), and writes them back to restore. **Fuel moves
-bytes; the consumer owns the storage** — the clean §15 split, and better than a Fuel-side disk
-backend would have been.
+**`fuel-inference/src/tiered_storage.rs` is multi-tier storage with a disk tier**, and it is
+further along than the audit credited:
 
-**Caveat: f32-only today.** Both methods reject a non-F32 pool, with a byte/dtype-generic form
-tracked as follow-up for the CUDA bf16 pool. That constrains a disk tier to f32 pools for now —
-which our F32-at-load path already satisfies, for the fourth independent time.
+| Present in Fuel | |
+| --- | --- |
+| `Tier::{Gpu = 0, Cpu = 1, Disk = 2}` + `is_faster_than` | the full tier model, disk included |
+| `SegmentMeta { key, position_range, size_bytes, tier, access_count }` | placement tracking |
+| **`position_range` "preserved across tier moves for correct positional embedding re-injection"** | **the RoPE-phase requirement, designed in from the start** |
+| `TieredStore` with `gpu_budget`/`cpu_budget`, `gpu_used`/`cpu_used`/`disk_used` | per-tier byte budgets and accounting |
+| `register` / `demote` / `promote` / `remove` / `get` | lifecycle |
+| `candidates_for_demotion(tier, needed)` | demotion selection |
+| `touch` + `access_count` | LRU recency |
+| `TierTransfer { key, from, to, size_bytes, position_range }` | a descriptor of the move to execute |
+
+**What is genuinely absent is only the byte movement**, and it is *explicitly* delegated —
+`TierTransfer` is documented as *"Describes a tier transfer the caller must execute"*, with
+*"caller must store positions with the data."* The module header says it *"does not move actual
+tensors (that responsibility belongs to the caller / runtime)."*
+
+**So the missing piece is narrow and has two halves:**
+
+1. **Device side — exists.** `DeviceKvPool::read_block(layer, kind, phys) -> Vec<f32>` and
+   `write_block(layer, kind, phys, &[f32])` move blocks between the device pool and host.
+   **f32-only today**, with a byte/dtype-generic form tracked for the CUDA bf16 pool.
+2. **Disk side — absent in Fuel.** Nothing writes host bytes to a file and reads them back.
+   Lightbulb's `FileDiskStore` does exactly this.
+
+**Revised placement.** Byte movement to and from disk is *mechanism*, not policy — per the
+rubric it belongs in Fuel, completing what is already started there, rather than staying a
+consumer implementation. That makes Lightbulb's `tiered_storage.rs` overlap **larger** than the
+diff's "complementary" verdict implied: Fuel has model + budgets + policy + position
+preservation; we have those *plus* the I/O. What is distinctively ours narrows to the
+`FileDiskStore` backend and the `fact_key` link to the KnowledgeBase (`<RETRIEVE:key>`), which
+is genuinely consumer semantics.
+
+**Corollary — a positive one.** The position-preservation property I raised with the allocator
+session as a RoPE risk is *already* a stated invariant on both `SegmentMeta` and `TierTransfer`.
+Two independent designs converged on carrying position ranges through tier moves, which is
+decent evidence it is the right invariant rather than a Lightbulb quirk.
 
 ### Structured output contracts — no Fuel bearing, one pre-existing gap
 
