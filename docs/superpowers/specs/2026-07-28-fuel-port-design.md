@@ -127,11 +127,73 @@ passes, which is what makes a rewrite of this size safe.
 > whether a real root exists elsewhere with authoritative pins. Reconstructing pins by guess
 > is worse than not touching it.
 >
-> **Standing caveat until a build succeeds:** "the Candle path works" is itself an
-> unverified claim of exactly the class that failed repeatedly in this project. Task 1's
-> baseline run is the first real test of whether D1 is achievable at all, and it must
-> precede any `model_fuel/` work — a rewrite with no working oracle is a materially
-> different and riskier project than the one specified here.
+> **RESOLVED 2026-07-29 for the build; the oracle is re-specified below.** The library now
+> compiles (`8f17eff`). But **9 of 20 test targets do not**, and three of the four suites
+> named above as the parity gate are among them — `batched_transformer_correctness`,
+> `model_correctness`, `correctness_tests` — with genuine API drift (`forward()` gained a
+> `&mut [ParallelKvCache]` parameter they never pass, missing struct fields, unresolved
+> imports). Only `fused_rmsnorm_parity` survives. **The failures cluster on the model and
+> tensor layer — precisely the code this port replaces.**
+>
+> Repairing them was rejected: a test repaired until it compiles against today's API
+> re-derives its assertions from the implementation it is meant to validate, and an
+> in-house test shares whatever bugs that implementation has. See
+> [The oracle](#the-oracle-three-tiers) for the replacement.
+
+### The oracle: three tiers
+
+D1's original single oracle (freeze the Candle path, diff against it) is replaced. Eric
+directed the investigation toward `kiss-ref`; its owner session confirmed the shape.
+
+**What kiss-ref is** **[verified with its owner]**: a spec-exact reference implementation of
+the KISS base-op vocabulary (106 ops, 20 dtypes), deliberately naive, a differential
+**target** — never a verdict source. Public on crates.io as of 2026-07-29:
+`kiss-ref-core = "0.1.0"` as a dev-dependency. (`fuel-kiss-ref-backend`'s comment calling it
+private and git-pinned is now stale.)
+
+**What it is not**: a model-level oracle. No model builder by design — no llama, attention,
+RoPE, or KV-cache ops. And end-to-end at TinyLlama scale is **intractable**: scalar
+per-element dispatch, no SIMD, ~1.7e10 dispatched ops for one 2048³ matmul, giving
+**hours-to-a-day per token**.
+
+**The layer that matters, which this spec originally missed**: between single ops and whole
+models sits a **recipe** layer — `eval_recipe(FlatDag, inputs, params, indices)` evaluates a
+fused DAG of KISS ops exactly, returning a per-node `DetClass`. That is an exact independent
+reference for a *graph fragment*, which is the port's actual question: not "are the
+primitives right" (Fuel checks that already via kiss-ref and `fuel-correctness-fixtures`)
+but **"is my graph construction right."**
+
+| Tier | Validates | Independent? |
+| --- | --- | --- |
+| **1 — toy-scale full graph vs. a kiss-ref recipe** | graph construction / wiring | **Yes** — spec-derived; shares no bugs with Candle, Fuel, or Lightbulb |
+| **2 — per-op and per-subgraph differentials on real slices** | numerics at production dimensions | **Yes** |
+| **3 — Candle-captured golden vectors at model scale** | end-to-end behavioural parity | **No** — regression net only; label it so nobody later mistakes it for a verdict source |
+
+**Why tier 1 is tractable**: graph-construction correctness is **dimension-independent**, so
+a 2-layer / 64-hidden forward proves the wiring inside kiss-ref's performance envelope.
+Tier 2 covers production dimensions with small real slices.
+
+**Tier 1 inputs must include real numeric edge cases** — NaN, −0.0, subnormals, a
+large-magnitude pre-softmax row. Graph-construction bugs and numeric-handling bugs surface
+on *different* inputs, and toy scale makes it affordable to test both. kiss-ref is landing a
+`Node::ConstBits` leaf so a recipe can carry those exact bit patterns.
+
+**The attention block is the fragment to build first** — softmax-over-scores, the causal
+mask, and the KV gather are where graph-construction bugs hide, and all three are
+expressible (softmax op, a select/where for the mask, gather for the KV).
+
+**Numeric profile — load-bearing.** kiss-ref's float reductions use ascending-index order
+with the accumulator at **storage** precision. A real FP16/BF16 model on a GPU accumulates
+in f32, so narrow-lane reductions (softmax denominators, RMSNorm sums, matmul
+K-contractions) differ **structurally, not in ULPs** — 33% measured on an FP8 reduce.
+Therefore: **diff in f32**, or use the accumulator-parameterized
+`reference_reduce_acc` / `reference_matmul_acc`. This converges with the F32-at-load decision
+already forced by Fuel's missing `[F32, BF16, F32]` CPU matmul — the same choice is correct
+for two independent reasons. Honor the per-node `DetClass`: nondeterministic nodes (float
+sum reductions, matmul) are tolerance-compared, never bit-exact.
+
+**Standing rule**: kiss-ref is a differential target, not a verdict source. A disagreement
+means "one of us is wrong, determine which" — never "kiss-ref is right by definition."
 
 ### D2 — Batched decode is the first end-to-end target
 
