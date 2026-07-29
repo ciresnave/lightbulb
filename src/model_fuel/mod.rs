@@ -46,6 +46,8 @@
 //! A working model. This module currently proves only that Fuel is usable from
 //! inside Lightbulb alongside `candlelight`. Everything else is ahead.
 
+pub mod loader;
+
 /// Smoke check: build a two-tensor graph on Fuel and realize it, from inside
 /// Lightbulb's own crate.
 ///
