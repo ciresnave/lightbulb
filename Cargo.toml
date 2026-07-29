@@ -115,10 +115,11 @@ path = "src/bin/lightbulb-cli.rs"
 # used as the port's INDEPENDENT differential target (tiers 1 and 2 of the
 # oracle). Differential target, never a verdict source — a disagreement means
 # "determine which of us is wrong".
-# Note: ConstBits + ScalarFloat::from_bits + the ScalarFloat seal ship in 0.2.0;
-# pathological bit-pattern inputs need a git rev at/after 721d03b until then.
-kiss-ref-core  = "0.1.0"
-kiss-ops-vocab = "0.1.0"
+# 0.2.0 brings Node::ConstBits (exact bit patterns for tier-1 edge cases),
+# R10-R14 reference fragments, and the ScalarFloat seal — the property that
+# stops kiss-ref mirroring a consumer's own arithmetic back as agreement.
+kiss-ref-core  = "0.2.0"
+kiss-ops-vocab = "0.2.0"
 tempfile       = "3"
 tower          = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"

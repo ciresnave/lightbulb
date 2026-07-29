@@ -219,8 +219,10 @@ fn rmsnorm_recipe() -> FlatDag {
 /// bugs and numeric-handling bugs surface on *different* inputs, and toy scale
 /// makes it affordable to carry both.
 ///
-/// (True bit-pattern pinning wants `Node::ConstBits`, which ships in kiss-ref
-/// 0.2.0. These are the pathological values expressible without it.)
+/// (Inputs arrive via `Tensor::from_vec(Vec<f32>)` on both sides, so they are
+/// already bit-exact — `Node::ConstBits` matters for pathological *constant
+/// leaves inside* a DAG, which this recipe has none of. An earlier note here
+/// claimed ConstBits was needed for these inputs; that was wrong.)
 fn rmsnorm_probe_input() -> (Vec<f32>, usize, usize) {
     let rows = 2;
     let d = 8;
@@ -380,4 +382,65 @@ fn declared_ceilings_are_what_we_think() {
     // For the non-primitives the bound is derived from the atom they decompose
     // through, which is what the SiLU/sigmoid tests above actually use.
     assert_eq!(tolerance_via(Op::Exp), Tolerance::Ulp(4));
+}
+
+/// NaN as a **structural tracer**: which inputs influence which outputs?
+///
+/// This is the sharpest tier-1 test in the file, and it checks something the
+/// value comparison cannot. RMSNorm reduces over the feature axis *within a
+/// row*, so a NaN in row 0 must contaminate **exactly row 0's outputs** and
+/// leave row 1 untouched. If either implementation reduced over the wrong axis,
+/// or broadcast the reciprocal-RMS across the wrong dimension, the NaN would
+/// spread to a different set of positions — while ordinary finite inputs would
+/// still produce plausible-looking numbers that a tolerance check might pass.
+///
+/// A wrong-axis reduction is precisely the graph-construction bug tier 1 exists
+/// to catch, and NaN propagation makes it visible as a *pattern* rather than a
+/// magnitude.
+#[test]
+fn nan_contamination_pattern_matches_kiss_ref() -> anyhow::Result<()> {
+    use lightbulb::model::fused_rmsnorm::FusedRmsNorm;
+
+    let (mut x_data, rows, d) = rmsnorm_probe_input();
+    // One NaN, in row 0 only.
+    x_data[2] = f32::NAN;
+
+    let w_data: Vec<f32> = vec![1.0, 0.5, 2.0, -1.0, 0.25, 1.5, -0.5, 3.0];
+    let eps = 1e-5_f64;
+    let device = Device::Cpu;
+
+    let x = Tensor::from_vec(x_data.clone(), (rows, d), &device)?;
+    let w = Tensor::from_vec(w_data.clone(), d, &device)?;
+    let candidate = FusedRmsNorm::new_with_weight(w, eps)
+        .forward(&x)?
+        .flatten_all()?
+        .to_vec1::<f32>()?;
+
+    let dag = rmsnorm_recipe();
+    let kx = kiss_ref_core::Tensor::from_vec(x_data, &[rows, d])
+        .map_err(|e| anyhow::anyhow!("{e:?}"))?;
+    let kw = kiss_ref_core::Tensor::from_vec(w_data, &[d])
+        .map_err(|e| anyhow::anyhow!("{e:?}"))?;
+    let evaluated = eval_recipe::<f32>(&dag, &[kx, kw], &[eps as f32], &[])
+        .map_err(|e| anyhow::anyhow!("{e:?}"))?;
+    let reference = evaluated.outputs[0].as_slice();
+
+    let cand_nan: Vec<bool> = candidate.iter().map(|v| v.is_nan()).collect();
+    let ref_nan: Vec<bool> = reference.iter().map(|v| v.is_nan()).collect();
+
+    assert_eq!(
+        cand_nan, ref_nan,
+        "NaN contamination pattern differs — one side reduces or broadcasts over a          different axis.
+  lightbulb: {cand_nan:?}
+  kiss-ref:  {ref_nan:?}"
+    );
+
+    // And pin the expectation itself, so agreeing-but-both-wrong is caught:
+    // row 0 fully contaminated, row 1 entirely clean.
+    let expected: Vec<bool> = (0..rows * d).map(|i| i < d).collect();
+    assert_eq!(
+        cand_nan, expected,
+        "both implementations agree, but not with RMSNorm's semantics — a NaN in          row 0 must contaminate exactly row 0 (per-row feature reduction)"
+    );
+    Ok(())
 }
