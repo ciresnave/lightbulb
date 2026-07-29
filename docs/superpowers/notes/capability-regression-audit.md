@@ -339,6 +339,42 @@ absence-in-both-systems rule it is not the audit's business to fix.
 
 ---
 
+## Stub census — how much of Lightbulb is actually implemented?
+
+Run because `kv_compression`'s surface overstated its implementation badly enough to withdraw
+two upstreaming offers, and the obvious worry was that the same error sat in other verdicts.
+**It does not.**
+
+**Gate zero across all of `src/`**: exactly **one** `todo!()`/`unimplemented!()` — the known
+`QuantGranularity::PerGroup` in `kv_compression.rs:446`.
+
+**But gate zero is a weak probe, because the worst case wasn't one.** Low-rank compression is
+not a `todo!()`; it is a function that computes its input, discards it, and returns
+`Tensor::randn`. So the sharper probe is **synthetic data in a production path**:
+
+`Tensor::randn` outside `#[cfg(test)]` appears at five sites. Three are **false positives** —
+doc-comment examples in ```` ```ignore ```` blocks (`fused_kernels.rs:45/46`,
+`tensor_parallel.rs:50`). The remaining two are `kv_compression.rs:1092/1099`, the low-rank
+stub already recorded.
+
+**Result: `kv_compression` is the outlier, not the pattern.** `tensor_parallel::from_full_tensor`
+is real (bounds-checked, genuine sharding), which also matters for the decision that Lightbulb's
+multi-GPU code serves as *one possible guide* for Fuel's multi-device work — the guide is not
+scaffolding.
+
+**Two probes worth keeping**, since one alone would have missed the case that cost the most:
+
+1. `grep -n "todo!\|unimplemented!"` — catches declared-unimplemented.
+2. `Tensor::randn`/synthetic constructors outside `#[cfg(test)]` — catches
+   **silently-unimplemented**, which is the more dangerous form because it type-checks, runs,
+   and returns plausibly-shaped output.
+
+The second is domain-specific; the general form is *"does this function's output actually
+depend on its input?"* — which is what a stub cannot fake and a reader cannot see from a
+signature.
+
+---
+
 ## NOT yet audited
 
 Listed so coverage is honest rather than implied:
