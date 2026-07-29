@@ -112,19 +112,54 @@ becomes a graph construct — a better outcome than either "upstream our statefu
 
 Stated because the conjecture deserves its falsifiers:
 
-- **The attention matrix may not be materialized at all.** Under FlashAttention-style fused
-  kernels the `[q][k]` matrix is never written to memory. A column-sum of a tensor that
-  doesn't exist is not a reduction — it is a different kernel. This is the most likely
-  failure, and it would mean the reduction has to be produced *by* the attention kernel
-  rather than *from* its output.
+- **~~The attention matrix may not be materialized at all.~~ CONFIRMED, conditionally —
+  2026-07-29, and this is the important one.** **[verified by Fuel]**
+  `registry/flash_attn.rs:235` builds `scores = scale · (q · kᵀ)` as a real `MatMul` node
+  feeding `softmax(mask(alibi(softcap(·))))`. So the matrix **is** materialized on the
+  **decomposed** arm and **is not** on the **fused** arm (same file, `:31`, notes the tiled
+  form even produces different numerics).
+
+  **Consequence: observability is arm-dependent, which makes this partly a C-5 question,
+  not purely C-6.** The in-graph reduction works *today* on the decomposed arm — but
+  choosing it may silently cost the fused arm. That is a legitimate, *measurable* trade:
+  benchmark decomposed-plus-reduction against fused-without-observation and pick. C-5 makes
+  the choice explicit rather than accidental; C-4 makes it measurable. **Nothing blocks
+  trying it.**
+
+  The general rule, now in §15 v0.4: *before promising an in-graph reduction, check the
+  reduced value survives the arm the consumer wants to run on.*
+
+  **The second-output route is also less exotic than assumed.** `flash_attn` already carries
+  an optional **`softmax_lse`** in its input signature (`:67` — "takes 4 or 5 inputs (q, k,
+  v, [softmax_lse], [alibi])"). Auxiliary attention statistics are an *established* shape
+  for these kernels, so a column-sum alongside the output is a backend ask with precedent,
+  not an invention.
 - **Runtime-offset accumulate may not compose with capture.** If the write offsets vary per
   step in a way that forces a graph rebuild, the capture requirement is violated by the fix.
 - **Decay may need to be per-slot rather than uniform**, if slots age independently — that
   changes `inplace_affine` into something with a per-element scale vector.
 
-## Next step
+## Next step — revised 2026-07-29
 
-Validate against a running port, in this order: (1) confirm the attention matrix is
-materializable at all on Fuel's path; (2) express the H2O recurrence as graph nodes; (3)
-confirm `CapturedRun` still captures the step. If (1) fails, the fallback is §15 v0.3's
-preference #4 — state the incompatibility plainly so consumers choose deliberately.
+Falsifier #1 is answered, so the ordering changes. **Do not start with H2O.**
+
+**Experiment 1 (cheapest, decisive, no backend work).** Take the **decomposed** attention
+arm, add the column-sum, and check whether `CapturedRun` still captures the step. This tests
+falsifier #2 — runtime-offset accumulate vs. capture — *independently* of the arm question.
+If capture breaks on a runtime-offset accumulate, the arm question is moot and the whole
+route dies early and cheaply. One variable at a time. (Experiment design credit: Fuel's seam
+owner; it is better than the ordering this document originally proposed.)
+
+**Experiment 2.** Express the H2O recurrence as graph nodes. Confirm the
+`n_t = t − insertion_step[k]` collapse early — it is the difference between one fused update
+and two.
+
+**Experiment 3.** Benchmark decomposed-plus-reduction against fused-without-observation.
+This is the C-5 trade, and it is a measurement, not an argument.
+
+**Verified available** (so "plausibly zero new primitives" holds for the *accumulate* half):
+`Op::WriteSlice` at `fuel-ir/src/dispatch.rs:398`, and `registry/inplace_affine.rs`. The
+open question is entirely the **source** of `a_t` — i.e. the arm question.
+
+**Fallback** if all routes fail: §15's preference #4 — state the incompatibility plainly so
+consumers choose deliberately rather than discovering it late.
