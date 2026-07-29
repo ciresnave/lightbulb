@@ -86,18 +86,33 @@ and it routes work to Baracuda/Fuel rather than into Lightbulb, which is the int
 
 ---
 
-## Uncertain — flagged, not resolved
+## Resolved — was the near-miss
 
-### Multi-GPU placement
+### Multi-GPU — model sharding, NOT op placement
 
-The port hands `multi_gpu/` (1,767 LOC of tensor/pipeline parallelism + distributed cache) to
-Fuel's optimizer, supplying the device set as a C-5 constraint. But **Fuel's multi-device
-coherence protocol is a placeholder** — `inference_context.rs`'s `authority`/`version` fields
-exist and no protocol consults them; Phase J activates it.
+**The most dangerous entry in this audit**, because it was one decision away from deleting
+working code.
 
-Single-device correctness doesn't depend on this. **Multi-GPU capability does**, and until
-Phase J lands this is an unverified assumption rather than a verified equivalence. Worth
-checking before anything depends on it.
+The port originally said: delete `multi_gpu/` (1,767 LOC), hand placement to Fuel's optimizer.
+That conflated two capabilities. **Fuel's multi-device story is *op placement*** — distributing
+operations across a supplied device set. **Lightbulb's is *model sharding*** — splitting one
+layer's weights across GPUs.
+
+**[verified]** ours: `ShardingStrategy::{ColumnWise, RowWise, Hybrid}`, `TensorShard`,
+`TensorShard::all_reduce` after a sharded matmul, and 728 LOC partitioning layers across
+pipeline stages. **[verified by Fuel]** greps for `tensor_parallel`/`data_parallel` across
+`fuel-dispatch`/`fuel-core`/`fuel-graph`: **zero implementation hits.**
+
+**Resolution (Eric)**: multi-device belongs in **Fuel**, with our code as *one possible guide*
+and an explicit caution — establish each piece belongs before building it. Per-file placement
+is in the spec's D3.
+
+**Operative constraint: `multi_gpu/` stays un-deleted until the Fuel-side equivalent exists
+*and is verified*.** Deleting on the strength of a plan is the same error one step removed
+from deleting on the strength of a module name.
+
+**How it was caught**: reclassifying it from "resolved" to "uncertain". Had it stayed
+"resolved", the deletion would have proceeded on an assumption nobody had tested.
 
 ---
 
