@@ -281,13 +281,37 @@ dependency** rather than a later adoption step — see Risks.
 > **Consequence**: deleting `multi_gpu/` would remove the ability to run a model larger than
 > one GPU. That is not a simplification; the capability has no counterpart on the other side.
 >
-> **Revised decision — DEFER.** `multi_gpu/` is **not** deleted and **not** in the port's
-> first pass. Single-device correctness lands first. What happens to it afterwards is a
-> genuine open question with at least three answers, and it is not Lightbulb's alone to pick:
-> port the sharding onto Fuel tensors as consumer code; propose model sharding as a Fuel
-> capability (it is arguably mechanism — "how to shard across a supplied device set" is in
-> §15's *Fuel* column); or keep it consumer-side permanently. Route through the same
-> four-way discussion as the attention gap.
+> **RESOLVED 2026-07-29 (Eric's decision): multi-device functionality belongs in Fuel, not
+> Lightbulb** — with Lightbulb's code as *one possible guide*, and an explicit caution:
+> **establish that each piece belongs before building it.** This is not "port `multi_gpu/`
+> into Fuel"; it is "decide per piece, then build what belongs."
+>
+> **Placement per file**, via the ecosystem rubric Fuel derived (A.5.2) — mechanism you
+> couldn't replace without forking → Foundation; mechanism you could decline → the toolkit
+> crates; numerics/kernels → a backend; policy → the consumer:
+>
+> | Piece | Belongs |
+> | --- | --- |
+> | `ShardedLinear`, pipeline *split* | **Fuel Foundation** — splitting one matmul across devices is the same math executed differently, i.e. arm selection at device granularity |
+> | Pipeline micro-batch *schedule* | **Split** — bubble management is Fuel; it stops being mechanism the moment it decides *whose request* advances |
+> | Distributed KV | **Fuel** — extends the block-pool allocator's C-1/C-3 across devices |
+> | Collectives (`all_reduce`) | **A backend** (Baracuda for CUDA) |
+> | Device set, whether to shard, elasticity response | **Ours** — already C-5's "device set" constraint |
+> | `config.rs`, shard-vs-replicate strategy | **Ours regardless** — safe to keep and shape now |
+>
+> **Operative constraint on our side: keep `multi_gpu/` in place, un-deleted, until the
+> Fuel-side equivalent exists and is verified.** Deleting on the strength of a *plan* is the
+> same error one step removed from deleting on the strength of a module name.
+>
+> **How this was nearly missed**: the original decision came from a module *name* and a
+> plausible-sounding principle ("placement is the optimizer's job"), without checking what the
+> module did or whether Fuel implemented the same thing. Fuel's seam owner caught it by
+> separating the two meanings of "multi-GPU", then verified per file: `pipeline_parallel.rs`
+> (728 LOC, `PipelineScheduler`/`PipelineStage`/`PipelineStrategy`), `tensor_parallel.rs`
+> (403, `ShardedLinear`/`ShardingStrategy`/`TensorShard`), `distributed_cache.rs` (264, KV
+> sharded/replicated across GPUs) — **none subsumed by Fuel's op-placement machinery.** The
+> reclassification from "resolved" to "uncertain" is what caught it; had it stayed "resolved",
+> 1,767 lines would have gone on an assumption nobody had tested.
 >
 > **How this was nearly missed**: the original decision was made from a module *name* and a
 > plausible-sounding principle ("placement is the optimizer's job"), without checking what the
