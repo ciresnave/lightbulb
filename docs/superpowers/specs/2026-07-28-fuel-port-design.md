@@ -487,6 +487,25 @@ two codebases landing on nearly the same decomposition independently.
 
 ---
 
+## Filed elsewhere — exploratory, not this port
+
+**Plan-once prefill.** Fuel's decode achieves plan-once because nothing in the graph depends
+on `cached_len` (Phase D). Prefill re-optimises per call because `seq` varies per request.
+**Our fixed-size `model/chunked_prefill.rs` would make `seq` constant**, so one cached plan
+could serve every chunk and every request — giving chunked prefill a second justification
+beyond TTFT bounding, with no new machinery on our side.
+
+Filed to Fuel's roadmap (via `2eymo83p`) as exploratory rather than pursued here, because:
+the win is probably small per-request (prefill's compute dwarfs its optimize cost, unlike
+decode's) and only material at high request rates with short prompts; and it couples to
+Fuel's own documented full-capacity/mask tradeoff, where naive chunking would multiply the
+wasted masked work by chunk count. It likely wants Fuel's runtime-`k_len` flash arm first.
+
+**Named test before anyone builds it**: optimize-time as a fraction of prefill wall-clock
+across (prompt length × request rate).
+
+---
+
 ## Out of scope
 
 - Training. Lightbulb is an inference host; `fuel-training` is not in this port.
