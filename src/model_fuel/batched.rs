@@ -439,13 +439,35 @@ impl<'m> BatchedPagedDecoder<'m> {
             positions.push(p);
         }
         let seqs: Vec<(usize, usize)> = positions.iter().map(|&p| (p, 1usize)).collect();
-        let need = self.pool.core().blocks_required_batch(&seqs);
+        // Capacity, counted the way the step actually spends it. `append`
+        // allocates for a row that starts a new block; copy-on-write allocates
+        // for a row whose frontier block is SHARED, because the share has to be
+        // broken before the write. Missing the second term is not a rounding
+        // error — it lets the pre-check pass and then leaves the batch
+        // partially advanced when a mid-batch allocation fails, which wedges
+        // the sessions at inconsistent positions and is not retryable.
+        //
+        // This mirrors the accounting in Fuel's own `forward_paged_step_batched`,
+        // generalized to ragged slots: our rows are at different positions, so
+        // "starts a new block" is per row rather than shared across the batch.
+        let mut cow_splits = 0usize;
+        for (&(s, _), &pos) in batch.iter().zip(positions.iter()) {
+            if pos % block_size != 0 {
+                if let Some(frontier) = self.pool.core().resident_block(s, pos / block_size) {
+                    if self.pool.core().block_refcount(frontier) > 1 {
+                        cow_splits += 1;
+                    }
+                }
+            }
+        }
+        let need = self.pool.core().blocks_required_batch(&seqs) + cow_splits;
         let have = self.pool.core().free_blocks();
         if need > have {
             bail!(
                 "BatchedPagedDecoder::step: pool exhausted — this batch needs {need} more \
-                 block(s), {have} free. Nothing was appended; evict or close a session and \
-                 retry, or admit a smaller batch."
+                 block(s) ({cow_splits} of them to break shared frontier blocks), {have} free. \
+                 Nothing was appended; evict or close a session and retry, or admit a smaller \
+                 batch."
             );
         }
         for (i, &(s, _)) in batch.iter().enumerate() {
@@ -455,38 +477,56 @@ impl<'m> BatchedPagedDecoder<'m> {
                 .map_err(|e| anyhow::anyhow!("step: row {i} append failed after the capacity pre-check passed (this is a pool-accounting bug, not a capacity one): {e:?}"))?;
         }
 
-        // Where each row's new K/V lands.
+        // Where each row's new K/V lands — via Fuel's copy-on-write guard.
+        //
+        // `ensure_writable_block` is a CONTRACT, not an optimisation: its own
+        // doc says it "must be called after `append` and before writing the
+        // token — otherwise decoding a spliced session silently corrupts its
+        // co-sharers". If the frontier block is exclusive it returns it
+        // unchanged; if it is shared it breaks the share AND copies the block's
+        // bytes (all layers, K and V) into the fresh one, so the session keeps
+        // its shared-prefix content while its write stops mutating a block
+        // another session still references.
+        //
+        // This replaces a hand-rolled guard that compared `(phys, slot)` pairs
+        // across rows and bailed on a collision. That guard was blind to the
+        // real hazard: two sessions sharing a physical block at DIFFERENT fill
+        // levels have different slots, so it stayed silent while the write
+        // corrupted the co-sharer — measured at 0.0296 max abs error against an
+        // exclusive-cache replay, on a module whose parity bar is 1e-4. It was
+        // also blind for a lone session: sharing is a property of the block, not
+        // of co-batching, so a single session decoding into a spliced block
+        // corrupts its donor with no batch involved at all.
+        //
+        // Copying the bytes is the part a bare refcount check would have missed.
         let mut phys: Vec<PhysBlockId> = Vec::with_capacity(b);
         let mut slot: Vec<usize> = Vec::with_capacity(b);
         for (i, (&(s, _), &pos)) in batch.iter().zip(positions.iter()).enumerate() {
             let p = self
                 .pool
-                .core()
-                .resident_block(s, pos / block_size)
-                .with_context(|| format!("step: row {i}'s block is not resident after append"))?;
+                .ensure_writable_block(s, pos / block_size)
+                .map_err(|e| {
+                    anyhow::anyhow!("step: row {i}: making the frontier block writable: {e:?}")
+                })?;
             phys.push(p);
             slot.push(pos % block_size);
         }
-        // Two rows writing the same (block, slot) would race in one graph and one
-        // would be lost. It cannot happen for exclusive blocks, but CAN if the
-        // caller spliced a shared prefix into two sessions and both are still
-        // growing inside the shared partial block — `cow_break` exists for that
-        // and has no device-layer content copy, so this is a live hazard rather
-        // than a theoretical one.
-        for i in 0..b {
-            for j in (i + 1)..b {
-                if phys[i] == phys[j] && slot[i] == slot[j] {
-                    bail!(
-                        "BatchedPagedDecoder::step: rows {i} and {j} both write physical block \
-                         {} slot {} — two sessions share a partially-filled block. Break the \
-                         share (cow_break + a read_block/write_block content copy) before \
-                         decoding both in one batch.",
-                        phys[i],
-                        slot[i]
-                    );
-                }
-            }
-        }
+        // With every frontier block now exclusively owned, two rows cannot
+        // address the same (block, slot): distinct sessions hold distinct
+        // physical blocks. Kept as a debug assertion rather than a runtime bail
+        // because it is now an invariant of the loop above, not a caller error.
+        debug_assert!(
+            {
+                let mut pairs: Vec<(PhysBlockId, usize)> =
+                    phys.iter().copied().zip(slot.iter().copied()).collect();
+                pairs.sort_unstable();
+                let n = pairs.len();
+                pairs.dedup();
+                pairs.len() == n
+            },
+            "two rows target the same (phys, slot) after ensure_writable_block — \
+             copy-on-write did not make the frontier blocks exclusive: phys={phys:?} slot={slot:?}"
+        );
 
         let handles: Vec<SessionHandle> = batch.iter().map(|&(s, _)| s).collect();
         let pt = self
@@ -1537,6 +1577,141 @@ mod tests {
              1e-4 comparison is not sensitive to the input, so the parity above is \
              vacuous"
         );
+        Ok(())
+    }
+
+    /// **Regression test for the shared-frontier-block corruption.**
+    ///
+    /// This is the hazard the old hand-rolled `(phys, slot)` guard was blind to,
+    /// and which had ZERO coverage: deleting that guard entirely changed no test
+    /// result. Two sessions sharing a physical block at different fill levels
+    /// have different slots, so the pairwise comparison never fired while the
+    /// write corrupted the co-sharer.
+    ///
+    /// Three things are asserted, and the third is the one that matters most:
+    ///   1. copy-on-write fires — the writer's frontier block id CHANGES;
+    ///   2. the donor's bytes are untouched;
+    ///   3. the writer's NEW block carries a COPY of the shared prefix.
+    ///
+    /// (3) is what separates Fuel's `ensure_writable_block` from the "just check
+    /// `block_refcount > 1`" fix that suggests itself: a bare refcount check
+    /// detects the share but leaves the session pointing at a *blank* fresh
+    /// block, silently discarding the prefix it spliced in. Detecting is not
+    /// enough; the bytes have to move.
+    #[test]
+    fn a_spliced_session_cows_its_frontier_instead_of_corrupting_the_donor() -> Result<()> {
+        let cfg = toy_cfg(2);
+        let model = LlamaModel {
+            config: cfg.clone(),
+            weights: tiny_weights(&cfg, 9999),
+        };
+        let block_size = 4;
+        let mut dec = BatchedPagedDecoder::new(&model, 32, block_size)?;
+
+        // Donor: 6 tokens => block 0 full, block 1 holding 2.
+        let a = dec.open_session();
+        for t in 0..6u32 {
+            dec.step(&[(a, t % cfg.vocab_size as u32)])?;
+        }
+        assert_eq!(dec.position(a), Some(6));
+
+        // Sharer: splice the donor's two logical blocks in.
+        let b = dec.open_session();
+        dec.pool_mut()
+            .core_mut()
+            .splice(a, b, 0, 2)
+            .map_err(|e| anyhow::anyhow!("splice: {e:?}"))?;
+
+        let donor_frontier = dec
+            .pool()
+            .core()
+            .resident_block(b, 1)
+            .context("b's frontier block is not resident after the splice")?;
+        assert_eq!(
+            dec.pool().core().resident_block(a, 1),
+            Some(donor_frontier),
+            "the splice did not actually share logical block 1 — nothing below tests sharing"
+        );
+        let rc = dec.pool().core().block_refcount(donor_frontier);
+        assert!(
+            rc > 1,
+            "refcount of the frontier block is {rc}, so it is not shared and this test is vacuous"
+        );
+
+        // Everything the donor holds, before the sharer writes anything.
+        let n_layers = cfg.n_layers;
+        let donor_before: Vec<(Vec<f32>, Vec<f32>)> = (0..n_layers)
+            .map(|l| -> Result<(Vec<f32>, Vec<f32>)> {
+                Ok((
+                    dec.pool()
+                        .read_block(l, BlockKind::K, donor_frontier)
+                        .map_err(|e| anyhow::anyhow!("read K: {e:?}"))?,
+                    dec.pool()
+                        .read_block(l, BlockKind::V, donor_frontier)
+                        .map_err(|e| anyhow::anyhow!("read V: {e:?}"))?,
+                ))
+            })
+            .collect::<Result<_>>()?;
+
+        // The sharer decodes one token into what is currently a SHARED block.
+        dec.step(&[(b, 1u32)])?;
+
+        // 1. Copy-on-write fired.
+        let new_frontier = dec
+            .pool()
+            .core()
+            .resident_block(b, 1)
+            .context("b's frontier vanished")?;
+        assert_ne!(
+            new_frontier, donor_frontier,
+            "b decoded straight into the block it shares with a — copy-on-write did not fire, so \
+             this write lands in the donor's KV"
+        );
+
+        // 2. The donor is untouched, every layer, K and V.
+        for (l, (k_before, v_before)) in donor_before.iter().enumerate() {
+            let k_after = dec
+                .pool()
+                .read_block(l, BlockKind::K, donor_frontier)
+                .map_err(|e| anyhow::anyhow!("read K: {e:?}"))?;
+            let v_after = dec
+                .pool()
+                .read_block(l, BlockKind::V, donor_frontier)
+                .map_err(|e| anyhow::anyhow!("read V: {e:?}"))?;
+            assert_eq!(
+                *k_before, k_after,
+                "layer {l}: b's decode mutated the donor's K block — this is the silent \
+                 cross-session corruption, and it produces wrong logits rather than an error"
+            );
+            assert_eq!(*v_before, v_after, "layer {l}: b's decode mutated the donor's V block");
+        }
+
+        // 3. The prefix survived the break: slots 0..2 of the new block match
+        //    the donor's. Slot 2 is where b just wrote, so it is excluded.
+        let per_slot = cfg.n_kv_heads * cfg.head_dim;
+        let shared_prefix = 2 * per_slot;
+        for (l, (k_before, v_before)) in donor_before.iter().enumerate() {
+            let k_new = dec
+                .pool()
+                .read_block(l, BlockKind::K, new_frontier)
+                .map_err(|e| anyhow::anyhow!("read K: {e:?}"))?;
+            let v_new = dec
+                .pool()
+                .read_block(l, BlockKind::V, new_frontier)
+                .map_err(|e| anyhow::anyhow!("read V: {e:?}"))?;
+            assert_eq!(
+                k_before[..shared_prefix],
+                k_new[..shared_prefix],
+                "layer {l}: the copy-on-write block does NOT carry the spliced prefix's K — the \
+                 share was broken but the bytes were not copied, so b silently lost its prefix"
+            );
+            assert_eq!(
+                v_before[..shared_prefix],
+                v_new[..shared_prefix],
+                "layer {l}: the copy-on-write block does NOT carry the spliced prefix's V"
+            );
+        }
+
         Ok(())
     }
 
