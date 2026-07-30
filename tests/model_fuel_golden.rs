@@ -21,14 +21,19 @@
 //!
 //! ## Status of the fixture, stated plainly
 //!
-//! At the time this file was written the fixture at
-//! `tests/fixtures/model_fuel_golden/v1/tinyllama_f32_greedy.json`
-//! **had not yet been generated**. The machinery is complete and its controls
-//! pass; the golden run itself (`capture_golden_fixture`, `#[ignore]`) still
-//! needs to be executed in release against the 2.2 GB checkpoint. Nothing in
-//! this repository fabricates that file — an empty-but-correct mechanism is
-//! worth more than an invented fixture, because an invented fixture is a lie
-//! that passes.
+//! The fixture at `tests/fixtures/model_fuel_golden/v1/tinyllama_f32_greedy.json`
+//! **exists and is real captured output** — 3 cases, 22 steps, produced by
+//! running `capture_golden_fixture` in release against the 2.2 GB checkpoint
+//! through `load_llama_f32_from_dir`. Nothing in this repository fabricates it:
+//! an empty-but-correct mechanism would have been worth more than an invented
+//! fixture, because an invented fixture is a lie that passes.
+//!
+//! It has been exercised on its first real job: after Fuel advanced 14 commits
+//! (`be081d5d` → `c12ed655`, which landed the batched paged decode path),
+//! `golden_matches_fixture` and `golden_is_bit_exact` both passed — f32 decode
+//! was bit-identical across the bump. That is the shape of evidence this file
+//! is for, and it is worth noting it is also the *weak* claim: bit-identical
+//! means "did not move", never "is correct".
 //!
 //! Everything below that does **not** need the checkpoint runs in ordinary CI in
 //! milliseconds. That is deliberate: the expensive test is `#[ignore]`d, so the
@@ -186,7 +191,7 @@
 //!   provenance claim that tier 3 cannot make, so the types here are named
 //!   differently to keep the distinction visible.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -401,11 +406,26 @@ enum DriftKind {
     PromptMismatch,
     LogitsLenMismatch,
     ProbeIndexMismatch,
+    /// The fixture's set of case names is not the set this harness runs. A
+    /// fixture missing a case cannot describe this run, and — before this
+    /// existed — a *deleted* case was silently skipped by both golden tests,
+    /// removing its coverage with no failure and no message.
+    CaseSetMismatch,
     StepCountMismatch,
     TokenSequenceMismatch,
     TokenMismatch,
     TopValueOutOfTolerance,
     ProbeOutOfTolerance,
+    /// A NaN or infinity appeared (or vanished) somewhere in the logits.
+    ///
+    /// This is the only check that sees all 32,000 values. The probe set covers
+    /// 35 of them, so a NaN at an unprobed index moves no probe, and NaN never
+    /// wins a strict `>` argmax so it does not move L1 either. Without this,
+    /// such a change is caught by nothing except L3 — which is documented as
+    /// expected-to-fail off the capture machine, and so is not a portable signal.
+    NonFiniteCountMismatch,
+    /// A whole-vector aggregate (max, min, or sum) moved beyond tolerance.
+    StatsOutOfTolerance,
     DigestMismatch,
 }
 
@@ -417,12 +437,15 @@ impl DriftKind {
             | DriftKind::FormatVersionMismatch
             | DriftKind::PromptMismatch
             | DriftKind::LogitsLenMismatch
-            | DriftKind::ProbeIndexMismatch => DriftClass::FixtureInvalid,
+            | DriftKind::ProbeIndexMismatch
+            | DriftKind::CaseSetMismatch => DriftClass::FixtureInvalid,
             DriftKind::StepCountMismatch
             | DriftKind::TokenSequenceMismatch
             | DriftKind::TokenMismatch
             | DriftKind::TopValueOutOfTolerance
             | DriftKind::ProbeOutOfTolerance
+            | DriftKind::NonFiniteCountMismatch
+            | DriftKind::StatsOutOfTolerance
             | DriftKind::DigestMismatch => DriftClass::OutputChanged,
         }
     }
@@ -434,11 +457,15 @@ impl DriftKind {
             | DriftKind::FormatVersionMismatch
             | DriftKind::PromptMismatch
             | DriftKind::LogitsLenMismatch
-            | DriftKind::ProbeIndexMismatch => Layer::L0Provenance,
+            | DriftKind::ProbeIndexMismatch
+            | DriftKind::CaseSetMismatch => Layer::L0Provenance,
             DriftKind::StepCountMismatch
             | DriftKind::TokenSequenceMismatch
             | DriftKind::TokenMismatch => Layer::L1Tokens,
-            DriftKind::TopValueOutOfTolerance | DriftKind::ProbeOutOfTolerance => Layer::L2Probes,
+            DriftKind::TopValueOutOfTolerance
+            | DriftKind::ProbeOutOfTolerance
+            | DriftKind::NonFiniteCountMismatch
+            | DriftKind::StatsOutOfTolerance => Layer::L2Probes,
             DriftKind::DigestMismatch => Layer::L3Digest,
         }
     }
@@ -467,10 +494,25 @@ TRIAGE — read the layers together, they are not redundant:
                                             before assuming a bug: a near-tie flip and a real
                                             regression are different events with the same symptom.
   L1 same, L2 out of tolerance           -> numerics moved materially.
-  L1 same, L2 in tolerance, L3 differs   -> drift at or below tolerance; bit-level only. Expected on
-                                            different hardware or a different toolchain (libm exp).
+  L1 same, L2 in tolerance, L3 differs   -> USUALLY bit-level drift only, and expected on different
+                                            hardware or a different toolchain (libm exp). But read
+                                            the COVERAGE NOTE below before dismissing it: 'L2 in
+                                            tolerance' is not the same statement as 'nothing moved'.
   any L0                                 -> FIXTURE STALE / WRONG INPUTS, not a regression. The
-                                            fixture does not describe this run. Re-capture.";
+                                            fixture does not describe this run. Re-capture.
+
+COVERAGE NOTE — what L2 actually covers, so the row above is read correctly:
+  Per step, L2 compares 35 of the ~32,000 logits by value (top1, top2, and 33
+  stride-997 probes) PLUS four whole-vector aggregates derived from all of them
+  (non-finite count, max, min, and the sum against a worst-case band).
+  The aggregates are what make 'L2 in tolerance' meaningful rather than merely
+  'the 0.1% we sampled is in tolerance' — in particular a NaN anywhere is caught
+  by the non-finite count, and a whole-vector shift by the sum band.
+  What still slips through: a SMALL move in ONE unprobed logit that does not
+  displace the argmax, does not change max/min, and stays inside the sum band.
+  That is the residual gap; L3 is what sees it. So when L3 differs alone, prefer
+  'bit-level drift' as the explanation, but confirm via tiers 1/2 rather than
+  treating this row as proof.";
 
 fn render_drifts(drifts: &[GoldenDrift]) -> String {
     let mut by_layer: BTreeMap<&str, Vec<&GoldenDrift>> = BTreeMap::new();
@@ -774,6 +816,53 @@ fn compare_inputs(
 /// bit-exactness is only claimed for (same binary, same machine, same feature
 /// set); [`golden_is_bit_exact`] turns it on and names that scope in its own
 /// failure text.
+/// The fixture must describe **exactly** the case set this harness runs.
+///
+/// Both golden tests iterate `case_specs()` and look each name up in the
+/// fixture. Before this existed, a name that was missing hit a `continue` —
+/// so deleting a case from the JSON removed its coverage entirely while the
+/// suite stayed green. That was demonstrated, not theorised: dropping
+/// `longer_continuation` took 12 of 22 steps out of the check and still
+/// reported `16 passed; 0 failed`.
+///
+/// A missing case is classified `FixtureInvalid` rather than `OutputChanged`,
+/// because it says the fixture no longer describes this harness — the correct
+/// response is to re-capture, not to investigate a regression. An *extra* case
+/// is the same class for the same reason: the fixture was captured by a
+/// different version of this file.
+fn compare_case_set(fixture: &GoldenFile, specs: &[CaseSpec]) -> Vec<GoldenDrift> {
+    let mut d = Vec::new();
+    let want: BTreeSet<&str> = specs.iter().map(|s| s.name).collect();
+    let have: BTreeSet<&str> = fixture.cases.iter().map(|c| c.name.as_str()).collect();
+
+    let missing: Vec<&str> = want.difference(&have).copied().collect();
+    let extra: Vec<&str> = have.difference(&want).copied().collect();
+
+    if !missing.is_empty() {
+        d.push(GoldenDrift::new(
+            DriftKind::CaseSetMismatch,
+            "fixture case set",
+            format!(
+                "this harness runs {:?} but the fixture has no case(s) {:?}. Coverage for those \
+                 cases would be SILENTLY SKIPPED. Re-capture the fixture.",
+                want, missing
+            ),
+        ));
+    }
+    if !extra.is_empty() {
+        d.push(GoldenDrift::new(
+            DriftKind::CaseSetMismatch,
+            "fixture case set",
+            format!(
+                "the fixture carries case(s) {:?} that this harness no longer runs — it was \
+                 captured by a different version of case_specs(). Re-capture.",
+                extra
+            ),
+        ));
+    }
+    d
+}
+
 fn compare_case(
     tol: &ToleranceBlock,
     expected: &GoldenCase,
@@ -923,6 +1012,78 @@ fn compare_case(
                     ),
                 ));
             }
+        }
+
+        // ---- L2: whole-vector aggregates ----
+        //
+        // The probe set covers 35 of 32,000 values (0.109%). Everything above
+        // this point is blind to a change at an unprobed index. These three
+        // aggregates are derived from EVERY value, were already being captured
+        // into all 22 steps, and — until this block existed — were never read.
+        //
+        // `nonfinite_count` is the important one. `derive_step` skips non-finite
+        // values when folding max/min/sum and counts them here instead, so this
+        // is an exact NaN/Inf detector, and it is the only layer below L3 that
+        // can see one: a NaN moves no probe unless it lands on one, and it never
+        // wins a strict `>` argmax, so L1 and L2-probes both stay silent.
+        if e.stats.nonfinite_count != o.stats.nonfinite_count {
+            d.push(GoldenDrift::new(
+                DriftKind::NonFiniteCountMismatch,
+                at.clone(),
+                format!(
+                    "fixture recorded {} non-finite value(s) in this step's logits, this run has {}. \
+                     NaN/Inf is invisible to L1 (never wins argmax) and to L2 probes (35 of {} \
+                     indices), so this counter is the only thing below L3 that sees it.",
+                    e.stats.nonfinite_count, o.stats.nonfinite_count, e.logits_len
+                ),
+            ));
+        }
+
+        for (label, ev, ov) in [
+            ("stats.max", &e.stats.max, &o.stats.max),
+            ("stats.min", &e.stats.min, &o.stats.min),
+        ] {
+            if let Some((abs, rel)) = value_drift(ev, ov, tol) {
+                d.push(GoldenDrift::new(
+                    DriftKind::StatsOutOfTolerance,
+                    format!("{at} {label}"),
+                    format!(
+                        "fixture {} ({}), this run {} ({}); abs {:e} rel {:e} vs tol abs {:e} rel {:e}",
+                        ev.approx, ev.bits, ov.approx, ov.bits, abs, rel, tol.abs, tol.rel
+                    ),
+                ));
+            }
+        }
+
+        // The sum is compared against a WORST-CASE band, not the per-value
+        // tolerance: if every one of `logits_len` values drifted by the full
+        // per-value allowance, the sum moves by at most that much. Signs cancel
+        // in a logits vector, so a relative test against the sum itself would be
+        // unstable near zero — this bound is loose by construction and is here
+        // to catch gross whole-vector movement (a systematic shift, a scaled
+        // vector), not subtle drift. The probes and L3 cover the fine end.
+        let peak = e.stats.max.to_f32().abs().max(e.stats.min.to_f32().abs()) as f64;
+        let sum_band = (e.logits_len as f64) * (peak * tol.rel + tol.abs);
+        let sum_delta = (e.stats.sum_f64 - o.stats.sum_f64).abs();
+        if sum_delta > sum_band {
+            d.push(GoldenDrift::new(
+                DriftKind::StatsOutOfTolerance,
+                format!("{at} stats.sum_f64"),
+                format!(
+                    "fixture {:e}, this run {:e}; delta {:e} exceeds the worst-case band {:e} \
+                     (= logits_len {} * (peak {:e} * tol_rel {:e} + tol_abs {:e})). This band is \
+                     deliberately loose — exceeding it means the whole vector moved, not that one \
+                     value did.",
+                    e.stats.sum_f64,
+                    o.stats.sum_f64,
+                    sum_delta,
+                    sum_band,
+                    e.logits_len,
+                    peak,
+                    tol.rel,
+                    tol.abs
+                ),
+            ));
         }
 
         if strict_digest && e.logits_sha256 != o.logits_sha256 {
@@ -1204,6 +1365,197 @@ fn c2_probe_beyond_tolerance_is_caught() {
          nudged={nudged}. Got: {drifts:?}",
         tol.rel,
         tol.abs
+    );
+}
+
+/// **C9 — a NaN at an unprobed index is caught, and ONLY the non-finite
+/// counter catches it.**
+///
+/// This is the exact failure scenario the whole-vector aggregates exist for,
+/// executed rather than argued. The probe set covers 35 of 32,000 indices, so
+/// a NaN elsewhere moves no probe; NaN never wins a strict `>` argmax, so L1
+/// does not move either; and `derive_step` skips non-finite values when folding
+/// max/min, so those do not move.
+///
+/// The index is chosen so its original value is smaller than the sum band,
+/// which makes the sum blind to it too — leaving `nonfinite_count` as the sole
+/// detector. Both of those conditions are asserted, so the control cannot go
+/// vacuous if the constants change.
+#[test]
+fn c9_nonfinite_at_an_unprobed_index_is_caught_by_the_counter_alone() {
+    let f = synthetic_fixture();
+    let tol = &f.tolerance;
+    let base_logits = synthetic_logits(7); // case 0, step 0's seed
+    let step0 = &f.cases[0].steps[0];
+
+    // The sum band this comparison will use, recomputed exactly as compare_case does.
+    let peak = step0.stats.max.to_f32().abs().max(step0.stats.min.to_f32().abs()) as f64;
+    let sum_band = (step0.logits_len as f64) * (peak * tol.rel + tol.abs);
+
+    // An index that is not a probe, not top1, not top2, and whose value is
+    // small enough that dropping it from the sum stays inside the band.
+    let victim = (0..SYNTHETIC_VOCAB)
+        .find(|i| {
+            !step0.probe_indices.contains(i)
+                && *i != SYNTHETIC_TOP1_IDX
+                && *i != SYNTHETIC_TOP2_IDX
+                && (base_logits[*i].abs() as f64) < sum_band * 0.5
+        })
+        .expect("no unprobed index with a small enough value — control would be vacuous");
+
+    let mut corrupted = base_logits.clone();
+    corrupted[victim] = f32::NAN;
+    let observed_step = derive_step(0, &corrupted);
+
+    // Prove the blindness claims rather than asserting them in a comment.
+    assert_eq!(
+        observed_step.argmax_index, step0.argmax_index,
+        "L1 moved — the NaN displaced the argmax, so this control is not testing what it claims"
+    );
+    assert_eq!(
+        observed_step.probe_values.iter().map(|v| v.bits.as_str()).collect::<Vec<_>>(),
+        step0.probe_values.iter().map(|v| v.bits.as_str()).collect::<Vec<_>>(),
+        "a probe moved — the victim index was in the probe set after all"
+    );
+    assert_eq!(
+        observed_step.stats.max.bits, step0.stats.max.bits,
+        "max moved; derive_step is supposed to skip non-finite values"
+    );
+    assert_eq!(
+        observed_step.stats.min.bits, step0.stats.min.bits,
+        "min moved; derive_step is supposed to skip non-finite values"
+    );
+    assert!(
+        (step0.stats.sum_f64 - observed_step.stats.sum_f64).abs() <= sum_band,
+        "the sum band caught it too, so this control no longer isolates the counter"
+    );
+
+    let mut observed = f.cases[0].clone();
+    observed.steps[0] = observed_step;
+    let drifts = compare_case(tol, &f.cases[0], &observed, false);
+
+    assert!(
+        drifts
+            .iter()
+            .any(|d| d.kind == DriftKind::NonFiniteCountMismatch),
+        "a NaN at unprobed index {victim} was NOT caught. Every value-level layer is blind to it \
+         by construction, so without the non-finite counter this reaches CI green. Got: {drifts:?}"
+    );
+    // And nothing else fires — which is the point: no other check can see it.
+    assert!(
+        drifts
+            .iter()
+            .all(|d| d.kind == DriftKind::NonFiniteCountMismatch),
+        "expected the counter to be the ONLY detector; got {drifts:?}"
+    );
+}
+
+/// **C10 — a whole-vector shift below every value-level threshold is caught by
+/// the sum band.**
+///
+/// Nudges ~32,000 unprobed values by 1e-4 each: no probe moves, no top value
+/// moves, the argmax does not move, and max/min shift by less than tolerance —
+/// but the sum moves by thousands of times the band. This is the second thing
+/// the aggregates buy, and like C9 it asserts its own non-vacuity.
+#[test]
+fn c10_whole_vector_shift_is_caught_by_the_sum_band() {
+    let f = synthetic_fixture();
+    let tol = &f.tolerance;
+    let step0 = &f.cases[0].steps[0];
+    let base_logits = synthetic_logits(7);
+
+    const DELTA: f32 = 1e-4;
+    let mut shifted = base_logits.clone();
+    let mut touched = 0usize;
+    for (i, v) in shifted.iter_mut().enumerate() {
+        if step0.probe_indices.contains(&i) || i == SYNTHETIC_TOP1_IDX || i == SYNTHETIC_TOP2_IDX {
+            continue;
+        }
+        *v += DELTA;
+        touched += 1;
+    }
+    assert!(touched > 30_000, "expected to touch most of the vocab, touched {touched}");
+
+    let observed_step = derive_step(0, &shifted);
+    assert_eq!(
+        observed_step.argmax_index, step0.argmax_index,
+        "the shift displaced the argmax; the control is meant to be invisible to L1"
+    );
+    assert_eq!(
+        observed_step.probe_values.iter().map(|v| v.bits.as_str()).collect::<Vec<_>>(),
+        step0.probe_values.iter().map(|v| v.bits.as_str()).collect::<Vec<_>>(),
+        "a probe moved; the control is meant to be invisible to L2 probes"
+    );
+
+    let mut observed = f.cases[0].clone();
+    observed.steps[0] = observed_step;
+    let drifts = compare_case(tol, &f.cases[0], &observed, false);
+
+    assert!(
+        drifts.iter().any(|d| d.kind == DriftKind::StatsOutOfTolerance),
+        "{touched} values each moved by {DELTA} and NOTHING caught it. Got: {drifts:?}"
+    );
+}
+
+/// **C11 — a case deleted from the fixture is caught.**
+///
+/// The hole this closes was demonstrated, not hypothesised: with the old
+/// `continue`-on-missing behaviour, deleting `longer_continuation` removed 12
+/// of 22 steps from the comparison and the suite still reported
+/// `16 passed; 0 failed` with no message. The positive branch below is what
+/// keeps this control honest — it proves the matching set does NOT report drift,
+/// so the check is discriminating rather than always-firing.
+#[test]
+fn c11_a_deleted_or_extra_fixture_case_is_caught() {
+    let specs = case_specs();
+    assert!(specs.len() >= 2, "this control needs at least two cases to delete one");
+
+    let template = synthetic_fixture().cases[0].clone();
+    let build = |names: &[String]| -> GoldenFile {
+        let mut f = synthetic_fixture();
+        f.cases = names
+            .iter()
+            .map(|n| {
+                let mut c = template.clone();
+                c.name = n.clone();
+                c
+            })
+            .collect();
+        f
+    };
+
+    let all: Vec<String> = specs.iter().map(|s| s.name.to_string()).collect();
+
+    // Positive branch: the exact set must be clean, or every assertion below is
+    // satisfied by a check that simply always fires.
+    assert!(
+        compare_case_set(&build(&all), &specs).is_empty(),
+        "the matching case set reported drift — the check is not discriminating"
+    );
+
+    // Deleted.
+    let short: Vec<String> = all[1..].to_vec();
+    let drifts = compare_case_set(&build(&short), &specs);
+    assert!(
+        drifts.iter().any(|d| d.kind == DriftKind::CaseSetMismatch),
+        "deleting case {:?} was not caught — its coverage would vanish silently. Got: {drifts:?}",
+        all[0]
+    );
+    assert_eq!(
+        drifts[0].kind.class(),
+        DriftClass::FixtureInvalid,
+        "a missing case means the fixture does not describe this harness; re-capture is the \
+         correct response, not a regression hunt"
+    );
+
+    // Extra.
+    let mut long = all.clone();
+    long.push("a_case_this_harness_does_not_run".to_string());
+    assert!(
+        compare_case_set(&build(&long), &specs)
+            .iter()
+            .any(|d| d.kind == DriftKind::CaseSetMismatch),
+        "an extra fixture case was not caught"
     );
 }
 
@@ -1565,6 +1917,32 @@ fn committed_fixture_is_self_consistent_if_present() {
         f.provenance.loader
     );
     assert!(!f.cases.is_empty(), "the fixture has no cases");
+
+    // The case set, pinned. This is the CI-visible half of the deleted-case
+    // hole: `golden_matches_fixture` also checks it, but that test is
+    // `#[ignore]`d behind a 2.2 GB checkpoint, so without this assertion a
+    // dropped case would reach CI green and stay there. `!cases.is_empty()`
+    // above is not sufficient — deleting one case of three leaves it true.
+    let set_drifts = compare_case_set(&f, &case_specs());
+    assert!(
+        set_drifts.is_empty(),
+        "the committed fixture's case set does not match case_specs():\n{}",
+        render_drifts(&set_drifts)
+    );
+
+    // Real logits are finite. Asserting it here means the comparison in
+    // `compare_case` is checking against a fixture that is known-clean, rather
+    // than faithfully defending a recorded NaN forever.
+    for c in &f.cases {
+        for s in &c.steps {
+            assert_eq!(
+                s.stats.nonfinite_count, 0,
+                "case {:?} step {} recorded {} non-finite logit(s) AT CAPTURE — the fixture is \
+                 pinning a NaN/Inf as correct behaviour",
+                c.name, s.step, s.stats.nonfinite_count
+            );
+        }
+    }
 
     // C5 over every float actually stored.
     for c in &f.cases {
@@ -2252,15 +2630,34 @@ fn golden_matches_fixture() -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("tokenizer: {e}"))?;
     let loaded = load_llama_f32_from_dir(&dir)?;
 
+    // The fixture must cover exactly this harness's case set. Checked BEFORE
+    // any generation, both because it is instant and because a mismatched set
+    // means the expensive work below would be comparing an incomplete picture.
+    let specs = case_specs();
+    let set_drifts = compare_case_set(&fixture, &specs);
+    assert!(
+        set_drifts.is_empty(),
+        "FIXTURE CASE SET DOES NOT MATCH THIS HARNESS — this is NOT a regression:\n{}",
+        render_drifts(&set_drifts)
+    );
+
     let mut drifts = Vec::new();
-    for spec in case_specs() {
+    let mut compared = 0usize;
+    for spec in &specs {
         let Some(expected) = fixture.cases.iter().find(|c| c.name == spec.name) else {
-            eprintln!("fixture has no case {:?}; skipping", spec.name);
-            continue;
+            unreachable!("compare_case_set proved every spec has a case")
         };
-        let observed = capture_case(&loaded, &tok, &spec)?;
+        let observed = capture_case(&loaded, &tok, spec)?;
         drifts.extend(compare_case(&fixture.tolerance, expected, &observed, false));
+        compared += 1;
     }
+    // A golden check that compared nothing must never report success.
+    assert_eq!(
+        compared,
+        specs.len(),
+        "only {compared} of {} cases were compared",
+        specs.len()
+    );
 
     // C7 on this run's numbers, not just the captured ones.
     for v in margin_guard_violations(&fixture.tolerance, &fixture.cases) {
@@ -2298,18 +2695,34 @@ fn golden_is_bit_exact() -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("tokenizer: {e}"))?;
     let loaded = load_llama_f32_from_dir(&dir)?;
 
+    let specs = case_specs();
+    let set_drifts = compare_case_set(&fixture, &specs);
+    assert!(
+        set_drifts.is_empty(),
+        "FIXTURE CASE SET DOES NOT MATCH THIS HARNESS — this is NOT bit-level drift:\n{}",
+        render_drifts(&set_drifts)
+    );
+
     let mut drifts = Vec::new();
-    for spec in case_specs() {
+    let mut compared = 0usize;
+    for spec in &specs {
         let Some(expected) = fixture.cases.iter().find(|c| c.name == spec.name) else {
-            continue;
+            unreachable!("compare_case_set proved every spec has a case")
         };
-        let observed = capture_case(&loaded, &tok, &spec)?;
+        let observed = capture_case(&loaded, &tok, spec)?;
         drifts.extend(
             compare_case(&fixture.tolerance, expected, &observed, true)
                 .into_iter()
                 .filter(|d| d.kind == DriftKind::DigestMismatch),
         );
+        compared += 1;
     }
+    assert_eq!(
+        compared,
+        specs.len(),
+        "only {compared} of {} cases were compared",
+        specs.len()
+    );
 
     assert!(
         drifts.is_empty(),
