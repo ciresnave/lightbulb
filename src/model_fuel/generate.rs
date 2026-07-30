@@ -104,10 +104,30 @@ pub fn generate_greedy(
     .map_err(|e| anyhow::anyhow!("allocating KV cache: {e:?}"))?;
     let mut ctx = InferenceContext::new(device);
 
+    // `forward_with_kv_context_PERSISTENT`, not the plain variant — and this is
+    // rule 3 in practice, not a micro-optimisation.
+    //
+    // The plain `forward_with_kv_context` re-optimises the graph on EVERY token.
+    // The persistent one optimises ONCE: the first call builds and caches an
+    // `OptimizedGraph` plus stable NodeIds into `session`; each later token
+    // rewrites the per-token host bytes (token id, RoPE tables at the new
+    // position, the shifted mask boundary) into the held device Arcs and calls
+    // `realize_prebuilt_as_with_env`, which SKIPS optimize. The KV Arcs are bound
+    // once and mutate in place via `Op::WriteSlice`, and the data `Const`s persist
+    // across tokens rather than being re-emitted.
+    //
+    // Measured: 8.92s/token on the plain path vs ~3.55s/token for Fuel's own
+    // reference generate — a ~2.5x gap that was entirely per-token
+    // re-optimisation. Fuel documents the persistent path as byte-identical on
+    // the same prefix, so this is free.
+    //
+    // `session` is what makes it plan-once; it must live across the whole loop.
+    let mut session: Option<fuel::inference_context::DecodeSession> = None;
+
     // Prefill: the whole prompt in one forward.
     let mut logits = loaded
         .model
-        .forward_with_kv_context(prompt_tokens, &mut cache, &mut ctx)
+        .forward_with_kv_context_persistent(prompt_tokens, &mut cache, &mut ctx, &mut session)
         .map_err(|e| anyhow::anyhow!("prefill forward: {e:?}"))?;
 
     let mut generated = Vec::with_capacity(max_new);
@@ -121,7 +141,7 @@ pub fn generate_greedy(
         // Decode: one token, same cache and context, mutated in place.
         logits = loaded
             .model
-            .forward_with_kv_context(&[next], &mut cache, &mut ctx)
+            .forward_with_kv_context_persistent(&[next], &mut cache, &mut ctx, &mut session)
             .map_err(|e| anyhow::anyhow!("decode forward: {e:?}"))?;
     }
 
@@ -151,10 +171,24 @@ mod tests {
     ///
     /// `#[ignore]`: needs a 2.2 GB checkpoint and is slow on CPU.
     ///
-    /// **Run it in release.** A debug build measured **87.9s/token** here against
-    /// `llama-lazy`'s **3.55s/token** — a ~25× gap that is the build profile, not
-    /// Fuel. Numeric code is exactly where debug overhead is worst, so a debug
-    /// timing is not a performance signal and should not be quoted as one.
+    /// **Run it in release.** Measured progression on this machine, 6 tokens
+    /// from a 5-token prompt, CPU:
+    ///
+    /// | build | forward | s/token |
+    /// | --- | --- | --- |
+    /// | debug | plain | 87.9 |
+    /// | release | plain | 8.92 |
+    /// | release | **persistent** | **4.52** |
+    ///
+    /// The debug→release step is ~10× and is the build profile, not Fuel —
+    /// numeric code is where debug overhead is worst, so a debug timing is not a
+    /// performance signal. The plain→persistent step is a further ~2× and was a
+    /// real bug in this file: the plain forward re-optimises the graph every
+    /// token.
+    ///
+    /// Fuel's own `llama-lazy` reference measures ~3.55s/token over 8 tokens.
+    /// The remaining gap is largely prefill amortised over fewer tokens here, so
+    /// these are close rather than identical — not a claim of parity.
     ///
     /// Run: `cargo test --release --lib model_fuel -- --ignored --nocapture`
     #[test]
