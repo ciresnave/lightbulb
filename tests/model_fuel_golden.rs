@@ -2088,6 +2088,40 @@ use lightbulb::model_fuel::generate::generate_greedy;
 use lightbulb::model_fuel::loader::LoadedLlama;
 use lightbulb::model_fuel::loader_f32::load_llama_f32_from_dir;
 
+/// Load the f32 checkpoint and **verify the loader's consequence**, rather than
+/// trusting the name it recorded.
+///
+/// `provenance.loader` cannot fail on a real run: `build_provenance` writes the
+/// `REQUIRED_LOADER` constant and every call site compares against that same
+/// constant. Switch the capture to the bf16 loader and the fixture still claims
+/// `load_llama_f32_from_dir`, and every loader control passes (finding C-7).
+///
+/// This checks what that string is a proxy for. bf16 projections produce a
+/// matmul key of `[F32, BF16, F32]`, which no CPU kernel serves, so the
+/// optimizer inserts a promoting cast — value-lossless, but **not
+/// accumulation-preserving**. Numbers captured through it are not comparable
+/// with numbers captured without it, which is the entire reason the golden cares
+/// which loader ran.
+///
+/// A mixed set is rejected rather than sampled: "most projections are f32" is
+/// precisely the state this exists to catch.
+fn load_f32_verified(dir: &Path) -> anyhow::Result<LoadedLlama> {
+    let loaded = load_llama_f32_from_dir(dir)?;
+    match loaded.projection_dtype() {
+        Some(fuel::DType::F32) => Ok(loaded),
+        Some(other) => anyhow::bail!(
+            "the fixture claims the all-f32 path ({REQUIRED_LOADER}), but the projection weights \
+             materialized at {other:?}. A bf16 projection routes through a promoting cast that is \
+             not accumulation-preserving, so nothing captured here is comparable with the fixture."
+        ),
+        None => anyhow::bail!(
+            "projection weights have MIXED dtypes. Part of the model would route through the \
+             promoting-cast path and part would not, so the capture is not on a single numeric \
+             path and no tolerance derived from it means anything."
+        ),
+    }
+}
+
 /// Drive `forward_with_kv_context_persistent` with the **identical call shape**
 /// to `src/model_fuel/generate.rs`, capturing the per-step logits that
 /// `generate_greedy` throws away.
@@ -2470,7 +2504,7 @@ fn determinism_probe() -> anyhow::Result<()> {
         .to_vec();
 
     eprintln!("loading all-f32 weights (~4.4 GB) ...");
-    let loaded = load_llama_f32_from_dir(&dir)?;
+    let loaded = load_f32_verified(&dir)?;
 
     let (a, ta) = capture_logits(&loaded, &ids, 4, Some(2))?;
     let (b, tb) = capture_logits(&loaded, &ids, 4, Some(2))?;
@@ -2582,7 +2616,7 @@ fn capture_golden_fixture() -> anyhow::Result<()> {
 
     eprintln!("loading all-f32 weights (~4.4 GB) from {} ...", dir.display());
     let t0 = std::time::Instant::now();
-    let loaded = load_llama_f32_from_dir(&dir)?;
+    let loaded = load_f32_verified(&dir)?;
     eprintln!("loaded in {:.1?}", t0.elapsed());
 
     let mut cases = Vec::new();
@@ -2690,7 +2724,7 @@ fn golden_matches_fixture() -> anyhow::Result<()> {
 
     let tok = tokenizers::Tokenizer::from_file(dir.join("tokenizer.json"))
         .map_err(|e| anyhow::anyhow!("tokenizer: {e}"))?;
-    let loaded = load_llama_f32_from_dir(&dir)?;
+    let loaded = load_f32_verified(&dir)?;
 
     // The fixture must cover exactly this harness's case set. Checked BEFORE
     // any generation, both because it is instant and because a mismatched set
@@ -2755,7 +2789,7 @@ fn golden_is_bit_exact() -> anyhow::Result<()> {
 
     let tok = tokenizers::Tokenizer::from_file(dir.join("tokenizer.json"))
         .map_err(|e| anyhow::anyhow!("tokenizer: {e}"))?;
-    let loaded = load_llama_f32_from_dir(&dir)?;
+    let loaded = load_f32_verified(&dir)?;
 
     let specs = case_specs();
     let set_drifts = compare_case_set(&fixture, &specs);
@@ -2826,7 +2860,7 @@ fn c8_cache_capacity_does_not_leak_into_values() -> anyhow::Result<()> {
         .get_ids()
         .to_vec();
 
-    let loaded = load_llama_f32_from_dir(&dir)?;
+    let loaded = load_f32_verified(&dir)?;
 
     let n = 4usize;
     let (small_logits, small_tokens) = capture_logits(&loaded, &ids, n, Some(2))?;
@@ -2885,7 +2919,7 @@ fn harness_argmax_agrees_with_generate_greedy() -> anyhow::Result<()> {
         .get_ids()
         .to_vec();
 
-    let loaded = load_llama_f32_from_dir(&dir)?;
+    let loaded = load_f32_verified(&dir)?;
     let (logits, harness_tokens) = capture_logits(&loaded, &ids, 4, Some(2))?;
     let impl_tokens = generate_greedy(&loaded, &ids, 4, Some(2))?;
 

@@ -43,6 +43,53 @@ pub struct LoadedLlama {
     pub config: fuel::lazy::LlamaConfig,
 }
 
+impl LoadedLlama {
+    /// The dtype every projection weight was materialized at, or `None` when
+    /// they disagree.
+    ///
+    /// # Why this exists
+    ///
+    /// The tier-3 golden records `provenance.loader` to pin that a fixture was
+    /// captured on the all-f32 path — rule 2, and not pedantry: bf16
+    /// projections give a matmul key of `[F32, BF16, F32]`, which no CPU kernel
+    /// serves, so the optimizer inserts a promoting cast that is value-lossless
+    /// but **not accumulation-preserving**. Numbers captured through it are not
+    /// comparable with numbers captured without it.
+    ///
+    /// That check could not fail. `build_provenance` writes the `REQUIRED_LOADER`
+    /// constant and every call site compares against the same constant, so it is
+    /// constant-versus-constant: switch the capture to the bf16 loader and the
+    /// fixture still claims f32. This method makes the loader's **consequence**
+    /// observable, so the golden can assert what the weights actually are rather
+    /// than what a string says they should be.
+    ///
+    /// Returns `None` on a mixed set rather than picking a representative,
+    /// because "some projections are bf16" is exactly the state the check exists
+    /// to catch, and a representative sample could miss it — the same
+    /// passing-sample-is-not-a-passing-class trap this project keeps meeting.
+    pub fn projection_dtype(&self) -> Option<fuel::DType> {
+        let w: &LlamaWeights = &self.model.weights;
+        let mut dt = w.output.dtype();
+        for layer in &w.layers {
+            for s in [
+                &layer.attn_q,
+                &layer.attn_k,
+                &layer.attn_v,
+                &layer.attn_o,
+                &layer.ffn_gate,
+                &layer.ffn_up,
+                &layer.ffn_down,
+            ] {
+                if s.dtype() != dt {
+                    return None;
+                }
+                dt = s.dtype();
+            }
+        }
+        Some(dt)
+    }
+}
+
 /// Load a Llama-shape checkpoint from a local directory containing
 /// `config.json` and `model.safetensors`.
 ///
