@@ -821,15 +821,31 @@ impl SpanBlockMap {
         let mut impacts = Vec::with_capacity(plan.victim_spans.len());
         for &span_id in &plan.victim_spans {
             let Some(span) = registry.get(span_id) else { continue };
+            // **Start from what the span still holds, not from what it once
+            // held.** A span is evicted over as many rounds as the scheduler
+            // needs; recomputing from `start_pos..end_pos` every time re-adds
+            // every range an earlier round already freed. Evict block 0 then
+            // block 1 of a [0,32) span at bs=8 and the second call would report
+            // [0,8) ∪ [16,32) — resurrecting [0,8), which round one detached.
+            // Lightbulb would then believe tokens are resident that Fuel has
+            // already handed back to the free list.
             let full = span.start_pos..span.end_pos;
-            let remaining = subtract_ranges(full.clone(), &cuts);
+            let base: Vec<Range<usize>> = match &span.state {
+                SpanState::Active => vec![full.clone()],
+                SpanState::PartiallyEvicted { remaining_ranges } => remaining_ranges.clone(),
+                SpanState::FullyEvicted => Vec::new(),
+            };
+            let remaining: Vec<Range<usize>> =
+                base.iter().flat_map(|p| subtract_ranges(p.clone(), &cuts)).collect();
 
             let (state, impact) = if remaining.is_empty() {
                 (SpanState::FullyEvicted, EvictionImpact::FullyEvicted)
-            } else if remaining.len() == 1 && remaining[0] == full {
-                // Nothing of this span was actually detached — e.g. every block
-                // it owned came back in `still_shared`.
-                (SpanState::Active, EvictionImpact::Unchanged)
+            } else if remaining == base {
+                // Nothing of this span was detached THIS round — e.g. every
+                // block it owned came back in `still_shared`. Preserve the
+                // existing state: forcing `Active` here would resurrect an
+                // earlier round's evictions, which is the same bug one level up.
+                (span.state.clone(), EvictionImpact::Unchanged)
             } else {
                 (
                     SpanState::PartiallyEvicted { remaining_ranges: remaining.clone() },
@@ -1790,6 +1806,74 @@ mod tests {
             reg.get(1).unwrap().state,
             SpanState::PartiallyEvicted { remaining_ranges: vec![0..4, 8..12] }
         );
+    }
+
+    /// **B-2.** Eviction runs over as many rounds as the scheduler needs, so
+    /// `apply_report` has to *fold* onto prior state rather than recompute from
+    /// the span's original extent.
+    ///
+    /// It used to take `start_pos..end_pos` and subtract only the current
+    /// report's cuts, discarding everything earlier rounds had already taken.
+    /// Two rounds on one span therefore resurrected the first round's losses —
+    /// the span was reported as holding tokens Fuel had already returned to the
+    /// free list, so Lightbulb would skip re-prefilling them and decode against
+    /// KV that is no longer there.
+    ///
+    /// On the pre-fix code the round-2 assertion fails with `[0..4, 8..12]` —
+    /// `0..4` back from the dead.
+    #[test]
+    fn apply_report_folds_across_eviction_rounds() {
+        let bs = 4;
+        let g = geom(16, bs);
+        let map = SpanBlockMap::new(g);
+        let mut p = pool(16, bs);
+        let s = p.open();
+        p.append(s, 12).unwrap(); // blocks 0,1,2 → tokens 0..12
+
+        let mut reg = SpanRegistry::new();
+        reg.register(CacheSpan::new(1, 0, 0, 12, CacheTag::UserInput, None)).unwrap();
+
+        // Round 1 — block 0 (tokens 0..4).
+        let plan1 =
+            EvictionPlan { blocks: vec![0], victim_spans: vec![1], protected_tail: Some(2) };
+        let r1 = p.evict_blocks(s, &plan1.blocks).unwrap();
+        assert_eq!(r1.freed, vec![0], "setup: block 0 must actually be freed");
+        let o1 = map.apply_report(&mut reg, &plan1, &r1);
+        assert_eq!(
+            o1.impacts,
+            vec![(1, EvictionImpact::PartiallyEvicted { remaining: vec![4..12] })]
+        );
+
+        // Round 2 — block 1 (tokens 4..8). Only 8..12 can still be live.
+        let plan2 =
+            EvictionPlan { blocks: vec![1], victim_spans: vec![1], protected_tail: Some(2) };
+        let r2 = p.evict_blocks(s, &plan2.blocks).unwrap();
+        assert_eq!(r2.freed, vec![1], "setup: block 1 must actually be freed");
+        let o2 = map.apply_report(&mut reg, &plan2, &r2);
+        assert_eq!(
+            o2.impacts,
+            vec![(1, EvictionImpact::PartiallyEvicted { remaining: vec![8..12] })],
+            "round 2 must fold onto round 1's survivors — tokens 0..4 were freed in \
+             round 1 and must not reappear"
+        );
+        assert_eq!(
+            reg.get(1).unwrap().state,
+            SpanState::PartiallyEvicted { remaining_ranges: vec![8..12] }
+        );
+
+        // Round 3 — the last block. Now the span really is gone.
+        let plan3 = EvictionPlan { blocks: vec![2], victim_spans: vec![1], protected_tail: None };
+        let r3 = p.evict_blocks(s, &plan3.blocks).unwrap();
+        assert_eq!(r3.freed, vec![2], "setup: block 2 must actually be freed");
+        let o3 = map.apply_report(&mut reg, &plan3, &r3);
+        assert_eq!(o3.impacts, vec![(1, EvictionImpact::FullyEvicted)]);
+        assert_eq!(reg.get(1).unwrap().state, SpanState::FullyEvicted);
+
+        // Replaying a report is a no-op, not a resurrection — the scheduler may
+        // retry, and a duplicate delivery must not revive a dead span.
+        let o4 = map.apply_report(&mut reg, &plan3, &r3);
+        assert_eq!(o4.impacts, vec![(1, EvictionImpact::FullyEvicted)]);
+        assert_eq!(reg.get(1).unwrap().state, SpanState::FullyEvicted);
     }
 
     #[test]
