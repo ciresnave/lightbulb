@@ -157,15 +157,37 @@
 //! block-table extents *first* — rule 3(a) below, with a working precedent in
 //! the same file.
 //!
-//! One consequence for the *next* measurement. A context-length sweep looked
-//! unusable on the paged arm on the theory that planning and execution both
-//! scale with `L`. That is too strong: within a single block the shape is
-//! constant, so planning should be roughly `L`-invariant and only step at block
-//! boundaries, while attention execution grows smoothly with KV length. An
-//! `L`-sweep confined to one block-size window may therefore separate them
-//! after all — smooth component execution, step component planning. Untested
-//! reasoning, recorded so it gets checked rather than assumed in either
-//! direction.
+//! **The next measurement, and its scope fixed in advance.** Within one block
+//! window the paged graph is not merely shape-stable but *structure*-stable —
+//! same nodes, same ops, with `context_lens` carrying length as data rather than
+//! shape — so planning should be near-flat in `L`, stepping only at boundaries.
+//! Attention execution meanwhile grows with KV span. Writing
+//! `step(L) = P + a·L + b`, where `a·L` is attention over the KV span and `b` is
+//! the `L`-invariant remainder (FFN, projections, embed, logits, norms):
+//!
+//! An `L`-sweep recovers the **slope `a`** and the **intercept `P + b`**. It
+//! **cannot split that intercept** — planning and `L`-invariant execution are
+//! both constant in `L` and so perfectly confounded by this method. At this
+//! module's geometry the confound is not marginal but dominant: `L` runs 8→13,
+//! and attention over ~13 KV entries is a rounding error against a full
+//! TinyLlama FFN and four projections per layer, so `b ≫ a·L` and the intercept
+//! is nearly all `b`.
+//!
+//! The tempting repair is to take `b` from the contiguous arm, where `P` and `E`
+//! *are* separately observable, and subtract. **Refuse it.** That imports an
+//! unmeasured cross-arm assumption — that paged and contiguous share
+//! `L`-invariant execution cost — which is the same move that produced the
+//! circular 0.95 s/row result above. It may well be true; it would not be
+//! measured.
+//!
+//! So: an `L`-sweep is worth running to *confirm the mechanism* (planning flat,
+//! execution growing — corroborating fresh-graph-per-call independently of the
+//! warm-up ratios) and to get `a` cleanly. It is **not** a route to the absolute
+//! plan/execute split. The better measurement is the **boundary step**: step
+//! height at a block crossing gives the marginal planning cost of one additional
+//! block *directly*, as a difference between two measurements at nearly equal
+//! `L` — no intercept, no decomposition, no cross-arm assumption. If only one
+//! thing gets run, run that.
 //!
 //! **Read this as a property of *this* paged path, not of paging.** The
 //! contiguous arm holds a plan-once `DecodeSession`; the paged arm has none and
