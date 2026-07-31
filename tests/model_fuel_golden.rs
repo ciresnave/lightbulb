@@ -2105,6 +2105,26 @@ use lightbulb::model_fuel::loader_f32::load_llama_f32_from_dir;
 ///
 /// A mixed set is rejected rather than sampled: "most projections are f32" is
 /// precisely the state this exists to catch.
+/// The checkpoint directory, or a loud failure.
+///
+/// **C-11.** All six model tests used to open with
+/// `let Some(dir) = tinyllama_dir() else { eprintln!("skipping…"); return Ok(()) }`,
+/// and an early `return Ok(())` from a `#[test]` is a **pass**. So on a machine
+/// without the snapshot, `cargo test --release -- --ignored` reported
+/// **"6 passed"** having executed zero model code — and the skip reason went to
+/// stderr, which libtest captures by default. A green that means "we ran
+/// nothing" is worse than a red, because nobody investigates a green.
+///
+/// These are `#[ignore]`d, so they run only when asked for by name. Asking for
+/// them without the checkpoint present is a broken invocation, not a routine
+/// skip, and it should say so.
+fn require_tinyllama() -> PathBuf {
+    tinyllama_dir().expect(
+        "no TinyLlama snapshot. These tests verify the model; without the checkpoint there is \
+         nothing to verify, so they fail rather than reporting a green that ran no model code.",
+    )
+}
+
 /// Serialises the model-loading tests so the suite cannot exhaust memory.
 ///
 /// Every `#[ignore]`d test here loads the checkpoint as **f32 — about 4.1 GB**
@@ -2531,10 +2551,7 @@ fn bless_reason_or_refuse(exists: bool) -> Result<String, String> {
 #[test]
 #[ignore = "needs the TinyLlama checkpoint; loads ~4.4 GB f32 and runs two generations"]
 fn determinism_probe() -> anyhow::Result<()> {
-    let Some(dir) = tinyllama_dir() else {
-        eprintln!("skipping: no TinyLlama snapshot");
-        return Ok(());
-    };
+    let dir = require_tinyllama();
     let tok = tokenizers::Tokenizer::from_file(dir.join("tokenizer.json"))
         .map_err(|e| anyhow::anyhow!("tokenizer: {e}"))?;
     let ids: Vec<u32> = tok
@@ -2573,6 +2590,16 @@ fn determinism_probe() -> anyhow::Result<()> {
 
     eprintln!("SAME-PROCESS: bit_identical={bit_identical} max_abs={max_abs:e} max_rel={max_rel:e}");
 
+    // Same-process check FIRST, so it is asserted even when the cross-process
+    // half below has to bail as incomplete.
+    assert!(
+        bit_identical,
+        "same-process runs are NOT bit-identical (max_abs {max_abs:e}, max_rel {max_rel:e}). \
+         State is leaking across sessions, or a kernel is not deterministic. Do not proceed to a \
+         bit-exact golden layer; use max_rel as measured_run_to_run_max_rel_delta in the tolerance \
+         derivation."
+    );
+
     let digests: Vec<String> = a.iter().map(|l| logits_digest(l)).collect();
     let probe_file = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("target")
@@ -2597,20 +2624,20 @@ fn determinism_probe() -> anyhow::Result<()> {
     } else {
         fs::create_dir_all(probe_file.parent().unwrap())?;
         fs::write(&probe_file, serde_json::to_string_pretty(&digests)?)?;
-        eprintln!(
-            "CROSS-PROCESS: baseline written to {}. RUN THIS TEST AGAIN to complete the probe — \
-             one run only measures within a process.",
+        // **C-11.** This run measured only the SAME-process half. Reporting `ok`
+        // here would claim a gate that did not run, and an exit status cannot
+        // distinguish "cross-process verified" from "cross-process not
+        // attempted" — which is exactly what L3 bit-exactness leans on. Fail, so
+        // the difference is visible; running again completes it.
+        anyhow::bail!(
+            "CROSS-PROCESS baseline WRITTEN to {} — the cross-process half of this probe has NOT \
+             run. One execution only measures determinism WITHIN a process; the claim L3 depends \
+             on is that a SECOND process reproduces the same digests. Run this test again to \
+             complete the gate. This failure is the first run's correct outcome, not a defect.",
             probe_file.display()
         );
     }
 
-    assert!(
-        bit_identical,
-        "same-process runs are NOT bit-identical (max_abs {max_abs:e}, max_rel {max_rel:e}). \
-         State is leaking across sessions, or a kernel is not deterministic. Do not proceed to a \
-         bit-exact golden layer; use max_rel as measured_run_to_run_max_rel_delta in the tolerance \
-         derivation."
-    );
     Ok(())
 }
 
@@ -2623,10 +2650,7 @@ fn determinism_probe() -> anyhow::Result<()> {
 #[test]
 #[ignore = "needs the TinyLlama checkpoint; ~4.5 s/token in release, ~6 generations"]
 fn capture_golden_fixture() -> anyhow::Result<()> {
-    let Some(dir) = tinyllama_dir() else {
-        eprintln!("skipping: no TinyLlama snapshot");
-        return Ok(());
-    };
+    let dir = require_tinyllama();
 
     assert!(
         !cfg!(debug_assertions),
@@ -2727,10 +2751,7 @@ fn capture_golden_fixture() -> anyhow::Result<()> {
 #[test]
 #[ignore = "needs the TinyLlama checkpoint; ~4.5 s/token in release"]
 fn golden_matches_fixture() -> anyhow::Result<()> {
-    let Some(dir) = tinyllama_dir() else {
-        eprintln!("skipping: no TinyLlama snapshot");
-        return Ok(());
-    };
+    let dir = require_tinyllama();
     let path = fixture_path();
     assert!(
         path.is_file(),
@@ -2819,10 +2840,7 @@ fn golden_matches_fixture() -> anyhow::Result<()> {
 #[test]
 #[ignore = "needs the checkpoint; bit-exactness only holds on the capture machine"]
 fn golden_is_bit_exact() -> anyhow::Result<()> {
-    let Some(dir) = tinyllama_dir() else {
-        eprintln!("skipping: no TinyLlama snapshot");
-        return Ok(());
-    };
+    let dir = require_tinyllama();
     let path = fixture_path();
     assert!(path.is_file(), "no golden fixture at {}", path.display());
     let fixture: GoldenFile = serde_json::from_str(&fs::read_to_string(&path)?)?;
@@ -2888,10 +2906,7 @@ fn golden_is_bit_exact() -> anyhow::Result<()> {
 #[test]
 #[ignore = "needs the TinyLlama checkpoint; two generations in release"]
 fn c8_cache_capacity_does_not_leak_into_values() -> anyhow::Result<()> {
-    let Some(dir) = tinyllama_dir() else {
-        eprintln!("skipping: no TinyLlama snapshot");
-        return Ok(());
-    };
+    let dir = require_tinyllama();
     let tok = tokenizers::Tokenizer::from_file(dir.join("tokenizer.json"))
         .map_err(|e| anyhow::anyhow!("tokenizer: {e}"))?;
     let ids: Vec<u32> = tok
@@ -2917,24 +2932,113 @@ fn c8_cache_capacity_does_not_leak_into_values() -> anyhow::Result<()> {
         ids.len() + n + 4
     );
 
-    let a = &small_logits[0];
-    let b = &big_logits[0];
-    assert_eq!(a.len(), b.len());
-    let differing = a
-        .iter()
-        .zip(b)
-        .filter(|(x, y)| x.to_bits() != y.to_bits())
-        .count();
-    assert_eq!(
-        differing, 0,
-        "{differing} of {} step-0 logits differ bit-for-bit between cache capacities {} and {}. \
-         Prefill reads no cache beyond what it writes, so capacity must not reach the values.",
-        a.len(),
-        ids.len() + n + 1,
-        ids.len() + n + 4
+    // **C-8.** This used to bit-compare `small_logits[0]` against
+    // `big_logits[0]` only — and step 0 is PREFILL, which (as the old failure
+    // message itself said) "reads no cache beyond what it writes". That is the
+    // one step where a mask or WriteSlice boundary bug *cannot* manifest. The
+    // decode steps, where it can, were compared only through the argmax token
+    // above — which this file elsewhere calls "nearly blind", since a token is
+    // one number out of a 32000-wide distribution and only changes when the
+    // ordering flips.
+    //
+    // Every shared step is now compared bit-for-bit.
+    let steps = small_logits.len().min(big_logits.len());
+    assert!(
+        steps >= 2,
+        "only {steps} shared step(s) captured — this control must compare at least one DECODE \
+         step, or it degenerates back into the prefill-only check that could not fail"
     );
 
-    eprintln!("cache-capacity invariance OK: {k} tokens and step-0 logits bit-identical");
+    let mut total_differing = 0usize;
+    let mut first_bad: Option<(usize, usize)> = None;
+    for step in 0..steps {
+        let a = &small_logits[step];
+        let b = &big_logits[step];
+        assert_eq!(a.len(), b.len(), "step {step}: logit width differs between capacities");
+        let d = a.iter().zip(b).filter(|(x, y)| x.to_bits() != y.to_bits()).count();
+        if d > 0 && first_bad.is_none() {
+            first_bad = Some((step, d));
+        }
+        total_differing += d;
+    }
+    assert_eq!(
+        total_differing,
+        0,
+        "cache CAPACITY reached the values: {total_differing} logit(s) differ bit-for-bit across \
+         {steps} shared step(s) between capacities {} and {} (first at step {:?}). Only the \
+         allocation size changed, so the mask or the WriteSlice offset depends on capacity — and a \
+         golden, which captures one capacity, would freeze that bug in place.",
+        ids.len() + n + 1,
+        ids.len() + n + 4,
+        first_bad
+    );
+
+    eprintln!(
+        "cache-capacity invariance OK: {k} tokens and ALL {steps} shared steps bit-identical \
+         ({} logits compared)",
+        steps * small_logits[0].len()
+    );
+    Ok(())
+}
+
+/// **C10 — the forward returns the LAST position's logits, not an earlier one.**
+///
+/// The runtime check inside `capture_case` asserts `l.len() == vocab_size`. That
+/// establishes the forward returned *one position's worth* of logits; it says
+/// nothing about WHICH position. A forward returning position 0 — or any fixed
+/// earlier position — passes it identically, and every number derived downstream
+/// would then be computed from the wrong row of the output.
+///
+/// This separates the two with two prefills that share a prefix. `logits(ids)`
+/// and `logits(ids[..n-1])` see identical tokens at every position `0..=n-2`, so
+/// if the forward returns some position `j <= n-2` the two results are
+/// **bit-identical**. They can differ only if the full-prompt call returned
+/// position `n-1` — the last one. A width assertion cannot make that distinction
+/// at all; this one fails loudly on exactly the bug it names.
+#[test]
+#[ignore = "needs the TinyLlama checkpoint; two prefills in release"]
+fn c10_forward_returns_the_last_position_not_an_earlier_one() -> anyhow::Result<()> {
+    let dir = require_tinyllama();
+    let tok = tokenizers::Tokenizer::from_file(dir.join("tokenizer.json"))
+        .map_err(|e| anyhow::anyhow!("tokenizer: {e}"))?;
+    let ids: Vec<u32> = tok
+        .encode("The capital of France is", true)
+        .map_err(|e| anyhow::anyhow!("encode: {e}"))?
+        .get_ids()
+        .to_vec();
+    assert!(
+        ids.len() >= 3,
+        "need at least 3 prompt tokens for the shared-prefix argument to bite, got {}",
+        ids.len()
+    );
+
+    let loaded = load_f32_verified(&dir)?;
+
+    // Step 0 of each capture is the prefill of the whole prompt it was handed.
+    let (full, _) = capture_logits(&loaded, &ids, 1, None)?;
+    let (short, _) = capture_logits(&loaded, &ids[..ids.len() - 1], 1, None)?;
+
+    let a = &full[0];
+    let b = &short[0];
+    assert_eq!(a.len(), b.len(), "logit widths differ — the two prefills are not comparable");
+
+    let identical = a.iter().zip(b).all(|(x, y)| x.to_bits() == y.to_bits());
+    assert!(
+        !identical,
+        "prefilling {} tokens and {} tokens produced BIT-IDENTICAL logits. Those prompts agree at \
+         every position 0..={}, so this is precisely what a forward returning a fixed EARLIER \
+         position looks like — and `assert_eq!(len, vocab_size)` cannot tell that apart from \
+         correct last-position behaviour.",
+        ids.len(),
+        ids.len() - 1,
+        ids.len() - 2
+    );
+
+    eprintln!(
+        "C10 OK: last-position slice confirmed — {}-token and {}-token prefills differ",
+        ids.len(),
+        ids.len() - 1
+    );
     Ok(())
 }
 
@@ -2947,10 +3051,7 @@ fn c8_cache_capacity_does_not_leak_into_values() -> anyhow::Result<()> {
 #[test]
 #[ignore = "needs the TinyLlama checkpoint"]
 fn harness_argmax_agrees_with_generate_greedy() -> anyhow::Result<()> {
-    let Some(dir) = tinyllama_dir() else {
-        eprintln!("skipping: no TinyLlama snapshot");
-        return Ok(());
-    };
+    let dir = require_tinyllama();
     let tok = tokenizers::Tokenizer::from_file(dir.join("tokenizer.json"))
         .map_err(|e| anyhow::anyhow!("tokenizer: {e}"))?;
     let ids: Vec<u32> = tok
