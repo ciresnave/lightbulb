@@ -1124,16 +1124,44 @@ impl BlockTierMover {
         // 3. Persist FREED blocks only. `still_shared` blocks were never
         //    detached: they are still resident, still being written by the
         //    sharer, and a stale disk copy would clobber it on promote.
-        let mut keys = Vec::with_capacity(report.freed.len());
+        //
+        // **Everything below runs over an already-detached session, so nothing
+        // here may use `?`.** `evict_blocks` has returned the blocks to the free
+        // list and `report.handle` is the *only* thing that can bring them back.
+        // Propagating an error would drop the handle with the rest of `report`,
+        // leaving the KV unrecoverable: blocks gone, bytes possibly not on disk,
+        // and no second handle anywhere. Failures therefore roll the eviction
+        // back instead of escaping over it.
+        let mut keys: Vec<(usize, String)> = Vec::with_capacity(report.freed.len());
+        let mut failure: Option<PolicyError> = None;
         for &logical in &report.freed {
             let Some(data) = payloads.get(&logical) else {
-                return Err(PolicyError::Invariant(format!(
+                failure = Some(PolicyError::Invariant(format!(
                     "Fuel freed block {logical} but no payload was captured for it"
                 )));
+                break;
             };
             let key = self.key_for(logical);
-            store.store(&key, &f32s_to_le_bytes(data)).map_err(PolicyError::Store)?;
-            keys.push((logical, key));
+            match store.store(&key, &f32s_to_le_bytes(data)) {
+                Ok(()) => keys.push((logical, key)),
+                Err(e) => {
+                    failure = Some(PolicyError::Store(e));
+                    break;
+                }
+            }
+        }
+
+        if let Some(cause) = failure {
+            return Err(self.roll_back_demotion(
+                plane,
+                store,
+                s,
+                report.handle,
+                &report.freed,
+                &payloads,
+                &keys,
+                cause,
+            ));
         }
 
         Ok(DemotionTicket {
@@ -1142,6 +1170,73 @@ impl BlockTierMover {
             still_shared: report.still_shared,
             keys,
         })
+    }
+
+    /// Undo a demotion that failed after the detach: put the blocks back and
+    /// rewrite their bytes from the **in-memory** payloads captured in step 1.
+    ///
+    /// Deliberately not from disk — an unreliable store is the usual reason to
+    /// be here, so its copy is exactly what cannot be trusted. Any partial disk
+    /// state is dropped first so a retry cannot find a half-written key.
+    ///
+    /// Returns the error the caller should see: the original cause when the
+    /// rollback succeeded, or a compound error naming both failures when it did
+    /// not — because at that point the KV really is gone, and reporting only
+    /// "store failed" would describe a recoverable situation that no longer
+    /// exists.
+    #[allow(clippy::too_many_arguments)]
+    fn roll_back_demotion<P: BlockPlane + ?Sized>(
+        &self,
+        plane: &mut P,
+        store: &mut dyn DiskStore,
+        s: SessionHandle,
+        handle: Externalized,
+        freed: &[usize],
+        payloads: &HashMap<usize, Vec<f32>>,
+        stored: &[(usize, String)],
+        cause: PolicyError,
+    ) -> PolicyError {
+        for (_, key) in stored {
+            let _ = store.delete(key);
+        }
+        if let Err(e) = plane.blocks_mut().restore(s, handle) {
+            return PolicyError::Invariant(format!(
+                "demote failed ({cause}) AND the rollback restore failed ({e:?}); the \
+                 detached blocks are unrecoverable"
+            ));
+        }
+        let n_layers = self.geom.n_layers();
+        let block_elems = self.geom.block_elems();
+        for &logical in freed {
+            let Some(data) = payloads.get(&logical) else { continue };
+            let Some(phys) = plane.blocks().resident_block(s, logical) else {
+                return PolicyError::Invariant(format!(
+                    "demote failed ({cause}) AND block {logical} is not resident after the \
+                     rollback restore; its KV is lost"
+                ));
+            };
+            for layer in 0..n_layers {
+                let k0 = layer * 2 * block_elems;
+                let v0 = k0 + block_elems;
+                if let Err(e) =
+                    plane.write_block_f32(layer, BlockKind::K, phys, &data[k0..k0 + block_elems])
+                {
+                    return PolicyError::Invariant(format!(
+                        "demote failed ({cause}) AND rewriting block {logical} K during \
+                         rollback failed ({e}); its KV is lost"
+                    ));
+                }
+                if let Err(e) =
+                    plane.write_block_f32(layer, BlockKind::V, phys, &data[v0..v0 + block_elems])
+                {
+                    return PolicyError::Invariant(format!(
+                        "demote failed ({cause}) AND rewriting block {logical} V during \
+                         rollback failed ({e}); its KV is lost"
+                    ));
+                }
+            }
+        }
+        cause
     }
 
     /// Promote a demoted set back into the pool.
@@ -2003,6 +2098,112 @@ mod tests {
             plane.write_block_f32(layer, BlockKind::K, phys, &k).unwrap();
             plane.write_block_f32(layer, BlockKind::V, phys, &v).unwrap();
         }
+    }
+
+    /// A `DiskStore` that accepts `ok_before` writes and then fails, so a
+    /// demotion can be interrupted with real bytes already persisted.
+    struct FlakyStore {
+        ok_before: usize,
+        writes: usize,
+        map: HashMap<String, Vec<u8>>,
+        deleted: Vec<String>,
+    }
+    impl FlakyStore {
+        fn new(ok_before: usize) -> Self {
+            Self { ok_before, writes: 0, map: HashMap::new(), deleted: Vec::new() }
+        }
+    }
+    impl DiskStore for FlakyStore {
+        fn store(&mut self, key: &str, data: &[u8]) -> Result<(), String> {
+            if self.writes >= self.ok_before {
+                return Err("disk full".to_string());
+            }
+            self.writes += 1;
+            self.map.insert(key.to_string(), data.to_vec());
+            Ok(())
+        }
+        fn load(&self, key: &str) -> Result<Vec<u8>, String> {
+            self.map.get(key).cloned().ok_or_else(|| format!("missing {key}"))
+        }
+        fn delete(&mut self, key: &str) -> Result<(), String> {
+            self.map.remove(key);
+            self.deleted.push(key.to_string());
+            Ok(())
+        }
+    }
+
+    /// **B-3.** A demotion that fails after the detach must not take the restore
+    /// handle with it.
+    ///
+    /// `evict_blocks` returns the blocks to the free list and hands back the one
+    /// `Externalized` handle that can undo that. The store step runs afterwards
+    /// and used to propagate with `?`, dropping `report` — and the handle inside
+    /// it. The blocks were then off the session, their bytes were *not* on disk
+    /// (that is precisely what had just failed), and nothing anywhere could
+    /// bring them back. An unrecoverable session, reported as a routine store
+    /// error.
+    ///
+    /// Two blocks with a store that fails on the second, so the rollback has to
+    /// undo a genuinely partial demotion: one payload already written, one not.
+    ///
+    /// On the pre-fix code this fails at the residency assertion.
+    #[test]
+    fn a_failed_store_rolls_the_demotion_back_instead_of_orphaning_the_handle() {
+        let bs = 2;
+        let g = geom(4, bs);
+        let mut plane = MemPlane::new(g);
+        let mut store = FlakyStore::new(1); // block 0 persists, block 1 fails
+        let mover = BlockTierMover::new(g, "sess-rollback");
+
+        let s = plane.blocks_mut().open();
+        plane.blocks_mut().append(s, 4).unwrap(); // blocks 0 and 1
+        let phys0 = plane.blocks().resident_block(s, 0).unwrap();
+        let phys1 = plane.blocks().resident_block(s, 1).unwrap();
+        fill_io(&plane, &g, phys0, 3.0);
+        fill_io(&plane, &g, phys1, 7.0);
+        let want0_k = plane.read_block_f32(0, BlockKind::K, phys0).unwrap();
+        let want1_k = plane.read_block_f32(0, BlockKind::K, phys1).unwrap();
+        let want1_v = plane.read_block_f32(0, BlockKind::V, phys1).unwrap();
+        let free_before = plane.blocks().free_blocks();
+        let blocks_before = plane.blocks().session_blocks(s).unwrap();
+
+        let err = mover.demote(&mut plane, &mut store, s, &[0, 1]).unwrap_err();
+        assert!(
+            matches!(err, PolicyError::Store(ref m) if m.contains("disk full")),
+            "the ORIGINAL cause must survive the rollback rather than being replaced \
+             by a rollback message, got {err}"
+        );
+
+        // Both blocks are back on the session.
+        let after0 = plane.blocks().resident_block(s, 0).expect(
+            "block 0 must be resident after a rolled-back demotion — the pre-fix code \
+             dropped the Externalized handle, detaching it permanently",
+        );
+        let after1 = plane.blocks().resident_block(s, 1).expect("block 1 must be resident");
+        assert_eq!(plane.blocks().session_blocks(s), Some(blocks_before));
+        assert_eq!(plane.blocks().free_blocks(), free_before, "free list must be restored");
+
+        // And their bytes are back, at whatever physical ids the restore chose.
+        assert_eq!(plane.read_block_f32(0, BlockKind::K, after0).unwrap(), want0_k);
+        assert_eq!(plane.read_block_f32(0, BlockKind::K, after1).unwrap(), want1_k);
+        assert_eq!(plane.read_block_f32(0, BlockKind::V, after1).unwrap(), want1_v);
+
+        // The half-written disk state is gone — a retry must not find a stale key
+        // for block 0 while block 1 has none.
+        assert!(
+            store.map.is_empty(),
+            "the partial payload for block 0 survived the rollback: {:?}",
+            store.map.keys().collect::<Vec<_>>()
+        );
+        assert_eq!(store.deleted.len(), 1, "exactly the one persisted key is deleted");
+
+        // The pool is not poisoned: a real demote/promote cycle still works.
+        let mut good = MemStore::default();
+        let ticket = mover.demote(&mut plane, &mut good, s, &[1]).unwrap();
+        assert_eq!(ticket.freed, vec![1]);
+        assert_eq!(mover.promote(&mut plane, &mut good, s, ticket).unwrap(), vec![1]);
+        let final1 = plane.blocks().resident_block(s, 1).unwrap();
+        assert_eq!(plane.read_block_f32(0, BlockKind::K, final1).unwrap(), want1_k);
     }
 
     #[test]
