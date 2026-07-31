@@ -100,8 +100,26 @@ fn test_shrink_with_memory_pressure() {
         monitor.record_batch(12, 0, &positions);
     }
 
-    // Tight memory scenario (only 8GB available)
-    let available_memory = 8 * 1024 * 1024 * 1024u64;
+    // Tight memory scenario. The number is DERIVED, not tuned until the test
+    // went green — this scenario previously claimed "approaching the limit"
+    // while describing a pool at about a third of capacity, so it asserted
+    // pressure that its own numbers never created:
+    //
+    //   kv_cache_bytes_per_request = layers 32 * 2 (K+V) * kv_heads 32
+    //                                * context 512 * head_dim 128 * 2 bytes
+    //                              = 256 MiB for a full context
+    //   per_token_bytes            = 256 MiB / 512 = 512 KiB
+    //   positions above sum to 5_700 tokens        => ~2.99 GB in use
+    //
+    // Against the old 8 GB that is 0.35 utilisation, and `shrink_threshold` is
+    // 0.80 — so no shrink, correctly. Worse, the branch was UNREACHABLE here:
+    // positions cannot exceed the 512-token context window, so even all 16
+    // slots at full context reach only 4.29 GB, or 0.5 utilisation. The test
+    // could not have passed at any position values.
+    //
+    // 3 GB puts the same 2.99 GB of KV at ~0.99 utilisation, which is genuine
+    // pressure and exercises the branch the test names.
+    let available_memory = 3 * 1024 * 1024 * 1024u64;
     let decision = monitor.should_adjust(16, available_memory);
 
     assert!(
