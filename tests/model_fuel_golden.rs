@@ -2105,10 +2105,50 @@ use lightbulb::model_fuel::loader_f32::load_llama_f32_from_dir;
 ///
 /// A mixed set is rejected rather than sampled: "most projections are f32" is
 /// precisely the state this exists to catch.
-fn load_f32_verified(dir: &Path) -> anyhow::Result<LoadedLlama> {
+/// Serialises the model-loading tests so the suite cannot exhaust memory.
+///
+/// Every `#[ignore]`d test here loads the checkpoint as **f32 — about 4.1 GB**
+/// from a 2.05 GB bf16 file. There are six of them and libtest defaults to one
+/// thread per core (32 here), so `--ignored` ran all six concurrently: ~25 GB of
+/// weights alone.
+///
+/// Observed directly: free RAM fell 40.2 → 0 GB in about 45 seconds and stayed
+/// pinned there. Sometimes the OS reclaims enough to limp on (a case took 325 s
+/// instead of 146 s); sometimes an allocation genuinely fails, and Rust's
+/// `handle_alloc_error` calls `abort()`, which on Windows MSVC is `__fastfail` —
+/// exit `0xC0000409`, with **no panic message and no test output**. That silent
+/// abort is indistinguishable from a crash in the code under test, which is what
+/// made it expensive to diagnose.
+///
+/// A note in a doc comment saying "run with `--test-threads=1`" would be an
+/// invariant someone has to remember. This is one they cannot forget: the lease
+/// is held for the lifetime of the returned model, so at most one checkpoint is
+/// resident at a time regardless of how the suite is invoked.
+static MODEL_LEASE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// A loaded model plus the lease that keeps it the only one in memory.
+///
+/// Derefs to [`LoadedLlama`], so call sites are unchanged.
+struct ModelLease {
+    loaded: LoadedLlama,
+    _guard: std::sync::MutexGuard<'static, ()>,
+}
+
+impl std::ops::Deref for ModelLease {
+    type Target = LoadedLlama;
+    fn deref(&self) -> &LoadedLlama {
+        &self.loaded
+    }
+}
+
+fn load_f32_verified(dir: &Path) -> anyhow::Result<ModelLease> {
+    // Recover from poisoning rather than propagating it: a panicking test tells
+    // us nothing about whether the NEXT one may load a model, and turning one
+    // failure into five cascading ones destroys the signal.
+    let guard = MODEL_LEASE.lock().unwrap_or_else(|e| e.into_inner());
     let loaded = load_llama_f32_from_dir(dir)?;
     match loaded.projection_dtype() {
-        Some(fuel::DType::F32) => Ok(loaded),
+        Some(fuel::DType::F32) => Ok(ModelLease { loaded, _guard: guard }),
         Some(other) => anyhow::bail!(
             "the fixture claims the all-f32 path ({REQUIRED_LOADER}), but the projection weights \
              materialized at {other:?}. A bf16 projection routes through a promoting cast that is \
