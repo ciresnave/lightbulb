@@ -22,7 +22,7 @@ mod api_tests {
         let db_url = "postgresql://lightbulb:vKTbmBA5RXIauMrNHxzs@localhost:5432/lightbulb";
 
         let config = ApiConfig {
-            database_url: db_url.to_string(),
+            database_url: Some(db_url.to_string()),
             bind_address: "127.0.0.1:0".to_string(),
             enable_openai_api: true,
             enable_admin_api: true,
@@ -34,6 +34,12 @@ mod api_tests {
             default_model: "test-model".to_string(),
             model_max_batch_size: 8,
             model_context_length: 2048,
+            // Fields this test does not exercise (currently `tls`) take their
+            // defaults. Listing every field exhaustively is what broke this
+            // suite when `tls` was added: a test that must be edited each time
+            // an unrelated field appears is a maintenance tax that buys no
+            // safety, because the test asserts nothing about those fields.
+            ..Default::default()
         };
 
         let scheduler_config = MemoryAwareConfig::default();
