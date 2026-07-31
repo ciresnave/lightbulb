@@ -615,13 +615,40 @@ pub fn splice_prefix(
         )));
     }
 
+    // **Decide the alignment invariant BEFORE mutating anything.** Fuel's
+    // `splice` sets `dst.filled_tokens += ((to-from)*bs).min(src_filled -
+    // from*bs)` (`kv_block_pool.rs:641`). With `from = 0` and `dst` verified
+    // empty above, the post-splice fill is *exactly* that expression, so it is
+    // predictable. Checking after the call would be too late: `splice` has by
+    // then pushed shared slots into `dst` and bumped the donor's refcounts, and
+    // there is no unsplice. The old post-check returned a correct error over an
+    // already-corrupting state — a caller that logged and continued, or retried,
+    // decoded into the donor's block regardless.
+    let donor_filled = pool
+        .filled_tokens(m.donor)
+        .ok_or(PolicyError::Alloc(KvAllocError::UnknownSession))?;
+    let projected = (m.blocks * bs).min(donor_filled);
+    if projected % bs != 0 {
+        return Err(PolicyError::Invariant(format!(
+            "post-splice fill would be {projected}, not block-aligned (block_size={bs}); \
+             the next decode step would write into the donor's shared block. Refused \
+             before splicing — dst is untouched and the donor's refcounts are unchanged"
+        )));
+    }
+
     pool.splice(m.donor, dst, 0, m.blocks)?;
 
+    // Belt and braces: if this ever fires, the projection above disagrees with
+    // Fuel and `dst` IS in the corrupting state. Distinguish it loudly from the
+    // pre-check, because the remedy is different — fix the projection, not the
+    // caller.
     let filled = pool.filled_tokens(dst).unwrap_or(0);
     if filled % bs != 0 {
         return Err(PolicyError::Invariant(format!(
-            "post-splice fill {filled} is not block-aligned (block_size={bs}); the next \
-             decode step would write into the donor's shared block"
+            "post-splice fill {filled} is not block-aligned (block_size={bs}) but the \
+             pre-check projected {projected}: Fuel's splice fill semantics have changed, \
+             and dst is now in the state this guard exists to prevent. Re-derive the \
+             projection in splice_prefix against kv_block_pool.rs"
         )));
     }
     Ok(filled)
@@ -1554,6 +1581,69 @@ mod tests {
         let dst3 = p.open();
         let good = PrefixMatch { donor, blocks: 1, shared_tokens: 4, remainder_tokens: 0 };
         assert_eq!(splice_prefix(&mut p, &good, dst3).unwrap(), 4);
+    }
+
+    /// **B-1.** A refusal must leave nothing behind. The control test above
+    /// asserts the alignment guard *fires*; this asserts the guard is
+    /// **transactional**, which is a different claim and the one that was false.
+    ///
+    /// The guard used to run after `pool.splice`, so on the error path `dst` had
+    /// already received the shared slots and the donor's refcounts had already
+    /// been bumped. The error was correct and the damage was done: a caller that
+    /// logged it and carried on — or retried into the same `dst` — decoded into
+    /// the donor's block anyway, which is exactly the corruption the guard
+    /// exists to prevent. There is no unsplice, so the check has to precede the
+    /// mutation rather than report on it.
+    ///
+    /// Fails on the pre-fix code at the very first assertion (`dst` holds 6
+    /// tokens, not 0).
+    #[test]
+    fn refused_splice_leaves_the_pool_completely_untouched() {
+        let bs = 4;
+        let mut p = pool(16, bs);
+        let donor = p.open();
+        p.append(donor, 6).unwrap(); // 2 blocks, 6 tokens — block 1 half full
+
+        // Snapshot every piece of state the splice would have moved.
+        let donor_blocks = p.session_blocks(donor).unwrap();
+        let donor_filled = p.filled_tokens(donor).unwrap();
+        let free_before = p.free_blocks();
+        let refs_before: Vec<u32> = (0..donor_blocks)
+            .map(|i| p.block_refcount(p.resident_block(donor, i).unwrap()))
+            .collect();
+
+        let dst = p.open();
+        let bad = PrefixMatch { donor, blocks: 2, shared_tokens: 8, remainder_tokens: 0 };
+        let err = splice_prefix(&mut p, &bad, dst).unwrap_err();
+        assert!(
+            matches!(err, PolicyError::Invariant(ref m) if m.contains("not block-aligned")),
+            "expected the alignment invariant, got {err}"
+        );
+
+        assert_eq!(
+            p.filled_tokens(dst),
+            Some(0),
+            "dst must hold NOTHING after a refusal — the pre-fix guard spliced first \
+             and reported afterwards, leaving dst holding the donor's tokens"
+        );
+        assert_eq!(p.session_blocks(dst), Some(0), "dst must own no blocks after a refusal");
+        for (i, before) in refs_before.iter().enumerate() {
+            let phys = p.resident_block(donor, i).unwrap();
+            assert_eq!(
+                p.block_refcount(phys), *before,
+                "donor block {i} refcount changed on a refused splice — the donor is \
+                 now pinned by a session that holds nothing"
+            );
+        }
+        assert_eq!(p.free_blocks(), free_before, "free list moved on a refused splice");
+        assert_eq!(p.session_blocks(donor), Some(donor_blocks), "donor block count changed");
+        assert_eq!(p.filled_tokens(donor), Some(donor_filled), "donor fill changed");
+
+        // And the pool is still usable for the aligned case afterwards — a
+        // refusal must not poison the donor for a later legitimate splice.
+        let dst2 = p.open();
+        let good = PrefixMatch { donor, blocks: 1, shared_tokens: 4, remainder_tokens: 0 };
+        assert_eq!(splice_prefix(&mut p, &good, dst2).unwrap(), 4);
     }
 
     #[test]
