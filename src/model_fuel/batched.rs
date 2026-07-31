@@ -133,6 +133,22 @@
 //! warm-up ratios, not on `c(B)`.
 //!
 //! **Read this as a property of *this* paged path, not of paging.** The
+//! Sharper than "no plan-once path exists": on the paged arm plan reuse is
+//! presently **ill-defined**, not merely unimplemented. `DeviceKvPool::
+//! block_table_shape` is `[batch, max_blocks]`, and `max_blocks` grows as
+//! sessions cross block boundaries — so the graph is a *different shape* at
+//! different context lengths, and there is no single plan to cache. The
+//! contiguous arm avoids this by carrying its KV extents symbolically
+//! (`cached_len_sym` / `attended_len_sym`, `fuel_ir::SymId`), which is exactly
+//! why its shape is stable enough to replay. A paged `DecodeSession` therefore
+//! needs symbolic block-table extents *first* — rule 3(a) below, with a working
+//! precedent in the same file.
+//!
+//! This also means an L-sweep cannot separate planning from execution on the
+//! paged arm: both scale with context length, so the curve would be monotone,
+//! clean, and uninterpretable.
+//!
+//! **Read this as a property of *this* paged path, not of paging.** The
 //! contiguous arm holds a plan-once `DecodeSession`; the paged arm has none and
 //! re-plans every step (rule 3 below). So the comparison is plan-once-versus-
 //! re-plan at least as much as it is contiguous-versus-paged — which is the
