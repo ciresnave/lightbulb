@@ -386,7 +386,7 @@ fn compute_manual_attention(
     }
 
     // Softmax
-    let attn_weights = candle_nn::ops::softmax_last_dim(&attn_weights)?;
+    let attn_weights = candlelight::nn::ops::softmax_last_dim(&attn_weights)?;
 
     // Weighted sum: attn @ V
     let output = attn_weights.matmul(v)?;

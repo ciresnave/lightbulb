@@ -3,7 +3,13 @@
 //! Tests the complete flow: monitoring → decision → adjustment
 //! under various workload scenarios.
 
-use lightbulb::engine::{SlotPool, SlotPoolMonitor, Request};
+// `Request` is ambiguous: `engine::Request` is the legacy shape (a `prompt`
+// String), while the slot pool takes `engine::slot_pool::Request` (tokenized
+// `prompt_tokens` plus sampling parameters). This suite builds the latter and
+// used to reach it through the `engine` re-export, which now resolves to the
+// former — hence "expected SlotPoolRequest, found Request" on every submit.
+use lightbulb::engine::slot_pool::Request;
+use lightbulb::engine::{SlotPool, SlotPoolMonitor};
 use lightbulb::hardware::batch_sizing::ModelMemoryProfile;
 
 fn test_model_profile() -> ModelMemoryProfile {
