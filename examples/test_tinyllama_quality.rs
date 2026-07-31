@@ -25,7 +25,7 @@ fn main() -> Result<()> {
     // Load model using Candle
     let device = Device::Cpu;
     let mut file = std::fs::File::open(model_path)?;
-    let candle_content = candle_core::quantized::gguf_file::Content::read(&mut file)?;
+    let candle_content = candlelight::core::quantized::gguf_file::Content::read(&mut file)?;
     let mut model = LlamaModelWeights::from_gguf(candle_content, &mut file, &device)?;
     println!("✓ Model loaded\n");
 
@@ -42,7 +42,7 @@ fn main() -> Result<()> {
     println!("Prompt tokens: {:?}", prompt_tokens);
 
     // Prefill
-    let input = candle_core::Tensor::new(prompt_tokens, &device)?.unsqueeze(0)?;
+    let input = candlelight::core::Tensor::new(prompt_tokens, &device)?.unsqueeze(0)?;
     let logits = model.forward(&input, 0)?;
 
     println!("Logits shape: {:?}", logits.dims());
@@ -65,7 +65,7 @@ fn main() -> Result<()> {
 
     // Generate 20 tokens
     for pos in 1..20 {
-        let input = candle_core::Tensor::new(&[next_token], &device)?.unsqueeze(0)?;
+        let input = candlelight::core::Tensor::new(&[next_token], &device)?.unsqueeze(0)?;
         let logits = model.forward(&input, prompt_tokens.len() + pos - 1)?;
 
         // Decode output might be [batch, vocab] or [batch, 1, vocab]

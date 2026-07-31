@@ -123,13 +123,14 @@ fn main() -> Result<()> {
     let stats = model_manager.stats();
     println!("\n📈 Batch Statistics:");
     println!("  Total batches: {}", stats.total_batches);
-    println!("  Prefill requests: {}", stats.prefill_requests);
-    println!("  Decode requests: {}", stats.decode_requests);
-    println!(
-        "  Decode batch opportunities: {}",
-        stats.decode_batch_opportunities
-    );
-    println!("  Max concurrent decodes: {}", stats.max_concurrent_decodes);
+    // ParallelBatchStats now counts BATCHES rather than requests, and no longer
+    // tracks decode_batch_opportunities or max_concurrent_decodes. Reporting the
+    // fields that exist rather than inventing stand-ins for the ones that don't.
+    println!("  Prefill batches: {}", stats.prefill_batches);
+    println!("  Decode batches: {}", stats.decode_batches);
+    println!("  Chunked prefill batches: {}", stats.chunked_prefill_batches);
+    println!("  Requests processed: {}", stats.total_requests_processed);
+    println!("  Max batch size: {}", stats.max_batch_size);
     println!(
         "  Avg forward time: {:.2}ms",
         stats.total_forward_time_ms / stats.total_batches as f64

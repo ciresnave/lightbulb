@@ -14,7 +14,7 @@ fn main() -> Result<()> {
     let weight_t = weight.t()?;
     println!("Weight.t() shape: {:?}", weight_t.dims());
 
-    // Try direct matmul (candle_nn::Linear style)
+    // Try direct matmul (candlelight::nn::Linear style)
     let result = input.broadcast_matmul(&weight_t)?;
     println!("Result shape: {:?}", result.dims());
 

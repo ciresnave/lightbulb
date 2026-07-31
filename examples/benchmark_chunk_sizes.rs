@@ -63,7 +63,8 @@ fn benchmark_chunk_size(
     let config = ChunkedPrefillConfig {
         chunk_size,
         max_batch_size: 4,
-        pad_last_chunk: true,
+        // `pad_last_chunk` was removed from ChunkedPrefillConfig; padding of the
+        // final chunk is no longer configurable here.
         pad_token_id: 0,
     };
 

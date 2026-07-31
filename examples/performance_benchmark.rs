@@ -17,7 +17,7 @@
 
 use anyhow::Result;
 use lightbulb::engine::{Request, RequestContext, RequestState};
-use lightbulb::model::ParallelParallelModelManager;
+use lightbulb::model::ParallelModelManager;
 use std::time::Instant;
 
 #[derive(Debug)]
@@ -235,15 +235,11 @@ fn main() -> Result<()> {
         // Print batch statistics
         let stats = model_manager.stats();
         println!("  Batch stats:");
+        // decode_batch_opportunities and max_concurrent_decodes were removed from
+        // ParallelBatchStats; these are the surviving batch-shape counters.
         println!("    Total batches: {}", stats.total_batches);
-        println!(
-            "    Decode batch opportunities: {}",
-            stats.decode_batch_opportunities
-        );
-        println!(
-            "    Max concurrent decodes: {}",
-            stats.max_concurrent_decodes
-        );
+        println!("    Decode batches: {}", stats.decode_batches);
+        println!("    Max batch size: {}", stats.max_batch_size);
 
         results.push(result);
     }

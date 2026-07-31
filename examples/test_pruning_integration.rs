@@ -191,7 +191,7 @@ fn run_inference(
     let tokenizer = content.extract_tokenizer()?;
 
     let mut file = std::fs::File::open(&model_path)?;
-    let candle_content = candle_core::quantized::gguf_file::Content::read(&mut file)?;
+    let candle_content = candlelight::core::quantized::gguf_file::Content::read(&mut file)?;
     let mut model = LlamaModelWeights::from_gguf(candle_content, &mut file, &device)?;
 
     let load_time = load_start.elapsed();
