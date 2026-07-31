@@ -133,20 +133,39 @@
 //! warm-up ratios, not on `c(B)`.
 //!
 //! **Read this as a property of *this* paged path, not of paging.** The
-//! Sharper than "no plan-once path exists": on the paged arm plan reuse is
-//! presently **ill-defined**, not merely unimplemented. `DeviceKvPool::
-//! block_table_shape` is `[batch, max_blocks]`, and `max_blocks` grows as
-//! sessions cross block boundaries — so the graph is a *different shape* at
-//! different context lengths, and there is no single plan to cache. The
-//! contiguous arm avoids this by carrying its KV extents symbolically
-//! (`cached_len_sym` / `attended_len_sym`, `fuel_ir::SymId`), which is exactly
-//! why its shape is stable enough to replay. A paged `DecodeSession` therefore
-//! needs symbolic block-table extents *first* — rule 3(a) below, with a working
-//! precedent in the same file.
+//! **Cause of the measured re-planning, separately from the blocker on fixing
+//! it.** These are two different facts and it is easy to credit the wrong one.
 //!
-//! This also means an L-sweep cannot separate planning from execution on the
-//! paged arm: both scale with context length, so the curve would be monotone,
-//! clean, and uninterpretable.
+//! *Cause, and it is sufficient on its own:* `forward_paged_step_batched` mints
+//! a fresh graph root every call (`LazyTensor::from_f32`, `fuel-core/src/
+//! lazy.rs:7599` in the `fuel-lightbulb-port` worktree), and by rule 1 every
+//! `from_*` starts a NEW graph. Position enters concretely too (`tok_pos`, a
+//! plain `usize`, :7540). Note this sweep's geometry: prompt 8 + 5 steps = final
+//! position 13 against `BLOCK = 16`, so `max_blocks == 1` for every session at
+//! every `B` and the block-table shape was `[B, 1]` for the entire run. **The
+//! shape never varied and it re-planned anyway.** Nothing about block tables is
+//! needed to explain the 0.99/0.99/1.01 ratios.
+//!
+//! *Blocker on the fix, which did not fire here:* `DeviceKvPool::
+//! block_table_shape` is `[batch, max_blocks]`, and `max_blocks` grows as
+//! sessions cross block boundaries. So once `L` crosses a boundary the graph is
+//! a different *shape*, and plan reuse stops being merely unimplemented and
+//! becomes **ill-defined** — there is no single plan to cache. The contiguous
+//! arm escapes this by carrying KV extents symbolically (`cached_len_sym` /
+//! `attended_len_sym`, `fuel_ir::SymId`), which is why its shape is stable
+//! enough to replay. A paged `DecodeSession` therefore needs symbolic
+//! block-table extents *first* — rule 3(a) below, with a working precedent in
+//! the same file.
+//!
+//! One consequence for the *next* measurement. A context-length sweep looked
+//! unusable on the paged arm on the theory that planning and execution both
+//! scale with `L`. That is too strong: within a single block the shape is
+//! constant, so planning should be roughly `L`-invariant and only step at block
+//! boundaries, while attention execution grows smoothly with KV length. An
+//! `L`-sweep confined to one block-size window may therefore separate them
+//! after all — smooth component execution, step component planning. Untested
+//! reasoning, recorded so it gets checked rather than assumed in either
+//! direction.
 //!
 //! **Read this as a property of *this* paged path, not of paging.** The
 //! contiguous arm holds a plan-once `DecodeSession`; the paged arm has none and
