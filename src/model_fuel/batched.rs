@@ -750,7 +750,12 @@ impl<'m> BatchedPagedDecoder<'m> {
         }
 
         let h_norm = affine_rms_norm(&h, &w.final_norm_gain, dim, cfg.norm_eps)?;
-        let logits = w.output.apply_linear(&h_norm, dim, cfg.vocab_size);
+        // `apply_linear` became fallible in Fuel (7ed43541-era); it used to
+        // return `LazyTensor` directly.
+        let logits = w
+            .output
+            .apply_linear(&h_norm, dim, cfg.vocab_size)
+            .map_err(|e| anyhow::anyhow!("step: logits projection: {e:?}"))?;
         let logits_root = logits
             .reshape(Shape::from_dims(&[b, cfg.vocab_size]))
             .map_err(|e| anyhow::anyhow!("step: logits reshape: {e:?}"))?;
@@ -804,16 +809,19 @@ impl<'m> BatchedPagedDecoder<'m> {
         let q = layer
             .attn_q
             .apply_linear(&x_norm, dim, dim)
+            .map_err(|e| anyhow::anyhow!("layer: q projection: {e:?}"))?
             .add_optional_trailing_bias(layer.attn_q_bias.as_ref())
             .map_err(|e| anyhow::anyhow!("layer: q bias: {e:?}"))?;
         let k = layer
             .attn_k
             .apply_linear(&x_norm, dim, kv_dim)
+            .map_err(|e| anyhow::anyhow!("layer: k projection: {e:?}"))?
             .add_optional_trailing_bias(layer.attn_k_bias.as_ref())
             .map_err(|e| anyhow::anyhow!("layer: k bias: {e:?}"))?;
         let v = layer
             .attn_v
             .apply_linear(&x_norm, dim, kv_dim)
+            .map_err(|e| anyhow::anyhow!("layer: v projection: {e:?}"))?
             .add_optional_trailing_bias(layer.attn_v_bias.as_ref())
             .map_err(|e| anyhow::anyhow!("layer: v bias: {e:?}"))?;
 
@@ -891,19 +899,31 @@ impl<'m> BatchedPagedDecoder<'m> {
             .permute([0usize, 2, 1, 3])
             .and_then(|t| t.reshape(Shape::from_dims(&[b, 1, dim])))
             .map_err(|e| anyhow::anyhow!("layer: merge heads: {e:?}"))?;
-        let attn_out = layer.attn_o.apply_linear(&merged, dim, dim);
+        let attn_out = layer
+            .attn_o
+            .apply_linear(&merged, dim, dim)
+            .map_err(|e| anyhow::anyhow!("layer: attn output projection: {e:?}"))?;
         let h1 = x
             .add(&attn_out)
             .map_err(|e| anyhow::anyhow!("layer: attn residual: {e:?}"))?;
 
         let h1_norm = affine_rms_norm(&h1, &layer.ffn_norm_gain, dim, cfg.norm_eps)?;
-        let gate = layer.ffn_gate.apply_linear(&h1_norm, dim, cfg.ffn_dim);
-        let up = layer.ffn_up.apply_linear(&h1_norm, dim, cfg.ffn_dim);
+        let gate = layer
+            .ffn_gate
+            .apply_linear(&h1_norm, dim, cfg.ffn_dim)
+            .map_err(|e| anyhow::anyhow!("layer: ffn gate projection: {e:?}"))?;
+        let up = layer
+            .ffn_up
+            .apply_linear(&h1_norm, dim, cfg.ffn_dim)
+            .map_err(|e| anyhow::anyhow!("layer: ffn up projection: {e:?}"))?;
         let swiglu = gate
             .silu()
             .mul(&up)
             .map_err(|e| anyhow::anyhow!("layer: swiglu: {e:?}"))?;
-        let ffn_out = layer.ffn_down.apply_linear(&swiglu, cfg.ffn_dim, dim);
+        let ffn_out = layer
+            .ffn_down
+            .apply_linear(&swiglu, cfg.ffn_dim, dim)
+            .map_err(|e| anyhow::anyhow!("layer: ffn down projection: {e:?}"))?;
         h1.add(&ffn_out)
             .map_err(|e| anyhow::anyhow!("layer: ffn residual: {e:?}"))
     }
