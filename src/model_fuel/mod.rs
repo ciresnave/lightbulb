@@ -49,6 +49,7 @@
 pub mod generate;
 pub mod loader;
 pub mod loader_f32;
+pub mod policies;
 
 /// Smoke check: build a two-tensor graph on Fuel and realize it, from inside
 /// Lightbulb's own crate.
