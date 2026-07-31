@@ -135,6 +135,11 @@ path = "src/bin/lightbulb-cli.rs"
 # stops kiss-ref mirroring a consumer's own arithmetic back as agreement.
 kiss-ref-core  = "0.2.0"
 kiss-ops-vocab = "0.2.0"
+# fuel-inference: the serving drivers (PagedSessionScheduler and friends).
+# DEV-only on purpose — Lightbulb's library does not depend on Fuel's scheduler,
+# it has its own. This is here so the A/B harness in tests/paged_plan_once.rs can
+# drive Fuel's paged decode path directly and measure the plan-once flag.
+fuel-inference = { path = "C:/Projects/fuel-lightbulb-port/fuel-inference" }
 tempfile       = "3"
 tower          = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"

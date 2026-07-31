@@ -2042,6 +2042,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "fuel-inference"
+version = "0.10.3"
+dependencies = [
+ "fuel-backend-contract",
+ "fuel-core",
+ "fuel-graph",
+ "fuel-ir",
+ "fuel-transformers",
+ "rand 0.9.5",
+ "serde",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
 name = "fuel-ir"
 version = "0.10.3"
 dependencies = [
@@ -2084,6 +2099,23 @@ dependencies = [
  "fuel-ir",
  "half",
  "rayon",
+]
+
+[[package]]
+name = "fuel-transformers"
+version = "0.10.3"
+dependencies = [
+ "byteorder",
+ "fancy-regex 0.17.0",
+ "fuel-core",
+ "fuel-cpu-backend",
+ "num-traits",
+ "rand 0.9.5",
+ "rayon",
+ "serde",
+ "serde_json",
+ "serde_plain",
+ "tracing",
 ]
 
 [[package]]
@@ -3409,6 +3441,7 @@ dependencies = [
  "distributed-config",
  "fuel-core",
  "fuel-cpu-backend",
+ "fuel-inference",
  "futures",
  "futures-util",
  "ggml-quants",
