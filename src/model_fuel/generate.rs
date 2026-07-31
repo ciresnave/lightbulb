@@ -45,7 +45,14 @@ use super::loader::LoadedLlama;
 /// under Lightbulb's control. The real sampler — temperature, top-k, top-p, the
 /// seeded RNG, and `contracts`' constrained generation — replaces this, and the
 /// replacement is a host-side change that Fuel never sees.
-fn argmax(logits: &[f32]) -> u32 {
+///
+/// **Public so the tier-3 golden can pin the tie-break against *this* function
+/// rather than a copy of it.** While it was private the harness carried a
+/// reimplementation, and its tie-break control asserted properties of that
+/// copy — which would keep passing if this one changed. The only link between
+/// them was a `#[ignore]`d checkpoint test, so in ordinary CI the contract was
+/// pinned against nothing that ships.
+pub fn argmax(logits: &[f32]) -> u32 {
     let mut best = 0usize;
     let mut best_v = f32::NEG_INFINITY;
     for (i, &v) in logits.iter().enumerate() {

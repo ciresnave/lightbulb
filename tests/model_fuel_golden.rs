@@ -559,23 +559,19 @@ fn render_drifts(drifts: &[GoldenDrift]) -> String {
 // the model.
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Reimplementation of `src/model_fuel/generate.rs::argmax`, which is private.
+/// The **shipped** argmax, imported rather than reimplemented.
 ///
-/// The tie-break must match exactly: strict `>` seeded with `NEG_INFINITY`, so
-/// the **lowest** index wins a tie. [`harness_argmax_agrees_with_generate_greedy`]
-/// is the control that proves this reimplementation has not drifted from the
-/// shipped one.
-fn argmax(logits: &[f32]) -> u32 {
-    let mut best = 0usize;
-    let mut best_v = f32::NEG_INFINITY;
-    for (i, &v) in logits.iter().enumerate() {
-        if v > best_v {
-            best_v = v;
-            best = i;
-        }
-    }
-    best as u32
-}
+/// The harness used to carry a copy, because `generate.rs::argmax` was private.
+/// [`control_argmax_tie_break_is_lowest_index`] then asserted the tie-break of
+/// *that copy* — which would have kept passing if the shipped one changed to
+/// `>=`. The only thing linking them was
+/// [`harness_argmax_agrees_with_generate_greedy`], which is `#[ignore]`d and
+/// needs the checkpoint, so in ordinary CI the tie-break contract was pinned
+/// against code that does not ship.
+///
+/// `argmax` is now `pub` and this is it, so the control tests the real
+/// function and the drift it was guarding against cannot occur.
+use lightbulb::model_fuel::generate::argmax;
 
 /// Second-highest by the same rule, excluding `top`.
 fn runner_up(logits: &[f32], top: usize) -> u32 {
@@ -716,7 +712,18 @@ fn margin_guard_violations(tol: &ToleranceBlock, cases: &[GoldenCase]) -> Vec<St
     let mut out = Vec::new();
     for c in cases {
         for s in &c.steps {
-            if s.margin_rel <= 10.0 * tol.rel {
+            // NaN FIRST, and separately. `NaN <= x` is false, so a step whose
+            // top-2 gap could not be computed used to sail through this guard as
+            // "stable" — the single case that most deserves flagging, silently
+            // exempted by IEEE comparison semantics.
+            if s.margin_rel.is_nan() {
+                out.push(format!(
+                    "case {:?} step {}: margin_rel is NaN — the top-2 gap could not be computed \
+                     (degenerate or non-finite logits). That is not a stable step, it is an \
+                     unmeasurable one, and it must not be pinned as a regression signal.",
+                    c.name, s.step
+                ));
+            } else if s.margin_rel <= 10.0 * tol.rel {
                 out.push(format!(
                     "case {:?} step {}: margin_rel {:e} <= 10 * tol_rel {:e} — this step is a near-tie \
                      and a 1-ULP drift can flip its token. It is a coin flip, not a regression signal.",
@@ -734,7 +741,9 @@ fn margin_guard_violations(tol: &ToleranceBlock, cases: &[GoldenCase]) -> Vec<St
 fn finalize_unstable(tol: &ToleranceBlock, cases: &mut [GoldenCase]) {
     for c in cases.iter_mut() {
         for s in c.steps.iter_mut() {
-            s.unstable = s.margin_rel <= 10.0 * tol.rel;
+            // NaN-safe for the same reason as `margin_guard_violations`:
+            // `NaN <= x` is false, which would mark an unmeasurable step stable.
+            s.unstable = s.margin_rel.is_nan() || s.margin_rel <= 10.0 * tol.rel;
         }
     }
 }
@@ -770,10 +779,28 @@ fn value_drift(expected: &F32Val, got: &F32Val, tol: &ToleranceBlock) -> Option<
 
 /// Inputs-level check, separated so a stale fixture reports as stale rather than
 /// as a regression.
+///
+/// # What `provenance.loader` does and does not establish
+///
+/// It is **self-asserted**, and the scope note matters because the field reads
+/// like evidence. `build_provenance` writes `REQUIRED_LOADER` and every real
+/// call site passes `REQUIRED_LOADER` as `observed_loader`, so on a genuine run
+/// this is constant-versus-constant and **cannot fail**. It records the intended
+/// path in the committed fixture, and the comparison *logic* is exercised —
+/// [`control_wrong_inputs_report_as_fixture_invalid_not_regression`] passes the
+/// bf16 loader name and requires the mismatch — but nothing here observes which
+/// loader actually ran. Swap the capture to `load_llama_from_dir` and this field
+/// will happily report agreement.
+///
+/// Making it observable needs `LoadedLlama` to expose the dtype its weights were
+/// materialized at, so the check could assert the *consequence* of the f32
+/// loader rather than its name. It exposes only `model` and `config` today.
+/// Until then, read this field as a label, not a measurement.
 fn compare_inputs(
     fixture: &GoldenFile,
     observed_config_sha: &str,
     observed_loader: &str,
+    observed_weights_len: u64,
 ) -> Vec<GoldenDrift> {
     let mut d = Vec::new();
     if fixture.format_version != FORMAT_VERSION {
@@ -804,6 +831,24 @@ fn compare_inputs(
             format!(
                 "fixture {} vs this checkpoint {} — different model, so nothing below is comparable",
                 fixture.provenance.config_json_sha256, observed_config_sha
+            ),
+        ));
+    }
+    // `model_safetensors_len` was written by `build_provenance` and then never
+    // compared by anything — recorded provenance that could not fail. A
+    // checkpoint whose weights changed while `config.json` stayed byte-identical
+    // (a re-export, a re-quantization, a truncated download) passed this gate
+    // and surfaced downstream as a REGRESSION, which invites exactly the wrong
+    // fix: re-blessing the fixture against a different model. Coarse, but it is
+    // the only signal here that looks at the weights at all.
+    if fixture.provenance.model_safetensors_len != observed_weights_len {
+        d.push(GoldenDrift::new(
+            DriftKind::CheckpointMismatch,
+            "provenance.model_safetensors_len",
+            format!(
+                "fixture weights are {} bytes, this checkpoint's are {} — same config.json, \
+                 different weights, so nothing below is comparable",
+                fixture.provenance.model_safetensors_len, observed_weights_len
             ),
         ));
     }
@@ -1307,7 +1352,7 @@ fn control_baseline_identical_input_reports_no_drift() {
         "an identical comparison reported drift, so every other control below is meaningless:\n{}",
         render_drifts(&drifts)
     );
-    let inputs = compare_inputs(&f, "synthetic-config-sha", REQUIRED_LOADER);
+    let inputs = compare_inputs(&f, "synthetic-config-sha", REQUIRED_LOADER, 0);
     assert!(inputs.is_empty(), "identical inputs reported drift: {inputs:?}");
 }
 
@@ -1754,7 +1799,7 @@ fn c7_margin_guard_flags_near_ties() {
 fn control_wrong_inputs_report_as_fixture_invalid_not_regression() {
     let f = synthetic_fixture();
 
-    let wrong_ckpt = compare_inputs(&f, "some-other-config-sha", REQUIRED_LOADER);
+    let wrong_ckpt = compare_inputs(&f, "some-other-config-sha", REQUIRED_LOADER, 0);
     assert!(
         wrong_ckpt
             .iter()
@@ -1768,7 +1813,21 @@ fn control_wrong_inputs_report_as_fixture_invalid_not_regression() {
         "a different checkpoint must classify as FixtureInvalid"
     );
 
-    let wrong_loader = compare_inputs(&f, "synthetic-config-sha", "load_llama_from_dir");
+    // Same config.json, different weights file — the case `model_safetensors_len`
+    // was recorded for and never checked against.
+    let wrong_weights = compare_inputs(&f, "synthetic-config-sha", REQUIRED_LOADER, 4_096);
+    assert!(
+        wrong_weights.iter().any(|d| d.kind == DriftKind::CheckpointMismatch),
+        "a checkpoint with identical config.json but different weights was not detected: \
+         {wrong_weights:?} — this reports downstream as a REGRESSION and invites re-blessing \
+         the fixture against a different model"
+    );
+    assert!(
+        wrong_weights.iter().all(|d| d.kind.class() == DriftClass::FixtureInvalid),
+        "different weights must classify as FixtureInvalid, not as a regression"
+    );
+
+    let wrong_loader = compare_inputs(&f, "synthetic-config-sha", "load_llama_from_dir", 0);
     assert!(
         wrong_loader
             .iter()
@@ -2610,7 +2669,10 @@ fn golden_matches_fixture() -> anyhow::Result<()> {
     let fixture: GoldenFile = serde_json::from_str(&fs::read_to_string(&path)?)?;
     let observed_sha = sha256_file(&dir.join("config.json"));
 
-    let input_drifts = compare_inputs(&fixture, &observed_sha, REQUIRED_LOADER);
+    let observed_weights_len =
+        fs::metadata(dir.join("model.safetensors")).map(|m| m.len()).unwrap_or(0);
+    let input_drifts =
+        compare_inputs(&fixture, &observed_sha, REQUIRED_LOADER, observed_weights_len);
     assert!(
         input_drifts.is_empty(),
         "FIXTURE STALE / WRONG INPUTS — this is NOT a regression:\n{}",
