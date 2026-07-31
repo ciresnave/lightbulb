@@ -1484,6 +1484,56 @@ mod tests {
         assert_eq!(plan.protected_tail, Some(2), "token 11 lives in block 2");
     }
 
+    /// **B-4.** Real coverage for the survivor-protection subtraction, which
+    /// had none.
+    ///
+    /// `plan_never_evicts_a_block_a_survivor_touches` never reaches it. With
+    /// victim `0..6` and survivor `6..12` at bs=4, `blocks_fully_covered` yields
+    /// `{0}` and `blocks_touched` yields `{1,2}` — **disjoint**, so
+    /// `candidate.remove` removes nothing and that test passes identically with
+    /// the loop deleted. Confirmed by deleting it: all 30 tests stayed green.
+    /// The name asserts the property; the body exercises the case where
+    /// `blocks_fully_covered`'s own conservatism already handles it.
+    ///
+    /// The loop only bites when a block is **both** fully covered by a victim
+    /// and touched by a survivor, which requires the spans to *overlap* rather
+    /// than merely abut. Victim `0..8` and survivor `6..12` overlap on tokens
+    /// 6 and 7, which live in block 1 — a block lying entirely inside the
+    /// victim.
+    #[test]
+    fn survivor_protection_actually_removes_a_fully_covered_block() {
+        let bs = 4;
+        let g = geom(16, bs);
+        let map = SpanBlockMap::new(g);
+        let mut reg = SpanRegistry::new();
+        // A (victim) 0..8 fully covers blocks 0 and 1.
+        // B (survivor) 6..12 overlaps A on tokens 6,7 — inside block 1.
+        reg.register(CacheSpan::new(1, 0, 0, 8, CacheTag::UserInput, Some("a".into()))).unwrap();
+        reg.register(CacheSpan::new(2, 0, 6, 12, CacheTag::UserInput, Some("b".into()))).unwrap();
+
+        // The setup must genuinely create the conflict, or this proves nothing.
+        let contested = 1usize;
+        assert!(
+            blocks_fully_covered(&(0..8), bs).contains(&contested),
+            "block {contested} must be FULLY COVERED by the victim, or the survivor \
+             subtraction is not what excludes it"
+        );
+        assert!(
+            blocks_touched(&(6..12), bs).contains(&contested),
+            "block {contested} must be TOUCHED by the survivor for this test to bite"
+        );
+
+        let plan = map.plan(&reg, 0, &[(1, 0.1)], 4, 3, 12);
+        assert_eq!(plan.victim_spans, vec![1]);
+        assert_eq!(
+            plan.blocks,
+            vec![0],
+            "block 1 lies entirely inside victim A but holds survivor B's tokens 6..8; \
+             evicting it would silently take live tokens from a span nobody asked to \
+             evict. Without the survivor subtraction the plan is [0, 1]"
+        );
+    }
+
     #[test]
     fn plan_excludes_the_protected_tail_block() {
         let g = geom(16, 4);
