@@ -826,6 +826,43 @@ impl SpanBlockMap {
     /// that needs this KV back later should take the plan from
     /// [`Self::plan_from_block_scores`] and hand its `blocks` to
     /// [`BlockTierMover::demote`], which captures the payloads first.
+    ///
+    /// # Why this has no caller in `src/engine` yet, and what would unblock it
+    ///
+    /// Not an oversight, and not a wiring job. Three things are missing, none of
+    /// them on this side (each checked with a positive control, since an empty
+    /// search proves nothing):
+    ///
+    /// 1. **`Op::PagedAttn` emits no attention statistic.** `fuel-ir`'s
+    ///    `dispatch.rs` documents it as geometry + scale + softcap in, one
+    ///    output out. In `fuel-core`, attention weights surface only in
+    ///    encoder-decoder models (`lazy_marian`, `lazy_musicgen`, `lazy_sam`,
+    ///    `lazy_t5`) — never on the Llama paged path.
+    /// 2. **Without that, H2O degenerates silently.** [`H2OPolicy::
+    ///    update_attention_scores`] consumes `[query_pos][key_pos]` weights.
+    ///    Never call it and every token scores `+INFINITY` ("never attended") —
+    ///    pinned by `h2o_block_scores_preserve_positive_infinity`. Such a path
+    ///    still runs and still evicts, on no signal whatsoever, while looking
+    ///    healthy. Wiring that and calling it live H2O would be worse than
+    ///    leaving it unwired.
+    /// 3. **The engine holds no Fuel pool.** `src/engine` refers to `SlotPool`,
+    ///    `ParallelCacheBuilder` and `H2OPolicy`, and to no `DeviceKvPool`,
+    ///    `KvBlockPool` or `model_fuel` — the serving loop is still entirely the
+    ///    candlelight path.
+    ///
+    /// The unblock is a Fuel op-surface increment: an **opt-in per-key mean
+    /// attention** (`a_mean`) output on the paged decode path. Per-key aggregate
+    /// is all H2O needs, and materialising the full `[H_q, S_k]` matrix is
+    /// precisely what flash-decode avoids — baracuda's flash-decode kernel
+    /// already computes it internally; the gap is plumbing it out. It should be
+    /// a **fact, not a conclusion** (hand over the statistic, let the consumer
+    /// decide what it implies) and opt-in, so a decode step nobody asked
+    /// statistics from does not pay for them.
+    ///
+    /// Note also that `model_fuel` is CPU-only today, so a CUDA-side `a_mean`
+    /// would not be consumable here until this path grows a CUDA arm. A CPU
+    /// `a_mean` from the existing paged attention would unblock this side
+    /// immediately.
     pub fn evict_with_h2o(
         &self,
         pool: &mut KvBlockPool,
