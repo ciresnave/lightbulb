@@ -48,27 +48,51 @@
 //! `B` prompts costs `max(P_i)` steps at width `B` instead of `sum(P_i)` steps at
 //! width 1. That matters more here than on the contiguous path, because the
 //! paged path has no plan-once `DecodeSession` (Fuel's `inference_context.rs`
-//! contains no paged arm at all) and re-optimises the graph every step —
-//! batching amortises that one optimise over `B` tokens.
+//! contains no paged arm at all) and re-optimises the graph every step.
+//! Batching was expected to amortise that one optimise over `B` tokens.
+//! **It does not — see the sweep below.**
 //!
-//! **This is a correctness deliverable, not a speedup. Measured, it is
-//! currently a large slowdown.** TinyLlama-1.1B, CPU, release, all-f32 weights,
-//! two prompts decoded together (`tinyllama_two_prompts_in_one_batch`):
+//! **This is a correctness deliverable, not a speedup. Measured, it is a large
+//! slowdown that batching does not fix.** TinyLlama-1.1B, CPU, release, all-f32
+//! weights, both arms in one process off one checkpoint load
+//! (`b_sweep_per_sequence_cost`):
 //!
-//! | path | per sequence-token |
-//! | --- | --- |
-//! | contiguous + persistent `DecodeSession`, B=1, bf16 projections (`generate.rs`) | **4.52 s** |
-//! | batched paged, B=2, f32 projections (this module) | **~10.9 s** (21.73 s/step ÷ 2) |
+//! | path | per step | per sequence-token | vs baseline |
+//! | --- | --- | --- | --- |
+//! | contiguous + persistent `DecodeSession`, B=1 | 977.420 ms | **977.420 ms** | 1.00× |
+//! | batched paged, B=1 | 5.452 s | **5.452 s** | 5.58× |
+//! | batched paged, B=2 | 21.724 s | **10.862 s** | 11.11× |
+//! | batched paged, B=4 | 37.555 s | **9.389 s** | 9.61× |
 //!
-//! Two independent reasons, both structural rather than incidental: the paged
-//! path re-optimises the whole graph every step (no `DecodeSession` exists for
-//! it), and f32 projections are 2× the weight bytes of the bf16 baseline — and
-//! f32 is not optional here, the pool is f32-gated. So the comparison is not
-//! apples to apples, and neither adjustment closes a 2.4× gap.
+//! **Per-sequence cost does not fall with `B`.** It nearly doubles from B=1 to
+//! B=2 and only partly recovers at B=4. A *fixed* re-plan cost `c` amortised
+//! over `B` rows would give `c/B + marginal` — monotonically decreasing. The
+//! observed shape refutes that: per-step cost rises 3.99× for 2× the rows
+//! (B=1→2), then 1.73× for 2× the rows (B=2→4). **The re-plan cost grows with
+//! `B`**, so batching enlarges the very thing it was supposed to amortise.
+//! Under fixed `c` a large enough batch eventually wins; under `c(B)`, none does.
 //!
-//! The claim worth testing is that *per-sequence* cost falls as `B` grows. This
-//! module ships **no B-sweep**, so that claim is untested. What is tested is that
-//! the batched path produces the same numbers as the serial one.
+//! B=8 is unmeasured (harness timeout), and cannot change the conclusion: per-step
+//! cost is non-decreasing in `B`, so `per_seq(8) = step(8)/8 ≥ 37.555/8 = 4.69 s`
+//! — still 4.8× the baseline in the impossible best case where four extra rows
+//! cost nothing.
+//!
+//! **Read this as a property of *this* paged path, not of paging.** The
+//! contiguous arm holds a plan-once `DecodeSession`; the paged arm has none and
+//! re-plans every step (rule 3 below). So the comparison is plan-once-versus-
+//! re-plan at least as much as it is contiguous-versus-paged — which is the
+//! intended measurement, because no paged plan-once path exists to measure. It
+//! bounds what paged decode costs *today*; what it argues for is a paged
+//! `DecodeSession` upstream in Fuel, not abandoning paging. Fuel's own
+//! contiguous tiers show the size of the prize: re-plan-per-step to captured
+//! replay measured ~10.4× on TinyLlama/4070, the same order as the gap here.
+//!
+//! Note this supersedes an earlier figure of 4.52 s/token for the contiguous
+//! baseline, which compared **bf16 projections measured on another day** against
+//! this module's f32 numbers and understated the gap ~4.6×. The paged side
+//! reproduced almost exactly across that gap (21.73 → 21.724 s/step at B=2);
+//! it was the baseline that was wrong. Hold dtype, process and machine fixed,
+//! or do not compare.
 //!
 //! # The three rules, as they land here
 //!
@@ -2063,6 +2087,260 @@ mod tests {
             "sequence 1 should name Tokyo, got {d1:?}. If sequence 0 is right and \
              this one is wrong, suspect the batch axis: row 1 may be reading row \
              0's blocks or row 0's RoPE position"
+        );
+        Ok(())
+    }
+
+    /// **The B-sweep** — does per-sequence cost actually fall as `B` grows?
+    ///
+    /// An earlier comparison put 4.52 s (contiguous, bf16, B=1) against ~10.9 s
+    /// (paged, f32, B=2) and said plainly it was not apples to apples. Three
+    /// of those four confounds are removable and this test removes them: both
+    /// arms run **in one process, off one checkpoint load, with f32 weights on
+    /// both sides**, so dtype, machine and day are held fixed. The fourth — no
+    /// `DecodeSession` on the paged path, so every step re-optimises the whole
+    /// graph — is structural (rule 3 is not achieved here, see the module
+    /// header) and is not a confound but the very thing under measurement.
+    ///
+    /// **Uniform context lengths are deliberate and they bias the result.**
+    /// Every row gets the same prompt length and all rows advance in lockstep,
+    /// which is the *best case* for batching: no ragged padding waste, maximum
+    /// shared work per step. Real continuous batching is ragged — sessions
+    /// arrive and finish at different steps and never realign. So a **negative**
+    /// result here is conclusive (it cannot get better with ragged input), while
+    /// a **positive** result is an upper bound that ragged serving will not
+    /// reach. Read the two directions asymmetrically.
+    ///
+    /// Reports per-sequence-token cost: wall-clock per step ÷ B. This is the
+    /// number the decision turns on — a batched step that costs B times a serial
+    /// step has bought nothing.
+    ///
+    /// **Each arm also reports its first step separately, and that ratio is the
+    /// load-bearing evidence.** A plan-once path pays for the plan on step 0 and
+    /// replays afterwards, so warm-up ≫ steady. A path that re-plans every token
+    /// pays the same price every step, so warm-up ≈ steady. That distinguishes
+    /// *"paging is expensive"* from *"this path re-plans every token"* without
+    /// instrumenting Fuel at all — and the two have entirely different fixes.
+    /// Without it the headline ratio is ambiguous between the two, which would
+    /// make it easy to write off paging on the strength of a missing optimiser.
+    ///
+    /// Asserts only non-vacuity (that every arm really decoded, full-width
+    /// logits, positions actually advanced), never a latency threshold — a
+    /// timing assert would be flaky and this is a measurement harness, not a
+    /// regression gate.
+    ///
+    /// Env overrides: `LB_SWEEP_B` (default `1,2,4,8`), `LB_SWEEP_PROMPT`
+    /// (default 8), `LB_SWEEP_STEPS` (default 4).
+    #[test]
+    #[ignore = "needs the TinyLlama checkpoint; minutes per B in release"]
+    fn b_sweep_per_sequence_cost() -> Result<()> {
+        use fuel::inference_context::KvCache;
+        use std::time::{Duration, Instant};
+
+        // Deliberately NOT the `return Ok(())` skip the other tests here use.
+        // An early return from a `#[test]` is a **pass**: a missing or moved
+        // checkpoint would print green having measured nothing, and every
+        // non-vacuity guard below — logits width, positions advanced,
+        // `session.is_some()` — sits downstream of this gate and never runs.
+        // This test is `#[ignore]`d and only ever invoked by name, so an absent
+        // checkpoint is a broken invocation, not a routine skip.
+        let dir = tinyllama_dir().expect(
+            "no TinyLlama snapshot: this is a measurement harness, so it fails \
+             rather than skipping — a green with no numbers behind it is worse \
+             than a red",
+        );
+
+        let env_usize = |k: &str, d: usize| -> usize {
+            std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d)
+        };
+        let prompt_len = env_usize("LB_SWEEP_PROMPT", 8);
+        let steps = env_usize("LB_SWEEP_STEPS", 4);
+        let bs: Vec<usize> = std::env::var("LB_SWEEP_B")
+            .unwrap_or_else(|_| "1,2,4,8".to_string())
+            .split(',')
+            .filter_map(|s| s.trim().parse::<usize>().ok())
+            .filter(|&b| b > 0)
+            .collect();
+        assert!(prompt_len > 0, "LB_SWEEP_PROMPT must be > 0");
+        assert!(steps > 0, "LB_SWEEP_STEPS must be > 0");
+        assert!(!bs.is_empty(), "LB_SWEEP_B parsed to nothing");
+
+        const BLOCK: usize = 16;
+        // Distinct token ids per row. Cost is shape-driven, not value-driven, so
+        // synthetic ids measure the same thing as real ones while giving exact
+        // control over context length — which is what keeps the rows uniform.
+        let make_prompt = |row: usize| -> Vec<u32> {
+            (0..prompt_len)
+                .map(|t| ((row * 131 + t * 17) % 1000 + 1) as u32)
+                .collect()
+        };
+        let argmax = |row: &[f32]| -> u32 {
+            let mut best = 0usize;
+            let mut bv = f32::NEG_INFINITY;
+            for (i, &v) in row.iter().enumerate() {
+                if v > bv {
+                    bv = v;
+                    best = i;
+                }
+            }
+            best as u32
+        };
+        let median = |mut v: Vec<Duration>| -> Duration {
+            v.sort_unstable();
+            v[v.len() / 2]
+        };
+
+        let t_load = Instant::now();
+        let model = load_f32_checkpoint(&dir)?;
+        let model = &model;
+        let vocab = model.config.vocab_size;
+        eprintln!(
+            "f32 checkpoint loaded in {:.1?} | prompt_len={prompt_len} steps={steps} \
+             (+1 warm-up, dropped) | B set = {bs:?}",
+            t_load.elapsed()
+        );
+
+        // ---- Arm A: contiguous + persistent DecodeSession, B=1 ----------------
+        // The current default decode path, exactly as `generate.rs` shapes it:
+        // `with_capacity` (not `with_dims`) plus `forward_with_kv_context_
+        // PERSISTENT` (not the plain variant). Both choices are load-bearing and
+        // documented there; getting either wrong here would flatter the paged arm.
+        let contiguous = {
+            let device = Device::cpu();
+            let c = &model.config;
+            let mut cache = KvCache::with_capacity(
+                c.n_layers,
+                c.n_kv_heads,
+                c.head_dim,
+                prompt_len + steps + 3,
+                fuel::DType::F32,
+                &device,
+            )
+            .map_err(|e| anyhow::anyhow!("baseline KV cache: {e:?}"))?;
+            let mut ctx = InferenceContext::new(device);
+            let mut session: Option<fuel::inference_context::DecodeSession> = None;
+
+            let p = make_prompt(0);
+            let mut logits = model
+                .forward_with_kv_context_persistent(&p, &mut cache, &mut ctx, &mut session)
+                .map_err(|e| anyhow::anyhow!("baseline prefill: {e:?}"))?;
+            assert_eq!(logits.len(), vocab, "baseline prefill logits width");
+
+            let mut per = Vec::with_capacity(steps);
+            let mut warmup = Duration::ZERO;
+            let mut next = argmax(&logits);
+            for i in 0..=steps {
+                let t0 = Instant::now();
+                logits = model
+                    .forward_with_kv_context_persistent(
+                        &[next],
+                        &mut cache,
+                        &mut ctx,
+                        &mut session,
+                    )
+                    .map_err(|e| anyhow::anyhow!("baseline decode: {e:?}"))?;
+                let dt = t0.elapsed();
+                // Step 0 is warm-up: the persistent session is built on first
+                // use, so including it would charge plan-once to every step.
+                // It is reported rather than discarded — see the note below on
+                // why the warm-up/steady ratio is the load-bearing evidence.
+                if i > 0 {
+                    per.push(dt);
+                } else {
+                    warmup = dt;
+                }
+                next = argmax(&logits);
+            }
+            assert_eq!(logits.len(), vocab, "baseline decode logits width");
+            assert_eq!(per.len(), steps, "baseline measured step count");
+            assert!(
+                session.is_some(),
+                "baseline never built a DecodeSession — the persistent path did \
+                 not engage, so this measured the re-optimising loop and would \
+                 understate the contiguous arm by ~2.5x"
+            );
+            let m = median(per.clone());
+            eprintln!("  contiguous persistent B=1  {m:>10.3?}/step  {m:>10.3?}/seq-token");
+            eprintln!("      warm-up {warmup:?} then {per:?}");
+            m
+        };
+
+        // ---- Arm B: batched paged, B in bs ------------------------------------
+        let mut rows: Vec<(usize, Duration, Duration)> = Vec::new();
+        for &b in &bs {
+            let per_seq_blocks = (prompt_len + steps + 2).div_ceil(BLOCK);
+            let num_blocks = per_seq_blocks * b + 4;
+            let mut dec = BatchedPagedDecoder::new(model, num_blocks, BLOCK)?;
+
+            let sessions: Vec<SessionHandle> = (0..b).map(|_| dec.open_session()).collect();
+            let owned: Vec<Vec<u32>> = (0..b).map(make_prompt).collect();
+            let prompts: Vec<&[u32]> = owned.iter().map(|p| p.as_slice()).collect();
+
+            let mut logits = dec.prefill_batch(&sessions, &prompts)?;
+            assert_eq!(logits.len(), b, "prefill returned one row per session");
+
+            let mut per = Vec::with_capacity(steps);
+            let mut warmup = Duration::ZERO;
+            for i in 0..=steps {
+                let batch: Vec<(SessionHandle, u32)> = sessions
+                    .iter()
+                    .zip(logits.iter())
+                    .map(|(&s, row)| (s, argmax(row)))
+                    .collect();
+                let t0 = Instant::now();
+                logits = dec.step(&batch)?;
+                let dt = t0.elapsed();
+                if i > 0 {
+                    per.push(dt);
+                } else {
+                    warmup = dt;
+                }
+            }
+
+            // Non-vacuity: every row really decoded and really advanced. Without
+            // this a silently-empty batch would post a spectacular per-token cost.
+            assert_eq!(logits.len(), b, "step returned one row per session");
+            for (i, row) in logits.iter().enumerate() {
+                assert_eq!(row.len(), vocab, "row {i} logits width");
+            }
+            for (i, &s) in sessions.iter().enumerate() {
+                assert_eq!(
+                    dec.position(s),
+                    Some(prompt_len + steps + 1),
+                    "row {i} did not advance one position per step"
+                );
+            }
+            assert_eq!(per.len(), steps, "measured step count at B={b}");
+
+            let m = median(per.clone());
+            let per_seq = m / (b as u32);
+            eprintln!("  batched paged      B={b:<2} {m:>10.3?}/step  {per_seq:>10.3?}/seq-token");
+            eprintln!("      warm-up {warmup:?} then {per:?}");
+            rows.push((b, m, per_seq));
+        }
+
+        // ---- The comparison the decision turns on -----------------------------
+        eprintln!();
+        eprintln!("  B    per-step      per-seq-token   vs contiguous");
+        eprintln!("  ---  ------------  --------------  -------------");
+        for &(b, step, per_seq) in &rows {
+            let ratio = per_seq.as_secs_f64() / contiguous.as_secs_f64();
+            let verdict = if ratio < 1.0 { "FASTER" } else { "slower" };
+            eprintln!("  {b:<3}  {step:>12.3?}  {per_seq:>14.3?}  {ratio:>8.2}x {verdict}");
+        }
+        let best = rows
+            .iter()
+            .min_by(|a, c| a.2.cmp(&c.2))
+            .expect("bs is non-empty");
+        eprintln!();
+        eprintln!(
+            "  best paged per-seq-token: {:.3?} at B={} | contiguous baseline: {:.3?}",
+            best.2, best.0, contiguous
+        );
+        eprintln!(
+            "  => paged {} the contiguous baseline at TinyLlama scale on CPU, \
+             under lockstep-uniform contexts (the batched path's best case).",
+            if best.2 < contiguous { "BEATS" } else { "does NOT beat" }
         );
         Ok(())
     }
