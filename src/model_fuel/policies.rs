@@ -763,6 +763,87 @@ impl SpanBlockMap {
         self.plan(registry, slot, &ranked, want_blocks, session_blocks, filled_tokens)
     }
 
+    /// Turn H2O's per-block scores into a block set, for callers whose eviction
+    /// signal is attention rather than spans.
+    ///
+    /// `scores` is [`h2o_block_scores`]'s output — descending, evict-first.
+    /// Blocks are taken in that order until `want_blocks` is reached, skipping:
+    ///
+    /// * **`NEG_INFINITY`** — H2O's protected/recent marker. Since
+    ///   [`h2o_block_scores`] aggregates by *minimum*, one protected token makes
+    ///   its whole block unevictable; ignoring that here would discard the
+    ///   aggregation's entire purpose.
+    /// * **`NaN`** — an unknown score. Evicting on "don't know" is not a
+    ///   decision, and `NaN` also has no defined position in the sort order, so
+    ///   its rank is meaningless.
+    /// * the protected tail block (the next write target), and anything at or
+    ///   past `session_blocks`.
+    ///
+    /// **`victim_spans` is empty**, because H2O ranks blocks and knows nothing
+    /// about spans. [`Self::apply_report`] will therefore record no span impacts
+    /// for this plan — correct for a caller that does not track spans, wrong for
+    /// one that does. A caller holding a `SpanRegistry` should use [`Self::plan`]
+    /// or [`Self::plan_with_policy`], or intersect the two block sets itself.
+    /// This adapter will not guess which.
+    pub fn plan_from_block_scores(
+        &self,
+        scores: &[(usize, f32)],
+        want_blocks: usize,
+        session_blocks: usize,
+        filled_tokens: usize,
+    ) -> EvictionPlan {
+        let protected_tail = self.geom.protected_tail_block(filled_tokens);
+        let mut blocks: Vec<usize> = Vec::new();
+        for &(b, score) in scores {
+            if want_blocks > 0 && blocks.len() >= want_blocks {
+                break;
+            }
+            if score.is_nan() || (score.is_infinite() && score.is_sign_negative()) {
+                continue;
+            }
+            if Some(b) == protected_tail || b >= session_blocks {
+                continue;
+            }
+            blocks.push(b);
+        }
+        blocks.sort_unstable();
+        blocks.dedup();
+        EvictionPlan { blocks, victim_spans: Vec::new(), protected_tail }
+    }
+
+    /// End-to-end H2O eviction: score, plan, detach.
+    ///
+    /// This is the wiring that makes [`h2o_block_scores`] reachable from
+    /// ordinary code rather than only from tests. Lightbulb scores the tokens
+    /// and decides which blocks die; Fuel performs the detach. Session geometry
+    /// (`session_blocks`, `filled_tokens`) is read from the pool rather than
+    /// taken as arguments, because those are Fuel's facts and a caller passing
+    /// its own stale copies is exactly how the tail block gets evicted.
+    ///
+    /// Returns the plan alongside Fuel's report so the caller can reconcile.
+    ///
+    /// **Bytes are not preserved** — `evict_blocks` is the pure detach. A caller
+    /// that needs this KV back later should take the plan from
+    /// [`Self::plan_from_block_scores`] and hand its `blocks` to
+    /// [`BlockTierMover::demote`], which captures the payloads first.
+    pub fn evict_with_h2o(
+        &self,
+        pool: &mut KvBlockPool,
+        policy: &H2OPolicy,
+        positions: &HashMap<usize, usize>,
+        s: SessionHandle,
+        want_blocks: usize,
+    ) -> Result<(EvictionPlan, EvictReport), PolicyError> {
+        let session_blocks =
+            pool.session_blocks(s).ok_or(PolicyError::Alloc(KvAllocError::UnknownSession))?;
+        let filled_tokens =
+            pool.filled_tokens(s).ok_or(PolicyError::Alloc(KvAllocError::UnknownSession))?;
+        let scores = h2o_block_scores(policy, positions, &self.geom);
+        let plan = self.plan_from_block_scores(&scores, want_blocks, session_blocks, filled_tokens);
+        let report = pool.evict_blocks(s, &plan.blocks)?;
+        Ok((plan, report))
+    }
+
     fn blocks_for_victims(
         &self,
         live_spans: &[(SpanId, Range<usize>)],
@@ -2135,6 +2216,72 @@ mod tests {
             by_block[&1]
         );
         assert!(by_block[&1] < by_block[&0], "block 1 must be less evictable than block 0");
+    }
+
+    /// Each guard in `plan_from_block_scores` gets its own ineligible block, so
+    /// a regression that drops one is visible rather than masked by the others.
+    #[test]
+    fn h2o_plan_skips_protected_tail_nan_and_out_of_range_blocks() {
+        let g = geom(16, 4);
+        let map = SpanBlockMap::new(g);
+        // Descending, as `h2o_block_scores` returns. 6 blocks, 12 filled tokens
+        // ⇒ protected tail is block 2.
+        let scores = vec![
+            (0, f32::INFINITY),     // never attended ⇒ evict first
+            (2, 5.0),               // the protected tail — next write target
+            (7, 4.0),               // at/past session_blocks
+            (1, f32::NAN),          // unknown ⇒ not a decision
+            (3, f32::NEG_INFINITY), // H2O-protected ⇒ never evictable
+            (4, 2.0),               // eligible
+        ];
+        let plan = map.plan_from_block_scores(&scores, 8, 6, 12);
+        assert_eq!(plan.protected_tail, Some(2));
+        assert_eq!(
+            plan.blocks,
+            vec![0, 4],
+            "block 2 is the tail, 7 is out of range, 1 is NaN, 3 is H2O-protected"
+        );
+        assert!(plan.victim_spans.is_empty(), "H2O ranks blocks, not spans");
+    }
+
+    /// **H2O reaches the allocator.** `h2o_block_scores` had no caller outside
+    /// tests: it computed per-block scores that nothing turned into an
+    /// `EvictionPlan`, and nothing handed to Fuel. This drives the whole path —
+    /// attention in, detached blocks out — against a real `KvBlockPool`.
+    #[test]
+    fn evict_with_h2o_drives_the_allocator_end_to_end() {
+        let bs = 4;
+        let g = geom(16, bs);
+        let map = SpanBlockMap::new(g);
+        let mut p = pool(16, bs);
+        let s = p.open();
+        p.append(s, 12).unwrap(); // blocks 0,1,2
+
+        let mut policy =
+            H2OPolicy::new(H2OConfig { enabled: true, num_recent_to_keep: 0, decay_factor: 1.0 });
+        let positions = identity_positions(12);
+        // One heavily-attended token inside block 1.
+        let mut row = vec![0.0f32; 12];
+        row[5] = 1.0;
+        policy.update_attention_scores(&[row], &positions);
+
+        let free_before = p.free_blocks();
+        let (plan, report) = map.evict_with_h2o(&mut p, &policy, &positions, s, 1).unwrap();
+
+        assert_eq!(plan.protected_tail, Some(2), "token 11 lives in block 2");
+        assert_eq!(
+            plan.blocks,
+            vec![0],
+            "block 0 is unattended, block 1 is protected by its hot token, block 2 is \
+             the tail"
+        );
+
+        // Fuel actually executed it — not just a plan that was computed and dropped.
+        assert_eq!(report.freed, vec![0]);
+        assert_eq!(p.free_blocks(), free_before + 1, "the block returned to the free list");
+        assert!(p.resident_block(s, 0).is_none(), "block 0 is detached");
+        assert!(p.resident_block(s, 1).is_some(), "the hot block survives");
+        assert!(p.resident_block(s, 2).is_some(), "the tail survives");
     }
 
     // -------------------------------------------------------------------
