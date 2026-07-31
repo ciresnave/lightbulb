@@ -77,6 +77,61 @@
 //! — still 4.8× the baseline in the impossible best case where four extra rows
 //! cost nothing.
 //!
+//! A second run on a quiet machine reproduced every arm within 2–3 % (5.452 →
+//! 5.344 s, 21.724 → 21.212 s, 37.555 → 37.124 s, baseline 977 → 950 ms). The
+//! harness is stable to a couple of percent; the 74–99 % swings seen earlier
+//! were machine contention and nothing else.
+//!
+//! **The warm-up/steady split identifies *which* cost this is.** Each arm
+//! reports its first step separately: a plan-once path pays for the plan on
+//! step 0 and replays afterwards, a re-planning path pays every step.
+//!
+//! | arm | warm-up | steady | ratio |
+//! | --- | --- | --- | --- |
+//! | contiguous persistent, B=1 | 4.956 s | 949.994 ms | **5.22×** |
+//! | batched paged, B=1 | 5.295 s | 5.344 s | 0.99× |
+//! | batched paged, B=2 | 21.041 s | 21.212 s | 0.99× |
+//! | batched paged, B=4 | 37.442 s | 37.124 s | 1.01× |
+//!
+//! Two things are measured here, and it is worth separating them from what is
+//! merely inferred, because the inference is load-bearing and easy to overstate.
+//!
+//! **Measured.** The paged path has **no first-step premium at any `B`**
+//! (0.99/0.99/1.01), so it re-plans every token. The contiguous path has a
+//! 5.22× premium, so it plans once and replays. On the contiguous arm both
+//! terms are directly observable — step 0 is plan+execute and the steady steps
+//! are execute-only — giving **planning ≈ 4.0 s and execution ≈ 0.95 s**.
+//! Independently, paged B=1 (5.344 s) costs within 8 % of the contiguous
+//! *first* step (4.956 s): one plan plus one row's execution, every token.
+//!
+//! **Inferred, and only under an assumption.** Splitting the *paged* step into
+//! plan and execute needs an assumption, because nothing on this path isolates
+//! them — that is precisely the missing mechanism. Assuming paged execution
+//! costs the same ~0.95 s per row as contiguous execution:
+//!
+//! ```text
+//! c(B=1) ≈ 4.4 s      c(B=2) ≈ 19.2 s      c(B=4) ≈ 33.1 s
+//! ```
+//!
+//! **Do not treat that assumption as confirmed by the numbers reproducing.**
+//! `c(B) ≡ step(B) − B·0.95 s` by construction, so `c(B)/B + 0.95 s` is
+//! identically `step(B)/B` — an algebraic identity, not a check. It would
+//! "reproduce" the data for *any* assumed execution cost. Likewise, dividing
+//! `c(B)` back out to conclude that paged execution is at parity with
+//! contiguous merely recovers the input assumption.
+//!
+//! What *is* safe: the planner dominates. Even bounding paged execution
+//! generously, step 0 of the contiguous arm shows a ~4 s plan against a ~0.95 s
+//! execute on the same model and machine, and the paged arm pays a
+//! contiguous-sized first step on every token.
+//!
+//! **`c(B)`'s shape is not characterised.** Per-row planning runs 4.4 → 9.6 →
+//! 8.3 s at B=1/2/4 — non-monotonic, worst at B=2. A cost that quadruples on
+//! the first doubling and then grows 1.7× on the second could be a threshold, a
+//! fallback engaging at B≥2, or an artifact at a single point. B=3 and B=8 would
+//! settle it. None of this affects the verdict, which rests on the measured
+//! warm-up ratios, not on `c(B)`.
+//!
 //! **Read this as a property of *this* paged path, not of paging.** The
 //! contiguous arm holds a plan-once `DecodeSession`; the paged arm has none and
 //! re-plans every step (rule 3 below). So the comparison is plan-once-versus-
