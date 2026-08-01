@@ -212,10 +212,29 @@
 //!    (`LazyTensor::from_f32`) and *everything* — weights, RoPE tables, the u32
 //!    block table, and the pool placeholders — is `const_*_like` off it.
 //! 2. **F32.** [`BatchedPagedDecoder::new`] rejects any non-`F32` projection at
-//!    construction. This is not just rule 2 pedantry: `DeviceKvPool::write_block`
-//!    / `read_block` and `forward_paged_step` are all hard-gated to f32, so a
-//!    bf16 model on this path is unusable anyway — better a typed error at
-//!    construction than a confusing one three layers down.
+//!    construction — but **not for the reason this doc used to give.** It said
+//!    `forward_paged_step` is "hard-gated to f32". That was true once and is now
+//!    false: all three paged forwards accept `F32 | BF16 | F16`
+//!    (`fuel-core/src/lazy.rs` :7530, :7670, :7983). Fuel is not gating us.
+//!
+//!    Two real reasons remain, both verified against Fuel's code rather than its
+//!    comments:
+//!
+//!    * **`Op::PagedAttn` has no CUDA and no Vulkan kernel** — it is CPU-only in
+//!      Fuel's binding table, and candidate enumeration filters by that table, so
+//!      a `PagedAttn` node has no GPU candidate to be placed on. Paged attention
+//!      therefore runs on CPU whatever backends are compiled in, and f32 avoids
+//!      paying a promoting cast on that CPU fallback for nothing. (Wiring a CUDA
+//!      `PagedAttn` kernel into the binding table is Fuel's PC-3.)
+//!    * **Our tiering uses the f32-typed pool API.** `write_block` / `read_block`
+//!      reject a non-F32 pool and direct callers to `write_block_bytes` /
+//!      `read_block_bytes`. So a bf16 pool is possible, but [`BlockTierMover`]
+//!      would have to move bytes instead of `f32`s — a real change, not a flag.
+//!
+//!    Note this rule is **specific to the paged path**. The contiguous path's
+//!    f32 choice is a CPU artifact and is separately relaxable: Fuel's
+//!    `insert_dtype_fixups` keeps bf16 where the kernel table serves the mixed
+//!    key natively and inserts a cast only where it does not.
 //! 3. **Capture-shaped decode.** *Not achieved here, and said plainly.* Each
 //!    `step` builds a fresh graph. Plan-once needs (a) a fixed-width block table
 //!    (`materialize_block_table`'s `max_blocks` grows when any session crosses a
@@ -409,11 +428,19 @@ impl<'m> BatchedPagedDecoder<'m> {
     /// Build a decoder over a fresh pool of `num_blocks` blocks of `block_size`
     /// tokens each.
     ///
-    /// Rejects (typed, at construction) any weight that is not `F32`. The pool's
-    /// byte movement (`write_block`/`read_block`, and therefore `evict`/`restore`)
-    /// is f32-only in Fuel today, and rule 2 wants `[F32,F32,F32]` matmul keys so
-    /// no promoting cast runs. A bf16 model reaching this path would be wrong in
-    /// two independent ways, so it stops here.
+    /// Rejects (typed, at construction) any weight that is not `F32`.
+    ///
+    /// **Not because Fuel's paged forwards require it** — they accept
+    /// `F32 | BF16 | F16`. Because `Op::PagedAttn` has no CUDA or Vulkan kernel,
+    /// so paged attention is placed on CPU regardless of which backends are
+    /// compiled in, and f32 avoids a promoting cast on that CPU fallback that
+    /// would buy nothing. And because the pool's `f32`-typed byte movement
+    /// (`write_block` / `read_block`, hence `evict` / `restore`) rejects a
+    /// non-F32 pool — a bf16 pool would need the `_bytes` variants throughout
+    /// [`BlockTierMover`].
+    ///
+    /// Revisit when Fuel's PC-3 lands a CUDA `PagedAttn` kernel: at that point
+    /// bf16 becomes a real question rather than a pointless one.
     ///
     /// Use `loader_f32::load_llama_f32_from_dir`, not the stock loader.
     pub fn new(model: &'m LlamaModel, num_blocks: usize, block_size: usize) -> Result<Self> {
@@ -434,6 +461,23 @@ impl<'m> BatchedPagedDecoder<'m> {
             head_dim: cfg.head_dim,
             elem_size: DType::F32.size_in_bytes(),
         };
+        // **`Device::cpu()` here is a STARTING LOCATION, not a pin — keep it.**
+        // Verified against Fuel's dispatch rather than assumed: the decision
+        // device is `graph.placement(id)` (a hard pin, scheduler-only) else
+        // `options.pinned_device` (soft, despite the name) else the target
+        // backend. A leaf's `Device` is in neither chain — it only allocates the
+        // leaf's storage and is consumed as input *residency*, which the cost
+        // model prices and the optimizer is free to move.
+        //
+        // So "start on CPU and let the optimizer move what is worth moving" is
+        // the correct consumer pattern, and `Device::custom` is not needed.
+        //
+        // It is still a performance LEVER, though: starting weights on CPU makes
+        // every GPU candidate pay an inbound transfer, so a transfer-aware
+        // planner may keep an op on CPU correctly, but for a reason we created
+        // by starting it there. Co-resident inputs price at ~0. If we ever want
+        // specific weights on a GPU, the move is to START them there — which
+        // zeroes their transfer term — not to pin anything.
         let device = Device::cpu();
         let pool = DeviceKvPool::new(geom, DType::F32, &device)
             .map_err(|e| anyhow::anyhow!("allocating DeviceKvPool: {e:?}"))?;
