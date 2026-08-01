@@ -7,8 +7,22 @@
     version     = "0.1.0"
 
 [features]
-    # CUDA support with flash attention and fused kernels
-    cuda = ["candlelight/cuda"]
+    # CUDA support with flash attention and fused kernels.
+    #
+    # This MUST propagate to `fuel` as well as `candlelight`. Fuel's own
+    # `default = []` is its clean CPU-testing baseline, not a consumer default —
+    # a consumer that wants multi-backend planning has to opt in, and omitting
+    # the feature produces a binary with zero GPU code in it. While this read
+    # `["candlelight/cuda"]` alone, there was NO build configuration in which
+    # `model_fuel` could reach a GPU: enabling `cuda` accelerated the candlelight
+    # path we are porting AWAY from and left the Fuel path CPU-only. These
+    # feature lines predate `fuel` being a dependency at all, and nobody extended
+    # them when it was added.
+    cuda = ["candlelight/cuda", "fuel/cuda"]
+    # Vulkan, via Fuel only — candlelight has no Vulkan backend. Worth having
+    # separately because Fuel supports it and it reaches integrated GPUs that
+    # CUDA cannot.
+    vulkan = ["fuel/vulkan"]
     default = []
     # Flash attention feature (requires CUDA)
     flash-attn = ["candlelight/flash-attn"]
