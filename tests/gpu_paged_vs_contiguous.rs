@@ -84,26 +84,51 @@
 //! # Result, 2026-08-01 (debug build, RTX 4070 Laptop 8 GB, TinyLlama-1.1B f32)
 //!
 //! ```text
-//!                    PAGED      CONTIGUOUS     ratio
-//!   DtoH copies      6,335             26      244x
-//!   DtoH bytes  101,691 MB        216 MB       470x
-//!   HtoD copies      9,992          3,290      3.0x
-//!   HtoD bytes  202,627 MB     70,617 MB       2.9x
-//!   kernels         17,802         36,718      0.48x
-//!   per-token       8.192 s        5.901 s     1.39x
+//!                   PAGED           PAGED      CONTIGUOUS   CONTIGUOUS
+//!                  Replan        PlanOnce           plain     captured
+//!                 (DEFAULT)                       (DEFAULT)
+//!   ms/token       8,192.0           275.8         5,901.0        26.47
+//!   HtoD copies      9,992           4,304           3,290          491
+//!   HtoD MB        202,627          79,422          70,617        9,015
+//!   DtoH copies      6,335           3,446              26           26
+//!   DtoH MB        101,691          40,088             216          216
+//!   kernels         17,802          17,802          36,718        9,214
 //! ```
 //!
-//! **Two independent pathologies, which the wall clock blended into one
-//! uninformative 1.39x ratio:**
+//! **BOTH SHIPPED DEFAULTS ARE THE WRONG ONE.** Fuel exposes a persistent seam on
+//! each path — `PagedDecodePlan::PlanOnce` (`PagedDecodeSession.base_cache`) and
+//! `forward_with_kv_context_captured` (caller-held `Option<DecodeSession>`) — and
+//! both are off unless the consumer opts in. Turning them on:
 //!
-//! 1. **Paged-specific round-trip.** 6.2 GB pulled back to the host *per token*
-//!    versus 13.5 MB contiguous — and contiguous's 13.5 MB is just the logits
-//!    readback, the irreducible floor. The paged arm also runs **less than half**
-//!    the GPU kernels; a path doing the same attention on-device would run more,
-//!    not fewer. Work is leaving the device.
-//! 2. **Weight re-upload, BOTH arms.** 70-202 GB uploaded for a 4.1 GB model over
-//!    16 tokens, with thousands of matched `cuMemAlloc_v2`/`cuMemFree_v2` pairs.
-//!    Weights never stay resident. Separate bug, separate fix.
+//! * paged **8,192 ms -> 275.8 ms** per token (**29.7x**)
+//! * contiguous **5,901 ms -> 26.47 ms** per token (**223x**)
+//!
+//! **The answer to the question this harness was built for**, with both arms
+//! correctly configured and differing only in paging:
+//!
+//! * **paged costs 10.4x contiguous** (275.8 ms vs 26.47 ms)
+//! * **paged moves 186x the bytes back to host** (40,088 MB vs 216 MB) —
+//!   2.5 GB per token against a 13.5 MB logits-readback floor
+//! * paged runs **~2x the kernels** of captured contiguous, while doing the same
+//!   model's work
+//!
+//! That DtoH gap **survives the plan flag**, which is what distinguishes it from
+//! a planning artifact: if the round-trip were a `Replan` side effect it would
+//! have converged toward the contiguous floor once persistence was on. It fell
+//! 61% and stayed 186x away.
+//!
+//! # Three pathologies, and only one of them is paging
+//!
+//! 1. **Paged round-trip to host.** Survives every fix above. Fuel-side: no fused
+//!    CUDA `Op::PagedAttn` kernel.
+//! 2. **`Replan` as the paged default.** Consumer-side, one line.
+//! 3. **Non-persistent contiguous decode.** Consumer-side, one seam. This was
+//!    first attributed to a *loader/anchor* placement bug on the theory that
+//!    weights sat on host and were copied per token. Wrong: threading
+//!    `DecodeSession` cut HtoD 70,617 -> 9,015 MB (-87%) with no loader change.
+//!    The arithmetic that *looked* like confirmation — 70,617 MB / 16 tokens
+//!    = 4.4 GB/token, almost exactly one 4.1 GB model — is produced identically
+//!    by both causes and discriminates neither.
 //!
 //! # Two instruments that pointed the wrong way
 //!
@@ -134,7 +159,7 @@ use std::time::{Duration, Instant};
 
 // `KvCache` lives in `inference_context`, NOT `lazy` — `lazy` re-exports plenty
 // of neighbouring types, which makes the wrong path look plausible.
-use fuel::inference_context::{InferenceContext, KvCache};
+use fuel::inference_context::{InferenceContext, KvCache, PagedDecodePlan};
 use fuel::lazy::SamplingStrategy;
 use fuel::{DType, Device};
 use fuel_inference::multi_session::{KvBudget, PagedSessionScheduler};
@@ -187,6 +212,28 @@ fn run_paged(
     let mut sched = PagedSessionScheduler::new(&loaded.model, budget, DType::F32, dev)
         .expect("build the paged scheduler on CUDA");
 
+    // `PagedSessionScheduler` DEFAULTS to `Replan` (fuel-inference
+    // multi_session.rs:1049): fresh graph, fresh realize, every token. `PlanOnce`
+    // routes through `forward_paged_step_persistent`, whose `PagedDecodeSession`
+    // holds a `base_cache` — the realized StorageCache from the first realize —
+    // and reuses the weight Arcs across tokens instead of re-shipping them.
+    //
+    // The first run of this harness left the default in place, which is why the
+    // paged arm re-uploaded weights per token. That is the shipped default, so
+    // it is a real measurement of what a caller gets — but it is not the best
+    // configuration, and conflating the two would be a mismeasurement.
+    //
+    // Parity is gated upstream by `paged_scheduler_plan_once_matches_replan_
+    // byte_exact`, so this is a performance flag, not a semantics change.
+    let plan = match std::env::var("LB_PLAN").unwrap_or_default().as_str() {
+        "once" => PagedDecodePlan::PlanOnce,
+        "" | "replan" => PagedDecodePlan::Replan,
+        other => panic!("LB_PLAN must be \"once\", \"replan\", or unset; got {other:?}"),
+    };
+    sched.set_plan(plan);
+    assert_eq!(sched.plan(), plan, "set_plan did not take");
+    eprintln!("paged arm running with plan = {plan:?}");
+
     let prompt = prompt_tokens();
     sched
         .add_session(&prompt, SamplingStrategy::Greedy, None, MAX_NEW)
@@ -224,21 +271,57 @@ fn run_contiguous(
     let prompt = prompt_tokens();
     let mut steps = Vec::with_capacity(MAX_NEW);
 
+    // `LB_PLAN` controls PERSISTENCE FOR BOTH ARMS, deliberately.
+    //
+    // The paged arm's `PlanOnce` retains weights across tokens via
+    // `PagedDecodeSession.base_cache`. The contiguous twin is
+    // `forward_with_kv_context_captured`, which threads an
+    // `Option<DecodeSession>` the CALLER holds — same `base_cache` field, same
+    // opt-in shape, also off by default.
+    //
+    // Comparing paged-with-PlanOnce against plain `forward_with_kv_context`
+    // would vary persistence AND paging at once, and report the sum as if it
+    // were the paging effect. The first run of this harness did exactly that:
+    // 8.192s paged vs 5.901s contiguous looked like "paging costs 1.39x" and was
+    // really "the paged arm was re-planning". Tying both arms to one switch is
+    // what keeps the contrast to the variable of interest.
+    //
+    // Neither type is nameable from here — `fuel-core` re-exports only
+    // `fuel_dispatch::topology`, not `CapturedDecodeSession` — but `None` infers
+    // both from the signature, so no extra dependency is needed.
+    let persistent = std::env::var("LB_PLAN").unwrap_or_default() == "once";
+    let mut session = None;
+    let mut captured = None;
+    eprintln!("contiguous arm running with persistent = {persistent}");
+
+    let mut step = |toks: &[u32],
+                    cache: &mut KvCache,
+                    ctx: &mut InferenceContext|
+     -> Vec<f32> {
+        if persistent {
+            loaded
+                .model
+                .forward_with_kv_context_captured(
+                    toks, cache, ctx, &mut session, &mut captured,
+                )
+                .expect("contiguous captured decode on CUDA")
+        } else {
+            loaded
+                .model
+                .forward_with_kv_context(toks, cache, ctx)
+                .expect("contiguous decode on CUDA")
+        }
+    };
+
     // Step 0 mirrors the paged arm: prefill plus the first sampled token.
     let t0 = Instant::now();
-    let logits = loaded
-        .model
-        .forward_with_kv_context(&prompt, &mut cache, &mut ctx)
-        .expect("contiguous prefill on CUDA");
+    let logits = step(&prompt, &mut cache, &mut ctx);
     let mut next = argmax(&logits);
     steps.push(t0.elapsed());
 
     for _ in 1..MAX_NEW {
         let t = Instant::now();
-        let logits = loaded
-            .model
-            .forward_with_kv_context(&[next], &mut cache, &mut ctx)
-            .expect("contiguous decode on CUDA");
+        let logits = step(&[next], &mut cache, &mut ctx);
         next = argmax(&logits);
         steps.push(t.elapsed());
     }
