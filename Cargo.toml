@@ -19,6 +19,23 @@
     # feature lines predate `fuel` being a dependency at all, and nobody extended
     # them when it was added.
     cuda = ["candlelight/cuda", "fuel/cuda"]
+    # Fuel's CUDA backend ALONE, without candlelight's.
+    #
+    # Needed because the two are independently breakable and, during the port,
+    # independently interesting. `candlelight/cuda` currently does not build on
+    # this toolchain at all: `candle-kernels v0.10.2`'s build script fails under
+    # CUDA 13.3, whose CCCL headers hard-error on MSVC's traditional
+    # preprocessor ("pass /Zc:preprocessor"). That is a pre-existing breakage in
+    # the path we are porting AWAY from — it predates the `fuel/cuda` wiring
+    # above and would fail identically with `cuda = ["candlelight/cuda"]` alone.
+    #
+    # Coupling both into one flag means candlelight's breakage blocks any
+    # experiment on Fuel's backend, which is exactly backwards for a port whose
+    # goal is retiring candlelight. Use this to exercise the Fuel path.
+    #
+    # Also pulls the dev-only `fuel-cuda-backend` so the GPU measurement harness
+    # can construct a `CudaDevice`; see the dev-dependency comment.
+    fuel-cuda = ["fuel/cuda", "dep:fuel-cuda-backend"]
     # Vulkan, via Fuel only — candlelight has no Vulkan backend. Worth having
     # separately because Fuel supports it and it reaches integrated GPUs that
     # CUDA cannot.
@@ -134,6 +151,17 @@
     # before anything is published or built elsewhere.
     fuel             = { path = "C:/Projects/fuel-lightbulb-port/fuel-core", package = "fuel-core" }
     fuel-cpu-backend = { path = "C:/Projects/fuel-lightbulb-port/fuel-cpu-backend" }
+    # Only used to CONSTRUCT a `CudaDevice` in the GPU measurement harness.
+    # `fuel-core` provides `impl From<CudaDevice> for Device` (its `cuda_backend`
+    # module) but re-exports only `builder_arg`, not `CudaDevice` itself — so a
+    # consumer that wants to name a GPU must depend on the backend crate.
+    #
+    # A regular optional dependency rather than a dev-dependency because Cargo
+    # rejects optional dev-dependencies outright ("dev-dependencies are not
+    # allowed to be optional"), and a PLAIN dev-dependency would run nvcc on
+    # every `cargo test` including CPU-only ones. Optional + feature-activated
+    # keeps default builds free of it entirely.
+    fuel-cuda-backend = { path = "C:/Projects/fuel-lightbulb-port/fuel-cuda-backend", optional = true }
 
 [[bin]]
 name = "lightbulb-cli"

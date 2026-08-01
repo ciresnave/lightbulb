@@ -307,6 +307,223 @@ dependencies = [
 ]
 
 [[package]]
+name = "baracuda-build"
+version = "0.0.1-alpha.78"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5e0f98555d03b2defb66efa823cc89cb843788844a921f69928785eced97517f"
+
+[[package]]
+name = "baracuda-core"
+version = "0.0.1-alpha.78"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "af9a22434c78fb37c8f16feadb96ee2fb23dbcf2479aff9d53e58482d08b0168"
+dependencies = [
+ "baracuda-types",
+ "libloading 0.8.9",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "baracuda-cublas"
+version = "0.0.1-alpha.78"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "45afc2b4e0fe56dd6899c4b87c4b6090b48e1d8228a0a711f1de131f6453a76c"
+dependencies = [
+ "baracuda-core",
+ "baracuda-cublas-sys",
+ "baracuda-cuda-sys",
+ "baracuda-driver",
+ "baracuda-types",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "baracuda-cublas-sys"
+version = "0.0.1-alpha.78"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "80c70c53e44fd0c95c664872a273e053d5f2136646f9ed3a28b799b7ae70355f"
+dependencies = [
+ "baracuda-build",
+ "baracuda-core",
+ "baracuda-cuda-sys",
+ "baracuda-types",
+ "libloading 0.8.9",
+]
+
+[[package]]
+name = "baracuda-cuda-sys"
+version = "0.0.1-alpha.78"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "331df401a77e8fc4f344a589fa31a2407dc7edf7f58b4a025c08c5c83cdecaba"
+dependencies = [
+ "baracuda-build",
+ "baracuda-core",
+ "baracuda-types",
+ "libloading 0.8.9",
+]
+
+[[package]]
+name = "baracuda-curand"
+version = "0.0.1-alpha.78"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c6bb40106e274b3bd4b00915abd41a10fd5c161c8fa7ddf8a2c46db5ea2de171"
+dependencies = [
+ "baracuda-core",
+ "baracuda-cuda-sys",
+ "baracuda-curand-sys",
+ "baracuda-driver",
+ "baracuda-types",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "baracuda-curand-sys"
+version = "0.0.1-alpha.78"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "60cc0cdce79ced0f8f45202d0a6e1830765ce48df5932b55ddca7297114e9d64"
+dependencies = [
+ "baracuda-build",
+ "baracuda-core",
+ "baracuda-cuda-sys",
+ "baracuda-types",
+ "libloading 0.8.9",
+]
+
+[[package]]
+name = "baracuda-cutlass"
+version = "0.0.1-alpha.78"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "311203d3add253b95a5ff6f95a45c45ca29cce106421393d16e506eee12940fa"
+dependencies = [
+ "baracuda-cublas",
+ "baracuda-cublas-sys",
+ "baracuda-cutlass-kernels-sys",
+ "baracuda-driver",
+ "baracuda-kernels-types",
+ "baracuda-types",
+ "half",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "baracuda-cutlass-kernels-sys"
+version = "0.0.1-alpha.78"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1ef3341024add7448583aec1990d52582361084887ede7893808ee0725e669ec"
+dependencies = [
+ "baracuda-cutlass-sys",
+ "baracuda-forge",
+]
+
+[[package]]
+name = "baracuda-cutlass-sys"
+version = "0.0.1-alpha.78"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "700150c636cce7ac622b4860e1311db26faa62eb3e51c1ec1599599ffbb498d9"
+dependencies = [
+ "fs2",
+]
+
+[[package]]
+name = "baracuda-driver"
+version = "0.0.1-alpha.78"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "13af5028fa114a7bf19cbc2ca8a99c02cdfed160448186bd6fb1a490c1300f31"
+dependencies = [
+ "baracuda-core",
+ "baracuda-cuda-sys",
+ "baracuda-types",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "baracuda-forge"
+version = "0.0.1-alpha.78"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2da0310ea60e36c1f6bc221a42f15fef7cb22c6dae02be8330706cfd4d21113f"
+dependencies = [
+ "baracuda-build",
+ "fs2",
+ "glob",
+ "num_cpus",
+ "rayon",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 1.0.69",
+ "walkdir",
+]
+
+[[package]]
+name = "baracuda-kernel-vocab"
+version = "0.0.1-alpha.78"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "110db6b5952707daead4f334314c7eab4fca6244f70754e84d53a10b89f3b839"
+dependencies = [
+ "baracuda-types",
+ "float8 0.7.0",
+ "half",
+]
+
+[[package]]
+name = "baracuda-kernels-sys"
+version = "0.0.1-alpha.78"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cf7b77795b52add55351ce9181ad090b406a838fd37188dd4c46b88a56a73e7b"
+dependencies = [
+ "baracuda-cutlass-kernels-sys",
+ "baracuda-cutlass-sys",
+ "baracuda-forge",
+]
+
+[[package]]
+name = "baracuda-kernels-types"
+version = "0.0.1-alpha.78"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f13a1ab4d54d3b0682aeb9ff58b34fca032f4a2c02f239531e498f41d92240ee"
+dependencies = [
+ "baracuda-driver",
+ "baracuda-kernel-vocab",
+ "baracuda-types",
+ "float8 0.7.0",
+ "half",
+]
+
+[[package]]
+name = "baracuda-nvrtc"
+version = "0.0.1-alpha.78"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6cb0ff439c24f6c5df752b537758074733e82c527efda0ee0d5ed201aa33a89a"
+dependencies = [
+ "baracuda-core",
+ "baracuda-nvrtc-sys",
+ "baracuda-types",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "baracuda-nvrtc-sys"
+version = "0.0.1-alpha.78"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "77635319960f2a27e652f78580b3a40c47f4fa826f291854a4a3c427d693c436"
+dependencies = [
+ "baracuda-build",
+ "baracuda-core",
+ "baracuda-types",
+ "libloading 0.8.9",
+]
+
+[[package]]
+name = "baracuda-types"
+version = "0.0.1-alpha.78"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "917109a691b8859c04578aad35154d29b1bf05185e045954cb0a9a3fd6933c6b"
+dependencies = [
+ "float8 0.7.0",
+ "half",
+]
+
+[[package]]
 name = "base64"
 version = "0.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1902,9 +2119,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "fuel-conv"
+version = "0.10.3"
+dependencies = [
+ "num-traits",
+]
+
+[[package]]
 name = "fuel-core"
 version = "0.10.3"
 dependencies = [
+ "baracuda-core",
+ "baracuda-driver",
+ "baracuda-types",
  "bytemuck",
  "byteorder",
  "float8 0.7.0",
@@ -1912,6 +2139,7 @@ dependencies = [
  "fuel-correctness-fixtures",
  "fuel-cpu-backend",
  "fuel-cpu-kernels",
+ "fuel-cuda-backend",
  "fuel-dispatch",
  "fuel-formats",
  "fuel-graph",
@@ -1919,6 +2147,8 @@ dependencies = [
  "fuel-ir",
  "fuel-memory",
  "fuel-quantized",
+ "fuel-ug",
+ "fuel-vulkan-backend",
  "gemm 0.19.0",
  "half",
  "hf-hub 0.5.0",
@@ -1983,17 +2213,51 @@ dependencies = [
 ]
 
 [[package]]
+name = "fuel-cuda-backend"
+version = "0.10.3"
+dependencies = [
+ "baracuda-core",
+ "baracuda-cublas",
+ "baracuda-cublas-sys",
+ "baracuda-cuda-sys",
+ "baracuda-curand",
+ "baracuda-cutlass",
+ "baracuda-driver",
+ "baracuda-kernels-sys",
+ "baracuda-kernels-types",
+ "baracuda-nvrtc",
+ "baracuda-types",
+ "float8 0.7.0",
+ "fuel-backend-contract",
+ "fuel-cpu-backend",
+ "fuel-graph",
+ "fuel-ir",
+ "fuel-quantized",
+ "half",
+ "num-traits",
+ "paste",
+ "smallvec",
+ "thiserror 2.0.19",
+ "tracing",
+]
+
+[[package]]
 name = "fuel-dispatch"
 version = "0.10.3"
 dependencies = [
+ "baracuda-kernels-types",
+ "baracuda-nvrtc",
  "bytemuck",
  "fuel-backend-contract",
  "fuel-cpu-backend",
+ "fuel-cuda-backend",
  "fuel-graph",
  "fuel-hardware",
  "fuel-ir",
  "fuel-kernel-seam-types",
+ "fuel-kiss-ref-backend",
  "fuel-memory",
+ "fuel-vulkan-backend",
  "half",
  "serde",
  "serde_json",
@@ -2036,7 +2300,9 @@ name = "fuel-hardware"
 version = "0.10.3"
 dependencies = [
  "fuel-cpu-backend",
+ "fuel-cuda-backend",
  "fuel-ir",
+ "fuel-vulkan-backend",
  "serde",
  "serde_json",
 ]
@@ -2077,13 +2343,27 @@ name = "fuel-kernel-seam-types"
 version = "0.10.3"
 
 [[package]]
+name = "fuel-kiss-ref-backend"
+version = "0.1.0"
+dependencies = [
+ "fuel-ir",
+ "fuel-kernel-seam-types",
+ "half",
+ "kiss-classify-vocab",
+ "kiss-ops-vocab",
+ "kiss-ref-core",
+]
+
+[[package]]
 name = "fuel-memory"
 version = "0.10.3"
 dependencies = [
  "bytemuck",
  "fuel-cpu-backend",
+ "fuel-cuda-backend",
  "fuel-graph",
  "fuel-ir",
+ "fuel-vulkan-backend",
  "half",
  "smallvec",
  "thiserror 2.0.19",
@@ -2117,6 +2397,33 @@ dependencies = [
  "serde_plain",
  "tracing",
 ]
+
+[[package]]
+name = "fuel-ug"
+version = "0.10.3"
+dependencies = [
+ "ug",
+ "ug-cuda",
+]
+
+[[package]]
+name = "fuel-vulkan-backend"
+version = "0.10.3"
+dependencies = [
+ "fuel-backend-contract",
+ "fuel-conv",
+ "fuel-graph",
+ "fuel-ir",
+ "fuel-vulkan-kernels",
+ "half",
+ "memmap2",
+ "tracing",
+ "vulkane",
+]
+
+[[package]]
+name = "fuel-vulkan-kernels"
+version = "0.10.3"
 
 [[package]]
 name = "futf"
@@ -3441,6 +3748,7 @@ dependencies = [
  "distributed-config",
  "fuel-core",
  "fuel-cpu-backend",
+ "fuel-cuda-backend",
  "fuel-inference",
  "futures",
  "futures-util",
@@ -5058,6 +5366,15 @@ dependencies = [
  "serde_derive",
  "typeid",
  "unicode-ident",
+]
+
+[[package]]
+name = "roxmltree"
+version = "0.21.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f1964b10c76125c36f8afe190065a4bf9a87bf324842c05701330bba9f1cacbb"
+dependencies = [
+ "memchr",
 ]
 
 [[package]]
@@ -6726,6 +7043,31 @@ name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
+
+[[package]]
+name = "vulkan_gen"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4333cb0d7a3f24246eadffc8de89694fd88c9d6aac912661dab3978a7e1c8a1b"
+dependencies = [
+ "regex",
+ "roxmltree",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.19",
+]
+
+[[package]]
+name = "vulkane"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8ec23099c359ae475feb072c48f24e8431513e41d9a3c3cb3ee0f094c9fb3748"
+dependencies = [
+ "libloading 0.9.0",
+ "ureq 3.3.0",
+ "vulkan_gen",
+]
 
 [[package]]
 name = "walkdir"
