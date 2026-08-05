@@ -475,11 +475,19 @@ Some(garbage) passes a presence check and then never fires."
   - `pub struct SessionState`
   - `SessionState::new(config: &fuel::lazy::LlamaConfig, max_seq_len: usize, device: &fuel::Device) -> anyhow::Result<Self>`
   - `SessionState::position(&self) -> usize`
-  - `SessionState::parts(&mut self) -> (&mut KvCache, &mut InferenceContext, &mut Option<DecodeSession>)` — `pub(crate)`
+  - `SessionState::parts(&mut self) -> (&mut KvCache, &mut InferenceContext)` — `pub(crate)`
+  - `SessionState::advance(&mut self, n: usize)` — `pub(crate)`
 
-A caller holding a raw `KvCache` can call `forward_with_kv_context` and lose
-223× silently. This type owns the `Option<DecodeSession>` so `step()` cannot be
-written without it.
+**REVISED 2026-08-05 after Fuel landed `forward_decode_step`** (`lazy.rs:8675`,
+main). The original design held an `Option<DecodeSession>` here so a caller
+could not forget to thread it. Fuel has since made the fast path reachable at
+the plain `(tokens, cache, ctx)` shape by carrying the held plan on the
+`InferenceContext` — so there is no longer a fourth argument to forget, and a
+field for it here would be ceremony.
+
+`SessionState` still earns its place: it keeps the KV cache, the context and the
+position coherent as one unit, and `new()` is the only place `with_capacity`
+(rather than the capture-defeating `with_dims`) is chosen.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -490,13 +498,13 @@ In `src/model_fuel/session.rs`:
 mod tests {
     use super::*;
 
-    /// A fresh session starts at position 0 and holds no decode plan.
+    /// A fresh session starts at position 0 with an allocated cache.
     ///
-    /// The `session.is_none()` half matters: `DecodeSession` is built lazily on
-    /// the first multi-token forward, and a session that arrived pre-populated
-    /// would mean the plan was built against the wrong prefix.
+    /// Weak by design — the interesting assertions about `SessionState` are
+    /// numerical and live in Task 5, which compares logits. This one exists so
+    /// `new()` cannot silently start mid-sequence.
     #[test]
-    fn new_session_is_empty_and_unplanned() {
+    fn new_session_starts_at_position_zero() {
         let cfg = fuel::lazy::LlamaConfig {
             vocab_size: 32,
             dim: 8,
@@ -511,7 +519,6 @@ mod tests {
         let dev = crate::model_fuel::device::select();
         let st = SessionState::new(&cfg, 16, &dev).expect("allocating a tiny KV cache");
         assert_eq!(st.position(), 0);
-        assert!(st.session.is_none(), "no decode plan should exist before the first forward");
     }
 }
 ```
@@ -534,37 +541,41 @@ Expected: FAIL — module `session` not found.
 //!
 //! # Why this exists
 //!
-//! Fuel offers two contiguous decode entry points at the same call shape:
+//! To keep the three things one sequence needs — KV cache, inference context,
+//! position — as a single unit, and to make `with_capacity` the only way a
+//! cache gets built here.
 //!
-//! ```text
-//! forward_with_kv_context             <- raw; rebuilds the graph every token
-//! forward_with_kv_context_persistent  <- holds a DecodeSession; plans once
-//! ```
+//! `with_capacity`, not `with_dims`, is the load-bearing part. `with_dims`
+//! grows the cache by REPLACEMENT, which rebuilds the graph every step and
+//! defeats both plan reuse and capture.
 //!
-//! Measured on CUDA (RTX 4070 Laptop, TinyLlama-1.1B f32, 16 tokens, debug):
-//! **5,901 ms/token** on the raw one against **26.47 ms/token** persistent — a
-//! 223× gap, from one caller-held `Option`. Lightbulb paid it once already.
+//! # A hazard this type no longer has to defend against
 //!
-//! Fuel characterises the raw entry as the intended rebuild primitive rather
-//! than a bad default, and keeps it raw deliberately: 85 call sites depend on
-//! it, and the persistent path uses it as its own fallback, so making it
-//! transparently persistent would recurse. That makes it a discoverability
-//! hazard rather than a bug — and this type is how Lightbulb stops meeting it.
-//! `SessionState` owns the `Option<DecodeSession>`, so a decode step cannot be
-//! written without one.
+//! Fuel originally exposed plan reuse only via
+//! `forward_with_kv_context_persistent`, whose `&mut Option<DecodeSession>`
+//! fourth argument you could not write unless you already knew `DecodeSession`
+//! existed. The call a consumer naturally writes was the slow one — measured on
+//! CUDA at **5,901 ms/token** against **26.47 ms/token**, though note that
+//! comparison also toggled capture, so it bounds rather than measures either.
+//!
+//! Fuel diagnosed it as a REACHABILITY defect and shipped `forward_decode_step`
+//! (`lazy.rs:8675`), which carries the held plan on the `InferenceContext` and
+//! takes the plain `(tokens, cache, ctx)` shape. There is no fourth argument to
+//! forget, so this type does not need to own one.
 
 use anyhow::Result;
 
-use fuel::inference_context::{DecodeSession, InferenceContext, KvCache};
+use fuel::inference_context::{InferenceContext, KvCache};
 use fuel::lazy::LlamaConfig;
 use fuel::{DType, Device};
 
-/// One sequence's KV cache, inference context, and decode plan.
+/// One sequence's KV cache, inference context, and position.
+///
+/// The decode plan is NOT held here — it rides on the `InferenceContext`, which
+/// is what `forward_decode_step` reads and writes.
 pub struct SessionState {
     cache: KvCache,
     ctx: InferenceContext,
-    /// The plan-once decode session. Built on the first forward, reused after.
-    pub(crate) session: Option<DecodeSession>,
     position: usize,
 }
 
@@ -597,7 +608,6 @@ impl SessionState {
         Ok(Self {
             cache,
             ctx: InferenceContext::new(device.clone()),
-            session: None,
             position: 0,
         })
     }
@@ -607,15 +617,12 @@ impl SessionState {
         self.position
     }
 
-    /// The three pieces a forward needs, borrowed together.
+    /// The two pieces a forward needs, borrowed together.
     ///
-    /// `pub(crate)` and returned as a triple so `decoder.rs` can drive a
-    /// forward without the fields becoming public — which is what would let a
-    /// caller reconstruct the raw path this type exists to prevent.
-    pub(crate) fn parts(
-        &mut self,
-    ) -> (&mut KvCache, &mut InferenceContext, &mut Option<DecodeSession>) {
-        (&mut self.cache, &mut self.ctx, &mut self.session)
+    /// `pub(crate)` and returned as a pair so `decoder.rs` can drive a forward
+    /// without the fields becoming public.
+    pub(crate) fn parts(&mut self) -> (&mut KvCache, &mut InferenceContext) {
+        (&mut self.cache, &mut self.ctx)
     }
 
     /// Record that `n` tokens were committed.
@@ -643,18 +650,19 @@ Expected: PASS.
 
 ```bash
 git add src/model_fuel/session.rs src/model_fuel/mod.rs
-git commit -m "feat(model_fuel): Own the persistence seam in a type
+git commit -m "feat(model_fuel): Group one sequence's decode state
 
-Fuel exposes forward_with_kv_context and _persistent at the same call
-shape. Measured on CUDA: 5,901 ms/token raw vs 26.47 ms/token persistent,
-a 223x gap from one caller-held Option. Lightbulb paid it once already.
+SessionState keeps KV cache, inference context and position as one unit,
+and makes with_capacity the only way a cache is built here — with_dims
+grows by replacement, rebuilding the graph every step and defeating both
+plan reuse and capture.
 
-Fuel keeps the raw entry raw deliberately — 85 call sites depend on it
-and the persistent path uses it as its own fallback, so making it
-transparently persistent would recurse. That makes it a discoverability
-hazard rather than a bug, and a type is the right answer: SessionState
-owns the Option<DecodeSession>, so a decode step cannot be written
-without one."
+It deliberately does NOT hold an Option<DecodeSession>. Fuel originally
+exposed plan reuse only through a fourth argument you could not write
+unless you knew DecodeSession existed, so the natural call was the slow
+one. Fuel diagnosed that as a reachability defect and shipped
+forward_decode_step, which carries the plan on the InferenceContext at
+the plain (tokens, cache, ctx) shape. Nothing left to forget."
 ```
 
 ---
@@ -761,17 +769,28 @@ Expected: FAIL — module `decoder` not found.
 //!
 //! # Why a trait for a single implementor
 //!
-//! Because the second implementor is already specified and blocked on Fuel.
-//! GGUF/quantized Llama is `QuantizedLlama3Model::from_gguf`, which wraps
-//! `Llama3Model` — and `Llama3Model` has no `KvCache` and no
-//! `forward_with_kv_context*` at all (verified 2026-08-05, confirmed
-//! independently by Fuel). Serving through it would re-run the whole prefix per
-//! token.
+//! Because the second implementor exists and is next.
 //!
-//! An ask is filed with Fuel for `forward_with_kv_context_persistent` on
-//! `Llama3Model`. When it lands, quantized support is `impl FuelDecoder for
-//! Llama3Model` and nothing else — no change to the session, the engine model,
-//! or the runner.
+//! GGUF/quantized Llama is `QuantizedLlama3Model::from_gguf`, which wraps
+//! `Llama3Model`. When this plan was written `Llama3Model` had no `KvCache` and
+//! no `forward_with_kv_context*` at all, so serving through it would have
+//! re-run the whole prefix per token. Lightbulb filed that gap; Fuel landed
+//! `Llama3Model::forward_with_kv_context_persistent`
+//! (`lazy_llama_full.rs:382`) the same day, and the quantized wrapper inherits
+//! it through its `inner`.
+//!
+//! So quantized support is now `impl FuelDecoder for Llama3Model` and nothing
+//! else — no change to the session, the engine model, or the runner. It is
+//! deliberately NOT in this plan: the runner should be proven end-to-end on one
+//! model path before a second one is debugged alongside it.
+//!
+//! **Two things to know when that impl is written.** Fuel's paged tier does not
+//! yet thread the LLaMA-3.1 frequency override, so `PagedDecodeModel` is a
+//! separate supertrait and handing a `Llama3Model` to `PagedSessionScheduler` is
+//! a compile error rather than a silent wrong answer. And a scaled-vs-unscaled
+//! parity test on a short prompt proves nothing: the RoPE band edges sit at
+//! `original_max_position_embeddings / *_freq_factor` = 8192, and at positions
+//! 0..6 the two differ by 1.1e-7.
 
 use anyhow::Result;
 
@@ -791,18 +810,24 @@ pub trait FuelDecoder {
 
 impl FuelDecoder for LlamaModel {
     fn prefill(&self, tokens: &[u32], st: &mut SessionState) -> Result<Vec<f32>> {
-        let (cache, ctx, session) = st.parts();
+        // `forward_decode_step` for BOTH prefill and decode, deliberately.
+        // At `seq != 1` it falls back to the rebuild path without building a
+        // plan; the first `seq == 1` token builds it; later tokens rebind and
+        // skip optimize. Output is byte-identical either way, so there is no
+        // reason for the two arms to call different entry points — and one
+        // entry point is one fewer place to get the fast path wrong.
+        let (cache, ctx) = st.parts();
         let logits = self
-            .forward_with_kv_context_persistent(tokens, cache, ctx, session)
+            .forward_decode_step(tokens, cache, ctx)
             .map_err(|e| anyhow::anyhow!("prefill forward: {e:?}"))?;
         st.advance(tokens.len());
         Ok(logits)
     }
 
     fn step(&self, token: u32, st: &mut SessionState) -> Result<Vec<f32>> {
-        let (cache, ctx, session) = st.parts();
+        let (cache, ctx) = st.parts();
         let logits = self
-            .forward_with_kv_context_persistent(&[token], cache, ctx, session)
+            .forward_decode_step(&[token], cache, ctx)
             .map_err(|e| anyhow::anyhow!("decode forward: {e:?}"))?;
         st.advance(1);
         Ok(logits)
@@ -1048,6 +1073,34 @@ pub struct FuelEngineModel {
     /// request's first step and dropped when it completes — a session holds a
     /// pre-allocated KV cache (~92 MiB for TinyLlama at 2048 f32), so leaking
     /// them leaks real memory.
+    ///
+    /// # Do not "optimise" this into a slot pool that reuses contexts
+    ///
+    /// One `SessionState` per REQUEST — each with its own `InferenceContext`
+    /// and its own `KvCache` — is correct and confirmed correct by Fuel
+    /// (2026-08-05). The obvious next optimisation is a fixed pool of slots
+    /// that reuses a context across successive requests to avoid rebuilding
+    /// the decode plan per request. **That is unsafe as Fuel stands**, and it
+    /// fails silently:
+    ///
+    /// - The held plan's KV Arcs are bound ONCE at build time and mutate in
+    ///   place via `Op::WriteSlice`. `rebind_and_realize_prebuilt` rebinds
+    ///   `token_ids`/`rope_cos`/`rope_sin`/`mask`/offset and **not** the KV
+    ///   nodes — so a plan is welded to the exact `KvCache` it was built on.
+    /// - `DecodeSession::is_valid_for`'s key is `(seq, max_seq_len, n_layers,
+    ///   cache_dtype)` — pure geometry. It cannot distinguish two `KvCache`
+    ///   instances of the same shape, which in a slot pool is the normal case.
+    ///
+    /// Retire request A from a slot, admit B with a fresh same-shaped cache,
+    /// reuse the slot's context: the key matches, the plan is reused, and B
+    /// decodes over A's KV buffers. No error, plausible tokens, one tenant
+    /// reading another's context.
+    ///
+    /// If plan reuse across requests is wanted later, the safe shape is a slot
+    /// owning a PERSISTENT `KvCache` and reusing **cache and context together**,
+    /// resetting the cache between requests rather than allocating a new one.
+    /// Tell Fuel first — they offered to add cache identity to the validity key
+    /// so the unsafe version fails loudly instead of silently.
     sessions: HashMap<String, SessionState>,
     context_length: usize,
     /// Per-request sampling seed source. Incremented per selection so two
@@ -1595,7 +1648,31 @@ plan reuse — it reads ~1.0 regardless. A *cross-arm* steady-state comparison
 (Replan vs PlanOnce) is the valid one, and is what produced the 29.7× in
 `0e3fc36`. This sweep does the latter. Do not substitute the former.
 
-- [ ] **Step 3: Record DtoH bytes per token alongside milliseconds**
+- [ ] **Step 3: Add the capture-isolation arm**
+
+**This corrects a confound in Lightbulb's own headline number.** The
+5,901 → 26.47 ms/token comparison in `0e3fc36` toggled persistence **and**
+capture together: `tests/gpu_paged_vs_contiguous.rs:301` calls
+`forward_with_kv_context_captured` on the fast arm and `forward_with_kv_context`
+on the slow one. So 223× is an upper bound on each and a measurement of neither.
+
+Fuel is holding a decision on it — CUDA-graph capture
+(`forward_with_kv_context_captured`) is called from tests only, no production
+route captures, and they have declined to default it on a number that cannot
+isolate it.
+
+Add a third contiguous configuration, holding persistence constant:
+
+| Arm | Entry point |
+| --- | --- |
+| persistent, no capture | `forward_decode_step` |
+| persistent, with capture | `forward_with_kv_context_captured` |
+
+Same tokens, same model, same commit. Report ms/token and DtoH bytes/token. The
+delta is capture's actual contribution. **k=1 alone answers this** — if the full
+sweep gets expensive, run this arm at k=1 only.
+
+- [ ] **Step 4: Record DtoH bytes per token alongside milliseconds**
 
 At each `k`, capture both from the existing `nsys` path. If bytes/token stays
 flat (~2.5 GB) while `k` grows, the host round-trip is per-token overhead and
@@ -1603,7 +1680,7 @@ amortizes across the batch; if it scales with `k`, it does not. That single
 distinction decides whether kernel work targets the attention math or the
 plumbing, and Fuel and Baracuda are both holding design decisions on it.
 
-- [ ] **Step 4: Run the sweep**
+- [ ] **Step 5: Run the sweep**
 
 ```bash
 pwsh C:\Projects\fuel-crash-vmm\scripts\gpu-run.ps1 -Project lightbulb -- cargo test --release --features fuel-cuda --test gpu_paged_vs_contiguous -- --ignored --nocapture
@@ -1616,7 +1693,7 @@ Also record `session_realize_count` at each point. "The field says `PlanOnce`"
 and "the persistent path actually ran" are different claims, and only the second
 is worth anything.
 
-- [ ] **Step 5: Report the curve, including if it is boring**
+- [ ] **Step 6: Report the curve, including if it is boring**
 
 A paged step that is **not** flat in `k` is the more consequential result: it
 means the round-trip scales with batch and kernel work must target the plumbing
@@ -1626,7 +1703,7 @@ rather than the attention math.
 the rejection. Do not synthesize a uniform batch to obtain a number that
 describes no real workload.
 
-- [ ] **Step 6: Commit the measurement**
+- [ ] **Step 7: Commit the measurement**
 
 Commit the harness change and the results table, quoting Task 1's `FUEL_BASELINE`
 SHA. State explicitly which `k` (if any) inverts the 10.4× ratio, and whether
