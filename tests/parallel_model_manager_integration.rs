@@ -132,6 +132,7 @@ fn test_parallel_multi_request_batching() {
             position: 0,
             cache_index: None,
             generated_tokens: Vec::new(),
+            temperature: 0.0,
         };
         batch.push(dummy);
     }

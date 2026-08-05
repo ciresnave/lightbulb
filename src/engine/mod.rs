@@ -156,6 +156,10 @@ pub struct RequestContext {
     pub position: usize,
     pub cache_index: Option<usize>,
     pub generated_tokens: Vec<u32>,
+    /// Sampling temperature carried from the originating `InferenceJob`.
+    /// `0.0` means greedy. Defaults to `0.0` so existing constructors are
+    /// unchanged and deterministic.
+    pub temperature: f64,
 }
 
 impl RequestContext {
@@ -167,7 +171,12 @@ impl RequestContext {
             position: 0,
             cache_index: None,
             generated_tokens: Vec::new(),
+            temperature: 0.0,
         }
+    }
+
+    pub fn request_temperature(&self) -> f64 {
+        self.temperature
     }
 
     pub fn assign_cache_index(&mut self, index: usize) {

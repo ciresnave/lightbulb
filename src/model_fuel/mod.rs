@@ -49,6 +49,7 @@
 pub mod batched;
 pub mod decoder;
 pub mod device;
+pub mod engine_model;
 pub mod generate;
 pub mod loader;
 pub mod loader_f32;

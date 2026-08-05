@@ -166,7 +166,8 @@ fn run_jobs<M: EngineModel>(mut model: M, rx: Receiver<InferenceJob>) {
             max_new_tokens: job.max_new_tokens,
         };
 
-        let ctx = RequestContext::new(req);
+        let mut ctx = RequestContext::new(req);
+        ctx.temperature = job.temperature;
         let mut batch = vec![ctx];
 
         // Process based on response mode (move out of job to avoid borrow issues)
