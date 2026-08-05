@@ -314,8 +314,20 @@ feature-flag decision means comparison needs two processes.
 
 ### Supporting tests
 
-- `SessionState::step` ≡ `generate_greedy` on the same prompt and checkpoint —
-  pins that the new stepwise interface did not change the decode maths.
+- `SessionState::step` ≡ `generate_greedy` on the same prompt and checkpoint,
+  **compared on logits with `maxdiff == 0`, not on tokens.**
+
+  **Token equality is a vacuous oracle here.** Argmax is a discretization that
+  discards nearly all of the signal: a decode-maths regression has to move a
+  logit far enough to cross the top-2 gap before a single token changes, so a
+  token-comparison test passes whether or not the maths changed. Fuel measured
+  this directly on 2026-08-05 — a real ~1.7e-3 mis-positioning perturbation
+  flipped **neither** greedy nor seeded-temperature tokens — and it bit them
+  before they caught it. Their prefix-sharing correctness work is asserted at
+  the logit level for the same reason.
+
+  This is the one supporting test whose whole purpose is detecting numerical
+  drift, so it is the one that must not be measured through argmax.
 - EOS stops generation strictly before `max_new_tokens` on a prompt whose greedy
   continuation is known to terminate. This must be able to fail: it asserts a
   *shorter* output, which a broken EOS cannot produce.
@@ -430,5 +442,15 @@ decision, per the port design's "keep — ours by contract" row.
   Fuel path. `ParallelModelManager` has them; the Fuel path will not at first.
   They are additive and each deserves its own decision against Fuel's
   equivalents, per the port design's subsystem table.
+
+  **Fuel's prefix-sharing equivalent landed on main 2026-08-05 (`1c640648`)** —
+  rung-1, same absolute positions, prefix at offset 0, which covers the
+  shared-system-prompt case. Surface is `KvBlockPool::{register_prefix,
+  splice_prefix_from, release_prefix}`, drivable directly without adopting
+  Fuel's scheduler. `splice_prefix_from` returns the shared token count, so
+  "prefill only `prompt[shared..]`" is enforced rather than conventional.
+  Rung-2 (position-shifted / mid-prompt donation, needing RoPE delta-rotation)
+  is deferred on Fuel's side. Recorded here so the eventual prefix-cache
+  decision compares against something concrete rather than re-deriving it.
 - Speculative decoding.
 - Multi-GPU placement — withdrawn as a category error in the port design (D3).
