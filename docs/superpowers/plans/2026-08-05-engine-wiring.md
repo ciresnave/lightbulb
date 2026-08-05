@@ -1559,25 +1559,41 @@ configuration while looking current. Replace the match arm at `:228-232`:
 Parameterize both arms over `k` from `LB_BATCH` (default `1`), looping k
 sessions per step. Record **prefill and steady-state decode separately**:
 
+**Three windows, not two, and the boundary placement is load-bearing.**
+
+**[verified by Fuel 2026-08-05, in code]** The decode plan is built on the
+**first decode token**, on both routes — never during prefill:
+
+- Paged: `fuel-inference/src/multi_session.rs:1278` prefill calls
+  `forward_paged_step`, the non-persistent re-planning entry, and builds no
+  session. `:1320` decode calls `forward_paged_step_persistent`, which is where
+  the plan is built.
+- Contiguous: `forward_with_kv_context_persistent` given the whole prompt sees
+  `seq != 1`, drops any session and falls back to the rebuild path *without*
+  building one. The build lands on the first decode token here too.
+
+So the first decode token carries a one-time plan-build cost that no later token
+pays. Whether it sits inside or outside the steady-state window changes what the
+`PlanOnce` arm's number means — and that is invisible in a two-window split.
+
 ```rust
-// Prefill and steady-state are recorded SEPARATELY and both are reported.
-//
-// Fuel observed that plan-reuse's cost difference appears during prefill (the
-// plan is built there) and warned that a sweep windowing only steady-state
-// would show ~1.0 and hide the effect entirely.
-//
-// That does not match Lightbulb's own measurement — 8,192 vs 275.8 ms/token
-// over 16 tokens (commit 0e3fc36) is a per-token difference, which is
-// steady-state by construction. The two observations may be measuring
-// different comparisons.
-//
-// Recording both windows is robust to either being right, and costs one extra
-// timer. Reporting only one would require deciding the disagreement first,
-// which is exactly the kind of reading-based adjudication this harness exists
-// to replace.
+// Three windows. `first_decode_ms` is separated because that is where the
+// plan is built (Fuel, verified in code 2026-08-05) — folding it into the
+// steady-state mean charges PlanOnce a one-time cost as if it recurred, and
+// at low token counts that is enough to move the ratio.
 let prefill_ms: f64 = /* wall time of the prefill call */;
-let decode_ms_per_token: f64 = /* wall time of the decode loop / tokens */;
+let first_decode_ms: f64 = /* wall time of decode token 0 alone */;
+let steady_ms_per_token: f64 = /* wall time of decode tokens 1..n, divided by (n-1) */;
 ```
+
+Report all three at every `k`. State explicitly in the results table which side
+of the boundary token 0 falls on.
+
+**Instrument validity, since this is what the disagreement turned out to be
+about.** A *within-arm* warm-up-vs-steady ratio is an invalid instrument for
+plan reuse — it reads ~1.0 regardless. A *cross-arm* steady-state comparison
+(Replan vs PlanOnce) is the valid one, and is what produced the 29.7× in
+`0e3fc36`. This sweep does the latter. Do not substitute the former.
 
 - [ ] **Step 3: Record DtoH bytes per token alongside milliseconds**
 
