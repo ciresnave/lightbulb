@@ -40,6 +40,19 @@
     # separately because Fuel supports it and it reaches integrated GPUs that
     # CUDA cannot.
     vulkan = ["fuel/vulkan"]
+    # Serve through the Fuel path (`src/model_fuel/`) instead of candlelight.
+    #
+    # A BUILD-TIME choice rather than a runtime one, so one binary serves one
+    # backend. Accepted cost: a candlelight/Fuel A/B needs two builds and two
+    # processes. Acceptable because the acceptance gate asserts content over
+    # HTTP rather than comparing the two runners — three of the four suites the
+    # port design named as the parity oracle no longer compile.
+    #
+    # `--all-features` selects Fuel. That build is already broken for an
+    # unrelated reason (`cuda` needs `candlelight/cuda`, whose candle-kernels
+    # v0.10.2 build script fails under CUDA 13.3), so no working configuration
+    # changes meaning.
+    fuel-engine = []
     default = []
     # Flash attention feature (requires CUDA)
     flash-attn = ["candlelight/flash-attn"]

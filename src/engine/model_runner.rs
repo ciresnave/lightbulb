@@ -83,6 +83,7 @@ impl ModelRunner {
     /// * `context_length` - Context window size
     /// * `dtype` - Data type for SafeTensors models ("f32", "f16", "bf16").
     ///   Ignored for GGUF models (dtype embedded in quantization format).
+    #[cfg(not(feature = "fuel-engine"))]
     pub fn start(
         model_path: impl Into<PathBuf>,
         max_batch_size: usize,
@@ -136,22 +137,76 @@ impl ModelRunner {
                 Err(e) => {
                     // Model failed to load; consume any pending jobs and return error message
                     eprintln!("Failed to load model at {}: {:#}", model_path.display(), e);
-                    while let Ok(job) = rx.recv() {
-                        let error_msg = format!("model load failed: {}", e);
-                        match job.response_mode {
-                            ResponseMode::Complete(resp_tx) => {
-                                let _ = resp_tx.send(Err(anyhow::anyhow!("{}", error_msg)));
-                            }
-                            ResponseMode::Streaming(stream_tx) => {
-                                let _ = stream_tx.send(Err(anyhow::anyhow!("{}", error_msg)));
-                            }
-                        }
-                    }
+                    drain_with_error(rx, &format!("model load failed: {e}"));
                 }
             }
         });
 
         Ok(tx)
+    }
+
+    /// Start the model runner thread, serving through the Fuel path.
+    ///
+    /// `dtype` is accepted and IGNORED: this path loads all weights as f32 by
+    /// construction. Fuel's CPU backend has no `[F32, BF16, F32]` matmul
+    /// kernel, and while the optimizer will insert a promoting cast, that cast
+    /// is value-lossless but NOT accumulation-preserving. Silently honouring a
+    /// "bf16" request would change numerics against every golden captured on
+    /// the f32 path. The parameter stays for signature compatibility.
+    #[cfg(feature = "fuel-engine")]
+    pub fn start(
+        model_path: impl Into<PathBuf>,
+        _max_batch_size: usize,
+        context_length: usize,
+        dtype: Option<String>,
+    ) -> Result<InferenceRequestSender> {
+        let model_path = model_path.into();
+        let (tx, rx): (Sender<InferenceJob>, Receiver<InferenceJob>) = std::sync::mpsc::channel();
+
+        if let Some(d) = dtype.as_deref() {
+            if d != "f32" {
+                tracing::warn!(
+                    "fuel-engine ignores dtype={d:?} and loads f32; see the module docs on \
+                     accumulation-preserving casts"
+                );
+            }
+        }
+
+        std::thread::spawn(move || {
+            println!("Loading Fuel model from {}", model_path.display());
+            match crate::model_fuel::engine_model::FuelEngineModel::load(
+                &model_path,
+                context_length,
+            ) {
+                Ok(model) => {
+                    println!("Fuel model loaded at {}", model_path.display());
+                    run_jobs(model, rx);
+                }
+                Err(e) => {
+                    eprintln!("Failed to load Fuel model at {}: {:#}", model_path.display(), e);
+                    drain_with_error(rx, &format!("model load failed: {e}"));
+                }
+            }
+        });
+
+        Ok(tx)
+    }
+}
+
+/// Answer every queued job with an error, then exit.
+///
+/// Shared by both backends: a load failure must not leave clients blocked on a
+/// channel that will never produce.
+fn drain_with_error(rx: Receiver<InferenceJob>, msg: &str) {
+    while let Ok(job) = rx.recv() {
+        match job.response_mode {
+            ResponseMode::Complete(resp_tx) => {
+                let _ = resp_tx.send(Err(anyhow::anyhow!("{}", msg)));
+            }
+            ResponseMode::Streaming(stream_tx) => {
+                let _ = stream_tx.send(Err(anyhow::anyhow!("{}", msg)));
+            }
+        }
     }
 }
 
