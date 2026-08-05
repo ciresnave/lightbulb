@@ -79,34 +79,86 @@ mod tests {
         p.join("model.safetensors").is_file().then_some(p)
     }
 
-    /// Stepping through `FuelDecoder` produces bit-identical logits to the
-    /// original `generate_greedy` loop.
+    /// `FuelDecoder` (`SessionState` + `forward_decode_step`) against a
+    /// hand-threaded `forward_with_kv_context_persistent` loop — the
+    /// pre-`forward_decode_step` call shape, with its own `KvCache`,
+    /// `InferenceContext`, and `Option<DecodeSession>`.
+    ///
+    /// **The reference arm must be a genuinely independent path, not a second
+    /// call through the same trait impl.** An earlier version of this test
+    /// drove both arms through `SessionState` + `FuelDecoder::prefill`/`step`
+    /// — the very impl under test — with one arm merely *labelled*
+    /// "reference". Any deterministic bug (wrong Fuel entry point, a swapped
+    /// argument, an off-by-one in `advance()` landing on a fixed wrong offset)
+    /// reproduces identically on both arms and still yields `maxdiff == 0.0`;
+    /// that shape can only fail on cross-run nondeterminism, which is not the
+    /// claim this test makes. Here the reference calls a different entry
+    /// point (`forward_with_kv_context_persistent`, not
+    /// `forward_decode_step`) and owns its session differently (a
+    /// hand-threaded `Option<DecodeSession>`, not the one `forward_decode_step`
+    /// takes off and puts back onto the `InferenceContext`). Fuel documents
+    /// `forward_decode_step` as a thin wrapper over this same call —
+    /// byte-identical — so this is an actual oracle, not a copy of the code
+    /// under test.
     ///
     /// **Asserted on logits with maxdiff == 0, deliberately not on tokens.**
     /// This test's sole purpose is detecting numerical drift, and argmax is the
-    /// operation that hides it — a token comparison would pass whether or not
+    /// operation that hides it: a token comparison would pass whether or not
     /// the decode maths changed, which is evidence carrying no information.
+    /// Fuel measured a real ~1.7e-3 perturbation that flipped neither greedy
+    /// nor seeded-temperature tokens.
     #[test]
     #[ignore = "needs the TinyLlama checkpoint; slow on CPU"]
     fn stepwise_logits_match_the_reference_loop_exactly() -> anyhow::Result<()> {
+        use fuel::inference_context::{DecodeSession, InferenceContext, KvCache};
+
         let Some(dir) = tinyllama_dir() else {
             panic!("no TinyLlama snapshot — this test asserts numerical behaviour, so it fails rather than skipping");
         };
         let loaded = crate::model_fuel::loader_f32::load_llama_f32_from_dir(&dir)?;
         let prompt: Vec<u32> = vec![1, 450, 7483, 310, 3444, 338];
+        let max_seq_len = prompt.len() + 4;
 
-        // Reference: the shape generate_greedy uses — one persistent session
-        // across prefill and every decode step.
-        let mut ref_st =
-            SessionState::new(&loaded.config, prompt.len() + 4, &loaded.device)?;
-        let mut reference = loaded.model.prefill(&prompt, &mut ref_st)?;
+        // Reference: the pre-`forward_decode_step` call shape — a separately
+        // constructed cache, context, and hand-threaded session, driven
+        // through `forward_with_kv_context_persistent` directly rather than
+        // through `FuelDecoder`.
+        let mut ref_cache = KvCache::with_capacity(
+            loaded.config.n_layers,
+            loaded.config.n_kv_heads,
+            loaded.config.head_dim,
+            max_seq_len,
+            fuel::DType::F32,
+            &loaded.device,
+        )
+        .map_err(|e| anyhow::anyhow!("ref cache: {e:?}"))?;
+        let mut ref_ctx = InferenceContext::new(loaded.device.clone());
+        let mut ref_session: Option<DecodeSession> = None;
+
+        let mut reference = loaded
+            .model
+            .forward_with_kv_context_persistent(
+                &prompt,
+                &mut ref_cache,
+                &mut ref_ctx,
+                &mut ref_session,
+            )
+            .map_err(|e| anyhow::anyhow!("ref prefill: {e:?}"))?;
         for _ in 0..3 {
             let next = crate::model_fuel::generate::argmax(&reference);
-            reference = loaded.model.step(next, &mut ref_st)?;
+            reference = loaded
+                .model
+                .forward_with_kv_context_persistent(
+                    &[next],
+                    &mut ref_cache,
+                    &mut ref_ctx,
+                    &mut ref_session,
+                )
+                .map_err(|e| anyhow::anyhow!("ref step: {e:?}"))?;
         }
 
-        // Under test: an independently constructed session doing the same.
-        let mut st = SessionState::new(&loaded.config, prompt.len() + 4, &loaded.device)?;
+        // Under test: `SessionState` + `FuelDecoder::prefill`/`step`.
+        let mut st = SessionState::new(&loaded.config, max_seq_len, &loaded.device)?;
         let mut got = loaded.model.prefill(&prompt, &mut st)?;
         for _ in 0..3 {
             let next = crate::model_fuel::generate::argmax(&got);
@@ -123,7 +175,13 @@ mod tests {
             maxdiff, 0.0,
             "logits drifted by {maxdiff:e} — decode is not reproducible step-for-step"
         );
-        assert_eq!(st.position(), ref_st.position(), "position accounting diverged");
+        // Cross-check against the reference cache's own accounting, not a
+        // second `SessionState` — `ref_st` no longer exists in this shape.
+        assert_eq!(
+            st.position(),
+            ref_cache.cached_len,
+            "position accounting diverged"
+        );
         Ok(())
     }
 }
