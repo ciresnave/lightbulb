@@ -28,6 +28,40 @@ pub struct InferenceJob {
 /// Sender type used by API handlers to enqueue inference jobs
 pub type InferenceRequestSender = Sender<InferenceJob>;
 
+/// What the job loop needs from a model, and nothing more.
+///
+/// **Deliberately tensor-free.** No Fuel or candlelight type appears here, which
+/// is what keeps `engine/` free of the tensor layer — the property the port
+/// design names as the actual differentiator worth protecting.
+///
+/// Already batch-shaped, so adding real batching changes the job-draining loop
+/// and the implementations, not this trait.
+pub(crate) trait EngineModel {
+    /// Advance every request in `batch` by at most one token.
+    ///
+    /// Returns one entry per request, **positionally aligned with `batch`**.
+    ///
+    /// `Some(tok)` means that request produced `tok` this step. **`None` means
+    /// it produced no token and that is not an error** — it is mid-chunked-
+    /// prefill or already stopped. Errors are the `Err` arm and abort the whole
+    /// batch. An implementation returning `Err` where `None` is meant turns
+    /// ordinary prefill progress into a failed request.
+    fn step_batch(&mut self, batch: &mut [RequestContext]) -> Result<Vec<Option<u32>>>;
+
+    /// Detokenize.
+    fn decode_text(&self, tokens: &[u32], skip_special: bool) -> Result<String>;
+}
+
+impl EngineModel for crate::model::ParallelModelManager {
+    fn step_batch(&mut self, batch: &mut [RequestContext]) -> Result<Vec<Option<u32>>> {
+        self.forward_batch(batch)
+    }
+
+    fn decode_text(&self, tokens: &[u32], skip_special: bool) -> Result<String> {
+        self.decode(tokens, skip_special)
+    }
+}
+
 /// Lightweight model runner that owns a ParallelModelManager on a dedicated thread
 /// and services incoming inference jobs via a blocking mpsc receiver.
 ///
@@ -90,124 +124,14 @@ impl ModelRunner {
             };
 
             match load_result {
-                Ok(mut manager) => {
+                Ok(manager) => {
                     println!(
                         "Model loaded at {} (format: {})",
                         model_path.display(),
                         if is_gguf { "GGUF" } else { "SafeTensors" }
                     );
 
-                    // Process incoming jobs
-                    while let Ok(job) = rx.recv() {
-                        let req = Request {
-                            id: job.id.clone(),
-                            prompt: job.prompt.clone(),
-                            max_new_tokens: job.max_new_tokens,
-                        };
-
-                        let ctx = RequestContext::new(req);
-                        let mut batch = vec![ctx];
-
-                        // Process based on response mode (move out of job to avoid borrow issues)
-                        match job.response_mode {
-                            ResponseMode::Streaming(stream_tx) => {
-                                // Streaming mode: decode and send tokens incrementally
-                                loop {
-                                    match manager.forward_batch(&mut batch) {
-                                        Ok(_) => {
-                                            // Check if a tool call was detected (CR.1)
-                                            if batch[0].state.is_awaiting_tool_result() {
-                                                // Tool call detected — KV cache is preserved.
-                                                // For now, log and resume without tool execution.
-                                                // Future: execute tool via callback, then inject result.
-                                                if let RequestState::AwaitingToolResult {
-                                                    ref tool_name,
-                                                    ref tool_args,
-                                                    ..
-                                                } = batch[0].state
-                                                {
-                                                    eprintln!(
-                                                        "Tool call detected (no executor registered): {}({})",
-                                                        tool_name, tool_args
-                                                    );
-                                                }
-                                                // Resume decoding — model continues without tool result
-                                                // (graceful degradation when no tool executor is available)
-                                                batch[0].resume_decoding();
-                                                continue;
-                                            }
-
-                                            // Get the most recent token and decode it
-                                            if let Some(&last_token) =
-                                                batch[0].generated_tokens.last()
-                                            {
-                                                match manager.decode(&[last_token], false) {
-                                                    Ok(token_text) => {
-                                                        if stream_tx.send(Ok(token_text)).is_err() {
-                                                            // Receiver dropped, stop generation
-                                                            break;
-                                                        }
-                                                    }
-                                                    Err(e) => {
-                                                        let _ = stream_tx.send(Err(e));
-                                                        break;
-                                                    }
-                                                }
-                                            }
-
-                                            if !batch[0].should_continue() {
-                                                break;
-                                            }
-                                        }
-                                        Err(e) => {
-                                            let _ = stream_tx.send(Err(e));
-                                            break;
-                                        }
-                                    }
-                                }
-                            }
-                            ResponseMode::Complete(resp_tx) => {
-                                // Complete mode: generate all tokens then send final text
-                                let mut final_result: Option<anyhow::Result<String>> = None;
-
-                                loop {
-                                    match manager.forward_batch(&mut batch) {
-                                        Ok(_) => {
-                                            // Check if a tool call was detected (CR.1)
-                                            if batch[0].state.is_awaiting_tool_result() {
-                                                // Graceful degradation: resume without tool result
-                                                batch[0].resume_decoding();
-                                                continue;
-                                            }
-
-                                            if !batch[0].should_continue() {
-                                                break;
-                                            }
-                                        }
-                                        Err(e) => {
-                                            final_result = Some(Err(e));
-                                            break;
-                                        }
-                                    }
-                                }
-
-                                // Decode all generated tokens at once
-                                if final_result.is_none() {
-                                    let generated_tokens = batch[0].generated_tokens.clone();
-                                    match manager.decode(&generated_tokens, false) {
-                                        Ok(text) => final_result = Some(Ok(text)),
-                                        Err(e) => final_result = Some(Err(e)),
-                                    }
-                                }
-
-                                if let Some(res) = final_result {
-                                    let _ = resp_tx.send(res);
-                                }
-                            }
-                        }
-                    }
-
-                    println!("Model runner thread exiting (receiver closed)");
+                    run_jobs(manager, rx);
                 }
                 Err(e) => {
                     // Model failed to load; consume any pending jobs and return error message
@@ -229,4 +153,120 @@ impl ModelRunner {
 
         Ok(tx)
     }
+}
+
+/// The job loop. Identical for every backend, which is why it is generic rather
+/// than duplicated per `cfg`.
+fn run_jobs<M: EngineModel>(mut model: M, rx: Receiver<InferenceJob>) {
+    // Process incoming jobs
+    while let Ok(job) = rx.recv() {
+        let req = Request {
+            id: job.id.clone(),
+            prompt: job.prompt.clone(),
+            max_new_tokens: job.max_new_tokens,
+        };
+
+        let ctx = RequestContext::new(req);
+        let mut batch = vec![ctx];
+
+        // Process based on response mode (move out of job to avoid borrow issues)
+        match job.response_mode {
+            ResponseMode::Streaming(stream_tx) => {
+                // Streaming mode: decode and send tokens incrementally
+                loop {
+                    match model.step_batch(&mut batch) {
+                        Ok(_) => {
+                            // Check if a tool call was detected (CR.1)
+                            if batch[0].state.is_awaiting_tool_result() {
+                                // Tool call detected — KV cache is preserved.
+                                // For now, log and resume without tool execution.
+                                // Future: execute tool via callback, then inject result.
+                                if let RequestState::AwaitingToolResult {
+                                    ref tool_name,
+                                    ref tool_args,
+                                    ..
+                                } = batch[0].state
+                                {
+                                    eprintln!(
+                                        "Tool call detected (no executor registered): {}({})",
+                                        tool_name, tool_args
+                                    );
+                                }
+                                // Resume decoding — model continues without tool result
+                                // (graceful degradation when no tool executor is available)
+                                batch[0].resume_decoding();
+                                continue;
+                            }
+
+                            // Get the most recent token and decode it
+                            if let Some(&last_token) =
+                                batch[0].generated_tokens.last()
+                            {
+                                match model.decode_text(&[last_token], false) {
+                                    Ok(token_text) => {
+                                        if stream_tx.send(Ok(token_text)).is_err() {
+                                            // Receiver dropped, stop generation
+                                            break;
+                                        }
+                                    }
+                                    Err(e) => {
+                                        let _ = stream_tx.send(Err(e));
+                                        break;
+                                    }
+                                }
+                            }
+
+                            if !batch[0].should_continue() {
+                                break;
+                            }
+                        }
+                        Err(e) => {
+                            let _ = stream_tx.send(Err(e));
+                            break;
+                        }
+                    }
+                }
+            }
+            ResponseMode::Complete(resp_tx) => {
+                // Complete mode: generate all tokens then send final text
+                let mut final_result: Option<anyhow::Result<String>> = None;
+
+                loop {
+                    match model.step_batch(&mut batch) {
+                        Ok(_) => {
+                            // Check if a tool call was detected (CR.1)
+                            if batch[0].state.is_awaiting_tool_result() {
+                                // Graceful degradation: resume without tool result
+                                batch[0].resume_decoding();
+                                continue;
+                            }
+
+                            if !batch[0].should_continue() {
+                                break;
+                            }
+                        }
+                        Err(e) => {
+                            final_result = Some(Err(e));
+                            break;
+                        }
+                    }
+                }
+
+                // Decode all generated tokens at once
+                if final_result.is_none() {
+                    let generated_tokens = batch[0].generated_tokens.clone();
+                    match model.decode_text(&generated_tokens, false) {
+                        Ok(text) => final_result = Some(Ok(text)),
+                        Err(e) => final_result = Some(Err(e)),
+                    }
+                }
+
+                if let Some(res) = final_result {
+                    let _ = resp_tx.send(res);
+                }
+            }
+        }
+    }
+
+    println!("Model runner thread exiting (receiver closed)");
 }
