@@ -4,7 +4,8 @@
 //! when to stop, whose request runs. Fuel supplies the forward pass, the KV
 //! cache and the graph. That split is the one the port is built on.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::hash::{Hash, Hasher};
 use std::path::Path;
 
 use anyhow::Result;
@@ -28,6 +29,26 @@ fn select_token(logits: &[f32], temperature: f64, seed: u64) -> u32 {
     let mut l = logits.to_vec();
     crate::sampling::apply_temperature(&mut l, temperature as f32);
     crate::sampling::sample_from_logits(&l, seed) as u32
+}
+
+/// Derive one token's sampling seed from the request it belongs to and its
+/// position within that request.
+///
+/// NOT a shared counter on the model. A single counter incremented across
+/// every request (the original shape) makes one request's sampled tokens
+/// depend on how much traffic the process served before it — the same
+/// prompt at `temperature: 0.7` would return different text depending on
+/// what ran earlier. Harmless only by accident: `run_jobs` currently drives
+/// one request at a time, so nothing interleaves. It becomes real
+/// cross-tenant coupling the moment `step_batch` sees a genuine batch, since
+/// two requests stepping in the same call would then share the counter's
+/// sequence. Hashing `(request_id, token_index)` instead makes each
+/// request's seed sequence depend only on itself.
+fn seed_for(request_id: &str, token_index: usize) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    request_id.hash(&mut hasher);
+    token_index.hash(&mut hasher);
+    hasher.finish()
 }
 
 /// A loaded Fuel model plus one decode session per in-flight request.
@@ -75,9 +96,6 @@ pub(crate) struct FuelEngineModel {
     /// so the unsafe version fails loudly instead of silently.
     sessions: HashMap<String, SessionState>,
     context_length: usize,
-    /// Per-request sampling seed source. Incremented per selection so two
-    /// tokens in one request do not share a seed.
-    seed_counter: u64,
 }
 
 impl FuelEngineModel {
@@ -91,7 +109,6 @@ impl FuelEngineModel {
             loaded,
             sessions: HashMap::new(),
             context_length,
-            seed_counter: 0,
         })
     }
 
@@ -112,7 +129,15 @@ impl FuelEngineModel {
                 // prompt + generation. Capped at context_length because the KV
                 // cache is pre-allocated and an oversized request would
                 // otherwise allocate unboundedly.
-                let want = ids.len() + ctx.request.max_new_tokens + 1;
+                //
+                // `saturating_add`: `max_new_tokens` comes straight from
+                // client JSON, unvalidated. A plain `+` panics on overflow in
+                // debug (killing the runner thread and stranding every later
+                // request) and silently wraps in release.
+                let want = ids
+                    .len()
+                    .saturating_add(ctx.request.max_new_tokens)
+                    .saturating_add(1);
                 let max_seq_len = want.min(self.context_length);
                 if ids.len() >= max_seq_len {
                     anyhow::bail!(
@@ -127,12 +152,29 @@ impl FuelEngineModel {
                 let logits = self.loaded.model.prefill(&ids, &mut st)?;
                 self.sessions.insert(ctx.request.id.clone(), st);
 
-                self.seed_counter += 1;
-                let tok = select_token(&logits, ctx.request_temperature(), self.seed_counter);
+                let seed = seed_for(&ctx.request.id, ctx.tokens_generated);
+                let tok = select_token(&logits, ctx.request_temperature(), seed);
                 ctx.generated_tokens.push(tok);
                 ctx.start_decoding();
-                ctx.record_token();
-                if self.loaded.is_eos(tok) {
+                // Prefill advances the cache by the WHOLE prompt, not by one
+                // token. `record_token()`'s `position += 1` is the decode-step
+                // meaning; candlelight's own prefill arm
+                // (`parallel_model_manager.rs`: `ctx.position += seq_len`)
+                // uses the cache-position meaning instead, and both backends
+                // feed the same `RequestContext` — `await_tool_result` reads
+                // `position` as a cache offset — so this matches that rather
+                // than calling `record_token()` here.
+                ctx.position += ids.len();
+                ctx.tokens_generated += 1;
+                // Mirrors candlelight's own completion check (`is_eos_token ||
+                // tokens_generated >= max_new_tokens`) rather than EOS alone.
+                // EOS-only completion leaves the ordinary "ran out the
+                // budget" request stuck in `Decoding` forever: `run_jobs`
+                // still exits its loop via `should_continue()`, but nothing
+                // ever removes this request's session, leaking its ~92 MiB KV
+                // cache on every non-EOS completion — the common case, since
+                // `chat.rs` defaults `max_tokens` to 100.
+                if self.loaded.is_eos(tok) || ctx.tokens_generated >= ctx.request.max_new_tokens {
                     ctx.complete();
                     self.sessions.remove(&ctx.request.id);
                 }
@@ -149,11 +191,11 @@ impl FuelEngineModel {
                     .ok_or_else(|| anyhow::anyhow!("no session for request {}", ctx.request.id))?;
                 let logits = self.loaded.model.step(last, st)?;
 
-                self.seed_counter += 1;
-                let tok = select_token(&logits, ctx.request_temperature(), self.seed_counter);
+                let seed = seed_for(&ctx.request.id, ctx.tokens_generated);
+                let tok = select_token(&logits, ctx.request_temperature(), seed);
                 ctx.generated_tokens.push(tok);
                 ctx.record_token();
-                if self.loaded.is_eos(tok) {
+                if self.loaded.is_eos(tok) || ctx.tokens_generated >= ctx.request.max_new_tokens {
                     ctx.complete();
                     self.sessions.remove(&ctx.request.id);
                 }
@@ -165,6 +207,18 @@ impl FuelEngineModel {
 
 impl EngineModel for FuelEngineModel {
     fn step_batch(&mut self, batch: &mut [RequestContext]) -> Result<Vec<Option<u32>>> {
+        // A request can stop without ever reaching EOS or max_new_tokens
+        // inside `step_one`: a client disconnect (the streaming send in
+        // `run_jobs` failing), a decode error propagated up through `?`, or
+        // a detokenize failure all break `run_jobs`'s loop from the OUTSIDE,
+        // so `step_one` never runs again for that request and the
+        // completion-based removal above never fires. Sweeping here catches
+        // exactly those paths: anything left in `sessions` whose id is not
+        // in the batch `run_jobs` is currently driving belongs to a request
+        // that will never be stepped again.
+        let live: HashSet<&str> = batch.iter().map(|ctx| ctx.request.id.as_str()).collect();
+        self.sessions.retain(|id, _| live.contains(id.as_str()));
+
         let mut out = Vec::with_capacity(batch.len());
         for ctx in batch.iter_mut() {
             out.push(self.step_one(ctx)?);
@@ -185,19 +239,35 @@ mod tests {
     use super::*;
 
     /// Greedy selection is deterministic; sampled selection at the same seed is
-    /// reproducible and at different seeds is not.
+    /// reproducible; sampled selection at different seeds actually varies.
     ///
-    /// The third assertion is the one that can fail informatively: if
-    /// `select_token` ignored the seed, the first two would still pass.
+    /// The first three assertions alone are a tautology, not a test: `f(x) ==
+    /// f(x)` holds for ANY pure function of `(logits, temperature, seed)`,
+    /// including one that ignores `temperature` and `seed` entirely (`fn
+    /// select_token(l, _, _) { argmax(l) }` passes all three). The final
+    /// assertion is the one that can fail informatively — it needs the seed
+    /// to actually move the output, which needs a distribution flat enough
+    /// for sampling to have somewhere to go. `peaked` below is too sharp for
+    /// that: softmax at temperature 1.0 puts the overwhelming majority of the
+    /// mass on index 1, so most seeds land there anyway and would prove
+    /// nothing, which is why a second, flat row is used for that assertion.
     #[test]
     fn select_token_is_greedy_at_zero_and_seeded_above() {
-        let logits = vec![0.1, 3.0, 0.2, 2.9, 0.3];
-        assert_eq!(select_token(&logits, 0.0, 1), 1, "temperature 0 must be argmax");
-        assert_eq!(select_token(&logits, 0.0, 999), 1, "greedy must ignore the seed");
+        let peaked = vec![0.1, 3.0, 0.2, 2.9, 0.3];
+        assert_eq!(select_token(&peaked, 0.0, 1), 1, "temperature 0 must be argmax");
+        assert_eq!(select_token(&peaked, 0.0, 999), 1, "greedy must ignore the seed");
         assert_eq!(
-            select_token(&logits, 1.0, 7),
-            select_token(&logits, 1.0, 7),
+            select_token(&peaked, 1.0, 7),
+            select_token(&peaked, 1.0, 7),
             "same seed must reproduce"
+        );
+
+        let flat = vec![1.0; 8];
+        let tokens: HashSet<u32> = (1u64..=5).map(|seed| select_token(&flat, 1.0, seed)).collect();
+        assert!(
+            tokens.len() > 1,
+            "seeds 1..=5 over a flat distribution all produced the same token \
+             ({tokens:?}) — select_token is not threading the seed through"
         );
     }
 }
