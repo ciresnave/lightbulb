@@ -47,6 +47,7 @@
 //! inside Lightbulb alongside `candlelight`. Everything else is ahead.
 
 pub mod batched;
+pub mod decoder;
 pub mod device;
 pub mod generate;
 pub mod loader;
