@@ -36,7 +36,6 @@ use fuel::lazy::{
     load_tensor_as_f32, load_transposed_matrix, LayerWeights, LlamaConfig, LlamaModel,
     LlamaWeights, WeightStorage,
 };
-use fuel::lazy_llama2c::Llama2cConfig;
 use fuel::safetensors::MmapedSafetensors;
 
 use super::loader::LoadedLlama;
@@ -52,9 +51,12 @@ use super::loader::LoadedLlama;
 pub fn load_llama_f32_from_dir(dir: &Path) -> Result<LoadedLlama> {
     let config_str = std::fs::read_to_string(dir.join("config.json"))
         .with_context(|| format!("reading config.json in {}", dir.display()))?;
-    let config: LlamaConfig = Llama2cConfig::from_hf_json_str(&config_str)
-        .map_err(|e| anyhow::anyhow!("parsing config.json: {e:?}"))?
-        .to_llama_config();
+    // `LlamaFullConfig`, NOT `Llama2cConfig`. Both parse this same file into
+    // the same `LlamaConfig` via `to_lazy_config()`, but only this one retains
+    // `eos_token_id`. Without it the engine can stop only on max_new_tokens.
+    let full = fuel::lazy_llama_full::LlamaFullConfig::from_hf_json_str(&config_str)
+        .map_err(|e| anyhow::anyhow!("parsing config.json: {e:?}"))?;
+    let config: LlamaConfig = full.to_lazy_config();
 
     let weights_path = dir.join("model.safetensors");
     if !weights_path.is_file() {
@@ -131,12 +133,24 @@ pub fn load_llama_f32_from_dir(dir: &Path) -> Result<LoadedLlama> {
         output,
     };
 
+    let tokenizer = tokenizers::Tokenizer::from_file(dir.join("tokenizer.json"))
+        .map_err(|e| anyhow::anyhow!("loading tokenizer.json in {}: {e}", dir.display()))?;
+    if full.eos_token_id.is_none() {
+        tracing::warn!(
+            "config.json in {} declares no eos_token_id; generation will stop \
+             only on max_new_tokens",
+            dir.display()
+        );
+    }
     Ok(LoadedLlama {
         model: LlamaModel {
             config: config.clone(),
             weights,
         },
         config,
+        tokenizer,
+        eos: full.eos_token_id,
+        device: super::device::select(),
     })
 }
 
@@ -230,6 +244,34 @@ mod tests {
             "the two loaders disagree — greedy decode should be identical unless \
              one of them mis-maps a tensor name, shape, or transpose"
         );
+        Ok(())
+    }
+
+    /// The loader must surface the checkpoint's EOS token.
+    ///
+    /// Asserts the CONCRETE value (TinyLlama's `</s>` is 2), not merely that
+    /// the field is `Some`. `Some(garbage)` would pass an is-present check and
+    /// then never fire during generation, producing exactly the runaway output
+    /// this field exists to prevent.
+    #[test]
+    #[ignore = "needs the TinyLlama checkpoint"]
+    fn loader_surfaces_eos_and_tokenizer() -> Result<()> {
+        let Some(dir) = tinyllama_dir() else {
+            panic!("no TinyLlama snapshot — this test asserts loader behaviour, so it fails rather than skipping");
+        };
+        let loaded = load_llama_f32_from_dir(&dir)?;
+
+        assert!(loaded.is_eos(2), "TinyLlama's </s> is token 2; EOS did not parse");
+        assert!(!loaded.is_eos(0), "token 0 is <unk>, not EOS");
+
+        // The tokenizer must round-trip, not merely exist.
+        let ids: Vec<u32> = loaded
+            .tokenizer
+            .encode("The capital of France is", true)
+            .map_err(|e| anyhow::anyhow!("encode: {e}"))?
+            .get_ids()
+            .to_vec();
+        assert!(!ids.is_empty(), "tokenizer produced no ids");
         Ok(())
     }
 }
