@@ -137,8 +137,45 @@ impl ParallelKvCache {
 
         let indices = iam.indices.unsqueeze(2)?.unsqueeze(1)?;
         let indices = indices.broadcast_as(k.shape())?.contiguous()?;
-        self.k.scatter_set(&indices, k, 2)?;
-        self.v.scatter_set(&indices, v, 2)?;
+
+        // INACTIVE ROWS MUST NOT BE WRITTEN.
+        //
+        // `scatter_set` writes every batch row, and an inactive slot's indices
+        // are its REAL live write position, not a sentinel — so without this,
+        // a slot that sat out this step gets its cache overwritten by whatever
+        // that row computed while masked out. `parallel_model_manager.rs`
+        // includes `Completed` and `AwaitingToolResult` slots in the batch
+        // precisely because it believes they are inert, and CR.1 promises a
+        // paused request's "KV cache is preserved" — this is what makes that
+        // true. A resumed tool-call request would otherwise attend over
+        // corrupted history and produce fluent, wrong output with nothing
+        // logged.
+        //
+        // Implemented by neutralising the SOURCE rather than skipping rows:
+        // inactive rows write back the cache's current contents, so the
+        // scatter stays one vectorised call instead of becoming a per-slot
+        // loop in the decode hot path.
+        if iam.active.len() != k.dim(0)? {
+            candlelight::core::bail!(
+                "IndicesAndMask.active has {} entries for a batch of {}",
+                iam.active.len(),
+                k.dim(0)?
+            );
+        }
+        let (k_src, v_src) = if iam.active.iter().all(|&a| a) {
+            (k.clone(), v.clone())
+        } else {
+            let keep: Vec<u8> = iam.active.iter().map(|&a| u8::from(a)).collect();
+            let keep = Tensor::from_vec(keep, (iam.active.len(), 1, 1, 1), k.device())?
+                .broadcast_as(k.shape())?
+                .contiguous()?;
+            let cur_k = self.k.gather(&indices, 2)?;
+            let cur_v = self.v.gather(&indices, 2)?;
+            (keep.where_cond(k, &cur_k)?, keep.where_cond(v, &cur_v)?)
+        };
+
+        self.k.scatter_set(&indices, &k_src, 2)?;
+        self.v.scatter_set(&indices, &v_src, 2)?;
 
         Ok((self.k.clone(), self.v.clone()))
     }
