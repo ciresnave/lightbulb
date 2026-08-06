@@ -127,6 +127,13 @@ pub fn load_llama_f32_from_dir(dir: &Path) -> Result<LoadedLlama> {
     };
 
     let weights = LlamaWeights {
+        // Fuel `c4718467` (breaking) keys the decode plan-reuse predicate on
+        // model IDENTITY, not geometry alone: a held plan bakes this weight
+        // set's tensors in as `Const`s, so two same-architecture models must
+        // NOT share a plan. `next()` mints a fresh process-unique id, which is
+        // what every loader in `fuel-core` does — a loaded checkpoint is a new
+        // weight set by construction, never a view onto an existing one.
+        instance: fuel::decode_shape::ModelInstanceId::next(),
         token_embedding,
         layers,
         final_norm_gain,

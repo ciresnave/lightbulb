@@ -1119,6 +1119,11 @@ mod tests {
         };
         let kv_dim = cfg.n_kv_heads * cfg.head_dim;
         LlamaWeights {
+            // Fresh id per call, deliberately: two `tiny_weights(cfg, seed)`
+            // calls with the SAME seed produce byte-identical weights but are
+            // distinct weight sets, and Fuel's plan-reuse predicate
+            // (`c4718467`) must not let one's held plan serve the other.
+            instance: fuel::decode_shape::ModelInstanceId::next(),
             token_embedding: vec_of(cfg.vocab_size * cfg.dim),
             layers: (0..cfg.n_layers)
                 .map(|_| LayerWeights {
@@ -1235,6 +1240,9 @@ mod tests {
             });
         }
         let weights = LlamaWeights {
+            // See `loader_f32.rs`: a freshly loaded checkpoint is a new weight
+            // set, so it mints its own identity (Fuel `c4718467`).
+            instance: fuel::decode_shape::ModelInstanceId::next(),
             token_embedding: vecf("model.embed_tokens.weight")?,
             layers,
             final_norm_gain: vecf("model.norm.weight")?,

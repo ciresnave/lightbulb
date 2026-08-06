@@ -149,60 +149,126 @@
 //!
 //! ---------------------------------------------------------------------------
 //!
-//! # 2026-08-05 rework: the batch-size sweep (Task 10)
+//! # 2026-08-05/06 rework: the batch-size sweep (Task 10) — RUN
 //!
-//! ## THIS CODE HAS NEVER COMPILED. NO NUMBER BELOW THIS LINE WAS MEASURED.
+//! **`FUEL_BASELINE = 8771997eac86b2a786bebcdcadda16fdcf2d28dc`**
+//! (`C:\Projects\fuel-lightbulb-port`), release build, RTX 4070 Laptop 8 GB,
+//! TinyLlama-1.1B **f32**, `LB_MAX_NEW=16`.
 //!
-//! At `FUEL_BASELINE = 12df216b89a832cd20408c146227b0af8375b805`, **`fuel-core`
-//! does not build under `--features cuda`**:
+//! The previous attempt was blocked: `fuel-core` did not build under
+//! `--features cuda` at the old `12df216b` baseline (three `E0061`s inside
+//! `#[cfg(feature = "cuda")] forward_with_kv_context_captured`, introduced by
+//! `3364e8a9` and invisible to a CPU CI matrix). Fixed upstream in `8771997e`.
+//! Full diagnosis in `.superpowers/sdd/2026-08-05-engine-wiring/task-10-report.md`.
+//!
+//! ## Steady-state decode, ms/token (`--release`)
 //!
 //! ```text
-//! error[E0061]: this method takes 5 arguments but 4 arguments were supplied
-//!     --> fuel-core/src/lazy.rs:9638   build_and_realize_first_decode_token
-//! error[E0061]: this method takes 7 arguments but 6 arguments were supplied
-//!     --> fuel-core/src/lazy.rs:9651   build_token_rope_mask_arcs
-//! error[E0061]: this method takes 6 arguments but 5 arguments were supplied
-//!     --> fuel-core/src/lazy.rs:9703   build_token_rope_mask_bytes
-//! error: could not compile `fuel-core` (lib) due to 3 previous errors
+//!                                          k=1                     k=2
+//!                                  (n=4/5 runs, median)      (single run)
+//!   paged        PlanOnce               151.1                    247.7
+//!   paged        Replan               13305.2                      —
+//!   contiguous   PlanOnce, capture off   97.5                    149.4
+//!   contiguous   PlanOnce, capture on    53.2                     85.9
+//!   contiguous   Replan                7023.0                      —
+//!   k >= 4       BOTH ARMS: CUDA_ERROR_OUT_OF_MEMORY (see below)
 //! ```
 //!
-//! All three sites are inside `#[cfg(feature = "cuda")]
-//! forward_with_kv_context_captured` (`lazy.rs:9602`) — the CUDA-graph capture
-//! entry this rework exists to isolate. `3364e8a9` threaded
-//! `rope_inv_freq: Option<&[f64]>` through the three private helpers, updated
-//! the non-CUDA callers, and missed these three. Because they are CUDA-gated,
-//! **no CPU CI run can fail on it**; the older worktree the 2026-08-01 numbers
-//! were taken on (`99dbf231`, an ancestor of `b63acac1`) predates the parameter
-//! and built fine, so this is a regression the baseline move brought in.
+//! ## The three results this was built to produce
 //!
-//! Consequences, in order of how much they matter:
+//! **1. CUDA-graph capture is worth ~2x, and it is pure launch overhead.**
+//! Persistence held CONSTANT (`PlanOnce` both sides, `optimize_calls_steady == 0`
+//! both sides), the only difference being the entry point:
 //!
-//! 1. Fuel's CUDA-graph capture path **does not compile** at the pinned
-//!    baseline. "Called from tests only" understates it — no Fuel CUDA test can
-//!    have run at this commit either.
-//! 2. This whole file is `#![cfg(feature = "fuel-cuda")]`, so it is EMPTY in
-//!    every configuration that currently builds. It cannot break anything. It
-//!    also has not been type-checked once. **Treat everything below as a draft
-//!    until `cargo check --features fuel-cuda` passes.**
-//! 3. `fuel-cuda-backend`, `fuel-inference` and Lightbulb's own `fuel-cuda`
-//!    code sit BEHIND `fuel-core` in the graph and were never reached. Expect
-//!    more CUDA-only breakage, not one patch.
+//! ```text
+//!                       forward_decode_step   forward_with_kv_context_captured
+//!   steady ms/token           97.5                        53.2
+//!   HtoD MB / copies      9014.573 / 491              9014.573 / 491
+//!   DtoH MB / copies       216.220 /  26               216.220 /  26
+//!   kernel launches         36,718                       9,214
+//! ```
 //!
-//! The full diagnosis, the three-line fix, and the decision it needs are in
-//! `.superpowers/sdd/2026-08-05-engine-wiring/task-10-report.md`.
+//! The byte counts are **identical to the digit**. Capture moves not one extra
+//! or fewer byte; it collapses 36,718 kernel launches into 9,214 (-75%). Four
+//! paired runs give 2.32x / 2.75x / 1.81x / 1.53x — median **2.06x**, and the
+//! sign never flips. This is the number Fuel was holding the default-on decision
+//! against, and it is now isolated rather than bounded.
 //!
-//! ## What the rework does, once it can run
+//! Persistence and capture turn out to be **orthogonal seams**: persistence cuts
+//! HtoD bytes (70,617 -> 9,015 MB, from the 2026-08-01 table) and leaves launches
+//! at 36,718; capture cuts launches and leaves bytes untouched.
 //!
-//! Everything above was measured at **k = 1**, in a **debug** build, with two
-//! timing windows and one confounded contrast. Four defects were fixed here.
+//! **2. The release k=1 paged penalty is ~2.6x, NOT 10.4x.** The 10.4x came from
+//! a **debug** build (the prior session's `build_gpu_harness.bat` had no
+//! `--release`) and is not a valid reference for a release sweep. Paired,
+//! same-block ratios at k=1: paged / captured-contiguous = 4.43 / 2.59 / 2.09
+//! (median **2.59x**); paged / uncaptured-contiguous = 1.61 / 1.43 / 1.37
+//! (median **1.43x** — a much tighter estimate, because both sides then pay the
+//! same launch overhead). **No inversion point exists in the measurable range:**
+//! the ratio does not fall from k=1 to k=2 (2.59 -> 2.88 against captured
+//! contiguous), and k >= 4 does not run.
 //!
-//! A comparability caveat that applies to whatever runs next: the 2026-08-01
-//! table — and the **10.4x** paged penalty derived from it — is from a **debug**
-//! build (the prior session's `build_gpu_harness.bat` runs `cargo test --no-run
-//! --features fuel-cuda`, no `--release`). Task 10's prescribed command is
-//! `--release`. So 10.4x is NOT a valid reference for a release sweep; the
-//! release k=1 ratio has to be re-established before "which k inverts 10.4x"
-//! means anything.
+//! **3. The host round-trip does NOT amortize across a batch.** DtoH totals,
+//! from `nsys --trace=cuda --stats=true`:
+//!
+//! ```text
+//!                       k=1 (16 tok, 23 fwd)   k=2 (32 tok, 49 fwd)
+//!   paged  DtoH MB            40,021.974            93,198.532
+//!          per token           2,501.4                2,912.5
+//!          per forward         1,740.1                1,902.0
+//!   contig DtoH MB               216.220               218.268
+//!          per token              13.51                  6.82
+//! ```
+//!
+//! Paged DtoH is **flat per forward step** and therefore scales linearly with k:
+//! doubling the batch doubles the round-trip. Contiguous's DtoH is a fixed
+//! ~216 MB plus a 0.128 MB logits readback per token — it is already free.
+//!
+//! **This slope does not discriminate kernel shapes.** An earlier framing said a
+//! flat-vs-scaling DtoH slope chose between a monolithic paged CUDA kernel and
+//! small primitives; Fuel retracted that, and it is wrong: *any* GPU
+//! implementation removes the host round-trip equally. The slope characterises
+//! the CURRENT placement, and what it says is that batching will not rescue it.
+//!
+//! ## k >= 4 does not run on this card, on either path
+//!
+//! ```text
+//!   contiguous k=4   CUDA_ERROR_OUT_OF_MEMORY  Node#20 Copy [11534336] F32 (44 MiB, an FFN matrix)
+//!   paged      k=4   CUDA_ERROR_OUT_OF_MEMORY  Node#20 Copy [11534336] F32   (after 592 s)
+//!   contiguous k=8   host abort: "memory allocation of 46137344 bytes failed" (the same 44 MiB)
+//!   contiguous k=16  CUDA_ERROR_OUT_OF_MEMORY  Node#24 Copy [4194304] F32 (16 MiB)
+//! ```
+//!
+//! The registered prediction was that per-session weight residency would kill
+//! k=2 on an 8 GB card. It survives k=2 and dies at k=4 — so residency does
+//! scale with k, less steeply than k x 4.4 GB. **Largest k that completed: 2.**
+//!
+//! ## `build_batched_decode_logits` rejects a realistic ragged batch — confirmed
+//!
+//! ```text
+//!   BATCHED_ADMISSION k=2 REJECTED cached_lens=[23, 26]
+//!     err=build_batched_decode_logits: non-uniform caches (cached_len/max_seq_len)
+//! ```
+//!
+//! Every cache was allocated at the SAME capacity on purpose, so this isolates
+//! *ragged positions* as the cause. Contiguous "batching" at k>1 is therefore k
+//! serial decodes — which is exactly what the timings above measured, and what a
+//! server would actually get. No uniform batch was synthesized to obtain a
+//! prettier number.
+//!
+//! ## `LB_ARM=paged_sched` validity control: PASSES
+//!
+//! Run A (paged first): paged 78.5, scheduler 130.3. Run B (scheduler first):
+//! scheduler 113.6, paged 157.3. **The sign of the difference flips with run
+//! order**, so run position dominates the arm effect; medians agree within 3%
+//! (117.9 vs 122.0) and both report identical witnesses (`optimize_calls` 9
+//! total / 0 steady, `realize_count` 14). The direct drive measures the shipped
+//! path.
+//!
+//! That same ordering effect is why every ratio above is quoted **paired within
+//! a block of consecutive runs**: the absolute paged k=1 number ranges 78.5 to
+//! 173.9 ms/token across five runs of identical configuration, while the paired
+//! paged/uncaptured-contiguous ratio stays inside 1.37-1.61.
 //!
 //! ## (a) `LB_PLAN` no longer has a default
 //!
@@ -280,7 +346,12 @@
 //! `LB_CAPTURE` has no default either, for the same reason `LB_PLAN` no longer
 //! does.
 //!
-//! ## Registered before the k>1 runs
+//! ## Registered before the k>1 runs — and how each came out
+//!
+//! Both registered predictions were **confirmed in substance**; the first was
+//! wrong about the exact k (it said 2, the card died at 4). Resolutions are in
+//! the results section above; the predictions are kept verbatim below so the
+//! record shows what was claimed before the numbers existed.
 //!
 //! * **Per-session weight residency is the OOM risk.** `load_llama_f32_from_dir`
 //!   builds `WeightStorage::F32(Arc<[f32]>)` — **host** memory. Every realize
