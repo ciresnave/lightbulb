@@ -150,13 +150,18 @@ fn an_inactive_slot_gets_a_permissive_mask_and_that_is_deliberate() {
         .unwrap()
         .to_vec1::<f32>()
         .unwrap();
+    // `== 0.0` is the whole invariant: it rules out -inf (which softmaxes to
+    // NaN) and NaN itself in one predicate, since neither equals zero. An
+    // earlier revision followed this with a separate `!is_nan()` assertion,
+    // which was dead weight — it cannot fail if this one passes.
     assert!(
         inactive_row.iter().all(|&x| x == 0.0),
-        "the inactive slot's mask is not all-zero. If this was an intentional          change to -inf, note that softmax over an all -inf row yields NaN; the          protection this row does NOT provide is supplied by append honouring          IndicesAndMask.active instead"
-    );
-    assert!(
-        inactive_row.iter().all(|&x| !x.is_nan()),
-        "the inactive slot's mask contains NaN before softmax has even run"
+        concat!(
+            "the inactive slot's mask is not all-zero. If this was an intentional ",
+            "change to -inf: softmax over an all -inf row yields NaN. The protection ",
+            "this row does NOT provide is supplied by append honouring ",
+            "IndicesAndMask.active — see an_inactive_slot_keeps_its_cached_kv."
+        )
     );
 
     // Control: the ACTIVE slot's row must contain -inf for future positions.
@@ -171,7 +176,10 @@ fn an_inactive_slot_gets_a_permissive_mask_and_that_is_deliberate() {
         .unwrap();
     assert!(
         active_row.iter().any(|&x| x == f32::NEG_INFINITY),
-        "the ACTIVE slot's mask has no -inf entries, so causal masking is not          being applied and this test's all-zero assertion above is vacuous"
+        concat!(
+            "the ACTIVE slot's mask has no -inf entries, so causal masking is not ",
+            "being applied and this test's all-zero assertion above is vacuous"
+        )
     );
 }
 
@@ -319,10 +327,64 @@ fn an_inactive_slot_keeps_its_cached_kv() {
     );
 
     // Control: the ACTIVE slot must still have been written, or this test would
-    // pass against an `append` that simply does nothing.
+    // pass against an `append` that simply does nothing. Asserted on BOTH K and
+    // V — a fix that guarded one and not the other would leave V stale while
+    // this test stayed green.
     assert_eq!(
         read_at(cache.k(), 0, 0, 0),
         vec![2.0; HEAD_DIM],
-        "the active slot was NOT written — append is a no-op and the assertions above prove nothing"
+        "the active slot's K was NOT written — append is a no-op and the assertions above prove nothing"
+    );
+    assert_eq!(
+        read_at(cache.v(), 0, 0, 0),
+        vec![2.0; HEAD_DIM],
+        "the active slot's V was NOT written while its K was — the two are guarded separately in append"
+    );
+}
+
+#[test]
+fn an_all_inactive_batch_leaves_every_slot_untouched() {
+    // Companion to `an_inactive_slot_keeps_its_cached_kv`, which covers a mixed
+    // batch. This covers the degenerate one: a step where NOTHING is active,
+    // which happens when every request in the batch is paused or completed.
+    //
+    // It passes against the current implementation — the mixed-batch fix
+    // already covers it — so it is a regression guard rather than a driver. It
+    // earns its place because the fast path in `append` branches on
+    // `active.iter().all(...)`, and a future refactor that inverted or
+    // short-circuited that branch would silently make an all-inactive batch
+    // write again, with no mixed-batch test failing.
+    let (mut b, device) = builder(2, 8);
+    let mut cache = b.make_cache(HEADS, HEAD_DIM).unwrap();
+    b.set_position(0, 0);
+    b.set_position(1, 0);
+
+    let iam_both = b.indices_and_mask(1, &[true, true]).unwrap();
+    let k1 = per_slot_tensor(&[3.0, 5.0], 1, &device);
+    let v1 = per_slot_tensor(&[3.0, 5.0], 1, &device);
+    cache.append(&k1, &v1, &iam_both).unwrap();
+
+    let k_before = cache.k().flatten_all().unwrap().to_vec1::<f32>().unwrap();
+    let v_before = cache.v().flatten_all().unwrap().to_vec1::<f32>().unwrap();
+    assert!(
+        k_before.iter().any(|&x| x != 0.0),
+        "setup failed: nothing was written, so an unchanged cache below would prove nothing"
+    );
+
+    // Every slot pauses. This step must not touch the cache at all.
+    let iam_none = b.indices_and_mask(1, &[false, false]).unwrap();
+    let k2 = per_slot_tensor(&[99.0, 99.0], 1, &device);
+    let v2 = per_slot_tensor(&[99.0, 99.0], 1, &device);
+    cache.append(&k2, &v2, &iam_none).unwrap();
+
+    assert_eq!(
+        cache.k().flatten_all().unwrap().to_vec1::<f32>().unwrap(),
+        k_before,
+        "an all-inactive append modified the K cache; every slot's history is now wrong"
+    );
+    assert_eq!(
+        cache.v().flatten_all().unwrap().to_vec1::<f32>().unwrap(),
+        v_before,
+        "an all-inactive append modified the V cache; every slot's history is now wrong"
     );
 }
