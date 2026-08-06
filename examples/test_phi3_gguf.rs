@@ -71,7 +71,7 @@ fn main() -> Result<()> {
     // For now, we'll use Candle's loader but we have the tokenizer ready!
     let device = Device::Cpu;
     let mut file = std::fs::File::open(model_path)?;
-    let candle_content = candle_core::quantized::gguf_file::Content::read(&mut file)?;
+    let candle_content = candlelight::core::quantized::gguf_file::Content::read(&mut file)?;
     let mut model = ModelWeights::from_gguf(false, candle_content, &mut file, &device)?;
     println!("✓ Model loaded (using Candle for now)\n");
 

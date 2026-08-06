@@ -204,9 +204,6 @@ impl ApiServer {
     pub fn build_router(&self) -> Router<AppState> {
         let mut router = Router::new();
 
-        // Health check
-        router = router.route("/health", get(health_check));
-
         // OpenAI-compatible API
         if self.state.config.enable_openai_api {
             router = router.merge(openai::routes());
@@ -239,6 +236,17 @@ impl ApiServer {
                 self.state.clone(),
                 auth_middleware::auth_middleware,
             ))
+            // Health check, registered AFTER the auth stack on purpose.
+            // `Router::layer` wraps only the routes registered before it, so
+            // placing `/health` here keeps it reachable without credentials.
+            // It used to be registered first, which put it behind
+            // `auth_middleware` and made every unauthenticated probe 401 — load
+            // balancers, container orchestrators and uptime monitors cannot
+            // present a bearer token, so a health endpoint that demands one
+            // reports the service as down precisely when it is up. The handler
+            // returns a static string, so nothing is disclosed by leaving it
+            // open. CORS and tracing below still apply to it.
+            .route("/health", get(health_check))
             // CORS and tracing
             .layer(
                 CorsLayer::new()

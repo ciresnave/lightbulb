@@ -275,7 +275,7 @@ fn compute_manual_attention(q: &Tensor, k: &Tensor, v: &Tensor) -> Result<Tensor
     let attn_weights = (attn_weights * scale)?;
 
     // Softmax
-    let attn_weights = candle_nn::ops::softmax_last_dim(&attn_weights)?;
+    let attn_weights = candlelight::nn::ops::softmax_last_dim(&attn_weights)?;
 
     // Weighted sum
     let output = attn_weights.matmul(v)?;

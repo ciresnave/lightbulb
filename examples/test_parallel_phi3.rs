@@ -25,7 +25,7 @@ fn main() -> Result<()> {
     // Load model using Candle
     let device = Device::Cpu;
     let mut file = std::fs::File::open(model_path)?;
-    let candle_content = candle_core::quantized::gguf_file::Content::read(&mut file)?;
+    let candle_content = candlelight::core::quantized::gguf_file::Content::read(&mut file)?;
     let mut model = Phi3ModelWeights::from_gguf(false, candle_content, &mut file, &device)?;
     println!("✓ Model loaded\n");
 
@@ -40,7 +40,7 @@ fn main() -> Result<()> {
     let prompt_tokens = tokens.get_ids();
 
     // Prefill
-    let input = candle_core::Tensor::new(prompt_tokens, &device)?.unsqueeze(0)?;
+    let input = candlelight::core::Tensor::new(prompt_tokens, &device)?.unsqueeze(0)?;
     let mut logits = model.forward(&input, 0)?;
 
     // Extract last token logits
@@ -55,7 +55,7 @@ fn main() -> Result<()> {
 
     // Generate 20 tokens
     for pos in 1..20 {
-        let input = candle_core::Tensor::new(&[next_token], &device)?.unsqueeze(0)?;
+        let input = candlelight::core::Tensor::new(&[next_token], &device)?.unsqueeze(0)?;
         let mut logits = model.forward(&input, prompt_tokens.len() + pos - 1)?;
 
         logits = if logits.dims().len() == 3 {

@@ -16,13 +16,64 @@ mod api_tests {
     use lightbulb::api::{ApiConfig, ApiServer};
     use lightbulb::engine::{MemoryAwareConfig, MemoryAwareScheduler};
 
+    /// Insert a known API key so the authenticated cases have something real to
+    /// present.
+    ///
+    /// `auth_middleware` hashes the bearer token with SHA-256, hex-encodes it
+    /// lowercase, and looks that up in `api_keys` — so this reproduces the whole
+    /// contract and nothing more. Idempotent, because `key_hash` is UNIQUE and
+    /// the suite is run repeatedly against a persistent container.
+    async fn provision_test_api_key(db_url: &str, token: &str, role: &str) {
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(token.as_bytes());
+        let key_hash: String =
+            hasher.finalize().iter().map(|b| format!("{:02x}", b)).collect();
+
+        let (client, connection) = tokio_postgres::connect(db_url, tokio_postgres::NoTls)
+            .await
+            .expect("connect to the test database — is the container up on this URL?");
+        tokio::spawn(async move {
+            let _ = connection.await;
+        });
+        client
+            .execute(
+                "INSERT INTO api_keys (key_hash, role, description) \
+                 VALUES ($1, $2, 'lightbulb integration test key') \
+                 ON CONFLICT (key_hash) DO NOTHING",
+                &[&key_hash, &role],
+            )
+            .await
+            .expect("provision the test API key");
+    }
+
     /// Create test API server
     async fn create_test_server() -> ApiServer {
-        // Create test database URL - uses the same database as main server
-        let db_url = "postgresql://lightbulb:vKTbmBA5RXIauMrNHxzs@localhost:5432/lightbulb";
+        // Overridable, because these tests WRITE to whatever database they are
+        // handed and 5432 is routinely occupied on a shared machine — pointing
+        // them at someone else's instance by default is how a test suite
+        // corrupts a neighbour's data. Set `LIGHTBULB_TEST_DATABASE_URL` to a
+        // throwaway container, e.g.:
+        //
+        //   docker run -d --name lightbulb-test-db \
+        //     -e POSTGRES_USER=lightbulb -e POSTGRES_PASSWORD=... \
+        //     -e POSTGRES_DB=lightbulb -p 5433:5432 postgres:18
+        //   $env:LIGHTBULB_TEST_DATABASE_URL =
+        //     "postgresql://lightbulb:...@localhost:5433/lightbulb"
+        let db_url = std::env::var("LIGHTBULB_TEST_DATABASE_URL").unwrap_or_else(|_| {
+            "postgresql://lightbulb:vKTbmBA5RXIauMrNHxzs@localhost:5432/lightbulb".to_string()
+        });
+
+        // Real auth needs a real key. Before this existed the authenticated
+        // cases sent `Bearer test-token` and expected 200 on the strength of a
+        // comment reading "mock auth allows any token" — a premise that has not
+        // been true since auth started validating against the database. They
+        // were asserting that an arbitrary bearer token grants access, which is
+        // the opposite of what should be pinned.
+        provision_test_api_key(&db_url, "test-token", "admin").await;
 
         let config = ApiConfig {
-            database_url: db_url.to_string(),
+            database_url: Some(db_url.clone()),
             bind_address: "127.0.0.1:0".to_string(),
             enable_openai_api: true,
             enable_admin_api: true,
@@ -34,6 +85,12 @@ mod api_tests {
             default_model: "test-model".to_string(),
             model_max_batch_size: 8,
             model_context_length: 2048,
+            // Fields this test does not exercise (currently `tls`) take their
+            // defaults. Listing every field exhaustively is what broke this
+            // suite when `tls` was added: a test that must be edited each time
+            // an unrelated field appears is a maintenance tax that buys no
+            // safety, because the test asserts nothing about those fields.
+            ..Default::default()
         };
 
         let scheduler_config = MemoryAwareConfig::default();

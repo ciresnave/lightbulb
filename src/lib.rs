@@ -12,6 +12,7 @@ pub mod loaders;
 pub mod lora; // LoRA (Low-Rank Adaptation) support with name mapping (M5.4)
 pub mod memory; // Unified memory estimation for models and caches
 pub mod model;
+pub mod model_fuel; // The Fuel-backed tensor core (D1: parallel path; `model` stays frozen on candlelight until parity)
 pub mod multi_gpu; // Multi-GPU inference support (M3.6)
 pub mod pruning; // Model pruning utilities (M5)
 pub mod quantization; // GGUF quantization utilities

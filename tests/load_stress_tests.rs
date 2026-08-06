@@ -270,11 +270,18 @@ impl LoadTestRunner {
         // TODO: Replace with actual inference call
         // For now, simulate request with random latency
         use rand::Rng;
-        let mut rng = rand::thread_rng();
-        let latency_ms = rng.gen_range(10..500); // 10-500ms latency
+        // Draw both values and drop the RNG **before** the await. `rand`'s
+        // thread RNG is `Rc`-backed and therefore not `Send`; holding it across
+        // `.await` makes the whole future non-`Send`, and `tokio::spawn`
+        // requires `Send`. Scoping it here is what keeps the spawn legal — the
+        // previous code drew the latency, awaited, then drew `success` from the
+        // same live RNG.
+        let (latency_ms, success) = {
+            let mut rng = rand::rng();
+            (rng.random_range(10..500), rng.random_bool(0.98)) // 10-500ms; 2% failures
+        };
         tokio::time::sleep(Duration::from_millis(latency_ms)).await;
 
-        let success = rng.gen_bool(0.98); // 2% failure rate for testing
         let tokens_generated = if success { config.generation_length } else { 0 };
 
         let latency = start.elapsed();

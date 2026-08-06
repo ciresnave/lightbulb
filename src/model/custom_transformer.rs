@@ -259,11 +259,6 @@ impl BatchedTransformer {
                 "model.embed_tokens.weight",
             )?;
 
-            // DEBUG: Verify weight shapes
-            // DEBUG output removed
-            let emb_w_vec = embedding_weight.flatten_all()?.to_vec1::<f32>()?;
-            let _emb_w_mean: f32 = emb_w_vec.iter().sum::<f32>() / emb_w_vec.len() as f32;
-            // DEBUG output removed
 
             QuantizableLinear::from_linear(candlelight::nn::Linear::new(embedding_weight.clone(), None))
         } else {
@@ -545,14 +540,6 @@ impl BatchedTransformer {
             }
             // Note: layer_idx is used internally by block for KV cache access
 
-            // DEBUG: Print stats for first and last few layers
-            if layer_idx < 3 || layer_idx >= self.blocks.len() - 3 {
-                let hs_vec = hidden_states.flatten_all()?.to_vec1::<f32>()?;
-                let _mean: f32 = hs_vec.iter().sum::<f32>() / hs_vec.len() as f32;
-                let _max = hs_vec.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-                let _min = hs_vec.iter().cloned().fold(f32::INFINITY, f32::min);
-                // DEBUG output removed
-            }
         }
 
         // M3.2 Optimization: Throttle H2O updates (expensive GPU→CPU transfer + allocations)

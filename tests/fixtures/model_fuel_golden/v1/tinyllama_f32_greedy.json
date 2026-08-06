@@ -1,0 +1,4514 @@
+{
+  "_README": "Tier 3 is a REGRESSION NET, NOT A VERDICT. These numbers are Lightbulb's own past output, not an independent reference. A mismatch means 'Lightbulb's output moved' — it does NOT mean the new output is wrong, and a match does NOT mean the output is right. Both directions are settled by tiers 1/2 (tests/kissref_differential.rs), never here.",
+  "format_version": 1,
+  "provenance": {
+    "captured_utc": "2026-07-30T03:18:47.484412700+00:00",
+    "lightbulb_commit": "8d997cc2de1f0dad497026456a689be3512de950",
+    "fuel_worktree_commit": "be081d5da571375a21bdbf6f3590f6c9739ce724",
+    "rustc": "rustc 1.99.0-nightly (9f36de775 2026-07-19); host: x86_64-pc-windows-msvc; release: 1.99.0-nightly",
+    "cargo_profile": "release",
+    "host_os": "windows windows",
+    "host_arch": "x86_64",
+    "host_cpu": "AMD64 Family 25 Model 97 Stepping 2, AuthenticAMD",
+    "fuel_feature_assumption": "fuel-core and fuel-cpu-backend taken as PATH deps with default features; both declare default = [], so mkl / accelerate / aocl / onemkl / cuda / cudnn / nccl / telemetry / jit are OFF. Not detectable from inside Lightbulb at runtime — verified externally with `cargo tree -e features -i fuel-cpu-backend` and `-i fuel-core`, both of which resolve to feature \"default\" only. Enabling any BLAS feature swaps the matmul kernel outright and invalidates every number in this file.",
+    "lightbulb_features_enabled": [],
+    "checkpoint_dir": "C:/Users/cires/.cache/huggingface/hub/models--TinyLlama--TinyLlama-1.1B-Chat-v1.0/snapshots/fe8a4ea1ffedaf415f4da2f062534de366a451e6",
+    "config_json_sha256": "486bedda3a6988332e60d9638a09ca4b260d34ebcf1b19e22cf3b140b63d8fe9",
+    "model_safetensors_len": 2200119864,
+    "loader": "load_llama_f32_from_dir",
+    "reason": "initial capture (no fixture existed; bootstrapping is not a re-blessing)"
+  },
+  "tolerance": {
+    "rel": 4.76837158203125e-7,
+    "abs": 1e-6,
+    "derivation": "tol_rel = clamp(measured_run_to_run_max_rel_delta * 100, lower = 4 ULP relative (4.0 * f32::EPSILON = 4.76837158203125e-7, grounded in kiss-ref's declared Op::Exp ULP ceiling of 4.0), upper = min_recorded_margin_rel / 10); tol_abs = 1e-6. The lower bound keeps libm patch-version variation from causing false alarms; the upper bound keeps the tolerance from ever being loose enough to mask a drift that could flip a token.",
+    "measured_run_to_run_max_rel_delta": 0.0,
+    "lower_bound_4ulp": 4.76837158203125e-7,
+    "upper_bound_min_margin_over_10": 0.00022017382948217096
+  },
+  "cases": [
+    {
+      "name": "capital_of_france",
+      "prompt": "The capital of France is",
+      "prompt_token_ids": [
+        1,
+        450,
+        7483,
+        310,
+        3444,
+        338
+      ],
+      "max_new": 6,
+      "eos": 2,
+      "generated_token_ids": [
+        3681,
+        29889,
+        13,
+        13,
+        29906,
+        29889
+      ],
+      "generated_text": "Paris.\n\n2.",
+      "steps": [
+        {
+          "step": 0,
+          "logits_len": 32000,
+          "argmax_index": 3681,
+          "runner_up_index": 5982,
+          "top1_value": {
+            "bits": "0x41563732",
+            "approx": "13.388475"
+          },
+          "top2_value": {
+            "bits": "0x41444c8b",
+            "approx": "12.268687"
+          },
+          "margin_abs": 1.1197881698608398,
+          "margin_rel": 0.08363821382886927,
+          "unstable": false,
+          "probe_stride": 997,
+          "probe_indices": [
+            0,
+            997,
+            1994,
+            2991,
+            3988,
+            4985,
+            5982,
+            6979,
+            7976,
+            8973,
+            9970,
+            10967,
+            11964,
+            12961,
+            13958,
+            14955,
+            15952,
+            16949,
+            17946,
+            18943,
+            19940,
+            20937,
+            21934,
+            22931,
+            23928,
+            24925,
+            25922,
+            26919,
+            27916,
+            28913,
+            29910,
+            30907,
+            31904
+          ],
+          "probe_values": [
+            {
+              "bits": "0xc0ec5719",
+              "approx": "-7.385632"
+            },
+            {
+              "bits": "0x40a673df",
+              "approx": "5.2016444"
+            },
+            {
+              "bits": "0xc0bc5218",
+              "approx": "-5.885021"
+            },
+            {
+              "bits": "0xc032915b",
+              "approx": "-2.7901218"
+            },
+            {
+              "bits": "0xbfdb4189",
+              "approx": "-1.7129375"
+            },
+            {
+              "bits": "0xc0bd1828",
+              "approx": "-5.9091988"
+            },
+            {
+              "bits": "0x41444c8b",
+              "approx": "12.268687"
+            },
+            {
+              "bits": "0xc0892911",
+              "approx": "-4.286263"
+            },
+            {
+              "bits": "0xc0a9d864",
+              "approx": "-5.307665"
+            },
+            {
+              "bits": "0xbdb30510",
+              "approx": "-0.087412"
+            },
+            {
+              "bits": "0xc0cbcffa",
+              "approx": "-6.369138"
+            },
+            {
+              "bits": "0xc001ffca",
+              "approx": "-2.0312371"
+            },
+            {
+              "bits": "0xc0afa7e1",
+              "approx": "-5.489243"
+            },
+            {
+              "bits": "0xc0c246a7",
+              "approx": "-6.0711246"
+            },
+            {
+              "bits": "0xc02bd131",
+              "approx": "-2.684643"
+            },
+            {
+              "bits": "0xc011e1f0",
+              "approx": "-2.2794151"
+            },
+            {
+              "bits": "0xc0ea5280",
+              "approx": "-7.322571"
+            },
+            {
+              "bits": "0xbf670409",
+              "approx": "-0.9024053"
+            },
+            {
+              "bits": "0xc074fc6d",
+              "approx": "-3.8279068"
+            },
+            {
+              "bits": "0xc03f1296",
+              "approx": "-2.9855094"
+            },
+            {
+              "bits": "0xc0f96a7d",
+              "approx": "-7.794249"
+            },
+            {
+              "bits": "0xc041feef",
+              "approx": "-3.031185"
+            },
+            {
+              "bits": "0xbfb9e2f0",
+              "approx": "-1.4522381"
+            },
+            {
+              "bits": "0xc09ae4ca",
+              "approx": "-4.8404284"
+            },
+            {
+              "bits": "0xc102565a",
+              "approx": "-8.146082"
+            },
+            {
+              "bits": "0xc0f0713d",
+              "approx": "-7.513823"
+            },
+            {
+              "bits": "0xc08105b6",
+              "approx": "-4.031947"
+            },
+            {
+              "bits": "0xc0e7a15d",
+              "approx": "-7.2384477"
+            },
+            {
+              "bits": "0xc0e11e33",
+              "approx": "-7.0349364"
+            },
+            {
+              "bits": "0xc0c8d456",
+              "approx": "-6.27592"
+            },
+            {
+              "bits": "0xbff92c23",
+              "approx": "-1.9466594"
+            },
+            {
+              "bits": "0xc0ff133a",
+              "approx": "-7.971097"
+            },
+            {
+              "bits": "0xc0d94256",
+              "approx": "-6.7893476"
+            }
+          ],
+          "stats": {
+            "max": {
+              "bits": "0x41563732",
+              "approx": "13.388475"
+            },
+            "min": {
+              "bits": "0xc15ef80e",
+              "approx": "-13.93556"
+            },
+            "sum_f64": -128651.45772868488,
+            "nonfinite_count": 0
+          },
+          "logits_sha256": "462cc96c5514ee19b06eccef28a55b9eeaa13ce115c630c12b721dcb844a7848"
+        },
+        {
+          "step": 1,
+          "logits_len": 32000,
+          "argmax_index": 29889,
+          "runner_up_index": 29892,
+          "top1_value": {
+            "bits": "0x416120f3",
+            "approx": "14.070544"
+          },
+          "top2_value": {
+            "bits": "0x415b04c9",
+            "approx": "13.688668"
+          },
+          "margin_abs": 0.38187599182128906,
+          "margin_rel": 0.02714010099610039,
+          "unstable": false,
+          "probe_stride": 997,
+          "probe_indices": [
+            0,
+            997,
+            1994,
+            2991,
+            3988,
+            4985,
+            5982,
+            6979,
+            7976,
+            8973,
+            9970,
+            10967,
+            11964,
+            12961,
+            13958,
+            14955,
+            15952,
+            16949,
+            17946,
+            18943,
+            19940,
+            20937,
+            21934,
+            22931,
+            23928,
+            24925,
+            25922,
+            26919,
+            27916,
+            28913,
+            29910,
+            30907,
+            31904
+          ],
+          "probe_values": [
+            {
+              "bits": "0xc10f49ba",
+              "approx": "-8.9555"
+            },
+            {
+              "bits": "0x40a8accf",
+              "approx": "5.271095"
+            },
+            {
+              "bits": "0xc0925c6b",
+              "approx": "-4.5737815"
+            },
+            {
+              "bits": "0xbfd1664f",
+              "approx": "-1.6359347"
+            },
+            {
+              "bits": "0xbf75f472",
+              "approx": "-0.9607612"
+            },
+            {
+              "bits": "0xc08d4b00",
+              "approx": "-4.4154053"
+            },
+            {
+              "bits": "0x40d844fd",
+              "approx": "6.7584214"
+            },
+            {
+              "bits": "0xc0943bd4",
+              "approx": "-4.632303"
+            },
+            {
+              "bits": "0xbe926690",
+              "approx": "-0.28593874"
+            },
+            {
+              "bits": "0xbf953f36",
+              "approx": "-1.1659915"
+            },
+            {
+              "bits": "0xc0c24e51",
+              "approx": "-6.07206"
+            },
+            {
+              "bits": "0x3f8ed0a6",
+              "approx": "1.1157424"
+            },
+            {
+              "bits": "0xc0aaeb37",
+              "approx": "-5.3412127"
+            },
+            {
+              "bits": "0xc09b53a6",
+              "approx": "-4.853961"
+            },
+            {
+              "bits": "0xc00d2386",
+              "approx": "-2.2052932"
+            },
+            {
+              "bits": "0xc04fb010",
+              "approx": "-3.245121"
+            },
+            {
+              "bits": "0xc06be632",
+              "approx": "-3.685925"
+            },
+            {
+              "bits": "0xc095d772",
+              "approx": "-4.6825495"
+            },
+            {
+              "bits": "0xc007c681",
+              "approx": "-2.1214907"
+            },
+            {
+              "bits": "0xbfec7318",
+              "approx": "-1.8472624"
+            },
+            {
+              "bits": "0xc115367d",
+              "approx": "-9.325803"
+            },
+            {
+              "bits": "0xc04aa90c",
+              "approx": "-3.1665678"
+            },
+            {
+              "bits": "0x3f915ed2",
+              "approx": "1.1357062"
+            },
+            {
+              "bits": "0xc0afeb6d",
+              "approx": "-5.4974885"
+            },
+            {
+              "bits": "0xc100e58a",
+              "approx": "-8.05604"
+            },
+            {
+              "bits": "0xc11207bb",
+              "approx": "-9.126887"
+            },
+            {
+              "bits": "0xc0cfb9d5",
+              "approx": "-6.4914346"
+            },
+            {
+              "bits": "0xc01614fe",
+              "approx": "-2.3450313"
+            },
+            {
+              "bits": "0xc0d95bf2",
+              "approx": "-6.792474"
+            },
+            {
+              "bits": "0xc0a89441",
+              "approx": "-5.2680974"
+            },
+            {
+              "bits": "0xbf80f9b1",
+              "approx": "-1.00762"
+            },
+            {
+              "bits": "0xc0ecd22e",
+              "approx": "-7.4006567"
+            },
+            {
+              "bits": "0xc0ab2fd9",
+              "approx": "-5.349591"
+            }
+          ],
+          "stats": {
+            "max": {
+              "bits": "0x416120f3",
+              "approx": "14.070544"
+            },
+            "min": {
+              "bits": "0xc1541bf1",
+              "approx": "-13.256822"
+            },
+            "sum_f64": -114980.75541102467,
+            "nonfinite_count": 0
+          },
+          "logits_sha256": "3dfe34ae8f9d08610da941184d8e3e19cbde8174d5e32d5256fb769dc1a16acf"
+        },
+        {
+          "step": 2,
+          "logits_len": 32000,
+          "argmax_index": 13,
+          "runner_up_index": 450,
+          "top1_value": {
+            "bits": "0x4146a32e",
+            "approx": "12.414839"
+          },
+          "top2_value": {
+            "bits": "0x413f1516",
+            "approx": "11.942648"
+          },
+          "margin_abs": 0.47219085693359375,
+          "margin_rel": 0.03803439294596011,
+          "unstable": false,
+          "probe_stride": 997,
+          "probe_indices": [
+            0,
+            997,
+            1994,
+            2991,
+            3988,
+            4985,
+            5982,
+            6979,
+            7976,
+            8973,
+            9970,
+            10967,
+            11964,
+            12961,
+            13958,
+            14955,
+            15952,
+            16949,
+            17946,
+            18943,
+            19940,
+            20937,
+            21934,
+            22931,
+            23928,
+            24925,
+            25922,
+            26919,
+            27916,
+            28913,
+            29910,
+            30907,
+            31904
+          ],
+          "probe_values": [
+            {
+              "bits": "0xc10b8cd6",
+              "approx": "-8.721884"
+            },
+            {
+              "bits": "0x408f0630",
+              "approx": "4.4695053"
+            },
+            {
+              "bits": "0xc07445e1",
+              "approx": "-3.816765"
+            },
+            {
+              "bits": "0xc06c36c3",
+              "approx": "-3.6908424"
+            },
+            {
+              "bits": "0xbe50099e",
+              "approx": "-0.20316169"
+            },
+            {
+              "bits": "0xc08552fb",
+              "approx": "-4.1663795"
+            },
+            {
+              "bits": "0x3ff79302",
+              "approx": "1.9341738"
+            },
+            {
+              "bits": "0xc09daff8",
+              "approx": "-4.9277306"
+            },
+            {
+              "bits": "0xbf66f93b",
+              "approx": "-0.90224046"
+            },
+            {
+              "bits": "0xc04720db",
+              "approx": "-3.1113803"
+            },
+            {
+              "bits": "0xc0d50962",
+              "approx": "-6.6573954"
+            },
+            {
+              "bits": "0x3e12f3fe",
+              "approx": "0.14350888"
+            },
+            {
+              "bits": "0xc07900c2",
+              "approx": "-3.8906713"
+            },
+            {
+              "bits": "0xc08fca21",
+              "approx": "-4.493424"
+            },
+            {
+              "bits": "0xbfcf2aa3",
+              "approx": "-1.6184887"
+            },
+            {
+              "bits": "0xc06f99f3",
+              "approx": "-3.7437713"
+            },
+            {
+              "bits": "0xc0e42e4e",
+              "approx": "-7.1306524"
+            },
+            {
+              "bits": "0xc0cb9b79",
+              "approx": "-6.3627286"
+            },
+            {
+              "bits": "0xc04e740e",
+              "approx": "-3.2258334"
+            },
+            {
+              "bits": "0xc08bc1ae",
+              "approx": "-4.3673925"
+            },
+            {
+              "bits": "0xc11548d7",
+              "approx": "-9.330283"
+            },
+            {
+              "bits": "0xc09cad56",
+              "approx": "-4.896159"
+            },
+            {
+              "bits": "0x403cb1a6",
+              "approx": "2.9483428"
+            },
+            {
+              "bits": "0xc0c1925f",
+              "approx": "-6.0491176"
+            },
+            {
+              "bits": "0xc0aaa06a",
+              "approx": "-5.332082"
+            },
+            {
+              "bits": "0xc0f48fb0",
+              "approx": "-7.64254"
+            },
+            {
+              "bits": "0xc0953695",
+              "approx": "-4.662913"
+            },
+            {
+              "bits": "0xc037c5cd",
+              "approx": "-2.8714478"
+            },
+            {
+              "bits": "0xc0f37c35",
+              "approx": "-7.608912"
+            },
+            {
+              "bits": "0xc08fc81b",
+              "approx": "-4.493177"
+            },
+            {
+              "bits": "0xc0516501",
+              "approx": "-3.2717898"
+            },
+            {
+              "bits": "0xc086ca15",
+              "approx": "-4.212168"
+            },
+            {
+              "bits": "0xc0a5fcf7",
+              "approx": "-5.1871295"
+            }
+          ],
+          "stats": {
+            "max": {
+              "bits": "0x4146a32e",
+              "approx": "12.414839"
+            },
+            "min": {
+              "bits": "0xc1584734",
+              "approx": "-13.517384"
+            },
+            "sum_f64": -112517.14937736164,
+            "nonfinite_count": 0
+          },
+          "logits_sha256": "e1791ca0f1b5151ccd31cd551bf6bc3141432e1903536311406e91e203a4e33c"
+        },
+        {
+          "step": 3,
+          "logits_len": 32000,
+          "argmax_index": 13,
+          "runner_up_index": 5618,
+          "top1_value": {
+            "bits": "0x41580602",
+            "approx": "13.501467"
+          },
+          "top2_value": {
+            "bits": "0x413d43d0",
+            "approx": "11.829056"
+          },
+          "margin_abs": 1.6724109649658203,
+          "margin_rel": 0.1238688355714933,
+          "unstable": false,
+          "probe_stride": 997,
+          "probe_indices": [
+            0,
+            997,
+            1994,
+            2991,
+            3988,
+            4985,
+            5982,
+            6979,
+            7976,
+            8973,
+            9970,
+            10967,
+            11964,
+            12961,
+            13958,
+            14955,
+            15952,
+            16949,
+            17946,
+            18943,
+            19940,
+            20937,
+            21934,
+            22931,
+            23928,
+            24925,
+            25922,
+            26919,
+            27916,
+            28913,
+            29910,
+            30907,
+            31904
+          ],
+          "probe_values": [
+            {
+              "bits": "0xc1194102",
+              "approx": "-9.578371"
+            },
+            {
+              "bits": "0x3ffe5567",
+              "approx": "1.9869813"
+            },
+            {
+              "bits": "0x3ea76fc0",
+              "approx": "0.32702446"
+            },
+            {
+              "bits": "0xc06854de",
+              "approx": "-3.63018"
+            },
+            {
+              "bits": "0xc078a5f9",
+              "approx": "-3.8851302"
+            },
+            {
+              "bits": "0xc067022b",
+              "approx": "-3.6095073"
+            },
+            {
+              "bits": "0x3e4c0df6",
+              "approx": "0.199272"
+            },
+            {
+              "bits": "0xbf839517",
+              "approx": "-1.0279874"
+            },
+            {
+              "bits": "0x40986659",
+              "approx": "4.7624936"
+            },
+            {
+              "bits": "0xc04f2a79",
+              "approx": "-3.2369673"
+            },
+            {
+              "bits": "0xbf1a8a55",
+              "approx": "-0.6036733"
+            },
+            {
+              "bits": "0x4097be1b",
+              "approx": "4.741956"
+            },
+            {
+              "bits": "0xc018117c",
+              "approx": "-2.3760672"
+            },
+            {
+              "bits": "0xc062507c",
+              "approx": "-3.5361624"
+            },
+            {
+              "bits": "0xc09df613",
+              "approx": "-4.9362884"
+            },
+            {
+              "bits": "0xc0745263",
+              "approx": "-3.8175285"
+            },
+            {
+              "bits": "0xc0b169ad",
+              "approx": "-5.54415"
+            },
+            {
+              "bits": "0xc035eda7",
+              "approx": "-2.8426301"
+            },
+            {
+              "bits": "0x40572a64",
+              "approx": "3.3619623"
+            },
+            {
+              "bits": "0xc09cedbf",
+              "approx": "-4.9040217"
+            },
+            {
+              "bits": "0xc0ddfd1c",
+              "approx": "-6.937147"
+            },
+            {
+              "bits": "0xc0790d17",
+              "approx": "-3.891424"
+            },
+            {
+              "bits": "0xbfc4a455",
+              "approx": "-1.536265"
+            },
+            {
+              "bits": "0xc05c101f",
+              "approx": "-3.438484"
+            },
+            {
+              "bits": "0xc090b6c7",
+              "approx": "-4.5223117"
+            },
+            {
+              "bits": "0xc0d296a4",
+              "approx": "-6.5808887"
+            },
+            {
+              "bits": "0xc048b53b",
+              "approx": "-3.1360614"
+            },
+            {
+              "bits": "0xc0b018ca",
+              "approx": "-5.503026"
+            },
+            {
+              "bits": "0xc0e32948",
+              "approx": "-7.098789"
+            },
+            {
+              "bits": "0xc07d35ae",
+              "approx": "-3.9564013"
+            },
+            {
+              "bits": "0xbfa666e4",
+              "approx": "-1.300015"
+            },
+            {
+              "bits": "0xc098365d",
+              "approx": "-4.756636"
+            },
+            {
+              "bits": "0xc02cc5cd",
+              "approx": "-2.6995728"
+            }
+          ],
+          "stats": {
+            "max": {
+              "bits": "0x41580602",
+              "approx": "13.501467"
+            },
+            "min": {
+              "bits": "0xc18284ae",
+              "approx": "-16.314785"
+            },
+            "sum_f64": -84603.67065689643,
+            "nonfinite_count": 0
+          },
+          "logits_sha256": "1fd542d26a5e94d8e752945d862ab777b075cd1c9342659ff0873186b59cb1c3"
+        },
+        {
+          "step": 4,
+          "logits_len": 32000,
+          "argmax_index": 29906,
+          "runner_up_index": 29933,
+          "top1_value": {
+            "bits": "0x415d395e",
+            "approx": "13.826506"
+          },
+          "top2_value": {
+            "bits": "0x415445ef",
+            "approx": "13.267074"
+          },
+          "margin_abs": 0.5594320297241211,
+          "margin_rel": 0.040460839740706085,
+          "unstable": false,
+          "probe_stride": 997,
+          "probe_indices": [
+            0,
+            997,
+            1994,
+            2991,
+            3988,
+            4985,
+            5982,
+            6979,
+            7976,
+            8973,
+            9970,
+            10967,
+            11964,
+            12961,
+            13958,
+            14955,
+            15952,
+            16949,
+            17946,
+            18943,
+            19940,
+            20937,
+            21934,
+            22931,
+            23928,
+            24925,
+            25922,
+            26919,
+            27916,
+            28913,
+            29910,
+            30907,
+            31904
+          ],
+          "probe_values": [
+            {
+              "bits": "0xc0e9111d",
+              "approx": "-7.283339"
+            },
+            {
+              "bits": "0xc063270d",
+              "approx": "-3.5492585"
+            },
+            {
+              "bits": "0x3fb78fb2",
+              "approx": "1.4340727"
+            },
+            {
+              "bits": "0xc0910556",
+              "approx": "-4.5319014"
+            },
+            {
+              "bits": "0xc095ca70",
+              "approx": "-4.6809616"
+            },
+            {
+              "bits": "0xc003afdc",
+              "approx": "-2.0576086"
+            },
+            {
+              "bits": "0xc0883184",
+              "approx": "-4.2560444"
+            },
+            {
+              "bits": "0x3e1ff7a0",
+              "approx": "0.15621805"
+            },
+            {
+              "bits": "0x40935553",
+              "approx": "4.6041656"
+            },
+            {
+              "bits": "0xc0628ef0",
+              "approx": "-3.5399742"
+            },
+            {
+              "bits": "0xc074f458",
+              "approx": "-3.8274136"
+            },
+            {
+              "bits": "0x40b1a68b",
+              "approx": "5.55158"
+            },
+            {
+              "bits": "0xbfff0caf",
+              "approx": "-1.9925746"
+            },
+            {
+              "bits": "0xbfad1649",
+              "approx": "-1.3522426"
+            },
+            {
+              "bits": "0xbfbf6beb",
+              "approx": "-1.4954809"
+            },
+            {
+              "bits": "0xc07e64f2",
+              "approx": "-3.9749112"
+            },
+            {
+              "bits": "0xc08facce",
+              "approx": "-4.4898443"
+            },
+            {
+              "bits": "0xbff8e2fe",
+              "approx": "-1.9444273"
+            },
+            {
+              "bits": "0x40947886",
+              "approx": "4.6397123"
+            },
+            {
+              "bits": "0xc0738ea8",
+              "approx": "-3.805582"
+            },
+            {
+              "bits": "0xc02d32de",
+              "approx": "-2.7062297"
+            },
+            {
+              "bits": "0xc0a60553",
+              "approx": "-5.18815"
+            },
+            {
+              "bits": "0xc0888fc6",
+              "approx": "-4.2675505"
+            },
+            {
+              "bits": "0xc09655ec",
+              "approx": "-4.6979885"
+            },
+            {
+              "bits": "0xbfbb1d98",
+              "approx": "-1.4618406"
+            },
+            {
+              "bits": "0xc039f90b",
+              "approx": "-2.9058254"
+            },
+            {
+              "bits": "0xc04e2b51",
+              "approx": "-3.2213938"
+            },
+            {
+              "bits": "0xc08903e3",
+              "approx": "-4.2817245"
+            },
+            {
+              "bits": "0xc0281532",
+              "approx": "-2.6262937"
+            },
+            {
+              "bits": "0xc086665a",
+              "approx": "-4.199994"
+            },
+            {
+              "bits": "0xbe8cf8ad",
+              "approx": "-0.27533475"
+            },
+            {
+              "bits": "0xc00b324b",
+              "approx": "-2.1749446"
+            },
+            {
+              "bits": "0xbfce88b4",
+              "approx": "-1.6135468"
+            }
+          ],
+          "stats": {
+            "max": {
+              "bits": "0x415d395e",
+              "approx": "13.826506"
+            },
+            "min": {
+              "bits": "0xc188c1a6",
+              "approx": "-17.094555"
+            },
+            "sum_f64": -60995.42607468134,
+            "nonfinite_count": 0
+          },
+          "logits_sha256": "6a7a7d8ce4b6c2c2206d115e9570f574789497b51f16dad828972f6e4260af68"
+        },
+        {
+          "step": 5,
+          "logits_len": 32000,
+          "argmax_index": 29889,
+          "runner_up_index": 29900,
+          "top1_value": {
+            "bits": "0x416f5988",
+            "approx": "14.959358"
+          },
+          "top2_value": {
+            "bits": "0x412dd8ad",
+            "approx": "10.865399"
+          },
+          "margin_abs": 4.093958854675293,
+          "margin_rel": 0.2736720917933059,
+          "unstable": false,
+          "probe_stride": 997,
+          "probe_indices": [
+            0,
+            997,
+            1994,
+            2991,
+            3988,
+            4985,
+            5982,
+            6979,
+            7976,
+            8973,
+            9970,
+            10967,
+            11964,
+            12961,
+            13958,
+            14955,
+            15952,
+            16949,
+            17946,
+            18943,
+            19940,
+            20937,
+            21934,
+            22931,
+            23928,
+            24925,
+            25922,
+            26919,
+            27916,
+            28913,
+            29910,
+            30907,
+            31904
+          ],
+          "probe_values": [
+            {
+              "bits": "0xc13d0f7e",
+              "approx": "-11.816282"
+            },
+            {
+              "bits": "0x3fbc1bc1",
+              "approx": "1.469597"
+            },
+            {
+              "bits": "0xbf8658e4",
+              "approx": "-1.0495877"
+            },
+            {
+              "bits": "0xbffdc7a8",
+              "approx": "-1.9826555"
+            },
+            {
+              "bits": "0xc0201fa1",
+              "approx": "-2.5019305"
+            },
+            {
+              "bits": "0xc0c6bc7f",
+              "approx": "-6.21051"
+            },
+            {
+              "bits": "0xbfb015c6",
+              "approx": "-1.3756645"
+            },
+            {
+              "bits": "0xc09747fc",
+              "approx": "-4.727537"
+            },
+            {
+              "bits": "0xc007c720",
+              "approx": "-2.1215286"
+            },
+            {
+              "bits": "0xc044f9bb",
+              "approx": "-3.0777423"
+            },
+            {
+              "bits": "0xc03a43c8",
+              "approx": "-2.910387"
+            },
+            {
+              "bits": "0xbfb80507",
+              "approx": "-1.4376534"
+            },
+            {
+              "bits": "0xc0c435f1",
+              "approx": "-6.1315846"
+            },
+            {
+              "bits": "0xc04bb434",
+              "approx": "-3.1828737"
+            },
+            {
+              "bits": "0xc05d0dfb",
+              "approx": "-3.4539783"
+            },
+            {
+              "bits": "0xc097a864",
+              "approx": "-4.7393055"
+            },
+            {
+              "bits": "0xc0fadebf",
+              "approx": "-7.8396907"
+            },
+            {
+              "bits": "0xc09a9864",
+              "approx": "-4.8311024"
+            },
+            {
+              "bits": "0xc0242712",
+              "approx": "-2.5648847"
+            },
+            {
+              "bits": "0xc0dd8fcd",
+              "approx": "-6.923804"
+            },
+            {
+              "bits": "0xc0c8b0d9",
+              "approx": "-6.271588"
+            },
+            {
+              "bits": "0xc0d36353",
+              "approx": "-6.6058745"
+            },
+            {
+              "bits": "0x3f8e1e1e",
+              "approx": "1.1102941"
+            },
+            {
+              "bits": "0xc0903e61",
+              "approx": "-4.5076146"
+            },
+            {
+              "bits": "0xc0892121",
+              "approx": "-4.285294"
+            },
+            {
+              "bits": "0xc08d59fe",
+              "approx": "-4.4172354"
+            },
+            {
+              "bits": "0xc0a95aa9",
+              "approx": "-5.292317"
+            },
+            {
+              "bits": "0xc0a15ddb",
+              "approx": "-5.042707"
+            },
+            {
+              "bits": "0xc0c18a29",
+              "approx": "-6.0481153"
+            },
+            {
+              "bits": "0xc04d2173",
+              "approx": "-3.2051666"
+            },
+            {
+              "bits": "0x3e8ea9a1",
+              "approx": "0.27863792"
+            },
+            {
+              "bits": "0xc088f45b",
+              "approx": "-4.2798285"
+            },
+            {
+              "bits": "0xc0c7d346",
+              "approx": "-6.24454"
+            }
+          ],
+          "stats": {
+            "max": {
+              "bits": "0x416f5988",
+              "approx": "14.959358"
+            },
+            "min": {
+              "bits": "0xc1a3a9b5",
+              "approx": "-20.457865"
+            },
+            "sum_f64": -131639.993764685,
+            "nonfinite_count": 0
+          },
+          "logits_sha256": "945feaef4acc98c9bc32a4211d72a1f71cde46c51857348d9a8a25966cc0d923"
+        }
+      ]
+    },
+    {
+      "name": "longer_continuation",
+      "prompt": "In a distant galaxy, a small crew of engineers discovered that",
+      "prompt_token_ids": [
+        1,
+        512,
+        263,
+        21188,
+        15400,
+        29891,
+        29892,
+        263,
+        2319,
+        17616,
+        310,
+        6012,
+        414,
+        10943,
+        393
+      ],
+      "max_new": 12,
+      "eos": 2,
+      "generated_token_ids": [
+        263,
+        13988,
+        5864,
+        2752,
+        471,
+        7934,
+        2629,
+        278,
+        15754,
+        29915,
+        29879,
+        7136
+      ],
+      "generated_text": "a powerful energy source was hidden within the planet's core",
+      "steps": [
+        {
+          "step": 0,
+          "logits_len": 32000,
+          "argmax_index": 263,
+          "runner_up_index": 896,
+          "top1_value": {
+            "bits": "0x4154f096",
+            "approx": "13.308737"
+          },
+          "top2_value": {
+            "bits": "0x414f8fd9",
+            "approx": "12.972619"
+          },
+          "margin_abs": 0.3361177444458008,
+          "margin_rel": 0.025255420515703727,
+          "unstable": false,
+          "probe_stride": 997,
+          "probe_indices": [
+            0,
+            997,
+            1994,
+            2991,
+            3988,
+            4985,
+            5982,
+            6979,
+            7976,
+            8973,
+            9970,
+            10967,
+            11964,
+            12961,
+            13958,
+            14955,
+            15952,
+            16949,
+            17946,
+            18943,
+            19940,
+            20937,
+            21934,
+            22931,
+            23928,
+            24925,
+            25922,
+            26919,
+            27916,
+            28913,
+            29910,
+            30907,
+            31904
+          ],
+          "probe_values": [
+            {
+              "bits": "0xc10ad437",
+              "approx": "-8.67681"
+            },
+            {
+              "bits": "0xbeb5f704",
+              "approx": "-0.3554002"
+            },
+            {
+              "bits": "0xc0c802f9",
+              "approx": "-6.250363"
+            },
+            {
+              "bits": "0xc01dd02d",
+              "approx": "-2.465831"
+            },
+            {
+              "bits": "0xc0687135",
+              "approx": "-3.6319096"
+            },
+            {
+              "bits": "0xc105f7d0",
+              "approx": "-8.373001"
+            },
+            {
+              "bits": "0x3f859a18",
+              "approx": "1.0437651"
+            },
+            {
+              "bits": "0xc0f426d2",
+              "approx": "-7.629739"
+            },
+            {
+              "bits": "0xc0aba4c2",
+              "approx": "-5.363862"
+            },
+            {
+              "bits": "0xc088b2a7",
+              "approx": "-4.271808"
+            },
+            {
+              "bits": "0xc0d33563",
+              "approx": "-6.600267"
+            },
+            {
+              "bits": "0xc0631196",
+              "approx": "-3.5479484"
+            },
+            {
+              "bits": "0xc0ed7647",
+              "approx": "-7.420688"
+            },
+            {
+              "bits": "0xc0d872f2",
+              "approx": "-6.7640314"
+            },
+            {
+              "bits": "0xbfeff4d8",
+              "approx": "-1.8746595"
+            },
+            {
+              "bits": "0xbf816f9d",
+              "approx": "-1.0112187"
+            },
+            {
+              "bits": "0xc0488c53",
+              "approx": "-3.1335647"
+            },
+            {
+              "bits": "0xc0467506",
+              "approx": "-3.1008925"
+            },
+            {
+              "bits": "0xc038e246",
+              "approx": "-2.8888106"
+            },
+            {
+              "bits": "0xc0acbfec",
+              "approx": "-5.398428"
+            },
+            {
+              "bits": "0xc0f46a3b",
+              "approx": "-7.6379676"
+            },
+            {
+              "bits": "0xc0c74736",
+              "approx": "-6.2274427"
+            },
+            {
+              "bits": "0xc08eb416",
+              "approx": "-4.459483"
+            },
+            {
+              "bits": "0xc00792dc",
+              "approx": "-2.1183386"
+            },
+            {
+              "bits": "0xc0b4ccb4",
+              "approx": "-5.649988"
+            },
+            {
+              "bits": "0xc0f41701",
+              "approx": "-7.627808"
+            },
+            {
+              "bits": "0xc0fabc21",
+              "approx": "-7.835465"
+            },
+            {
+              "bits": "0xc0ee86a2",
+              "approx": "-7.4539347"
+            },
+            {
+              "bits": "0xc1298f8a",
+              "approx": "-10.597544"
+            },
+            {
+              "bits": "0xc0d52156",
+              "approx": "-6.6603193"
+            },
+            {
+              "bits": "0xc0c0d0d8",
+              "approx": "-6.0254936"
+            },
+            {
+              "bits": "0xc0ce6558",
+              "approx": "-6.449871"
+            },
+            {
+              "bits": "0xc081bb2b",
+              "approx": "-4.0540977"
+            }
+          ],
+          "stats": {
+            "max": {
+              "bits": "0x4154f096",
+              "approx": "13.308737"
+            },
+            "min": {
+              "bits": "0xc16a32a9",
+              "approx": "-14.637368"
+            },
+            "sum_f64": -136186.67775067827,
+            "nonfinite_count": 0
+          },
+          "logits_sha256": "1f8fa0b469dd0ef00b09a12008379371babccbd84f7d027deac4ce42360ad59a"
+        },
+        {
+          "step": 1,
+          "logits_len": 32000,
+          "argmax_index": 13988,
+          "runner_up_index": 20364,
+          "top1_value": {
+            "bits": "0x413e59f0",
+            "approx": "11.896957"
+          },
+          "top2_value": {
+            "bits": "0x413afabc",
+            "approx": "11.686214"
+          },
+          "margin_abs": 0.21074295043945312,
+          "margin_rel": 0.01771402077008615,
+          "unstable": false,
+          "probe_stride": 997,
+          "probe_indices": [
+            0,
+            997,
+            1994,
+            2991,
+            3988,
+            4985,
+            5982,
+            6979,
+            7976,
+            8973,
+            9970,
+            10967,
+            11964,
+            12961,
+            13958,
+            14955,
+            15952,
+            16949,
+            17946,
+            18943,
+            19940,
+            20937,
+            21934,
+            22931,
+            23928,
+            24925,
+            25922,
+            26919,
+            27916,
+            28913,
+            29910,
+            30907,
+            31904
+          ],
+          "probe_values": [
+            {
+              "bits": "0xc117e4e8",
+              "approx": "-9.493385"
+            },
+            {
+              "bits": "0xc023c335",
+              "approx": "-2.5587895"
+            },
+            {
+              "bits": "0xbf03edaf",
+              "approx": "-0.5153455"
+            },
+            {
+              "bits": "0x3fd8a337",
+              "approx": "1.6924809"
+            },
+            {
+              "bits": "0xc040a44a",
+              "approx": "-3.0100274"
+            },
+            {
+              "bits": "0xc0d1e3ba",
+              "approx": "-6.5590487"
+            },
+            {
+              "bits": "0xbe5034d2",
+              "approx": "-0.2033265"
+            },
+            {
+              "bits": "0xc06b7f84",
+              "approx": "-3.679658"
+            },
+            {
+              "bits": "0xc0a777ec",
+              "approx": "-5.233389"
+            },
+            {
+              "bits": "0xbedae05d",
+              "approx": "-0.427493"
+            },
+            {
+              "bits": "0xc0e59337",
+              "approx": "-7.1742206"
+            },
+            {
+              "bits": "0xc0a239d4",
+              "approx": "-5.069559"
+            },
+            {
+              "bits": "0xc0f12480",
+              "approx": "-7.5357056"
+            },
+            {
+              "bits": "0xc105840b",
+              "approx": "-8.344737"
+            },
+            {
+              "bits": "0xbfaf0067",
+              "approx": "-1.3671998"
+            },
+            {
+              "bits": "0xc035960c",
+              "approx": "-2.8372831"
+            },
+            {
+              "bits": "0xc0d36d85",
+              "approx": "-6.607119"
+            },
+            {
+              "bits": "0xbfe9459a",
+              "approx": "-1.8224366"
+            },
+            {
+              "bits": "0xc08e92a4",
+              "approx": "-4.4554005"
+            },
+            {
+              "bits": "0xc0da1d67",
+              "approx": "-6.816089"
+            },
+            {
+              "bits": "0xc0af2b5a",
+              "approx": "-5.474042"
+            },
+            {
+              "bits": "0xc0cff232",
+              "approx": "-6.498315"
+            },
+            {
+              "bits": "0xc068a3b7",
+              "approx": "-3.6349924"
+            },
+            {
+              "bits": "0xbfb6315f",
+              "approx": "-1.4233817"
+            },
+            {
+              "bits": "0xc0985bf2",
+              "approx": "-4.761224"
+            },
+            {
+              "bits": "0xc0ca0e0d",
+              "approx": "-6.314215"
+            },
+            {
+              "bits": "0xc0bf48ec",
+              "approx": "-5.9776516"
+            },
+            {
+              "bits": "0xc0ddc480",
+              "approx": "-6.930237"
+            },
+            {
+              "bits": "0xc100b19e",
+              "approx": "-8.043364"
+            },
+            {
+              "bits": "0xc069f012",
+              "approx": "-3.6552777"
+            },
+            {
+              "bits": "0xc0c5fec6",
+              "approx": "-6.1873503"
+            },
+            {
+              "bits": "0xc0ef0971",
+              "approx": "-7.4699025"
+            },
+            {
+              "bits": "0xc09ee1c7",
+              "approx": "-4.9650607"
+            }
+          ],
+          "stats": {
+            "max": {
+              "bits": "0x413e59f0",
+              "approx": "11.896957"
+            },
+            "min": {
+              "bits": "0xc18ddf8f",
+              "approx": "-17.73416"
+            },
+            "sum_f64": -137779.29650032264,
+            "nonfinite_count": 0
+          },
+          "logits_sha256": "b0fc89a81f8b28ceebc39d346a02cf32f18d7dc4dcc3ec2d2fca23ec81588806"
+        },
+        {
+          "step": 2,
+          "logits_len": 32000,
+          "argmax_index": 5864,
+          "runner_up_index": 28639,
+          "top1_value": {
+            "bits": "0x413273ec",
+            "approx": "11.153301"
+          },
+          "top2_value": {
+            "bits": "0x41305c59",
+            "approx": "11.022546"
+          },
+          "margin_abs": 0.13075542449951172,
+          "margin_rel": 0.011723472871165354,
+          "unstable": false,
+          "probe_stride": 997,
+          "probe_indices": [
+            0,
+            997,
+            1994,
+            2991,
+            3988,
+            4985,
+            5982,
+            6979,
+            7976,
+            8973,
+            9970,
+            10967,
+            11964,
+            12961,
+            13958,
+            14955,
+            15952,
+            16949,
+            17946,
+            18943,
+            19940,
+            20937,
+            21934,
+            22931,
+            23928,
+            24925,
+            25922,
+            26919,
+            27916,
+            28913,
+            29910,
+            30907,
+            31904
+          ],
+          "probe_values": [
+            {
+              "bits": "0xc1191ad4",
+              "approx": "-9.56905"
+            },
+            {
+              "bits": "0xbf1e0124",
+              "approx": "-0.6172049"
+            },
+            {
+              "bits": "0xc06f754f",
+              "approx": "-3.741535"
+            },
+            {
+              "bits": "0x402a7d7a",
+              "approx": "2.6639085"
+            },
+            {
+              "bits": "0xc02a27d1",
+              "approx": "-2.6586802"
+            },
+            {
+              "bits": "0xc096b516",
+              "approx": "-4.709605"
+            },
+            {
+              "bits": "0xbf9fca12",
+              "approx": "-1.2483542"
+            },
+            {
+              "bits": "0xc0d1105e",
+              "approx": "-6.533248"
+            },
+            {
+              "bits": "0xc057cb6b",
+              "approx": "-3.3717906"
+            },
+            {
+              "bits": "0xbe042422",
+              "approx": "-0.12904409"
+            },
+            {
+              "bits": "0xc0e1e827",
+              "approx": "-7.059589"
+            },
+            {
+              "bits": "0xc06b97a8",
+              "approx": "-3.6811314"
+            },
+            {
+              "bits": "0xc10c5905",
+              "approx": "-8.771733"
+            },
+            {
+              "bits": "0xc0c7d2ef",
+              "approx": "-6.2444987"
+            },
+            {
+              "bits": "0xc0376a02",
+              "approx": "-2.8658452"
+            },
+            {
+              "bits": "0x404d23e2",
+              "approx": "3.205315"
+            },
+            {
+              "bits": "0xc0b20d7c",
+              "approx": "-5.564146"
+            },
+            {
+              "bits": "0xc0a43526",
+              "approx": "-5.131488"
+            },
+            {
+              "bits": "0xc0bf1914",
+              "approx": "-5.9718113"
+            },
+            {
+              "bits": "0xc10028e6",
+              "approx": "-8.009985"
+            },
+            {
+              "bits": "0xc0bddc8b",
+              "approx": "-5.9331717"
+            },
+            {
+              "bits": "0xc0d6a601",
+              "approx": "-6.707764"
+            },
+            {
+              "bits": "0xc0cd5f19",
+              "approx": "-6.4178586"
+            },
+            {
+              "bits": "0xbf9d20b6",
+              "approx": "-1.2275608"
+            },
+            {
+              "bits": "0xc09a3d38",
+              "approx": "-4.819973"
+            },
+            {
+              "bits": "0xc107c786",
+              "approx": "-8.486212"
+            },
+            {
+              "bits": "0xc0e8bafa",
+              "approx": "-7.2728243"
+            },
+            {
+              "bits": "0xc0d56c71",
+              "approx": "-6.6694875"
+            },
+            {
+              "bits": "0xc12f8016",
+              "approx": "-10.968771"
+            },
+            {
+              "bits": "0xc0a38e3f",
+              "approx": "-5.111114"
+            },
+            {
+              "bits": "0xc082042b",
+              "approx": "-4.063009"
+            },
+            {
+              "bits": "0xc0ea4273",
+              "approx": "-7.3206115"
+            },
+            {
+              "bits": "0xc0ae5382",
+              "approx": "-5.447694"
+            }
+          ],
+          "stats": {
+            "max": {
+              "bits": "0x413273ec",
+              "approx": "11.153301"
+            },
+            "min": {
+              "bits": "0xc17d0873",
+              "approx": "-15.814563"
+            },
+            "sum_f64": -149174.8968572244,
+            "nonfinite_count": 0
+          },
+          "logits_sha256": "2bfeee042d3bc8a63fa689a1b75b0a2c2212b9cc2e6dc3a3c35d4389d52227ee"
+        },
+        {
+          "step": 3,
+          "logits_len": 32000,
+          "argmax_index": 2752,
+          "runner_up_index": 1746,
+          "top1_value": {
+            "bits": "0x4162260c",
+            "approx": "14.134289"
+          },
+          "top2_value": {
+            "bits": "0x413d6f07",
+            "approx": "11.839606"
+          },
+          "margin_abs": 2.294682502746582,
+          "margin_rel": 0.16234863580263406,
+          "unstable": false,
+          "probe_stride": 997,
+          "probe_indices": [
+            0,
+            997,
+            1994,
+            2991,
+            3988,
+            4985,
+            5982,
+            6979,
+            7976,
+            8973,
+            9970,
+            10967,
+            11964,
+            12961,
+            13958,
+            14955,
+            15952,
+            16949,
+            17946,
+            18943,
+            19940,
+            20937,
+            21934,
+            22931,
+            23928,
+            24925,
+            25922,
+            26919,
+            27916,
+            28913,
+            29910,
+            30907,
+            31904
+          ],
+          "probe_values": [
+            {
+              "bits": "0xc10be356",
+              "approx": "-8.743002"
+            },
+            {
+              "bits": "0xc005fb89",
+              "approx": "-2.0934775"
+            },
+            {
+              "bits": "0xc0367f50",
+              "approx": "-2.8515205"
+            },
+            {
+              "bits": "0x408f01a8",
+              "approx": "4.468952"
+            },
+            {
+              "bits": "0xc032a3ca",
+              "approx": "-2.791247"
+            },
+            {
+              "bits": "0xc0877d18",
+              "approx": "-4.23402"
+            },
+            {
+              "bits": "0x4009b0e1",
+              "approx": "2.1514208"
+            },
+            {
+              "bits": "0xc03d3267",
+              "approx": "-2.9562013"
+            },
+            {
+              "bits": "0xbfa4d9f5",
+              "approx": "-1.2879015"
+            },
+            {
+              "bits": "0x3db375ac",
+              "approx": "0.087626785"
+            },
+            {
+              "bits": "0xc0b89dc5",
+              "approx": "-5.769259"
+            },
+            {
+              "bits": "0xc0a3b1c7",
+              "approx": "-5.1154513"
+            },
+            {
+              "bits": "0xc100bd8d",
+              "approx": "-8.046277"
+            },
+            {
+              "bits": "0xc0a644d7",
+              "approx": "-5.1959033"
+            },
+            {
+              "bits": "0xbfc152f0",
+              "approx": "-1.5103436"
+            },
+            {
+              "bits": "0x405996a4",
+              "approx": "3.3998194"
+            },
+            {
+              "bits": "0xc07e98d9",
+              "approx": "-3.978079"
+            },
+            {
+              "bits": "0xc08cdead",
+              "approx": "-4.402182"
+            },
+            {
+              "bits": "0xc069a274",
+              "approx": "-3.6505404"
+            },
+            {
+              "bits": "0xc0f206e9",
+              "approx": "-7.5633435"
+            },
+            {
+              "bits": "0xc0884ace",
+              "approx": "-4.2591314"
+            },
+            {
+              "bits": "0xc0b0ff6b",
+              "approx": "-5.531179"
+            },
+            {
+              "bits": "0xc0a95726",
+              "approx": "-5.291888"
+            },
+            {
+              "bits": "0x3f9abfd2",
+              "approx": "1.2089789"
+            },
+            {
+              "bits": "0xc05b2100",
+              "approx": "-3.4238892"
+            },
+            {
+              "bits": "0xc1023d67",
+              "approx": "-8.139991"
+            },
+            {
+              "bits": "0xc0c9976a",
+              "approx": "-6.299733"
+            },
+            {
+              "bits": "0xc0a3e99f",
+              "approx": "-5.122268"
+            },
+            {
+              "bits": "0xc10cd609",
+              "approx": "-8.802255"
+            },
+            {
+              "bits": "0xc0c070cd",
+              "approx": "-6.0137696"
+            },
+            {
+              "bits": "0xc08a2f5f",
+              "approx": "-4.3182826"
+            },
+            {
+              "bits": "0xc0f3c7fe",
+              "approx": "-7.618163"
+            },
+            {
+              "bits": "0xc0a19bab",
+              "approx": "-5.0502524"
+            }
+          ],
+          "stats": {
+            "max": {
+              "bits": "0x4162260c",
+              "approx": "14.134289"
+            },
+            "min": {
+              "bits": "0xc1856fb2",
+              "approx": "-16.679539"
+            },
+            "sum_f64": -136712.65358350915,
+            "nonfinite_count": 0
+          },
+          "logits_sha256": "1c9a1b31246d1b3863a1ab53514c639df6eb22e80d614f08da96c055721e1cc2"
+        },
+        {
+          "step": 4,
+          "logits_len": 32000,
+          "argmax_index": 471,
+          "runner_up_index": 750,
+          "top1_value": {
+            "bits": "0x415db048",
+            "approx": "13.855537"
+          },
+          "top2_value": {
+            "bits": "0x4154385c",
+            "approx": "13.26376"
+          },
+          "margin_abs": 0.5917778015136719,
+          "margin_rel": 0.0427105628463173,
+          "unstable": false,
+          "probe_stride": 997,
+          "probe_indices": [
+            0,
+            997,
+            1994,
+            2991,
+            3988,
+            4985,
+            5982,
+            6979,
+            7976,
+            8973,
+            9970,
+            10967,
+            11964,
+            12961,
+            13958,
+            14955,
+            15952,
+            16949,
+            17946,
+            18943,
+            19940,
+            20937,
+            21934,
+            22931,
+            23928,
+            24925,
+            25922,
+            26919,
+            27916,
+            28913,
+            29910,
+            30907,
+            31904
+          ],
+          "probe_values": [
+            {
+              "bits": "0xc10fc196",
+              "approx": "-8.984762"
+            },
+            {
+              "bits": "0xbfb70313",
+              "approx": "-1.4297813"
+            },
+            {
+              "bits": "0xbf9f0a36",
+              "approx": "-1.2424991"
+            },
+            {
+              "bits": "0xbfc3ff39",
+              "approx": "-1.5312263"
+            },
+            {
+              "bits": "0xc005bdb0",
+              "approx": "-2.0897026"
+            },
+            {
+              "bits": "0xc0df0093",
+              "approx": "-6.96882"
+            },
+            {
+              "bits": "0x40f46dcc",
+              "approx": "7.638403"
+            },
+            {
+              "bits": "0xc07e7c3c",
+              "approx": "-3.9763327"
+            },
+            {
+              "bits": "0xc05981fa",
+              "approx": "-3.3985581"
+            },
+            {
+              "bits": "0xbfe2228e",
+              "approx": "-1.7666795"
+            },
+            {
+              "bits": "0xc0edacb8",
+              "approx": "-7.427334"
+            },
+            {
+              "bits": "0xc02cb149",
+              "approx": "-2.6983206"
+            },
+            {
+              "bits": "0xc0dbfe8b",
+              "approx": "-6.874822"
+            },
+            {
+              "bits": "0xc026eafc",
+              "approx": "-2.6080923"
+            },
+            {
+              "bits": "0x3fdb0c07",
+              "approx": "1.7113045"
+            },
+            {
+              "bits": "0x3e1997c8",
+              "approx": "0.14999306"
+            },
+            {
+              "bits": "0xbf2b22df",
+              "approx": "-0.66850084"
+            },
+            {
+              "bits": "0xc032d832",
+              "approx": "-2.7944455"
+            },
+            {
+              "bits": "0xc0b03e50",
+              "approx": "-5.5076065"
+            },
+            {
+              "bits": "0xc104a80a",
+              "approx": "-8.291025"
+            },
+            {
+              "bits": "0xc0df5fe4",
+              "approx": "-6.9804554"
+            },
+            {
+              "bits": "0xc01d28bd",
+              "approx": "-2.4556115"
+            },
+            {
+              "bits": "0xc0384576",
+              "approx": "-2.8792396"
+            },
+            {
+              "bits": "0xc042167f",
+              "approx": "-3.032623"
+            },
+            {
+              "bits": "0xc0a9f932",
+              "approx": "-5.3116693"
+            },
+            {
+              "bits": "0xc1138810",
+              "approx": "-9.220718"
+            },
+            {
+              "bits": "0xc0cb55ea",
+              "approx": "-6.3542376"
+            },
+            {
+              "bits": "0xc0cbcab4",
+              "approx": "-6.368494"
+            },
+            {
+              "bits": "0xc1023acb",
+              "approx": "-8.139354"
+            },
+            {
+              "bits": "0xc087cb35",
+              "approx": "-4.2435555"
+            },
+            {
+              "bits": "0xc0b75695",
+              "approx": "-5.729319"
+            },
+            {
+              "bits": "0xc0ce066c",
+              "approx": "-6.438284"
+            },
+            {
+              "bits": "0xc0bc64ca",
+              "approx": "-5.8873034"
+            }
+          ],
+          "stats": {
+            "max": {
+              "bits": "0x415db048",
+              "approx": "13.855537"
+            },
+            "min": {
+              "bits": "0xc16fdb1e",
+              "approx": "-14.990995"
+            },
+            "sum_f64": -137685.803390258,
+            "nonfinite_count": 0
+          },
+          "logits_sha256": "18897a8bcaf855e8ad69ad0a849163770afa58954ab616cbf15e4e500fa6be3a"
+        },
+        {
+          "step": 5,
+          "logits_len": 32000,
+          "argmax_index": 7934,
+          "runner_up_index": 2198,
+          "top1_value": {
+            "bits": "0x41421395",
+            "approx": "12.129781"
+          },
+          "top2_value": {
+            "bits": "0x412ec019",
+            "approx": "10.921899"
+          },
+          "margin_abs": 1.2078819274902344,
+          "margin_rel": 0.09957986467014655,
+          "unstable": false,
+          "probe_stride": 997,
+          "probe_indices": [
+            0,
+            997,
+            1994,
+            2991,
+            3988,
+            4985,
+            5982,
+            6979,
+            7976,
+            8973,
+            9970,
+            10967,
+            11964,
+            12961,
+            13958,
+            14955,
+            15952,
+            16949,
+            17946,
+            18943,
+            19940,
+            20937,
+            21934,
+            22931,
+            23928,
+            24925,
+            25922,
+            26919,
+            27916,
+            28913,
+            29910,
+            30907,
+            31904
+          ],
+          "probe_values": [
+            {
+              "bits": "0xc0e38c45",
+              "approx": "-7.1108727"
+            },
+            {
+              "bits": "0xc00f37c7",
+              "approx": "-2.2377794"
+            },
+            {
+              "bits": "0xbf58e2c0",
+              "approx": "-0.84720993"
+            },
+            {
+              "bits": "0xbf9babc4",
+              "approx": "-1.2161794"
+            },
+            {
+              "bits": "0xc0683092",
+              "approx": "-3.6279645"
+            },
+            {
+              "bits": "0xc0b84d34",
+              "approx": "-5.759424"
+            },
+            {
+              "bits": "0x412ba223",
+              "approx": "10.727084"
+            },
+            {
+              "bits": "0xc0a191fc",
+              "approx": "-5.0490704"
+            },
+            {
+              "bits": "0xc050382d",
+              "approx": "-3.2534287"
+            },
+            {
+              "bits": "0xc071db1a",
+              "approx": "-3.778998"
+            },
+            {
+              "bits": "0xc0a5db65",
+              "approx": "-5.1830316"
+            },
+            {
+              "bits": "0xc0144848",
+              "approx": "-2.3169117"
+            },
+            {
+              "bits": "0xc05e0011",
+              "approx": "-3.468754"
+            },
+            {
+              "bits": "0xc0a80516",
+              "approx": "-5.250621"
+            },
+            {
+              "bits": "0xbf21e334",
+              "approx": "-0.6323731"
+            },
+            {
+              "bits": "0xc024e6ee",
+              "approx": "-2.5765948"
+            },
+            {
+              "bits": "0x3f4c54e9",
+              "approx": "0.7981706"
+            },
+            {
+              "bits": "0xc015cc4b",
+              "approx": "-2.340594"
+            },
+            {
+              "bits": "0xbfa99b58",
+              "approx": "-1.3250532"
+            },
+            {
+              "bits": "0xc094fe64",
+              "approx": "-4.6560535"
+            },
+            {
+              "bits": "0xc082434d",
+              "approx": "-4.0707154"
+            },
+            {
+              "bits": "0xc0387886",
+              "approx": "-2.8823562"
+            },
+            {
+              "bits": "0xc064b883",
+              "approx": "-3.5737617"
+            },
+            {
+              "bits": "0xc071e87d",
+              "approx": "-3.779815"
+            },
+            {
+              "bits": "0xc0834a7b",
+              "approx": "-4.102842"
+            },
+            {
+              "bits": "0xc0dd55bb",
+              "approx": "-6.916715"
+            },
+            {
+              "bits": "0xc0f5f3d5",
+              "approx": "-7.6860147"
+            },
+            {
+              "bits": "0xc0e733d1",
+              "approx": "-7.2250752"
+            },
+            {
+              "bits": "0xc0de0118",
+              "approx": "-6.9376335"
+            },
+            {
+              "bits": "0xc061b3c7",
+              "approx": "-3.5265977"
+            },
+            {
+              "bits": "0xc0a7f8e4",
+              "approx": "-5.249132"
+            },
+            {
+              "bits": "0xc0efe378",
+              "approx": "-7.496517"
+            },
+            {
+              "bits": "0xc0ca4818",
+              "approx": "-6.3213005"
+            }
+          ],
+          "stats": {
+            "max": {
+              "bits": "0x41421395",
+              "approx": "12.129781"
+            },
+            "min": {
+              "bits": "0xc17ec75e",
+              "approx": "-15.923674"
+            },
+            "sum_f64": -119057.6035890372,
+            "nonfinite_count": 0
+          },
+          "logits_sha256": "8f6f7646338013bc665d5f0f4921605fa6046c235ad6eefcf72fda5e5e47dbbe"
+        },
+        {
+          "step": 6,
+          "logits_len": 32000,
+          "argmax_index": 2629,
+          "runner_up_index": 297,
+          "top1_value": {
+            "bits": "0x4184b485",
+            "approx": "16.588144"
+          },
+          "top2_value": {
+            "bits": "0x4182ec25",
+            "approx": "16.365305"
+          },
+          "margin_abs": 0.22283935546875,
+          "margin_rel": 0.013433651854411281,
+          "unstable": false,
+          "probe_stride": 997,
+          "probe_indices": [
+            0,
+            997,
+            1994,
+            2991,
+            3988,
+            4985,
+            5982,
+            6979,
+            7976,
+            8973,
+            9970,
+            10967,
+            11964,
+            12961,
+            13958,
+            14955,
+            15952,
+            16949,
+            17946,
+            18943,
+            19940,
+            20937,
+            21934,
+            22931,
+            23928,
+            24925,
+            25922,
+            26919,
+            27916,
+            28913,
+            29910,
+            30907,
+            31904
+          ],
+          "probe_values": [
+            {
+              "bits": "0xc100647f",
+              "approx": "-8.024535"
+            },
+            {
+              "bits": "0xbf888cd3",
+              "approx": "-1.0667976"
+            },
+            {
+              "bits": "0xbf9349f4",
+              "approx": "-1.1506944"
+            },
+            {
+              "bits": "0xbff17415",
+              "approx": "-1.886355"
+            },
+            {
+              "bits": "0xc056db30",
+              "approx": "-3.3571281"
+            },
+            {
+              "bits": "0xc0d47bd1",
+              "approx": "-6.6401143"
+            },
+            {
+              "bits": "0x40c42240",
+              "approx": "6.129181"
+            },
+            {
+              "bits": "0xc0b02578",
+              "approx": "-5.504574"
+            },
+            {
+              "bits": "0xc0a65d80",
+              "approx": "-5.1989136"
+            },
+            {
+              "bits": "0xbff18095",
+              "approx": "-1.8867365"
+            },
+            {
+              "bits": "0xc08b1691",
+              "approx": "-4.3465047"
+            },
+            {
+              "bits": "0xbfe78a88",
+              "approx": "-1.8089151"
+            },
+            {
+              "bits": "0xc0b577d6",
+              "approx": "-5.6708784"
+            },
+            {
+              "bits": "0xc0acf233",
+              "approx": "-5.4045653"
+            },
+            {
+              "bits": "0xbff1b95c",
+              "approx": "-1.8884692"
+            },
+            {
+              "bits": "0xbfe5435a",
+              "approx": "-1.7911179"
+            },
+            {
+              "bits": "0x3f322215",
+              "approx": "0.69583255"
+            },
+            {
+              "bits": "0x3f36d4c1",
+              "approx": "0.71418387"
+            },
+            {
+              "bits": "0xc08607c2",
+              "approx": "-4.188447"
+            },
+            {
+              "bits": "0xc098db21",
+              "approx": "-4.776749"
+            },
+            {
+              "bits": "0xc0ae216e",
+              "approx": "-5.441581"
+            },
+            {
+              "bits": "0xc03181a1",
+              "approx": "-2.773537"
+            },
+            {
+              "bits": "0xc093f2cd",
+              "approx": "-4.623389"
+            },
+            {
+              "bits": "0xc0512ec0",
+              "approx": "-3.2684784"
+            },
+            {
+              "bits": "0xc0b97765",
+              "approx": "-5.7958245"
+            },
+            {
+              "bits": "0xc0ee159b",
+              "approx": "-7.4401374"
+            },
+            {
+              "bits": "0xc0b46a88",
+              "approx": "-5.6380043"
+            },
+            {
+              "bits": "0xc0ea8a16",
+              "approx": "-7.329356"
+            },
+            {
+              "bits": "0xc0fa51ff",
+              "approx": "-7.8225093"
+            },
+            {
+              "bits": "0xc08031a1",
+              "approx": "-4.006058"
+            },
+            {
+              "bits": "0xc0849db3",
+              "approx": "-4.1442504"
+            },
+            {
+              "bits": "0xc1021bf8",
+              "approx": "-8.131828"
+            },
+            {
+              "bits": "0xc0a8966e",
+              "approx": "-5.268363"
+            }
+          ],
+          "stats": {
+            "max": {
+              "bits": "0x4184b485",
+              "approx": "16.588144"
+            },
+            "min": {
+              "bits": "0xc16f2cff",
+              "approx": "-14.948485"
+            },
+            "sum_f64": -125621.89583612932,
+            "nonfinite_count": 0
+          },
+          "logits_sha256": "a9daf539b8d37519ff18b656f0916ed0918d0e5ea6159d8cf8de29ce8bf42582"
+        },
+        {
+          "step": 7,
+          "logits_len": 32000,
+          "argmax_index": 278,
+          "runner_up_index": 263,
+          "top1_value": {
+            "bits": "0x4181e36d",
+            "approx": "16.236048"
+          },
+          "top2_value": {
+            "bits": "0x41819a37",
+            "approx": "16.2003"
+          },
+          "margin_abs": 0.035747528076171875,
+          "margin_rel": 0.0022017382948217095,
+          "unstable": false,
+          "probe_stride": 997,
+          "probe_indices": [
+            0,
+            997,
+            1994,
+            2991,
+            3988,
+            4985,
+            5982,
+            6979,
+            7976,
+            8973,
+            9970,
+            10967,
+            11964,
+            12961,
+            13958,
+            14955,
+            15952,
+            16949,
+            17946,
+            18943,
+            19940,
+            20937,
+            21934,
+            22931,
+            23928,
+            24925,
+            25922,
+            26919,
+            27916,
+            28913,
+            29910,
+            30907,
+            31904
+          ],
+          "probe_values": [
+            {
+              "bits": "0xc10168fe",
+              "approx": "-8.088133"
+            },
+            {
+              "bits": "0x3f2872d1",
+              "approx": "0.65800196"
+            },
+            {
+              "bits": "0xc0df382e",
+              "approx": "-6.975608"
+            },
+            {
+              "bits": "0xc0845bbc",
+              "approx": "-4.136198"
+            },
+            {
+              "bits": "0xc0861a4f",
+              "approx": "-4.1907115"
+            },
+            {
+              "bits": "0xc0f48135",
+              "approx": "-7.6407723"
+            },
+            {
+              "bits": "0x3e1f4fdc",
+              "approx": "0.15557808"
+            },
+            {
+              "bits": "0xc0cd0675",
+              "approx": "-6.407038"
+            },
+            {
+              "bits": "0xc0acbce6",
+              "approx": "-5.398059"
+            },
+            {
+              "bits": "0xc03d60e4",
+              "approx": "-2.9590387"
+            },
+            {
+              "bits": "0xc0d04572",
+              "approx": "-6.508477"
+            },
+            {
+              "bits": "0xc0608cb7",
+              "approx": "-3.5085886"
+            },
+            {
+              "bits": "0xc0a835d5",
+              "approx": "-5.2565713"
+            },
+            {
+              "bits": "0xc0c66bc0",
+              "approx": "-6.200653"
+            },
+            {
+              "bits": "0xbfce6624",
+              "approx": "-1.6124921"
+            },
+            {
+              "bits": "0xc0756b75",
+              "approx": "-3.8346837"
+            },
+            {
+              "bits": "0xc0576e14",
+              "approx": "-3.3660936"
+            },
+            {
+              "bits": "0xc09baf3c",
+              "approx": "-4.865141"
+            },
+            {
+              "bits": "0xc051d9ea",
+              "approx": "-3.2789254"
+            },
+            {
+              "bits": "0xc0b7f97b",
+              "approx": "-5.749204"
+            },
+            {
+              "bits": "0xc0f937ca",
+              "approx": "-7.78806"
+            },
+            {
+              "bits": "0xc09ffc32",
+              "approx": "-4.9995356"
+            },
+            {
+              "bits": "0xc07840a6",
+              "approx": "-3.8789458"
+            },
+            {
+              "bits": "0xc0a0c6ff",
+              "approx": "-5.0242915"
+            },
+            {
+              "bits": "0xc0d67fa6",
+              "approx": "-6.703082"
+            },
+            {
+              "bits": "0xc0f6cafa",
+              "approx": "-7.7122774"
+            },
+            {
+              "bits": "0xc0fb6ff2",
+              "approx": "-7.857415"
+            },
+            {
+              "bits": "0xc10ca616",
+              "approx": "-8.790548"
+            },
+            {
+              "bits": "0xc10bfe64",
+              "approx": "-8.749607"
+            },
+            {
+              "bits": "0xc0949f2e",
+              "approx": "-4.644431"
+            },
+            {
+              "bits": "0xc0b6c887",
+              "approx": "-5.7119784"
+            },
+            {
+              "bits": "0xc0feb14b",
+              "approx": "-7.959142"
+            },
+            {
+              "bits": "0xc0428e2f",
+              "approx": "-3.0399282"
+            }
+          ],
+          "stats": {
+            "max": {
+              "bits": "0x4181e36d",
+              "approx": "16.236048"
+            },
+            "min": {
+              "bits": "0xc1822205",
+              "approx": "-16.266611"
+            },
+            "sum_f64": -140136.61421211017,
+            "nonfinite_count": 0
+          },
+          "logits_sha256": "d8587ba09226b4955ecf7bf2c58fdbbfcdc4f18fc8308925f7dcf074df4c81bf"
+        },
+        {
+          "step": 8,
+          "logits_len": 32000,
+          "argmax_index": 15754,
+          "runner_up_index": 7136,
+          "top1_value": {
+            "bits": "0x413ddef9",
+            "approx": "11.866937"
+          },
+          "top2_value": {
+            "bits": "0x412dd5ef",
+            "approx": "10.86473"
+          },
+          "margin_abs": 1.002206802368164,
+          "margin_rel": 0.0844537077330646,
+          "unstable": false,
+          "probe_stride": 997,
+          "probe_indices": [
+            0,
+            997,
+            1994,
+            2991,
+            3988,
+            4985,
+            5982,
+            6979,
+            7976,
+            8973,
+            9970,
+            10967,
+            11964,
+            12961,
+            13958,
+            14955,
+            15952,
+            16949,
+            17946,
+            18943,
+            19940,
+            20937,
+            21934,
+            22931,
+            23928,
+            24925,
+            25922,
+            26919,
+            27916,
+            28913,
+            29910,
+            30907,
+            31904
+          ],
+          "probe_values": [
+            {
+              "bits": "0xc0f740b6",
+              "approx": "-7.7266493"
+            },
+            {
+              "bits": "0x3edfe8b9",
+              "approx": "0.4373224"
+            },
+            {
+              "bits": "0xc091ec8d",
+              "approx": "-4.560126"
+            },
+            {
+              "bits": "0x3fd14954",
+              "approx": "1.6350503"
+            },
+            {
+              "bits": "0xc0383320",
+              "approx": "-2.8781204"
+            },
+            {
+              "bits": "0xc10892cb",
+              "approx": "-8.535838"
+            },
+            {
+              "bits": "0xbed35d66",
+              "approx": "-0.41282195"
+            },
+            {
+              "bits": "0xc0ce3d4a",
+              "approx": "-6.4449816"
+            },
+            {
+              "bits": "0xc0ce398d",
+              "approx": "-6.4445252"
+            },
+            {
+              "bits": "0x3f139a42",
+              "approx": "0.57657254"
+            },
+            {
+              "bits": "0xc09e74f5",
+              "approx": "-4.951777"
+            },
+            {
+              "bits": "0xc0d8befc",
+              "approx": "-6.7733135"
+            },
+            {
+              "bits": "0xc0deea28",
+              "approx": "-6.9660835"
+            },
+            {
+              "bits": "0xc0a0e3d0",
+              "approx": "-5.027809"
+            },
+            {
+              "bits": "0x3f807a5c",
+              "approx": "1.0037341"
+            },
+            {
+              "bits": "0xc026e8c7",
+              "approx": "-2.6079576"
+            },
+            {
+              "bits": "0xc0b4a2fb",
+              "approx": "-5.644895"
+            },
+            {
+              "bits": "0xc0cc58fb",
+              "approx": "-6.385862"
+            },
+            {
+              "bits": "0xc0a447f4",
+              "approx": "-5.1337833"
+            },
+            {
+              "bits": "0xc0aa4a23",
+              "approx": "-5.32155"
+            },
+            {
+              "bits": "0xc073fd80",
+              "approx": "-3.8123474"
+            },
+            {
+              "bits": "0xc0dbde29",
+              "approx": "-6.870869"
+            },
+            {
+              "bits": "0xc0abb6bd",
+              "approx": "-5.366057"
+            },
+            {
+              "bits": "0xc0416cc5",
+              "approx": "-3.0222638"
+            },
+            {
+              "bits": "0xc0abb8ea",
+              "approx": "-5.3663225"
+            },
+            {
+              "bits": "0xc1035ef4",
+              "approx": "-8.210682"
+            },
+            {
+              "bits": "0xc086aef6",
+              "approx": "-4.2088575"
+            },
+            {
+              "bits": "0xc0c2e36b",
+              "approx": "-6.090261"
+            },
+            {
+              "bits": "0xc0ab0893",
+              "approx": "-5.3447967"
+            },
+            {
+              "bits": "0xc0801d34",
+              "approx": "-4.003565"
+            },
+            {
+              "bits": "0xc0ab5944",
+              "approx": "-5.3546467"
+            },
+            {
+              "bits": "0xc0bcad24",
+              "approx": "-5.8961353"
+            },
+            {
+              "bits": "0xc071647f",
+              "approx": "-3.7717588"
+            }
+          ],
+          "stats": {
+            "max": {
+              "bits": "0x413ddef9",
+              "approx": "11.866937"
+            },
+            "min": {
+              "bits": "0xc1807578",
+              "approx": "-16.057358"
+            },
+            "sum_f64": -133583.53962884564,
+            "nonfinite_count": 0
+          },
+          "logits_sha256": "a18389a9a8a900a2f8451be437a6ca14d118fa8a98dcee356e7863b743d10048"
+        },
+        {
+          "step": 9,
+          "logits_len": 32000,
+          "argmax_index": 29915,
+          "runner_up_index": 896,
+          "top1_value": {
+            "bits": "0x415cfaae",
+            "approx": "13.811201"
+          },
+          "top2_value": {
+            "bits": "0x4143e48d",
+            "approx": "12.243299"
+          },
+          "margin_abs": 1.5679025650024414,
+          "margin_rel": 0.11352398347918471,
+          "unstable": false,
+          "probe_stride": 997,
+          "probe_indices": [
+            0,
+            997,
+            1994,
+            2991,
+            3988,
+            4985,
+            5982,
+            6979,
+            7976,
+            8973,
+            9970,
+            10967,
+            11964,
+            12961,
+            13958,
+            14955,
+            15952,
+            16949,
+            17946,
+            18943,
+            19940,
+            20937,
+            21934,
+            22931,
+            23928,
+            24925,
+            25922,
+            26919,
+            27916,
+            28913,
+            29910,
+            30907,
+            31904
+          ],
+          "probe_values": [
+            {
+              "bits": "0xc1180ccd",
+              "approx": "-9.503125"
+            },
+            {
+              "bits": "0x3fff2ca0",
+              "approx": "1.9935493"
+            },
+            {
+              "bits": "0xc028c424",
+              "approx": "-2.6369715"
+            },
+            {
+              "bits": "0xbffbaa2c",
+              "approx": "-1.9661307"
+            },
+            {
+              "bits": "0xc07fd80f",
+              "approx": "-3.9975622"
+            },
+            {
+              "bits": "0xc0dc8e6c",
+              "approx": "-6.8923855"
+            },
+            {
+              "bits": "0x40a514d9",
+              "approx": "5.158795"
+            },
+            {
+              "bits": "0xc0adc9de",
+              "approx": "-5.430892"
+            },
+            {
+              "bits": "0xc082ee11",
+              "approx": "-4.091561"
+            },
+            {
+              "bits": "0xc06d559d",
+              "approx": "-3.7083504"
+            },
+            {
+              "bits": "0xc0ac3d2e",
+              "approx": "-5.382468"
+            },
+            {
+              "bits": "0xc0bd269e",
+              "approx": "-5.910964"
+            },
+            {
+              "bits": "0xc0ee8103",
+              "approx": "-7.4532485"
+            },
+            {
+              "bits": "0xc0b8bb22",
+              "approx": "-5.7728434"
+            },
+            {
+              "bits": "0x3e52e0a1",
+              "approx": "0.20593502"
+            },
+            {
+              "bits": "0xc08997f9",
+              "approx": "-4.2998013"
+            },
+            {
+              "bits": "0xc0191236",
+              "approx": "-2.3917365"
+            },
+            {
+              "bits": "0xc088f59e",
+              "approx": "-4.2799826"
+            },
+            {
+              "bits": "0xc0a6de38",
+              "approx": "-5.2146263"
+            },
+            {
+              "bits": "0xc0f8a01e",
+              "approx": "-7.7695456"
+            },
+            {
+              "bits": "0xc101567a",
+              "approx": "-8.083612"
+            },
+            {
+              "bits": "0xc0d27b1c",
+              "approx": "-6.577528"
+            },
+            {
+              "bits": "0xc0606a94",
+              "approx": "-3.506505"
+            },
+            {
+              "bits": "0xc0b96413",
+              "approx": "-5.793466"
+            },
+            {
+              "bits": "0xc0f29e8d",
+              "approx": "-7.5818543"
+            },
+            {
+              "bits": "0xc1063450",
+              "approx": "-8.387772"
+            },
+            {
+              "bits": "0xc0afb04f",
+              "approx": "-5.490272"
+            },
+            {
+              "bits": "0xc09bd8de",
+              "approx": "-4.870223"
+            },
+            {
+              "bits": "0xc0ac585c",
+              "approx": "-5.385786"
+            },
+            {
+              "bits": "0xc0a520ff",
+              "approx": "-5.160278"
+            },
+            {
+              "bits": "0xc093055d",
+              "approx": "-4.5944047"
+            },
+            {
+              "bits": "0xc0d6ee2e",
+              "approx": "-6.7165747"
+            },
+            {
+              "bits": "0xc0ac17e4",
+              "approx": "-5.3779163"
+            }
+          ],
+          "stats": {
+            "max": {
+              "bits": "0x415cfaae",
+              "approx": "13.811201"
+            },
+            "min": {
+              "bits": "0xc18989e4",
+              "approx": "-17.19233"
+            },
+            "sum_f64": -143275.11182448268,
+            "nonfinite_count": 0
+          },
+          "logits_sha256": "1d759fd9073c39731f2c74158da1fcaf76ad1413c8f6be7db9ce59fe61a62b22"
+        },
+        {
+          "step": 10,
+          "logits_len": 32000,
+          "argmax_index": 29879,
+          "runner_up_index": 29903,
+          "top1_value": {
+            "bits": "0x41a53d09",
+            "approx": "20.654802"
+          },
+          "top2_value": {
+            "bits": "0x41237f77",
+            "approx": "10.218619"
+          },
+          "margin_abs": 10.436182975769043,
+          "margin_rel": 0.5052666596792983,
+          "unstable": false,
+          "probe_stride": 997,
+          "probe_indices": [
+            0,
+            997,
+            1994,
+            2991,
+            3988,
+            4985,
+            5982,
+            6979,
+            7976,
+            8973,
+            9970,
+            10967,
+            11964,
+            12961,
+            13958,
+            14955,
+            15952,
+            16949,
+            17946,
+            18943,
+            19940,
+            20937,
+            21934,
+            22931,
+            23928,
+            24925,
+            25922,
+            26919,
+            27916,
+            28913,
+            29910,
+            30907,
+            31904
+          ],
+          "probe_values": [
+            {
+              "bits": "0xc122438d",
+              "approx": "-10.141492"
+            },
+            {
+              "bits": "0x4012136b",
+              "approx": "2.2824352"
+            },
+            {
+              "bits": "0xbfd24d68",
+              "approx": "-1.6429873"
+            },
+            {
+              "bits": "0xbf871e31",
+              "approx": "-1.0556089"
+            },
+            {
+              "bits": "0xc08635fa",
+              "approx": "-4.194089"
+            },
+            {
+              "bits": "0xc0af6e59",
+              "approx": "-5.48222"
+            },
+            {
+              "bits": "0x3f89c3cd",
+              "approx": "1.0762879"
+            },
+            {
+              "bits": "0xbf928876",
+              "approx": "-1.1447895"
+            },
+            {
+              "bits": "0xbf3db9e5",
+              "approx": "-0.7411178"
+            },
+            {
+              "bits": "0xc02d389a",
+              "approx": "-2.7065797"
+            },
+            {
+              "bits": "0xc05b0563",
+              "approx": "-3.4222038"
+            },
+            {
+              "bits": "0x3fad17e2",
+              "approx": "1.3522913"
+            },
+            {
+              "bits": "0xc0e05384",
+              "approx": "-7.010195"
+            },
+            {
+              "bits": "0xc09f1cad",
+              "approx": "-4.9722505"
+            },
+            {
+              "bits": "0xbfe07227",
+              "approx": "-1.7534837"
+            },
+            {
+              "bits": "0xbf48faf7",
+              "approx": "-0.7850794"
+            },
+            {
+              "bits": "0xc0bc518b",
+              "approx": "-5.884954"
+            },
+            {
+              "bits": "0xc08927a8",
+              "approx": "-4.286091"
+            },
+            {
+              "bits": "0xc06aa7c6",
+              "approx": "-3.66649"
+            },
+            {
+              "bits": "0xc0b5130c",
+              "approx": "-5.658575"
+            },
+            {
+              "bits": "0xc0cf9f70",
+              "approx": "-6.4882126"
+            },
+            {
+              "bits": "0xc0a28d68",
+              "approx": "-5.0797615"
+            },
+            {
+              "bits": "0xbf9a03d1",
+              "approx": "-1.2032415"
+            },
+            {
+              "bits": "0xc0879a6f",
+              "approx": "-4.2376018"
+            },
+            {
+              "bits": "0xc0b779bf",
+              "approx": "-5.7336116"
+            },
+            {
+              "bits": "0xc0c73b53",
+              "approx": "-6.2259917"
+            },
+            {
+              "bits": "0xc0a76e6a",
+              "approx": "-5.2322283"
+            },
+            {
+              "bits": "0xc0b445b9",
+              "approx": "-5.633511"
+            },
+            {
+              "bits": "0xc0ec51a0",
+              "approx": "-7.384964"
+            },
+            {
+              "bits": "0xc081c97a",
+              "approx": "-4.0558443"
+            },
+            {
+              "bits": "0xbf18e722",
+              "approx": "-0.5972768"
+            },
+            {
+              "bits": "0xc0dd850a",
+              "approx": "-6.92249"
+            },
+            {
+              "bits": "0xc0ae9b41",
+              "approx": "-5.456452"
+            }
+          ],
+          "stats": {
+            "max": {
+              "bits": "0x41a53d09",
+              "approx": "20.654802"
+            },
+            "min": {
+              "bits": "0xc1766604",
+              "approx": "-15.399906"
+            },
+            "sum_f64": -105533.91862311366,
+            "nonfinite_count": 0
+          },
+          "logits_sha256": "a9588cf81ba92707852f8a60970017e51dcc3bd14028ecc4343f4c3fab0fb7a8"
+        },
+        {
+          "step": 11,
+          "logits_len": 32000,
+          "argmax_index": 7136,
+          "runner_up_index": 25005,
+          "top1_value": {
+            "bits": "0x416d1aae",
+            "approx": "14.819014"
+          },
+          "top2_value": {
+            "bits": "0x41565ee5",
+            "approx": "13.398168"
+          },
+          "margin_abs": 1.4208459854125977,
+          "margin_rel": 0.09587992994596387,
+          "unstable": false,
+          "probe_stride": 997,
+          "probe_indices": [
+            0,
+            997,
+            1994,
+            2991,
+            3988,
+            4985,
+            5982,
+            6979,
+            7976,
+            8973,
+            9970,
+            10967,
+            11964,
+            12961,
+            13958,
+            14955,
+            15952,
+            16949,
+            17946,
+            18943,
+            19940,
+            20937,
+            21934,
+            22931,
+            23928,
+            24925,
+            25922,
+            26919,
+            27916,
+            28913,
+            29910,
+            30907,
+            31904
+          ],
+          "probe_values": [
+            {
+              "bits": "0xc0f61f15",
+              "approx": "-7.691294"
+            },
+            {
+              "bits": "0xbf2708ba",
+              "approx": "-0.6524769"
+            },
+            {
+              "bits": "0xc04388c0",
+              "approx": "-3.0552216"
+            },
+            {
+              "bits": "0x3e3de037",
+              "approx": "0.18542562"
+            },
+            {
+              "bits": "0xc0476f18",
+              "approx": "-3.1161556"
+            },
+            {
+              "bits": "0xc0fb1efb",
+              "approx": "-7.847532"
+            },
+            {
+              "bits": "0x3ea87245",
+              "approx": "0.3289968"
+            },
+            {
+              "bits": "0xc08b9fea",
+              "approx": "-4.3632708"
+            },
+            {
+              "bits": "0xc09f17a8",
+              "approx": "-4.9716377"
+            },
+            {
+              "bits": "0xbee9ad3b",
+              "approx": "-0.45639977"
+            },
+            {
+              "bits": "0xc0b17e10",
+              "approx": "-5.5466385"
+            },
+            {
+              "bits": "0xc0a40af8",
+              "approx": "-5.126339"
+            },
+            {
+              "bits": "0xc0a18d3b",
+              "approx": "-5.04849"
+            },
+            {
+              "bits": "0xc0efb0ac",
+              "approx": "-7.4903164"
+            },
+            {
+              "bits": "0xbf4b9e57",
+              "approx": "-0.7953848"
+            },
+            {
+              "bits": "0xc059814a",
+              "approx": "-3.3985162"
+            },
+            {
+              "bits": "0xc0a28e86",
+              "approx": "-5.079898"
+            },
+            {
+              "bits": "0xc0e0802e",
+              "approx": "-7.015647"
+            },
+            {
+              "bits": "0xc08c6a35",
+              "approx": "-4.3879647"
+            },
+            {
+              "bits": "0xc0b28b3c",
+              "approx": "-5.5794964"
+            },
+            {
+              "bits": "0xc0ae7dfa",
+              "approx": "-5.452878"
+            },
+            {
+              "bits": "0xc0da31c9",
+              "approx": "-6.8185773"
+            },
+            {
+              "bits": "0xc0c174a6",
+              "approx": "-6.0454893"
+            },
+            {
+              "bits": "0xc08d2d9c",
+              "approx": "-4.4118176"
+            },
+            {
+              "bits": "0xc0aa4c88",
+              "approx": "-5.321842"
+            },
+            {
+              "bits": "0xc0f260f0",
+              "approx": "-7.574333"
+            },
+            {
+              "bits": "0xbfcf8276",
+              "approx": "-1.6211689"
+            },
+            {
+              "bits": "0xc08fab85",
+              "approx": "-4.4896874"
+            },
+            {
+              "bits": "0xc06cdedc",
+              "approx": "-3.7011023"
+            },
+            {
+              "bits": "0xc09c2598",
+              "approx": "-4.879589"
+            },
+            {
+              "bits": "0xc08768ed",
+              "approx": "-4.2315583"
+            },
+            {
+              "bits": "0xc0ee80c0",
+              "approx": "-7.4532166"
+            },
+            {
+              "bits": "0xc08c8a85",
+              "approx": "-4.391909"
+            }
+          ],
+          "stats": {
+            "max": {
+              "bits": "0x416d1aae",
+              "approx": "14.819014"
+            },
+            "min": {
+              "bits": "0xc18fd358",
+              "approx": "-17.978195"
+            },
+            "sum_f64": -127696.54541622079,
+            "nonfinite_count": 0
+          },
+          "logits_sha256": "1912f7f439d1bd36f1b06d21f6a6a6f2809d056ab5ada939b46b2e56d2edc01f"
+        }
+      ]
+    },
+    {
+      "name": "single_token_prefill",
+      "prompt": "The capital of France is",
+      "prompt_token_ids": [
+        1
+      ],
+      "max_new": 4,
+      "eos": 2,
+      "generated_token_ids": [
+        529,
+        29989,
+        5205,
+        29989
+      ],
+      "generated_text": "<|system|",
+      "steps": [
+        {
+          "step": 0,
+          "logits_len": 32000,
+          "argmax_index": 529,
+          "runner_up_index": 29958,
+          "top1_value": {
+            "bits": "0x412d263a",
+            "approx": "10.821833"
+          },
+          "top2_value": {
+            "bits": "0x410f1795",
+            "approx": "8.943257"
+          },
+          "margin_abs": 1.878575325012207,
+          "margin_rel": 0.1735912376931194,
+          "unstable": false,
+          "probe_stride": 997,
+          "probe_indices": [
+            0,
+            997,
+            1994,
+            2991,
+            3988,
+            4985,
+            5982,
+            6979,
+            7976,
+            8973,
+            9970,
+            10967,
+            11964,
+            12961,
+            13958,
+            14955,
+            15952,
+            16949,
+            17946,
+            18943,
+            19940,
+            20937,
+            21934,
+            22931,
+            23928,
+            24925,
+            25922,
+            26919,
+            27916,
+            28913,
+            29910,
+            30907,
+            31904
+          ],
+          "probe_values": [
+            {
+              "bits": "0xc095d41b",
+              "approx": "-4.682142"
+            },
+            {
+              "bits": "0xbe4c641f",
+              "approx": "-0.19960068"
+            },
+            {
+              "bits": "0x3d5b721f",
+              "approx": "0.05357563"
+            },
+            {
+              "bits": "0x3e848cc3",
+              "approx": "0.25888643"
+            },
+            {
+              "bits": "0x3fe22ccf",
+              "approx": "1.7669924"
+            },
+            {
+              "bits": "0xc04e7f5a",
+              "approx": "-3.226523"
+            },
+            {
+              "bits": "0x3f30fa48",
+              "approx": "0.691319"
+            },
+            {
+              "bits": "0x3c9dca30",
+              "approx": "0.01926145"
+            },
+            {
+              "bits": "0xbf3842e8",
+              "approx": "-0.7197709"
+            },
+            {
+              "bits": "0xbf857a01",
+              "approx": "-1.0427858"
+            },
+            {
+              "bits": "0x3ff8b8be",
+              "approx": "1.9431379"
+            },
+            {
+              "bits": "0xbf85e63d",
+              "approx": "-1.0460888"
+            },
+            {
+              "bits": "0x3eb6f393",
+              "approx": "0.35732707"
+            },
+            {
+              "bits": "0xc09549d1",
+              "approx": "-4.665261"
+            },
+            {
+              "bits": "0xc0296814",
+              "approx": "-2.6469774"
+            },
+            {
+              "bits": "0x3fa7023e",
+              "approx": "1.3047559"
+            },
+            {
+              "bits": "0xc10024a8",
+              "approx": "-8.008949"
+            },
+            {
+              "bits": "0x3fd1c164",
+              "approx": "1.6387143"
+            },
+            {
+              "bits": "0x3df59d16",
+              "approx": "0.119928524"
+            },
+            {
+              "bits": "0xbff35d26",
+              "approx": "-1.9012802"
+            },
+            {
+              "bits": "0xbfb76d3e",
+              "approx": "-1.4330213"
+            },
+            {
+              "bits": "0xbf9c6790",
+              "approx": "-1.2219105"
+            },
+            {
+              "bits": "0xbfbe83bf",
+              "approx": "-1.4883956"
+            },
+            {
+              "bits": "0xbfc3c89f",
+              "approx": "-1.52956"
+            },
+            {
+              "bits": "0xc02530e5",
+              "approx": "-2.5811093"
+            },
+            {
+              "bits": "0xc0b346ae",
+              "approx": "-5.602378"
+            },
+            {
+              "bits": "0xc03fa0c2",
+              "approx": "-2.9941869"
+            },
+            {
+              "bits": "0x3dcfc0b8",
+              "approx": "0.1014418"
+            },
+            {
+              "bits": "0xc1197dbb",
+              "approx": "-9.593196"
+            },
+            {
+              "bits": "0x3eeb9886",
+              "approx": "0.46014804"
+            },
+            {
+              "bits": "0xc02c1496",
+              "approx": "-2.6887565"
+            },
+            {
+              "bits": "0x403cab64",
+              "approx": "2.9479609"
+            },
+            {
+              "bits": "0xc0129c08",
+              "approx": "-2.2907734"
+            }
+          ],
+          "stats": {
+            "max": {
+              "bits": "0x412d263a",
+              "approx": "10.821833"
+            },
+            "min": {
+              "bits": "0xc1a135a4",
+              "approx": "-20.151192"
+            },
+            "sum_f64": -58560.8313846009,
+            "nonfinite_count": 0
+          },
+          "logits_sha256": "664b2cad06350466152b6b2a1ce46344e1736e07a1e89142d09f52c1c307e2bb"
+        },
+        {
+          "step": 1,
+          "logits_len": 32000,
+          "argmax_index": 29989,
+          "runner_up_index": 29871,
+          "top1_value": {
+            "bits": "0x417e6064",
+            "approx": "15.898533"
+          },
+          "top2_value": {
+            "bits": "0x40f24bb4",
+            "approx": "7.571741"
+          },
+          "margin_abs": 8.326791763305664,
+          "margin_rel": 0.523745922516109,
+          "unstable": false,
+          "probe_stride": 997,
+          "probe_indices": [
+            0,
+            997,
+            1994,
+            2991,
+            3988,
+            4985,
+            5982,
+            6979,
+            7976,
+            8973,
+            9970,
+            10967,
+            11964,
+            12961,
+            13958,
+            14955,
+            15952,
+            16949,
+            17946,
+            18943,
+            19940,
+            20937,
+            21934,
+            22931,
+            23928,
+            24925,
+            25922,
+            26919,
+            27916,
+            28913,
+            29910,
+            30907,
+            31904
+          ],
+          "probe_values": [
+            {
+              "bits": "0xc10c53bc",
+              "approx": "-8.770443"
+            },
+            {
+              "bits": "0xbfdde521",
+              "approx": "-1.733555"
+            },
+            {
+              "bits": "0xc051a92e",
+              "approx": "-3.275951"
+            },
+            {
+              "bits": "0xbfd650a8",
+              "approx": "-1.6743364"
+            },
+            {
+              "bits": "0x3f5c4001",
+              "approx": "0.8603516"
+            },
+            {
+              "bits": "0xc06936c8",
+              "approx": "-3.6439686"
+            },
+            {
+              "bits": "0xc07da3b7",
+              "approx": "-3.9631174"
+            },
+            {
+              "bits": "0x40499743",
+              "approx": "3.1498573"
+            },
+            {
+              "bits": "0xbf0aadcd",
+              "approx": "-0.5417145"
+            },
+            {
+              "bits": "0xbfec1494",
+              "approx": "-1.844378"
+            },
+            {
+              "bits": "0x3f972608",
+              "approx": "1.1808481"
+            },
+            {
+              "bits": "0xbe2ae202",
+              "approx": "-0.16687778"
+            },
+            {
+              "bits": "0xc0598c7c",
+              "approx": "-3.3991995"
+            },
+            {
+              "bits": "0xc05a9a35",
+              "approx": "-3.415662"
+            },
+            {
+              "bits": "0xc005493c",
+              "approx": "-2.0825949"
+            },
+            {
+              "bits": "0xc0117d6f",
+              "approx": "-2.2732809"
+            },
+            {
+              "bits": "0xc09890dc",
+              "approx": "-4.767683"
+            },
+            {
+              "bits": "0xc05c83b6",
+              "approx": "-3.445539"
+            },
+            {
+              "bits": "0xbfa2782f",
+              "approx": "-1.2692927"
+            },
+            {
+              "bits": "0xc09ecd66",
+              "approx": "-4.962573"
+            },
+            {
+              "bits": "0xc0fecbc6",
+              "approx": "-7.9623747"
+            },
+            {
+              "bits": "0xc0c6d938",
+              "approx": "-6.214016"
+            },
+            {
+              "bits": "0xc02df017",
+              "approx": "-2.717779"
+            },
+            {
+              "bits": "0xc065dd58",
+              "approx": "-3.5916348"
+            },
+            {
+              "bits": "0xc0971b78",
+              "approx": "-4.722103"
+            },
+            {
+              "bits": "0xc0533e1c",
+              "approx": "-3.3006659"
+            },
+            {
+              "bits": "0xc0345a3f",
+              "approx": "-2.8180082"
+            },
+            {
+              "bits": "0xc08958db",
+              "approx": "-4.2920966"
+            },
+            {
+              "bits": "0xc0ebc13a",
+              "approx": "-7.367337"
+            },
+            {
+              "bits": "0xc0d66844",
+              "approx": "-6.7002277"
+            },
+            {
+              "bits": "0xbedd95af",
+              "approx": "-0.43278262"
+            },
+            {
+              "bits": "0xc109599a",
+              "approx": "-8.584375"
+            },
+            {
+              "bits": "0xc0007885",
+              "approx": "-2.007356"
+            }
+          ],
+          "stats": {
+            "max": {
+              "bits": "0x417e6064",
+              "approx": "15.898533"
+            },
+            "min": {
+              "bits": "0xc153442a",
+              "approx": "-13.204142"
+            },
+            "sum_f64": -100691.24294092669,
+            "nonfinite_count": 0
+          },
+          "logits_sha256": "6da126a83f9e7c7242691c57ca0f7417c6f9669f13efc5188520702e033f3452"
+        },
+        {
+          "step": 2,
+          "logits_len": 32000,
+          "argmax_index": 5205,
+          "runner_up_index": 465,
+          "top1_value": {
+            "bits": "0x41c744a6",
+            "approx": "24.90852"
+          },
+          "top2_value": {
+            "bits": "0x41952124",
+            "approx": "18.641182"
+          },
+          "margin_abs": 6.267337799072266,
+          "margin_rel": 0.25161422128917477,
+          "unstable": false,
+          "probe_stride": 997,
+          "probe_indices": [
+            0,
+            997,
+            1994,
+            2991,
+            3988,
+            4985,
+            5982,
+            6979,
+            7976,
+            8973,
+            9970,
+            10967,
+            11964,
+            12961,
+            13958,
+            14955,
+            15952,
+            16949,
+            17946,
+            18943,
+            19940,
+            20937,
+            21934,
+            22931,
+            23928,
+            24925,
+            25922,
+            26919,
+            27916,
+            28913,
+            29910,
+            30907,
+            31904
+          ],
+          "probe_values": [
+            {
+              "bits": "0xc09c9289",
+              "approx": "-4.8928876"
+            },
+            {
+              "bits": "0xbfa778d4",
+              "approx": "-1.3083749"
+            },
+            {
+              "bits": "0xbf08c409",
+              "approx": "-0.53424126"
+            },
+            {
+              "bits": "0x3fad8026",
+              "approx": "1.3554733"
+            },
+            {
+              "bits": "0x3ef48afd",
+              "approx": "0.4776229"
+            },
+            {
+              "bits": "0xc02faa54",
+              "approx": "-2.744771"
+            },
+            {
+              "bits": "0xc08c5362",
+              "approx": "-4.3851786"
+            },
+            {
+              "bits": "0x4105e49e",
+              "approx": "8.368315"
+            },
+            {
+              "bits": "0x3f6b7ffe",
+              "approx": "0.91992176"
+            },
+            {
+              "bits": "0xc0201648",
+              "approx": "-2.50136"
+            },
+            {
+              "bits": "0xbf695c1e",
+              "approx": "-0.91156185"
+            },
+            {
+              "bits": "0x3f057a65",
+              "approx": "0.52139884"
+            },
+            {
+              "bits": "0x3e074703",
+              "approx": "0.13210683"
+            },
+            {
+              "bits": "0x3fc15ff5",
+              "approx": "1.5107409"
+            },
+            {
+              "bits": "0x3fbf364c",
+              "approx": "1.4938445"
+            },
+            {
+              "bits": "0xbfbd1b21",
+              "approx": "-1.4773904"
+            },
+            {
+              "bits": "0xc0207f04",
+              "approx": "-2.5077524"
+            },
+            {
+              "bits": "0xbe2e0e16",
+              "approx": "-0.16997561"
+            },
+            {
+              "bits": "0xbfcc9411",
+              "approx": "-1.5982686"
+            },
+            {
+              "bits": "0xbfa07926",
+              "approx": "-1.2536972"
+            },
+            {
+              "bits": "0xbe4b95ff",
+              "approx": "-0.19881438"
+            },
+            {
+              "bits": "0xc0110fb9",
+              "approx": "-2.2665846"
+            },
+            {
+              "bits": "0xc0149469",
+              "approx": "-2.3215582"
+            },
+            {
+              "bits": "0xc06203b1",
+              "approx": "-3.5314753"
+            },
+            {
+              "bits": "0xbf752aad",
+              "approx": "-0.95768243"
+            },
+            {
+              "bits": "0x3fe81b4e",
+              "approx": "1.8133333"
+            },
+            {
+              "bits": "0xc093ab4c",
+              "approx": "-4.6146603"
+            },
+            {
+              "bits": "0xc019ac15",
+              "approx": "-2.401128"
+            },
+            {
+              "bits": "0xc0cdb5bd",
+              "approx": "-6.428435"
+            },
+            {
+              "bits": "0xc0568503",
+              "approx": "-3.3518684"
+            },
+            {
+              "bits": "0x3fff58bf",
+              "approx": "1.9948958"
+            },
+            {
+              "bits": "0xc05e68dc",
+              "approx": "-3.47515"
+            },
+            {
+              "bits": "0x3faf84aa",
+              "approx": "1.3712361"
+            }
+          ],
+          "stats": {
+            "max": {
+              "bits": "0x41c744a6",
+              "approx": "24.90852"
+            },
+            "min": {
+              "bits": "0xc1520f11",
+              "approx": "-13.128678"
+            },
+            "sum_f64": -39881.42090443312,
+            "nonfinite_count": 0
+          },
+          "logits_sha256": "8f6348e1ecb4998c174082f99d8f0e0bab51f8ecfabc4141425e022dcbf4b64d"
+        },
+        {
+          "step": 3,
+          "logits_len": 32000,
+          "argmax_index": 29989,
+          "runner_up_index": 25183,
+          "top1_value": {
+            "bits": "0x420121a3",
+            "approx": "32.28285"
+          },
+          "top2_value": {
+            "bits": "0x41942c1f",
+            "approx": "18.521544"
+          },
+          "margin_abs": 13.76130485534668,
+          "margin_rel": 0.4262729453942599,
+          "unstable": false,
+          "probe_stride": 997,
+          "probe_indices": [
+            0,
+            997,
+            1994,
+            2991,
+            3988,
+            4985,
+            5982,
+            6979,
+            7976,
+            8973,
+            9970,
+            10967,
+            11964,
+            12961,
+            13958,
+            14955,
+            15952,
+            16949,
+            17946,
+            18943,
+            19940,
+            20937,
+            21934,
+            22931,
+            23928,
+            24925,
+            25922,
+            26919,
+            27916,
+            28913,
+            29910,
+            30907,
+            31904
+          ],
+          "probe_values": [
+            {
+              "bits": "0xc09eab1a",
+              "approx": "-4.9583864"
+            },
+            {
+              "bits": "0xbf3ae4fe",
+              "approx": "-0.73005664"
+            },
+            {
+              "bits": "0xbf3dc0c6",
+              "approx": "-0.74122274"
+            },
+            {
+              "bits": "0xc01653c5",
+              "approx": "-2.348863"
+            },
+            {
+              "bits": "0x3fe8349f",
+              "approx": "1.8141059"
+            },
+            {
+              "bits": "0xbfe13efe",
+              "approx": "-1.7597349"
+            },
+            {
+              "bits": "0x3fd3f36b",
+              "approx": "1.655866"
+            },
+            {
+              "bits": "0xbed4ff06",
+              "approx": "-0.41600817"
+            },
+            {
+              "bits": "0xbfccefae",
+              "approx": "-1.6010644"
+            },
+            {
+              "bits": "0xbdf38486",
+              "approx": "-0.11890511"
+            },
+            {
+              "bits": "0xc014bc79",
+              "approx": "-2.3240035"
+            },
+            {
+              "bits": "0xc015ff9a",
+              "approx": "-2.3437257"
+            },
+            {
+              "bits": "0xc02050f3",
+              "approx": "-2.5049407"
+            },
+            {
+              "bits": "0xbff0424e",
+              "approx": "-1.8770235"
+            },
+            {
+              "bits": "0xbe38fd72",
+              "approx": "-0.18065432"
+            },
+            {
+              "bits": "0xbebf5920",
+              "approx": "-0.37372684"
+            },
+            {
+              "bits": "0xbd885cbe",
+              "approx": "-0.06658314"
+            },
+            {
+              "bits": "0xc02fd597",
+              "approx": "-2.7474115"
+            },
+            {
+              "bits": "0xc034fb35",
+              "approx": "-2.8278325"
+            },
+            {
+              "bits": "0xc0a0f977",
+              "approx": "-5.0304523"
+            },
+            {
+              "bits": "0xc0a5d0a7",
+              "approx": "-5.1817203"
+            },
+            {
+              "bits": "0xbe3dc011",
+              "approx": "-0.18530299"
+            },
+            {
+              "bits": "0xbfabafcc",
+              "approx": "-1.3413024"
+            },
+            {
+              "bits": "0xc009d14f",
+              "approx": "-2.1534002"
+            },
+            {
+              "bits": "0xc05f02f3",
+              "approx": "-3.484555"
+            },
+            {
+              "bits": "0xbef1656e",
+              "approx": "-0.47147697"
+            },
+            {
+              "bits": "0xc0c6ba0e",
+              "approx": "-6.2102118"
+            },
+            {
+              "bits": "0xc0ae9218",
+              "approx": "-5.4553337"
+            },
+            {
+              "bits": "0xc0c07555",
+              "approx": "-6.0143228"
+            },
+            {
+              "bits": "0xc097c48b",
+              "approx": "-4.742742"
+            },
+            {
+              "bits": "0x3f6f3f69",
+              "approx": "0.9345613"
+            },
+            {
+              "bits": "0xc0b047d7",
+              "approx": "-5.5087695"
+            },
+            {
+              "bits": "0xbf7cb16c",
+              "approx": "-0.98708224"
+            }
+          ],
+          "stats": {
+            "max": {
+              "bits": "0x420121a3",
+              "approx": "32.28285"
+            },
+            "min": {
+              "bits": "0xc1803346",
+              "approx": "-16.025036"
+            },
+            "sum_f64": -66118.62230418582,
+            "nonfinite_count": 0
+          },
+          "logits_sha256": "6931a92ce1908193e554e6add07df390cb46e282c95f66246ea13312f9b4e5a2"
+        }
+      ]
+    }
+  ]
+}

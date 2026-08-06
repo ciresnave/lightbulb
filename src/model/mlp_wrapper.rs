@@ -152,11 +152,6 @@ impl Mlp {
     /// When `use_fused_kernels` is true, uses `fused_linear_silu` for the gate path
     /// to reduce memory bandwidth and improve CPU performance (~11% bandwidth reduction).
     pub fn forward(&self, x: &Tensor) -> Result<Tensor> {
-        // DEBUG: Check input stats
-        let input_vec = x.flatten_all()?.to_vec1::<f32>()?;
-        let _input_max = input_vec.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-        let _input_mean: f32 = input_vec.iter().sum::<f32>() / input_vec.len() as f32;
-
         // M3.3: Fused kernels implementation
         // NOTE: Current implementation shows regression due to overhead of extracting
         // weights from candlelight::nn::Linear. The weight() and bias() methods appear to

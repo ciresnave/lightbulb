@@ -42,8 +42,8 @@ fn main() {
     let mut cache_builder = ParallelCacheBuilder::new(
         batch_size,
         context_length,
-        candle_core::DType::F16,
-        &candle_core::Device::Cpu,
+        candlelight::core::DType::F16,
+        &candlelight::core::Device::Cpu,
     ).unwrap();
     
     println!("Cache: {} slots × {} positions", batch_size, context_length);

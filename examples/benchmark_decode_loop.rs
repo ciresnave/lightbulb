@@ -59,7 +59,7 @@ fn main() -> Result<()> {
     );
 
     // Create model weights (random initialization for benchmark)
-    let vb = candle_nn::VarBuilder::zeros(DType::F32, &device);
+    let vb = candlelight::nn::VarBuilder::zeros(DType::F32, &device);
     let mut model = BatchedLlama::new(config.clone(), vb)?;
 
     // Create KV cache

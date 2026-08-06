@@ -46,11 +46,12 @@ fn main() -> Result<()> {
     for (i, question) in questions.iter().enumerate() {
         let prompt = format!("{}\n\nUser: {}\n\nAssistant:", system_prompt, question);
 
-        let request = Request::new(
-            format!("test-{}", i),
-            prompt.clone(),
-            50, // max_tokens
-        );
+        // `Request::new` was removed; it is a plain struct now.
+        let request = Request {
+            id: format!("test-{}", i),
+            prompt: prompt.clone(),
+            max_new_tokens: 50,
+        };
 
         println!("Request {}: {}", i + 1, question);
 
@@ -71,14 +72,24 @@ fn main() -> Result<()> {
     // Print statistics
     println!("\n=== TTFT Statistics ===");
     println!("First request (cache miss): {:.3}s", ttft_times[0]);
-    if ttft_times.len() > 1 {
+    // `improvement` is bound OUTSIDE the `if`, because the verdict block near
+    // the end of this function reads it. It used to be a `let` inside the
+    // block, so those reads referred to nothing — the example did not compile.
+    let improvement = if ttft_times.len() > 1 {
         let avg_subsequent = ttft_times[1..].iter().sum::<f64>() / (ttft_times.len() - 1) as f64;
         println!("Average subsequent (cache hits): {:.3}s", avg_subsequent);
         let speedup = ttft_times[0] / avg_subsequent;
         println!("Speedup from caching: {:.2}x", speedup);
         let improvement = (1.0 - avg_subsequent / ttft_times[0]) * 100.0;
         println!("TTFT improvement: {:.1}%", improvement);
-    }
+        improvement
+    } else {
+        // One sample means no hit to compare against, so there is no measured
+        // improvement to claim — not a 0% improvement, an absent measurement.
+        // The verdict block treats this as "lower than expected", which is the
+        // right reading of "we could not tell".
+        0.0
+    };
 
     // Print prefix cache statistics
     println!("\n=== Prefix Cache Statistics ===");
