@@ -1676,9 +1676,19 @@ sweep gets expensive, run this arm at k=1 only.
 
 At each `k`, capture both from the existing `nsys` path. If bytes/token stays
 flat (~2.5 GB) while `k` grows, the host round-trip is per-token overhead and
-amortizes across the batch; if it scales with `k`, it does not. That single
-distinction decides whether kernel work targets the attention math or the
-plumbing, and Fuel and Baracuda are both holding design decisions on it.
+amortizes across the batch; if it scales with `k`, it does not.
+
+**Corrected 2026-08-05, and worth stating because the wrong version was already
+propagating.** An earlier draft claimed this slope decides monolithic-kernel vs
+small-primitives for a paged CUDA kernel. Fuel retracted that: *any* GPU
+implementation removes the host round-trip equally, so the slope characterises
+the **current broken placement**, not a difference between two candidate
+futures. Baracuda had built a prioritisation rule on the wrong version before it
+was caught.
+
+The slope is still worth measuring — it tells us whether the round-trip
+amortises across a batch, which bears on how urgent the fix is — but do not
+report it as a kernel-shape discriminator.
 
 - [ ] **Step 5: Run the sweep**
 
