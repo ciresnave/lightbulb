@@ -33,17 +33,38 @@ use anyhow::{Context, Result};
 use std::path::Path;
 
 use fuel::lazy::{LlamaModel, LlamaWeights};
-use fuel::lazy_llama2c::Llama2cConfig;
 
-/// A loaded Llama-shape model plus the config it was built from.
+/// A loaded Llama-shape model, plus everything a serving loop needs to drive it.
+///
+/// `config` is retained because callers need `vocab_size` to slice logits and
+/// `n_layers`/`n_kv_heads`/`head_dim` to size a KV cache.
+///
+/// `tokenizer`, `eos` and `device` were added when this path was wired into the
+/// engine. All three load EAGERLY: a server that accepts a request and only
+/// then discovers it cannot detokenize has converted a startup error into a
+/// per-request one.
 pub struct LoadedLlama {
     pub model: LlamaModel,
-    /// Retained because callers need `vocab_size` to slice logits and
-    /// `n_layers`/`n_kv_heads`/`head_dim` to size a KV cache.
     pub config: fuel::lazy::LlamaConfig,
+    pub tokenizer: tokenizers::Tokenizer,
+    /// `None` when `config.json` carries no `eos_token_id`. Generation then
+    /// stops only on `max_new_tokens`, which is why the loader logs a warning.
+    pub eos: Option<fuel::lazy_llama_full::LlamaEosToks>,
+    /// The device the weights were loaded onto. A `SessionState` built against
+    /// a different one is a byte-count error deep inside `realize`.
+    pub device: fuel::Device,
 }
 
 impl LoadedLlama {
+    /// `true` if `tok` ends generation for this checkpoint.
+    ///
+    /// `false` when the checkpoint declares no EOS — generation then runs to
+    /// `max_new_tokens`, which is the honest behaviour for a model that never
+    /// declared a stop.
+    pub fn is_eos(&self, tok: u32) -> bool {
+        self.eos.as_ref().is_some_and(|e| e.is_eos(tok))
+    }
+
     /// The dtype every projection weight was materialized at, or `None` when
     /// they disagree.
     ///
@@ -106,12 +127,13 @@ pub fn load_llama_from_dir(dir: &Path) -> Result<LoadedLlama> {
     let config_str = std::fs::read_to_string(&config_path)
         .with_context(|| format!("reading {}", config_path.display()))?;
 
-    // Llama2cConfig::from_hf_json_str parses HF-native field names
-    // (hidden_size → dim, num_hidden_layers → n_layers, ...) and is documented
-    // compatible with TinyLlama, Llama-2, Llama-3 and Mistral.
-    let cfg_2c = Llama2cConfig::from_hf_json_str(&config_str)
+    // `LlamaFullConfig`, NOT `Llama2cConfig`. Both parse HF-native field names
+    // (hidden_size → dim, num_hidden_layers → n_layers, ...) into the same
+    // `LlamaConfig` via `to_lazy_config()`, but only this one retains
+    // `eos_token_id`. Without it the engine can stop only on max_new_tokens.
+    let full = fuel::lazy_llama_full::LlamaFullConfig::from_hf_json_str(&config_str)
         .map_err(|e| anyhow::anyhow!("parsing config.json: {e:?}"))?;
-    let config = cfg_2c.to_llama_config();
+    let config = full.to_lazy_config();
 
     let weights_path = dir.join("model.safetensors");
     if !weights_path.is_file() {
@@ -127,12 +149,26 @@ pub fn load_llama_from_dir(dir: &Path) -> Result<LoadedLlama> {
     let weights = LlamaWeights::load_from_mmapped(&st, &config)
         .map_err(|e| anyhow::anyhow!("building LlamaWeights: {e:?}"))?;
 
+    let tokenizer_path = dir.join("tokenizer.json");
+    let tokenizer = tokenizers::Tokenizer::from_file(&tokenizer_path)
+        .map_err(|e| anyhow::anyhow!("loading {}: {e}", tokenizer_path.display()))?;
+    if full.eos_token_id.is_none() {
+        tracing::warn!(
+            "config.json in {} declares no eos_token_id; generation will stop \
+             only on max_new_tokens",
+            dir.display()
+        );
+    }
+
     Ok(LoadedLlama {
         model: LlamaModel {
             config: config.clone(),
             weights,
         },
         config,
+        tokenizer,
+        eos: full.eos_token_id,
+        device: super::device::select(),
     })
 }
 

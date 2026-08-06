@@ -40,6 +40,19 @@
     # separately because Fuel supports it and it reaches integrated GPUs that
     # CUDA cannot.
     vulkan = ["fuel/vulkan"]
+    # Serve through the Fuel path (`src/model_fuel/`) instead of candlelight.
+    #
+    # A BUILD-TIME choice rather than a runtime one, so one binary serves one
+    # backend. Accepted cost: a candlelight/Fuel A/B needs two builds and two
+    # processes. Acceptable because the acceptance gate asserts content over
+    # HTTP rather than comparing the two runners — three of the four suites the
+    # port design named as the parity oracle no longer compile.
+    #
+    # `--all-features` selects Fuel. That build is already broken for an
+    # unrelated reason (`cuda` needs `candlelight/cuda`, whose candle-kernels
+    # v0.10.2 build script fails under CUDA 13.3), so no working configuration
+    # changes meaning.
+    fuel-engine = []
     default = []
     # Flash attention feature (requires CUDA)
     flash-attn = ["candlelight/flash-attn"]
@@ -144,13 +157,26 @@
     # MUST be the git dependency: `fuel-core` on crates.io is an UNRELATED
     # project (the Fuel blockchain client, v0.48.x). `cargo add fuel-core`
     # silently pulls the wrong crate.
-    # PATH deps to a local worktree during the port, deliberately: the git
-    # dependency works but re-clones a very large workspace into cargo's cache,
-    # and this tree is already on disk and tracks origin/main. Switch to the git
-    # form (`{ git = "https://github.com/ciresnave/fuel", package = "fuel-core" }`)
-    # before anything is published or built elsewhere.
-    fuel             = { path = "C:/Projects/fuel-lightbulb-port/fuel-core", package = "fuel-core" }
-    fuel-cpu-backend = { path = "C:/Projects/fuel-lightbulb-port/fuel-cpu-backend" }
+    # GIT deps pinned to an exact rev. These were absolute Windows PATH deps to a
+    # local worktree during the port — fine on one machine, unbuildable anywhere
+    # else, which is exactly what a public PR exposed.
+    #
+    # PINNED, not floating: `fuel`'s main moved six times on 2026-08-06 alone,
+    # including one revision where `fuel-core` did not compile under
+    # `--features cuda` at all. A branch dependency would make this crate's
+    # buildability a function of when you cloned it.
+    #
+    # `8771997e` is the rev every test on this branch was verified against, and
+    # it is the one that repaired that CUDA break. Bump it deliberately, with a
+    # re-run, not as a drive-by.
+    #
+    # LOCAL DEVELOPMENT against a Fuel checkout: do NOT edit these lines back to
+    # paths. Add a gitignored `.cargo/config.toml` instead —
+    #     paths = ["../fuel-lightbulb-port"]
+    # — which overrides the git source without touching the manifest, so a
+    # working tree stays publishable.
+    fuel             = { git = "https://github.com/ciresnave/fuel", rev = "8771997eac86b2a786bebcdcadda16fdcf2d28dc", package = "fuel-core" }
+    fuel-cpu-backend = { git = "https://github.com/ciresnave/fuel", rev = "8771997eac86b2a786bebcdcadda16fdcf2d28dc" }
     # Only used to CONSTRUCT a `CudaDevice` in the GPU measurement harness.
     # `fuel-core` provides `impl From<CudaDevice> for Device` (its `cuda_backend`
     # module) but re-exports only `builder_arg`, not `CudaDevice` itself — so a
@@ -161,7 +187,7 @@
     # allowed to be optional"), and a PLAIN dev-dependency would run nvcc on
     # every `cargo test` including CPU-only ones. Optional + feature-activated
     # keeps default builds free of it entirely.
-    fuel-cuda-backend = { path = "C:/Projects/fuel-lightbulb-port/fuel-cuda-backend", optional = true }
+    fuel-cuda-backend = { git = "https://github.com/ciresnave/fuel", rev = "8771997eac86b2a786bebcdcadda16fdcf2d28dc", optional = true }
 
 [[bin]]
 name = "lightbulb-cli"
@@ -181,7 +207,7 @@ kiss-ops-vocab = "0.2.0"
 # DEV-only on purpose — Lightbulb's library does not depend on Fuel's scheduler,
 # it has its own. This is here so the A/B harness in tests/paged_plan_once.rs can
 # drive Fuel's paged decode path directly and measure the plan-once flag.
-fuel-inference = { path = "C:/Projects/fuel-lightbulb-port/fuel-inference" }
+fuel-inference = { git = "https://github.com/ciresnave/fuel", rev = "8771997eac86b2a786bebcdcadda16fdcf2d28dc" }
 tempfile       = "3"
 tower          = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
