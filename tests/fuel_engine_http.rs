@@ -179,10 +179,15 @@ async fn fuel_runner_serves_a_coherent_completion_over_http() {
 ///   real HTTP round trip and the real sampling code, not the greedy
 ///   shortcut.
 ///
-/// Neither subsumes the other: a broken `select_token` for `temperature !=
-/// 0.0` (e.g. a softmax/RNG bug that only manifests off the greedy branch)
-/// would pass the first test and fail this one; a broken router or a dead
-/// `inference_tx` would fail both.
+/// Neither subsumes the other: this test proves the DEFAULT (no-`temperature`
+/// -field) request path reaches the model and returns real decoded output —
+/// not the no-model fallback — using the real HTTP round trip and the real
+/// sampling code. It does NOT validate sampling quality or correctness: with
+/// the termination assertion removed (see below), a broken `select_token` for
+/// `temperature != 0.0` (e.g. a softmax/RNG bug off the greedy branch) would
+/// still decode to non-empty, non-fallback text and PASS this test. Only a
+/// broken router or a dead `inference_tx` — something that stops the request
+/// from reaching the model at all — would fail it.
 #[tokio::test]
 #[ignore = "needs the TinyLlama checkpoint; minutes on CPU"]
 async fn fuel_runner_serves_a_default_temperature_completion() {
@@ -264,8 +269,11 @@ async fn fuel_runner_serves_a_default_temperature_completion() {
     // EOS in only ~1 of 6 trials — it behaves like a base model free-
     // associating past the original topic (population figures, other
     // countries, fashion trends, national anthems) rather than concluding.
-    // Full trial table: `.superpowers/sdd/2026-08-05-engine-wiring/
-    // default-temp-gate-report.md`.
+    //
+    // Trial data (6 runs total): max_tokens=24 -> 4 trials, EOS reached in
+    // exactly 1 ("Paris. The capital of the USA is Washington DC.`</s>`");
+    // max_tokens=64 -> 1 trial, EOS not reached; max_tokens=100 -> 1 trial,
+    // EOS not reached. Overall: EOS fired in 1 of 6 trials.
     //
     // That is a real defect, but it is a defect in `chat.rs`'s prompt
     // construction — not in the Fuel decode path this branch exists to wire

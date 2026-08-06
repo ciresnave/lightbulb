@@ -333,11 +333,15 @@
 //! other way.
 //!
 //! **On the inversion point:** no k in the measurable range inverts the ratio.
-//! But the evidence for "the ratio does not fall with k" is weak — it rests on
-//! the unpaired k=2 singletons (2.59 -> 2.88) which the noise floor cannot
-//! resolve. What is solid is narrower: **no inversion was observed at k=1, and
-//! k >= 4 does not run at all**, so no k is available at which paged could be
-//! shown to win.
+//! The "does the ratio fall with k" comparison does not even reach weak
+//! evidence post-correction: the k=1 anchor is now **3.98x** (paired,
+//! corrected-window, reliable), while the only k=2 point is **2.88x** — but
+//! that k=2 cell is the known-inflated three-window-harness figure (above),
+//! unpaired on top of that, so 3.98 -> 2.88 is at least partly a re-measurement
+//! of the same capture-window bug rather than evidence of a real k-trend, and
+//! it cannot be read as "holds flat" or "falls" with any confidence. What is
+//! solid is narrower: **no inversion was observed at k=1, and k >= 4 does not
+//! run at all**, so no k is available at which paged could be shown to win.
 //!
 //! **3. The host round-trip does NOT amortize across a batch.** DtoH totals,
 //! from `nsys --trace=cuda --stats=true`:
@@ -1195,6 +1199,13 @@ fn gpu_paged_vs_contiguous_per_token() {
     let k = batch_k();
     let n_new = max_new();
     assert!(n_new >= 3, "LB_MAX_NEW must be >= 3 to leave a non-empty steady window");
+    // `>= 3` is a floor, not sufficient once `LB_CAPTURE=on`: the contiguous
+    // arm's capture-build round (token 2) consumes one round the steady
+    // window would otherwise get (see Window 3 below), so at `LB_CAPTURE=on`
+    // the true floor is 4. Checked again, capture-aware, wherever `capture`
+    // is actually known (the "contiguous" and "" arms) — an empty steady
+    // window divides by zero and reports NaN instead of failing loudly,
+    // which is exactly the defect class this harness exists to avoid.
     let plan = plan_from_env();
     // `LB_ARM` selects a single arm so `nsys` can attribute CUDA transfers to
     // one code path. Unset runs both in one process off one load, which is the
@@ -1218,6 +1229,14 @@ fn gpu_paged_vs_contiguous_per_token() {
         }
         "contiguous" => {
             let capture = capture_from_env(plan);
+            assert!(
+                n_new >= 3 + capture as usize,
+                "LB_MAX_NEW must be >= {} when LB_CAPTURE=on (got {n_new}): the \
+                 capture-build round (token 2) consumes one round the steady window \
+                 would otherwise get, and an empty steady window divides by zero and \
+                 reports NaN instead of failing",
+                3 + capture as usize
+            );
             let w = run_contiguous(&loaded, &dev, k, n_new, plan, capture)
                 .expect("contiguous arm");
             summarise(
@@ -1228,6 +1247,14 @@ fn gpu_paged_vs_contiguous_per_token() {
         }
         "" => {
             let capture = capture_from_env(plan);
+            assert!(
+                n_new >= 3 + capture as usize,
+                "LB_MAX_NEW must be >= {} when LB_CAPTURE=on (got {n_new}): the \
+                 capture-build round (token 2) consumes one round the steady window \
+                 would otherwise get, and an empty steady window divides by zero and \
+                 reports NaN instead of failing",
+                3 + capture as usize
+            );
             let paged = run_paged(&loaded, &dev, k, n_new, plan).expect("paged arm");
             let contig = run_contiguous(&loaded, &dev, k, n_new, plan, capture)
                 .expect("contiguous arm");
