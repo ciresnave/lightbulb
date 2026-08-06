@@ -34,7 +34,6 @@
 use anyhow::Result;
 
 use fuel::inference_context::{InferenceContext, KvCache};
-use fuel::Device;
 
 use super::loader::LoadedLlama;
 
@@ -83,7 +82,18 @@ pub fn generate_greedy(
     // caller's budget has to cover prompt + generation.
     let max_seq_len = prompt_tokens.len() + max_new + 1;
     let c = &loaded.config;
-    let device = Device::cpu();
+    // The device the WEIGHTS were loaded onto — not `Device::cpu()`.
+    //
+    // This hardcoded CPU until 2026-08-06. It predates `LoadedLlama` carrying a
+    // device at all, and under `fuel-cuda` it silently ran the whole decode on
+    // host while the weights sat on the GPU: not an error, just a
+    // hundredfold-slower answer, or a device-mismatch failure deep inside
+    // `realize` where the cause is unrecoverable from the message.
+    //
+    // `model_fuel::device::select()` is the ONE place a device is chosen, and
+    // `LoadedLlama.device` records what it chose. Reading it here is what keeps
+    // the cache and the weights on the same device by construction.
+    let device = loaded.device.clone();
 
     // `with_capacity`, NOT `with_dims` — and this is a rule-3 decision, not a
     // detail. `with_dims` grows the cache by REPLACEMENT, which rebuilds the

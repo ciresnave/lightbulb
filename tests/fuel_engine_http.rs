@@ -68,10 +68,19 @@ use tower::ServiceExt;
 use lightbulb::api::{ApiConfig, AppState};
 use lightbulb::engine::{MemoryAwareConfig, MemoryAwareScheduler, ModelRunner};
 
+/// Locate the TinyLlama checkpoint.
+///
+/// `TINYLLAMA_DIR` overrides the built-in default, which is one developer's
+/// HuggingFace cache including a specific snapshot hash. Without the override
+/// this gate can only run on that machine — it fails loudly rather than
+/// false-passing, but "fails everywhere else" is not a useful acceptance gate.
 fn tinyllama_dir() -> Option<PathBuf> {
-    let p = PathBuf::from(
-        "C:/Users/cires/.cache/huggingface/hub/models--TinyLlama--TinyLlama-1.1B-Chat-v1.0/snapshots/fe8a4ea1ffedaf415f4da2f062534de366a451e6",
-    );
+    let p = match std::env::var_os("TINYLLAMA_DIR") {
+        Some(v) => PathBuf::from(v),
+        None => PathBuf::from(
+            "C:/Users/cires/.cache/huggingface/hub/models--TinyLlama--TinyLlama-1.1B-Chat-v1.0/snapshots/fe8a4ea1ffedaf415f4da2f062534de366a451e6",
+        ),
+    };
     p.join("model.safetensors").is_file().then_some(p)
 }
 

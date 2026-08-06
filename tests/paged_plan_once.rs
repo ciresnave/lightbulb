@@ -64,11 +64,20 @@ const PROMPT_LEN: usize = 8;
 const MAX_NEW: usize = 7;
 const BLOCK_SIZE: usize = 16;
 
+/// Locate the TinyLlama checkpoint.
+///
+/// `TINYLLAMA_DIR` overrides the built-in default, which is one developer's
+/// HuggingFace cache including a specific snapshot hash. A measurement harness
+/// that only runs on one machine cannot be reproduced by whoever is asked to
+/// believe its numbers.
 fn tinyllama_dir() -> Option<PathBuf> {
-    let p = PathBuf::from(
-        "C:/Users/cires/.cache/huggingface/hub/models--TinyLlama--TinyLlama-1.1B-Chat-v1.0/\
-         snapshots/fe8a4ea1ffedaf415f4da2f062534de366a451e6",
-    );
+    let p = match std::env::var_os("TINYLLAMA_DIR") {
+        Some(v) => PathBuf::from(v),
+        None => PathBuf::from(
+            "C:/Users/cires/.cache/huggingface/hub/models--TinyLlama--TinyLlama-1.1B-Chat-v1.0/\
+             snapshots/fe8a4ea1ffedaf415f4da2f062534de366a451e6",
+        ),
+    };
     p.join("config.json").is_file().then_some(p)
 }
 
