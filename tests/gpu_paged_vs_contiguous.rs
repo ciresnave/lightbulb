@@ -174,6 +174,17 @@
 //! scales linearly", "capture moves zero bytes", and 2.06x presented as the
 //! quotient of the two medians (that is 1.83x).
 //!
+//! **Revision 2 (2026-08-06): a MEASUREMENT error, not a reporting one.** The
+//! steady window was one boundary short and included the token-2 CUDA-graph
+//! capture build, inflating the captured arm only. Found by Fuel. The harness now
+//! has a **fourth window** (`prefill | first_decode | capture_build | steady`)
+//! and emits every raw round. Re-measured on the GPU, paired, three blocks:
+//! **capture is ~4x, not ~2x** (3.69x here, 4.28x independently by Fuel), and the
+//! paged/captured penalty consequently moves 2.59x -> 3.98x. The paged arm was
+//! checked for the same defect and does **not** have it (below). Everything not
+//! touching the captured steady window — the OOM ceiling, the ragged-batch
+//! rejection, all byte counts, and both `Replan` arms — is unchanged.
+//!
 //! ## The noise floor, first — it governs how every number below may be read
 //!
 //! The **absolute** paged k=1 steady number ranges **78.5 to 173.9 ms/token
@@ -183,7 +194,13 @@
 //!
 //! * A ratio is trustworthy only when both sides come from **one consecutive
 //!   block** of runs in a single `sweep.ps1` invocation. Only k=1 has such
-//!   blocks (`rep1`/`rep2`/`rep3`, three points each).
+//!   blocks — three under the old three-window harness, three more under the
+//!   corrected four-window one.
+//! * **One exception, and it is the strongest number here.** The captured arm's
+//!   steady rounds vary by 1.9% within a run and its median varies by 1.9%
+//!   ACROSS the three corrected blocks (25.639 / 26.126 / 25.891). That is not
+//!   noise-floor-limited, and it is why the capture result survives replication
+//!   while the k=2 timing claims did not.
 //! * **Every k=2 point is ONE UNPAIRED SAMPLE.** `contiguous cap=off k=2` ran
 //!   2026-08-05 19:52, `cap=on k=2` ran 2026-08-06 03:25, `paged k=2` ran
 //!   03:29 — three separate invocations spanning 7.5 hours. k=2 ratios are
@@ -199,38 +216,68 @@
 //! ## Steady-state decode, ms/token (`--release`)
 //!
 //! ```text
-//!                                          k=1                     k=2
-//!                                  (n=4/5 runs, median)   (ONE UNPAIRED RUN EACH)
-//!   paged        PlanOnce               151.1                    247.7
-//!   paged        Replan               13305.2                   not run
-//!   contiguous   PlanOnce, capture off   97.5                    149.4
-//!   contiguous   PlanOnce, capture on    53.2                     85.9
-//!   contiguous   Replan                7023.0                   not run
+//!                                     k=1, CORRECTED WINDOW        k=2
+//!                                     (n=3 paired, median)  (ONE UNPAIRED RUN EACH,
+//!                                                            THREE-WINDOW HARNESS)
+//!   paged        PlanOnce                   103.1                 247.7
+//!   paged        Replan                   13305.2   (3-window)    not run
+//!   contiguous   PlanOnce, capture off       95.5                 149.4
+//!   contiguous   PlanOnce, capture on        25.9                  85.9 (INFLATED)
+//!   contiguous   Replan                    7023.0   (3-window)    not run
 //!   k >= 4       BOTH ARMS: CUDA_ERROR_OUT_OF_MEMORY (see below)
 //! ```
 //!
+//! **The k=2 captured cell is known-inflated and was NOT re-measured**: it came
+//! from the three-window harness, so it still has the token-2 capture build
+//! smeared through it. Every k=2 conclusion was already withdrawn as unpaired
+//! (below), so re-running it would not have changed any claim; it is left in with
+//! its defect named rather than silently deleted. The `Replan` rows are unaffected
+//! — `forward_with_kv_context` has no capture step at all.
+//!
 //! ## The three results this was built to produce
 //!
-//! **1. CUDA-graph capture is worth ~2x, and it is launch overhead plus memset
+//! **1. CUDA-graph capture is worth ~4x, and it is launch overhead plus memset
 //! elimination — zero host-device traffic.**
 //!
 //! ```text
 //!                       forward_decode_step   forward_with_kv_context_captured
-//!   steady ms/token           97.5                        53.2
+//!   steady ms/token           95.46                       25.89
+//!   capture build (tok 2)      N/A                    132-178 ms, own window
 //!   HtoD MB / copies      9014.573 / 491              9014.573 / 491
 //!   DtoH MB / copies       216.220 /  26               216.220 /  26
 //!   kernel launches         36,718                       9,214
 //!   device memsets      14,368 / 363.674 MB          2,811 / 280.238 MB
 //! ```
 //!
-//! **Two legitimate statistics, and they are not the same number.** Ratio of the
-//! two medians = **1.83x** (97.5195 / 53.1705). Median of the four paired ratios
-//! (2.32 / 2.75 / 1.81 / 1.53) = **2.06x**. Report it as **~2x, paired range
-//! 1.5-2.8x**, and never present 1.83 and 2.06 as the same quantity.
+//! Paired ratios over three consecutive blocks, corrected window:
+//! **4.34 / 3.69 / 3.05**, median **3.69x**; ratio of medians 95.464 / 25.891 =
+//! **3.69x** (the two statistics coincide at n=3).
 //!
-//! Stronger than "the sign never flips": **the two four-run distributions do not
-//! overlap at all** — max(capture on) 67.118 < min(capture off) 93.131.
-//! Mann-Whitney, n=4 vs 4, complete separation: one-sided p = 1/70 ≈ **0.014**.
+//! **Two independent instruments agree, and that is the strongest evidence in
+//! this file.** Fuel measured the same contrast on the same card from a separate
+//! harness: plan-once 111.77 -> captured 25.87 = **4.28x**. Our captured replay
+//! median is **25.891** against their **25.87** — 0.08% apart. The entire
+//! residual spread between 3.69x and 4.28x lives in the *no-capture* baseline
+//! (ours 79.7-111.2, theirs 111.77), which is the noisy side; the quantity
+//! capture actually changes is pinned to three digits by both.
+//!
+//! The captured arm's steady rounds are also extraordinarily stable — 25.6 to
+//! 26.6 ms across 13 rounds, a 1.9% spread — against a 2.2x process-to-process
+//! noise floor everywhere else in this file. Capture does not merely speed the
+//! decode up; it makes it *predictable*.
+//!
+//! **THIS NUMBER WAS ~2x IN AN EARLIER REVISION, AND THAT WAS WRONG.** Not a
+//! re-interpretation — a measurement error, in this harness. See the `Windows`
+//! struct docs for the mechanism: the steady window used to start at token 2,
+//! which is where `forward_with_kv_context_captured` builds the CUDA graph
+//! (`lazy.rs:9768`, case 3). A 132-178 ms one-time build was averaged into
+//! thirteen ~26 ms tokens, inflating the **captured arm only**, so it did not
+//! cancel in the ratio and roughly halved the apparent speedup. Fuel found it by
+//! measuring that token directly (438.51 ms on their run); the arithmetic
+//! reproduced our own 53.2 ms figure from their two components before the
+//! diagnosis was accepted. The stale figures — 1.83x ratio-of-medians, 2.06x
+//! median-of-paired-ratios, and the four-run non-overlap statistic computed on
+//! them — are in git history and should not be quoted.
 //!
 //! **Bias direction: conservative.** Capture always ran in position 2, after the
 //! no-capture arm, and later positions are slower. The real effect is at least
@@ -253,13 +300,25 @@
 //! (70,617 -> 9,015 MB, from the 2026-08-01 table) and leaves launches at 36,718;
 //! capture cuts launches and memsets and leaves host-device bytes untouched.
 //!
-//! **2. The release k=1 paged penalty is ~2.6x, NOT 10.4x.** The 10.4x came from
-//! a **debug** build (the prior session's `build_gpu_harness.bat` had no
-//! `--release`) and is not a valid reference for a release sweep. Paired,
-//! same-block ratios at k=1: paged / captured-contiguous = 4.43 / 2.59 / 2.09
-//! (median **2.59x**); paged / uncaptured-contiguous = 1.61 / 1.43 / 1.37
-//! (median **1.43x** — a much tighter estimate, because both sides then pay the
-//! same launch overhead).
+//! **2. The release k=1 paged penalty is ~4x against captured contiguous, and
+//! indistinguishable from 1x against uncaptured — NOT 10.4x either way.** The
+//! 10.4x came from a **debug** build (the prior session's `build_gpu_harness.bat`
+//! had no `--release`) and is not a valid reference for a release sweep.
+//!
+//! Paired, same-block ratios at k=1, corrected window (three blocks):
+//!
+//! ```text
+//!   paged / captured contiguous     3.98 / 4.63 / 3.98   median 3.98x
+//!   paged / uncaptured contiguous   0.92 / 1.52 / 1.08   median 1.08x
+//! ```
+//!
+//! **The paged/captured figure moved from 2.59x to 3.98x as a direct consequence
+//! of the capture-window fix** — the denominator was inflated, so the penalty was
+//! understated. The paged/uncaptured figure is untouched by that fix (neither arm
+//! has a capture build); its drift from an earlier session's 1.37-1.61 to this
+//! session's 0.92-1.52 is ordinary process noise, and the honest reading across
+//! both sessions is that **paged and uncaptured contiguous are not resolvably
+//! different** — the ratio straddles 1.0.
 //!
 //! **Bias direction: inflationary.** Paged always ran in position 3 — the latest
 //! and slowest slot in every block. The real penalty is at most this large.
@@ -310,6 +369,28 @@
 //! small primitives; Fuel retracted that, and it is wrong: *any* GPU
 //! implementation removes the host round-trip equally. The slope characterises
 //! the CURRENT placement, and what it says is that batching will not rescue it.
+//!
+//! ## Does the PAGED arm have the same window defect? No — checked, not assumed
+//!
+//! The paged path has its own one-time plan build, so the obvious worry is that
+//! its steady window hides one too. It does not, on three independent grounds:
+//!
+//! * **Structural.** `forward_paged_step_persistent` under `PlanOnce` builds the
+//!   held session on the token where `decode_session` is `None` — token 1, the
+//!   `first_decode` window — and rebinds on every later token. There is no
+//!   second-token special case; the contiguous captured path is the only entry
+//!   with two build steps.
+//! * **Witness.** `realize_count == 14` equals the steady round count **exactly**,
+//!   in every paged run. Every steady round is a rebind; none is a build.
+//! * **Raw rounds.** The first steady round is mildly elevated
+//!   (122.6 vs ~100 ms median; 123.9 vs ~112; 100.9 vs ~100) — about **1.2x**,
+//!   ordinary warm-up, and well inside the arm's own round-to-round spread.
+//!   Compare the captured arm's genuine build: 178.2 ms against a 25.9 ms replay,
+//!   **6.9x**. Different by an order of magnitude.
+//!
+//! Dropping the paged arm's first steady round changes its mean by 1.6%
+//! (101.997 -> 100.41), so the paged/contiguous ratio needs no analogous
+//! correction.
 //!
 //! ## k >= 4 does not run on this card, on either path
 //!
@@ -594,17 +675,44 @@ fn capture_from_env(plan: PagedDecodePlan) -> bool {
     capture
 }
 
-/// Three timing windows plus the two witnesses that the persistent path ran.
+/// FOUR timing windows plus the two witnesses that the persistent path ran.
 ///
-/// `steady` holds one entry per decode ROUND after the first; each round
-/// advances all `k` sequences by one token, so a round costs `k` tokens.
+/// **The fourth window exists because three were one short, and the omission
+/// corrupted a headline number.** `forward_with_kv_context_captured`
+/// (`fuel-core/src/lazy.rs:9768`) has *two* one-time build steps, not one:
+///
+/// ```text
+///   case 2  session.is_none()   -> "First decode token: build the held session"   token 1
+///   case 3  captured.is_none()  -> "Second decode token: build the capture"       token 2
+///   case 4  otherwise           -> "Third token onward: pure replay"              token 3+
+/// ```
+///
+/// The original split put token 1 in `first_decode` and folded token 2 into
+/// `steady`. Token 2 is the **CUDA-graph capture build** — a one-time cost that
+/// exists in the captured arm ONLY. Smearing it across the steady mean inflated
+/// exactly one arm, so it did not cancel in the ratio: it roughly halved the
+/// apparent speedup (reported ~2x; the corrected figure is ~4x, see the module
+/// docs). Found by Fuel, who measured the token directly at 438.51 ms against a
+/// ~25.87 ms replay, then confirmed here by arithmetic before being accepted.
+///
+/// `steady` therefore holds one entry per decode ROUND **after** every one-time
+/// build; each round advances all `k` sequences by one token, so a round costs
+/// `k` tokens.
 struct Windows {
     k: usize,
     /// Every sequence's prompt, plus the token sampled from its prefill logits.
     prefill: Duration,
     /// One token for each of the `k` sequences, through the persistent entry.
-    /// This is where the plan is built.
+    /// This is where the DECODE SESSION (the plan) is built.
     first_decode: Duration,
+    /// Token 2: where `forward_with_kv_context_captured` builds the CUDA graph.
+    ///
+    /// `None` on every arm that has no such step — the uncaptured contiguous
+    /// configurations and both paged arms. On those, token 2 is an ordinary
+    /// token and stays in `steady` where it belongs; this is reported as `N/A`
+    /// rather than by moving a normal token into a window it does not occupy,
+    /// which would re-introduce the same class of error in the other direction.
+    capture_build: Option<Duration>,
     steady: Vec<Duration>,
     /// `optimize_graph` invocations over the whole run (this thread).
     optimize_calls: usize,
@@ -630,6 +738,23 @@ impl Windows {
     }
     fn first_decode_ms_per_token(&self) -> f64 {
         self.first_decode.as_secs_f64() * 1000.0 / self.k as f64
+    }
+    /// `NaN` when the arm has no capture-build step, so the printed value reads
+    /// as absent rather than as a suspiciously small real measurement.
+    fn capture_build_ms_per_token(&self) -> f64 {
+        match self.capture_build {
+            Some(d) => d.as_secs_f64() * 1000.0 / self.k as f64,
+            None => f64::NAN,
+        }
+    }
+    /// Every steady round, in milliseconds, in order.
+    ///
+    /// Printed verbatim at every point. The window bug this struct's docs
+    /// describe was invisible for a whole review cycle because only the mean and
+    /// the median were ever emitted — a one-time cost hiding inside an aggregate
+    /// is exactly what raw per-round output makes impossible.
+    fn steady_rounds_ms(&self) -> Vec<f64> {
+        self.steady.iter().map(|d| d.as_secs_f64() * 1000.0).collect()
     }
 }
 
@@ -737,6 +862,15 @@ fn run_paged(
         k,
         prefill,
         first_decode,
+        // The paged arm has NO analogue of the contiguous capture build.
+        // `forward_paged_step_persistent` under `PlanOnce` builds the held
+        // session on the token where `decode_session` is `None` — token 1, the
+        // `first_decode` window — and REBINDS it on every token after. The
+        // witness is direct: `realize_count == 14` equals the steady round
+        // count exactly, so every steady round is a rebind and none is a build.
+        // Checked because the contiguous window bug would have had a twin here
+        // if the paged path had a second one-time step; it does not.
+        capture_build: None,
         steady,
         optimize_calls: opt1 - opt0,
         optimize_calls_steady: opt1 - opt_after_first,
@@ -803,6 +937,8 @@ fn run_paged_scheduler(
         k,
         prefill: prefill_and_first,
         first_decode: Duration::ZERO,
+        // Paged has no capture step; see `run_paged`.
+        capture_build: None,
         steady,
         optimize_calls: opt1 - opt0,
         optimize_calls_steady: opt1 - opt_after_first,
@@ -908,8 +1044,30 @@ fn run_contiguous(
     let first_decode = t.elapsed();
     let opt_after_first = optimize_calls_thread_local();
 
-    // --- Window 3: steady state.
-    let rounds = n_new.saturating_sub(2);
+    // --- Window 3: the CAPTURE BUILD (token 2), captured configuration ONLY.
+    //
+    // `forward_with_kv_context_captured` case 3 (`lazy.rs:9768`, comment
+    // "Second decode token: build the capture") does the CUDA-graph capture on
+    // token 2 and pure replay from token 3. This window used to be the first
+    // entry of `steady`, which smeared a ~200-440 ms one-time build across
+    // thirteen ~26 ms tokens — in the captured arm ONLY, so it did not cancel
+    // in the ratio and roughly halved the measured speedup.
+    //
+    // The uncaptured configurations have no such step, so they take no round
+    // here and token 2 stays in `steady`, where for them it genuinely belongs.
+    let mut rounds = n_new.saturating_sub(2);
+    let capture_build = if capture {
+        rounds -= 1;
+        let t = Instant::now();
+        for i in 0..k {
+            decode_one!(i);
+        }
+        Some(t.elapsed())
+    } else {
+        None
+    };
+
+    // --- Window 4: steady state — every round after every one-time build.
     let mut steady = Vec::with_capacity(rounds);
     for _ in 0..rounds {
         let t = Instant::now();
@@ -945,6 +1103,7 @@ fn run_contiguous(
         k,
         prefill,
         first_decode,
+        capture_build,
         steady,
         optimize_calls: opt1 - opt0,
         optimize_calls_steady: opt1 - opt_after_first,
@@ -964,6 +1123,14 @@ fn summarise(label: &str, cfg: &str, w: &Windows) {
         w.first_decode_ms_per_token(),
         w.k
     );
+    match w.capture_build {
+        Some(d) => eprintln!(
+            "  capture bld  {:>10.2} ms   ({:.2} ms/token) <- CUDA graph captured here (token 2)",
+            ms(d),
+            w.capture_build_ms_per_token()
+        ),
+        None => eprintln!("  capture bld         N/A          this arm has no capture-build step"),
+    }
     eprintln!(
         "  steady       {:>10.2} ms   over {} rounds x {} sequences = {} tokens",
         ms(w.steady_total()),
@@ -974,6 +1141,13 @@ fn summarise(label: &str, cfg: &str, w: &Windows) {
     eprintln!("  steady ms/token {:.3}", w.steady_ms_per_token());
     if !w.steady.is_empty() {
         eprintln!("  steady round median {:?}", median(w.steady.clone()));
+        // Raw rounds, always. The capture-build window went undetected for a
+        // whole review cycle because only the mean and median were emitted; a
+        // one-time cost hiding in an aggregate is precisely what this prevents.
+        eprintln!(
+            "  steady rounds ms {:?}",
+            w.steady_rounds_ms().iter().map(|v| (v * 1000.0).round() / 1000.0).collect::<Vec<_>>()
+        );
     }
     eprintln!(
         "  optimize_calls total={} steady_window={} (PlanOnce reuse => steady_window == 0)",
@@ -984,12 +1158,16 @@ fn summarise(label: &str, cfg: &str, w: &Windows) {
     }
     eprintln!(
         "RESULT {cfg} k={} prefill_ms={:.3} first_decode_ms={:.3} first_decode_ms_per_tok={:.3} \
-         steady_ms_per_tok={:.3} steady_rounds={} optimize_calls={} optimize_calls_steady={} \
-         realize={:?}",
+         capture_build_ms={} steady_ms_per_tok={:.3} steady_rounds={} optimize_calls={} \
+         optimize_calls_steady={} realize={:?}",
         w.k,
         ms(w.prefill),
         ms(w.first_decode),
         w.first_decode_ms_per_token(),
+        match w.capture_build {
+            Some(d) => format!("{:.3}", ms(d)),
+            None => "NA".to_string(),
+        },
         w.steady_ms_per_token(),
         w.steady.len(),
         w.optimize_calls,
