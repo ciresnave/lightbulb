@@ -36,10 +36,33 @@
 //! `speculative.rs`) unnoticed since the candle→fuel rename, so it is a
 //! well-trodden hole rather than a one-off.
 //!
-//! **3. Capture-shaped decode.** `CapturedRun` measured 10.4× on TinyLlama decode,
-//! byte-exact, and requires a stable graph: no per-token graph rebuilding, no
-//! host-side branching inside the step, runtime-offset KV writes. Cheap to design
-//! in, painful to retrofit — so it is designed in from the first commit.
+//! **3. Capture-shaped decode.** Requires a stable graph: no per-token graph
+//! rebuilding, no host-side branching inside the step, runtime-offset KV writes.
+//! Cheap to design in, painful to retrofit — so it is designed in from the first
+//! commit.
+//!
+//! **The 10.4× that originally justified this rule does not survive
+//! measurement.** Lightbulb measured capture's contribution directly on
+//! 2026-08-06 (RTX 4070 Laptop, TinyLlama-1.1B f32, release, Fuel `8771997e`,
+//! k=1) with **persistence held constant on both arms** —
+//! `forward_with_kv_context_captured` against `forward_decode_step`:
+//!
+//! | | |
+//! | --- | --- |
+//! | speedup | **~2×** (paired ratios 1.5–2.8, distributions non-overlapping, p≈0.014) |
+//! | kernel launches | 36,718 → 9,214 |
+//! | host↔device bytes | **unchanged, identical to the digit** |
+//! | device memsets | 14,368 → 2,811 (363.7 → 280.2 MB) |
+//!
+//! So capture is launch-overhead plus memset elimination, worth ~2× and not
+//! ~10×. The likely reason for the gap: a 10.4× figure almost certainly
+//! compares capture against a **re-planning** baseline, bundling persistence
+//! with capture — the same confound that made Lightbulb's own 223× figure
+//! uninterpretable. Persistence is now the default on both Fuel decode routes,
+//! so that portion is no longer capture's to claim.
+//!
+//! **The rule stands anyway.** ~2× is worth having, it costs nothing to design
+//! in, and retrofitting it is expensive. Only the justification shrank.
 //!
 //! # What this is not yet
 //!

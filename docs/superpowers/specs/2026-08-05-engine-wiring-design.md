@@ -360,6 +360,15 @@ the gate demands every cache sit at an identical `cached_len`.
 
 ### The measurement decides, not this document
 
+**SUPERSEDED 2026-08-06 by the measurement this section commissioned.** The
+10.4× below is a **debug-build** number. At release, on Fuel `8771997e`, the same
+pair is ~2.6× (paired ratios 4.43 / 2.59 / 2.09, n=3), with arm ordering
+confounded in the direction that inflates the penalty and one excluded
+same-session pair showing an inversion (0.84). The honest statement is **paged
+costs roughly 1.4–4× contiguous at k=1; direction established, magnitude not
+well constrained on this hardware.** The reasoning below stands — it argued
+correctly that a k=1 ratio cannot decide a batching question.
+
 The measured 10.4× paged penalty (`0e3fc36`) is a **k=1** number, and k=1 is
 precisely the case batching exists to avoid. A paged step is one graph over k
 rows; if its cost is near-flat in k, the ratio inverts somewhere. Where it

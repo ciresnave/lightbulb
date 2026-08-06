@@ -197,7 +197,10 @@
 //! bounds what paged decode costs *today*; what it argues for is a paged
 //! `DecodeSession` upstream in Fuel, not abandoning paging. Fuel's own
 //! contiguous tiers show the size of the prize: re-plan-per-step to captured
-//! replay measured ~10.4× on TinyLlama/4070, the same order as the gap here.
+//! replay was originally cited at ~10.4× on TinyLlama/4070. That figure did
+//! NOT survive isolated measurement: with persistence held constant, capture is
+//! ~2× (see model_fuel/mod.rs rule 3). The 10.4× almost certainly bundled
+//! persistence with capture.
 //!
 //! Note this supersedes an earlier figure of 4.52 s/token for the contiguous
 //! baseline, which compared **bf16 projections measured on another day** against
