@@ -161,24 +161,58 @@
 //! `3364e8a9` and invisible to a CPU CI matrix). Fixed upstream in `8771997e`.
 //! Full diagnosis in `.superpowers/sdd/2026-08-05-engine-wiring/task-10-report.md`.
 //!
+//! **These numbers survive Fuel's post-baseline placement fix `595f5d1c`.** It
+//! only *removes fallback candidates*, and a removed candidate could change an
+//! outcome only if it had been winning — which would have panicked. No run here
+//! panicked, so the `8771997e` attribution stands without a re-run.
+//!
+//! **Revision 1 (2026-08-06):** an audit against the raw run logs and `nsys`
+//! stats verified every number as correct and verbatim; nothing was re-measured.
+//! Several claims were restated at the confidence the data supports. Withdrawn
+//! or downgraded: a "~1.6x per-token rise from k=1 to k=2" (the k=2 points are
+//! unpaired singletons), the `paged_sched` control's "PASSES" verdict, "DtoH
+//! scales linearly", "capture moves zero bytes", and 2.06x presented as the
+//! quotient of the two medians (that is 1.83x).
+//!
+//! ## The noise floor, first — it governs how every number below may be read
+//!
+//! The **absolute** paged k=1 steady number ranges **78.5 to 173.9 ms/token
+//! across five runs of identical configuration** (2.2x). Within-run round
+//! medians track their means closely, so the variance is between processes, not
+//! between rounds. Consequences, applied throughout:
+//!
+//! * A ratio is trustworthy only when both sides come from **one consecutive
+//!   block** of runs in a single `sweep.ps1` invocation. Only k=1 has such
+//!   blocks (`rep1`/`rep2`/`rep3`, three points each).
+//! * **Every k=2 point is ONE UNPAIRED SAMPLE.** `contiguous cap=off k=2` ran
+//!   2026-08-05 19:52, `cap=on k=2` ran 2026-08-06 03:25, `paged k=2` ran
+//!   03:29 — three separate invocations spanning 7.5 hours. k=2 ratios are
+//!   arithmetic on unpaired singletons and **cannot be distinguished from the
+//!   noise floor**.
+//! * **Arm order was never counterbalanced.** In every block the order was
+//!   `contiguous cap=off` (1st), `contiguous cap=on` (2nd), `paged` (3rd), and
+//!   later positions ran slower. So the capture result is **conservative** (the
+//!   real effect is at least what is measured) and the paged penalty is
+//!   **inflated** (the real penalty is at most what is measured). Each claim
+//!   below says which way its bias runs.
+//!
 //! ## Steady-state decode, ms/token (`--release`)
 //!
 //! ```text
 //!                                          k=1                     k=2
-//!                                  (n=4/5 runs, median)      (single run)
+//!                                  (n=4/5 runs, median)   (ONE UNPAIRED RUN EACH)
 //!   paged        PlanOnce               151.1                    247.7
-//!   paged        Replan               13305.2                      —
+//!   paged        Replan               13305.2                   not run
 //!   contiguous   PlanOnce, capture off   97.5                    149.4
 //!   contiguous   PlanOnce, capture on    53.2                     85.9
-//!   contiguous   Replan                7023.0                      —
+//!   contiguous   Replan                7023.0                   not run
 //!   k >= 4       BOTH ARMS: CUDA_ERROR_OUT_OF_MEMORY (see below)
 //! ```
 //!
 //! ## The three results this was built to produce
 //!
-//! **1. CUDA-graph capture is worth ~2x, and it is pure launch overhead.**
-//! Persistence held CONSTANT (`PlanOnce` both sides, `optimize_calls_steady == 0`
-//! both sides), the only difference being the entry point:
+//! **1. CUDA-graph capture is worth ~2x, and it is launch overhead plus memset
+//! elimination — zero host-device traffic.**
 //!
 //! ```text
 //!                       forward_decode_step   forward_with_kv_context_captured
@@ -186,17 +220,38 @@
 //!   HtoD MB / copies      9014.573 / 491              9014.573 / 491
 //!   DtoH MB / copies       216.220 /  26               216.220 /  26
 //!   kernel launches         36,718                       9,214
+//!   device memsets      14,368 / 363.674 MB          2,811 / 280.238 MB
 //! ```
 //!
-//! The byte counts are **identical to the digit**. Capture moves not one extra
-//! or fewer byte; it collapses 36,718 kernel launches into 9,214 (-75%). Four
-//! paired runs give 2.32x / 2.75x / 1.81x / 1.53x — median **2.06x**, and the
-//! sign never flips. This is the number Fuel was holding the default-on decision
-//! against, and it is now isolated rather than bounded.
+//! **Two legitimate statistics, and they are not the same number.** Ratio of the
+//! two medians = **1.83x** (97.5195 / 53.1705). Median of the four paired ratios
+//! (2.32 / 2.75 / 1.81 / 1.53) = **2.06x**. Report it as **~2x, paired range
+//! 1.5-2.8x**, and never present 1.83 and 2.06 as the same quantity.
 //!
-//! Persistence and capture turn out to be **orthogonal seams**: persistence cuts
-//! HtoD bytes (70,617 -> 9,015 MB, from the 2026-08-01 table) and leaves launches
-//! at 36,718; capture cuts launches and leaves bytes untouched.
+//! Stronger than "the sign never flips": **the two four-run distributions do not
+//! overlap at all** — max(capture on) 67.118 < min(capture off) 93.131.
+//! Mann-Whitney, n=4 vs 4, complete separation: one-sided p = 1/70 ≈ **0.014**.
+//!
+//! **Bias direction: conservative.** Capture always ran in position 2, after the
+//! no-capture arm, and later positions are slower. The real effect is at least
+//! this large.
+//!
+//! **What actually establishes that persistence is held constant** — it is *not*
+//! `optimize_calls_steady == 0`, which only proves `optimize_graph` was not
+//! called. It is the call graph: `forward_decode_step` (`lazy.rs:8818`) is a
+//! three-line take/forward/put wrapper over
+//! `forward_with_kv_context_persistent`, and `forward_with_kv_context_captured`
+//! (`lazy.rs:9768`) builds its `DecodeSession` on that same shared path, per its
+//! own comment. Both arms are the persistent path; capture is the only
+//! difference. `optimize_calls_steady == 0` is corroboration, not the argument.
+//!
+//! HtoD and DtoH byte counts are identical to the digit, so capture moves **no
+//! host-device traffic** either way. It collapses 36,718 kernel launches into
+//! 9,214 (-75%) and 14,368 device memsets into 2,811 (-80%, 363.7 -> 280.2 MB).
+//!
+//! Persistence and capture are **orthogonal seams**: persistence cuts HtoD bytes
+//! (70,617 -> 9,015 MB, from the 2026-08-01 table) and leaves launches at 36,718;
+//! capture cuts launches and memsets and leaves host-device bytes untouched.
 //!
 //! **2. The release k=1 paged penalty is ~2.6x, NOT 10.4x.** The 10.4x came from
 //! a **debug** build (the prior session's `build_gpu_harness.bat` had no
@@ -204,9 +259,26 @@
 //! same-block ratios at k=1: paged / captured-contiguous = 4.43 / 2.59 / 2.09
 //! (median **2.59x**); paged / uncaptured-contiguous = 1.61 / 1.43 / 1.37
 //! (median **1.43x** — a much tighter estimate, because both sides then pay the
-//! same launch overhead). **No inversion point exists in the measurable range:**
-//! the ratio does not fall from k=1 to k=2 (2.59 -> 2.88 against captured
-//! contiguous), and k >= 4 does not run.
+//! same launch overhead).
+//!
+//! **Bias direction: inflationary.** Paged always ran in position 3 — the latest
+//! and slowest slot in every block. The real penalty is at most this large.
+//!
+//! **One pair is excluded, and here is why.** `sweepA` also produced paged 78.499
+//! against contiguous cap=off 93.131 — a ratio of **0.84, i.e. an inversion**,
+//! and 78.499 / 40.155 = 1.96 against cap=on. Both are excluded from the paired
+//! medians because `sweepA`'s contiguous pair and its paged run came from
+//! *different* `sweep.ps1` invocations (commands #4 and #5), so they are not a
+//! consecutive block and the pairing rule above does not hold for them. The
+//! exclusion is stated rather than silent because the excluded pair points the
+//! other way.
+//!
+//! **On the inversion point:** no k in the measurable range inverts the ratio.
+//! But the evidence for "the ratio does not fall with k" is weak — it rests on
+//! the unpaired k=2 singletons (2.59 -> 2.88) which the noise floor cannot
+//! resolve. What is solid is narrower: **no inversion was observed at k=1, and
+//! k >= 4 does not run at all**, so no k is available at which paged could be
+//! shown to win.
 //!
 //! **3. The host round-trip does NOT amortize across a batch.** DtoH totals,
 //! from `nsys --trace=cuda --stats=true`:
@@ -220,9 +292,18 @@
 //!          per token              13.51                  6.82
 //! ```
 //!
-//! Paged DtoH is **flat per forward step** and therefore scales linearly with k:
-//! doubling the batch doubles the round-trip. Contiguous's DtoH is a fixed
-//! ~216 MB plus a 0.128 MB logits readback per token — it is already free.
+//! **The supported finding: paged per-token DtoH did NOT fall as the batch
+//! doubled** (2,501 -> 2,913 MB/token). Whatever the exact functional form,
+//! batching does not amortize the round-trip, and that is the decision-relevant
+//! claim. Byte counts are exact, not noisy — unlike the timings, they are the
+//! same to the digit across runs.
+//!
+//! **"Scales linearly with k" is n=2 and is NOT load-bearing.** Two points
+//! cannot establish a slope. Per-forward-step DtoH being flat within 9% is
+//! consistent with linear scaling and is offered as a mechanism sketch only.
+//!
+//! Contiguous's DtoH is a fixed ~216 MB plus a 0.128 MB logits readback per
+//! token — it is already free.
 //!
 //! **This slope does not discriminate kernel shapes.** An earlier framing said a
 //! flat-vs-scaling DtoH slope chose between a monolithic paged CUDA kernel and
@@ -256,19 +337,27 @@
 //! server would actually get. No uniform batch was synthesized to obtain a
 //! prettier number.
 //!
-//! ## `LB_ARM=paged_sched` validity control: PASSES
+//! ## `LB_ARM=paged_sched` validity control — what it can and cannot rule out
 //!
 //! Run A (paged first): paged 78.5, scheduler 130.3. Run B (scheduler first):
-//! scheduler 113.6, paged 157.3. **The sign of the difference flips with run
-//! order**, so run position dominates the arm effect; medians agree within 3%
-//! (117.9 vs 122.0) and both report identical witnesses (`optimize_calls` 9
-//! total / 0 steady, `realize_count` 14). The direct drive measures the shipped
-//! path.
+//! scheduler 113.6, paged 157.3. The sign of the difference flips with run
+//! order; the two-sample "medians" (which at n=2 are just means) are 117.9 vs
+//! 122.0. Both arms report identical witnesses (`optimize_calls` 9 total /
+//! 0 steady, `realize_count` 14 per session).
 //!
-//! That same ordering effect is why every ratio above is quoted **paired within
-//! a block of consecutive runs**: the absolute paged k=1 number ranges 78.5 to
-//! 173.9 ms/token across five runs of identical configuration, while the paired
-//! paged/uncaptured-contiguous ratio stays inside 1.37-1.61.
+//! **Verdict: rules out a >2x discrepancy between the hand-driven path and the
+//! shipped `PagedSessionScheduler`; cannot discriminate below that.** This is
+//! n=2 per arm against a ~2.2x noise floor — it is an underpowered null, and an
+//! underpowered null is not a PASS. It was reported as one in the first draft;
+//! that is retracted. The harness's own rule (*"evidence invariant to the
+//! claim's truth carries no information"*) applies here in the ordinary
+//! direction, not inverted: a test that could not have detected a sub-2x
+//! difference says nothing about whether one exists.
+//!
+//! What the control does buy: the hand-driven drive is not off by an order of
+//! magnitude, and the witnesses match exactly, so the direct numbers are usable
+//! at the resolution the rest of this file quotes them (which is never finer
+//! than 2x).
 //!
 //! ## (a) `LB_PLAN` no longer has a default
 //!
