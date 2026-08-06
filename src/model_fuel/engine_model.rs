@@ -51,6 +51,49 @@ fn seed_for(request_id: &str, token_index: usize) -> u64 {
     hasher.finish()
 }
 
+/// Cap a request's generation budget to what remains of `context_length`
+/// after the prompt, so `should_continue()` stops the decode loop before
+/// Fuel's own cache bound would.
+///
+/// Returns `(effective_max_new_tokens, was_truncated)`. Pure and
+/// model-independent on purpose: the caller (`step_one`) needs a loaded
+/// checkpoint to reach this decision, but the decision itself does not, so it
+/// is split out here to be unit-testable without one.
+///
+/// The KV cache is pre-allocated at `max_seq_len = (prompt + max_new_tokens +
+/// 1).min(context_length)`. The `+1`/`.min()` already bound the cache
+/// allocation itself, but nothing previously bounded the LOOP: if `prompt +
+/// max_new_tokens + 1 > context_length`, `should_continue()` keeps driving
+/// decode steps against the client's original `max_new_tokens` right past the
+/// point the cache has room, and Fuel's own bound check (`cached_len + seq >
+/// max_seq_len` in fuel-core's lazy realize) returns `Err` mid-decode.
+/// `run_jobs`'s Complete mode then discards every token already generated and
+/// reports a bare HTTP 500 for a request that was otherwise succeeding.
+///
+/// Truncating the budget here instead makes the loop stop naturally, so the
+/// request returns the tokens that DO fit rather than erroring on the ones
+/// that don't. This is deliberately not wrap-around (candlelight's `position
+/// % context` reuse of cache slots): silently reusing cache positions changes
+/// what the model attends to. Returning fewer tokens is honest; returning
+/// tokens computed against the wrong context would not be.
+fn effective_generation_budget(
+    prompt_tokens: usize,
+    requested_max_new_tokens: usize,
+    context_length: usize,
+) -> (usize, bool) {
+    let want = prompt_tokens
+        .saturating_add(requested_max_new_tokens)
+        .saturating_add(1);
+    if want <= context_length {
+        (requested_max_new_tokens, false)
+    } else {
+        let truncated = context_length
+            .saturating_sub(prompt_tokens)
+            .saturating_sub(1);
+        (truncated, true)
+    }
+}
+
 /// A loaded Fuel model plus one decode session per in-flight request.
 ///
 /// `pub(crate)`, not `pub`: it implements `EngineModel`
@@ -124,6 +167,31 @@ impl FuelEngineModel {
                     .map_err(|e| anyhow::anyhow!("tokenizing prompt: {e}"))?
                     .get_ids()
                     .to_vec();
+
+                // Generation can overflow the context even when the prompt
+                // alone fits: shrink the request's own budget up front so the
+                // decode loop's `should_continue()` stops naturally instead
+                // of running into Fuel's cache bound mid-generation. See
+                // `effective_generation_budget` for why this is truncation,
+                // not wrap-around.
+                let (effective_budget, truncated) = effective_generation_budget(
+                    ids.len(),
+                    ctx.request.max_new_tokens,
+                    self.context_length,
+                );
+                if truncated {
+                    tracing::warn!(
+                        request_id = %ctx.request.id,
+                        requested_max_new_tokens = ctx.request.max_new_tokens,
+                        truncated_max_new_tokens = effective_budget,
+                        context_length = self.context_length,
+                        prompt_tokens = ids.len(),
+                        "requested max_new_tokens does not fit in context_length; \
+                         truncating the generation budget so this request returns \
+                         the tokens it can generate instead of erroring mid-decode"
+                    );
+                    ctx.request.max_new_tokens = effective_budget;
+                }
 
                 // Cache capacity is fixed at allocation, so it must cover
                 // prompt + generation. Capped at context_length because the KV
@@ -269,5 +337,41 @@ mod tests {
             "seeds 1..=5 over a flat distribution all produced the same token \
              ({tokens:?}) — select_token is not threading the seed through"
         );
+    }
+
+    #[test]
+    fn effective_generation_budget_untouched_when_it_fits() {
+        // 10 prompt + 20 requested + 1 = 31 <= 64 context: no truncation.
+        let (budget, truncated) = effective_generation_budget(10, 20, 64);
+        assert_eq!(budget, 20);
+        assert!(!truncated);
+    }
+
+    #[test]
+    fn effective_generation_budget_truncates_on_the_reviews_concrete_case() {
+        // The failure named in the review: context_length 512, a 500-token
+        // prompt, default max_tokens 100. 500 + 100 + 1 = 601 > 512, so the
+        // budget must shrink to what's actually left: 512 - 500 - 1 = 11.
+        let (budget, truncated) = effective_generation_budget(500, 100, 512);
+        assert_eq!(budget, 11);
+        assert!(truncated);
+    }
+
+    #[test]
+    fn effective_generation_budget_floors_at_zero_without_underflow() {
+        // Prompt fills the context to one token short: no room for a
+        // generation budget at all. Must floor at 0, not underflow/panic.
+        let (budget, truncated) = effective_generation_budget(511, 100, 512);
+        assert_eq!(budget, 0);
+        assert!(truncated);
+    }
+
+    #[test]
+    fn effective_generation_budget_boundary_is_not_truncated() {
+        // Exactly fits: prompt + requested + 1 == context_length is fine as
+        // requested, not a truncation case.
+        let (budget, truncated) = effective_generation_budget(10, 21, 32);
+        assert_eq!(budget, 21);
+        assert!(!truncated);
     }
 }

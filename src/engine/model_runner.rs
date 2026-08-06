@@ -4,6 +4,12 @@ use std::sync::mpsc::{Receiver, Sender};
 use tokio::sync::{mpsc as async_mpsc, oneshot};
 
 use crate::engine::{Request, RequestContext, RequestState};
+// Only the `not(fuel-engine)` `ModelRunner::start` names this bare — the
+// `impl EngineModel for crate::model::ParallelModelManager` below spells the
+// type out fully qualified, so it does not keep this import alive on its
+// own. Under `fuel-engine`, nothing in this file uses the bare name, so an
+// ungated import is an unused-import warning on that build.
+#[cfg(not(feature = "fuel-engine"))]
 use crate::model::ParallelModelManager;
 
 /// Response mode for inference jobs
@@ -40,12 +46,60 @@ pub(crate) trait EngineModel {
     /// Advance every request in `batch` by at most one token.
     ///
     /// Returns one entry per request, **positionally aligned with `batch`**.
+    /// Errors are the `Err` arm and abort the whole batch. That much holds;
+    /// see the next section before relying on anything about the `Ok` value.
     ///
-    /// `Some(tok)` means that request produced `tok` this step. **`None` means
-    /// it produced no token and that is not an error** — it is mid-chunked-
-    /// prefill or already stopped. Errors are the `Err` arm and abort the whole
-    /// batch. An implementation returning `Err` where `None` is meant turns
-    /// ordinary prefill progress into a failed request.
+    /// # Return value: currently unread, and implementors disagree about it
+    ///
+    /// This doc used to claim `Some(tok)` means "produced `tok` this step"
+    /// and `None` means "produced no token and that is not an error — mid-
+    /// chunked-prefill or already stopped." That description is not honoured
+    /// by either side of the trait as it stands:
+    ///
+    /// - The only caller, `run_jobs` in this file, matches `Ok(_)` on the
+    ///   whole `Vec` and never reads an individual entry — it checks
+    ///   `batch[0].state`/`batch[0].generated_tokens` instead. Nothing today
+    ///   depends on what the `Vec`'s elements contain.
+    /// - `ParallelModelManager::step_batch`
+    ///   (`model/parallel_model_manager.rs:1513`) sets an entry to `None` on
+    ///   the SAME step it pushes a token to `generated_tokens` and completes
+    ///   the request — using `None` for "produced a token and is now done",
+    ///   not "produced no token". `FuelEngineModel::step_batch`
+    ///   (`model_fuel/engine_model.rs`) uses `Some`/`None` closer to the
+    ///   original wording. The two implementations do not agree with each
+    ///   other, let alone with this doc.
+    ///
+    /// Do not add a caller that relies on the per-entry `Option` meaning
+    /// anything specific until this is reconciled — treat it as an unread
+    /// implementation detail for now. (Reconciling `ParallelModelManager`'s
+    /// behaviour is out of scope here; this paragraph only corrects the doc
+    /// to match reality.)
+    ///
+    /// # Caller precondition: `batch` must be every live request, every call
+    ///
+    /// Every request that is still live (not yet completed/errored/dropped)
+    /// MUST appear in `batch` on every `step_batch` call for as long as it
+    /// stays live. An implementation is entitled to treat a live request's
+    /// ABSENCE from `batch` as termination and free whatever per-request
+    /// state it holds (e.g. a KV cache) as a result.
+    ///
+    /// This holds today only because the current sole caller (`run_jobs`)
+    /// builds one `batch = vec![ctx]` per job and re-steps that same
+    /// single-request batch for the request's entire lifetime — so
+    /// `FuelEngineModel::step_batch`'s per-call session sweep (see
+    /// `model_fuel/engine_model.rs`), which drops any session whose id is not
+    /// in the current `batch`, is safe: "absent ⇒ dead" and "absent ⇒ still
+    /// live but not scheduled this round" are indistinguishable to that
+    /// sweep, and only the single-request-per-batch caller shape makes the
+    /// former the only real case. A future scheduler that steps a SUBSET of
+    /// live requests per call (e.g. true multi-request batching) would
+    /// violate this precondition silently: the sweep would free the KV cache
+    /// of a request that is still running, and the next step for that
+    /// request would either error on a missing session or, worse, get
+    /// handed a fresh session and silently restart from position 0 — a
+    /// cross-tenant correctness bug, not a leak. Any such scheduler must
+    /// either keep every live request in every `batch`, or `step_batch`
+    /// implementations that free on absence must be changed first.
     fn step_batch(&mut self, batch: &mut [RequestContext]) -> Result<Vec<Option<u32>>>;
 
     /// Detokenize.
@@ -173,6 +227,32 @@ impl ModelRunner {
         }
 
         std::thread::spawn(move || {
+            // The candlelight arm above auto-detects `.gguf` and routes to
+            // `load_gguf`. This arm has no GGUF loader at all — Fuel decode
+            // support is SafeTensors-only today (`load_llama_f32_from_dir`
+            // expects a directory with `model.safetensors`). Without this
+            // check, a GGUF-configured server rebuilt with `fuel-engine`
+            // would silently hand the `.gguf` file path to the SafeTensors
+            // loader and fail with a confusing "missing model.safetensors"
+            // error that names the wrong problem. Fail explicitly instead.
+            let is_gguf = model_path
+                .extension()
+                .map_or(false, |ext| ext.eq_ignore_ascii_case("gguf"));
+            if is_gguf {
+                let msg = format!(
+                    "fuel-engine does not yet support GGUF models (got {}); \
+                     the Fuel path currently loads SafeTensors only via \
+                     load_llama_f32_from_dir. Quantized/GGUF support is \
+                     pending `impl FuelDecoder for Llama3Model`. Rebuild \
+                     without --features fuel-engine to use this model, or \
+                     point at a SafeTensors checkpoint directory.",
+                    model_path.display()
+                );
+                eprintln!("{msg}");
+                drain_with_error(rx, &msg);
+                return;
+            }
+
             println!("Loading Fuel model from {}", model_path.display());
             match crate::model_fuel::engine_model::FuelEngineModel::load(
                 &model_path,
