@@ -201,7 +201,6 @@ async fn create_chat_completion(
     // If a model runner is available, enqueue the request and wait for generated text.
     if let Some(tx) = &state.inference_tx {
         let result = run_inference_once(tx, prompt.clone(), max_new_tokens, temperature).await?;
-        let text = result.text.clone();
 
         let created = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)?
@@ -216,15 +215,15 @@ async fn create_chat_completion(
                 index: 0,
                 message: ChatMessage {
                     role: "assistant".to_string(),
-                    content: text,
+                    content: result.text,
                     name: None,
                 },
-                finish_reason: "stop".to_string(),
+                finish_reason: result.finish_reason.as_str().to_string(),
             }],
             usage: Some(Usage {
-                prompt_tokens: prompt_tokens.len(),
-                completion_tokens: 0,
-                total_tokens: prompt_tokens.len(),
+                prompt_tokens: result.prompt_tokens,
+                completion_tokens: result.completion_tokens,
+                total_tokens: result.prompt_tokens + result.completion_tokens,
             }),
             lightbulb_result: None,
         });
