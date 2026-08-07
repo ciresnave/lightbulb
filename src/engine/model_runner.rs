@@ -45,6 +45,19 @@ pub struct CompletionResult {
     pub finish_reason: FinishReason,
 }
 
+/// One item on the streaming channel.
+///
+/// `Done` carries ONLY the finish reason. Adding `completion_tokens` for
+/// symmetry with `CompletionResult` is deliberately rejected: OpenAI omits
+/// `usage` from stream chunks, so nothing would consume it, and a field that
+/// exists because it looked symmetrical is one the next reader has to work out
+/// is unused.
+#[derive(Debug)]
+pub enum StreamItem {
+    Token(String),
+    Done { finish_reason: FinishReason },
+}
+
 /// Classify how a finished request ended.
 ///
 /// Reads `ctx.stopped_on_eos` rather than `ctx.state`, because
@@ -75,7 +88,7 @@ pub enum ResponseMode {
     /// Complete response - send final text when done
     Complete(oneshot::Sender<anyhow::Result<CompletionResult>>),
     /// Streaming response - send tokens as they are generated
-    Streaming(async_mpsc::UnboundedSender<Result<String>>),
+    Streaming(async_mpsc::UnboundedSender<Result<StreamItem>>),
 }
 
 /// Job submitted to the model runner thread
@@ -365,7 +378,16 @@ fn run_jobs<M: EngineModel>(mut model: M, rx: Receiver<InferenceJob>) {
         // Process based on response mode (move out of job to avoid borrow issues)
         match job.response_mode {
             ResponseMode::Streaming(stream_tx) => {
-                // Streaming mode: decode and send tokens incrementally
+                // Streaming mode: decode and send tokens incrementally.
+                //
+                // `finished_normally` distinguishes the loop's four `break`
+                // paths: a dropped receiver, a `decode_text` failure, a
+                // `step_batch` failure, and `should_continue()` going false.
+                // Only the last is a normal completion — the other three have
+                // either already sent `Err` or can no longer be received by
+                // anyone — so it is the only path that sets the flag before
+                // breaking.
+                let mut finished_normally = false;
                 loop {
                     match model.step_batch(&mut batch) {
                         Ok(_) => {
@@ -397,7 +419,7 @@ fn run_jobs<M: EngineModel>(mut model: M, rx: Receiver<InferenceJob>) {
                             {
                                 match model.decode_text(&[last_token], false) {
                                     Ok(token_text) => {
-                                        if stream_tx.send(Ok(token_text)).is_err() {
+                                        if stream_tx.send(Ok(StreamItem::Token(token_text))).is_err() {
                                             // Receiver dropped, stop generation
                                             break;
                                         }
@@ -410,6 +432,7 @@ fn run_jobs<M: EngineModel>(mut model: M, rx: Receiver<InferenceJob>) {
                             }
 
                             if !batch[0].should_continue() {
+                                finished_normally = true;
                                 break;
                             }
                         }
@@ -418,6 +441,16 @@ fn run_jobs<M: EngineModel>(mut model: M, rx: Receiver<InferenceJob>) {
                             break;
                         }
                     }
+                }
+
+                // Exactly one Done, carrying what the runner observed rather
+                // than what the handler would otherwise assume. Sent on the
+                // normal exit only — an error path already sent Err, and a
+                // dropped receiver cannot receive this either.
+                if finished_normally {
+                    let _ = stream_tx.send(Ok(StreamItem::Done {
+                        finish_reason: finish_reason_for(&batch[0]),
+                    }));
                 }
             }
             ResponseMode::Complete(resp_tx) => {

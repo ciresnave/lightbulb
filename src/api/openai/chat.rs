@@ -433,11 +433,10 @@ fn create_chat_stream(
         let chat_id = format!("chatcmpl-{}", uuid::Uuid::new_v4());
         let chat_id_for_stream = chat_id.clone();
         let model_for_stream = model.clone();
-        let chat_id_for_done = chat_id.clone();
-        let model_for_done = model.clone();
 
         use futures::stream::StreamExt as FuturesStreamExt;
         use tokio_stream::wrappers::UnboundedReceiverStream;
+        use crate::engine::model_runner::StreamItem;
 
         let token_stream = UnboundedReceiverStream::new(stream_rx)
             .scan(true, move |is_first, result| {
@@ -448,7 +447,7 @@ fn create_chat_stream(
 
                 async move {
                     match result {
-                        Ok(token_text) => Some(Ok(Event::default().data(
+                        Ok(StreamItem::Token(token_text)) => Some(Ok(Event::default().data(
                             serde_json::json!({
                                 "id": chat_id,
                                 "object": "chat.completion.chunk",
@@ -465,6 +464,20 @@ fn create_chat_stream(
                             })
                             .to_string(),
                         ))),
+                        Ok(StreamItem::Done { finish_reason }) => Some(Ok(Event::default().data(
+                            serde_json::json!({
+                                "id": chat_id,
+                                "object": "chat.completion.chunk",
+                                "created": created,
+                                "model": model,
+                                "choices": [{
+                                    "index": 0,
+                                    "delta": {},
+                                    "finish_reason": finish_reason.as_str()
+                                }]
+                            })
+                            .to_string(),
+                        ))),
                         Err(e) => Some(Ok(Event::default().data(
                             serde_json::json!({
                                 "error": {
@@ -476,27 +489,7 @@ fn create_chat_stream(
                         ))),
                     }
                 }
-            })
-            .chain(stream::once({
-                let chat_id = chat_id_for_done.clone();
-                let model = model_for_done.clone();
-                async move {
-                    Ok(Event::default().data(
-                        serde_json::json!({
-                            "id": chat_id,
-                            "object": "chat.completion.chunk",
-                            "created": created,
-                            "model": model,
-                            "choices": [{
-                                "index": 0,
-                                "delta": {},
-                                "finish_reason": "stop"
-                            }]
-                        })
-                        .to_string(),
-                    ))
-                }
-            }));
+            });
 
         return token_stream.boxed();
     }
