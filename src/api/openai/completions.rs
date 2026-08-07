@@ -101,12 +101,9 @@ pub async fn completions(
 
 /// Create completion
 async fn create_completion(
-    _state: AppState,
+    state: AppState,
     request: CompletionRequest,
 ) -> anyhow::Result<CompletionResponse> {
-    // TODO: Integrate with actual inference engine
-    // For now, return a mock response
-
     let created = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)?
         .as_secs();
@@ -116,13 +113,45 @@ async fn create_completion(
         PromptInput::Multiple(arr) => arr.join("\n"),
     };
 
+    // NO CHAT TEMPLATE. `/v1/completions` is OpenAI's raw-text endpoint; the
+    // prompt is used exactly as given. Templating belongs to
+    // `/v1/chat/completions` — see the chat-template-resolution spec.
+    let Some(tx) = &state.inference_tx else {
+        // Degrade the same way the chat endpoint does: the server is up, the
+        // model is not, and that is information rather than an error.
+        return Ok(CompletionResponse {
+            id: format!("cmpl-{}", uuid::Uuid::new_v4()),
+            object: "text_completion".to_string(),
+            created,
+            model: request.model.clone(),
+            choices: vec![CompletionChoice {
+                text: "No model available on the server.".to_string(),
+                index: 0,
+                logprobs: None,
+                finish_reason: "stop".to_string(),
+            }],
+            usage: None,
+        });
+    };
+
+    let max_new_tokens = request.max_tokens.unwrap_or(100);
+    let temperature = request.temperature as f64;
+    let result = crate::api::openai::chat::run_inference_once(
+        tx,
+        prompt_text.clone(),
+        max_new_tokens,
+        temperature,
+    )
+    .await?;
+
+    // `echo` concatenates with no separator: OpenAI returns the prompt
+    // followed immediately by its continuation, because the two are one
+    // continuous text. The placeholder's blank line was an artifact of the
+    // prompt and the placeholder being unrelated strings.
     let completion_text = if request.echo {
-        format!(
-            "{}\n\nThis is a placeholder completion. Inference engine integration pending.",
-            prompt_text
-        )
+        format!("{}{}", prompt_text, result.text)
     } else {
-        "This is a placeholder completion. Inference engine integration pending.".to_string()
+        result.text
     };
 
     Ok(CompletionResponse {
@@ -134,12 +163,12 @@ async fn create_completion(
             text: completion_text,
             index: 0,
             logprobs: None,
-            finish_reason: "stop".to_string(),
+            finish_reason: result.finish_reason.as_str().to_string(),
         }],
         usage: Some(Usage {
-            prompt_tokens: 10,
-            completion_tokens: 15,
-            total_tokens: 25,
+            prompt_tokens: result.prompt_tokens,
+            completion_tokens: result.completion_tokens,
+            total_tokens: result.prompt_tokens + result.completion_tokens,
         }),
     })
 }

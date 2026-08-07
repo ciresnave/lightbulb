@@ -205,3 +205,46 @@ async fn streaming_terminal_chunk_reports_length() {
         "the terminal chunk did not report the observed reason"
     );
 }
+
+/// `/v1/completions` must reach the model. It returned a hardcoded placeholder
+/// with HTTP 200, so status and shape assertions all passed against a stub —
+/// which is why the provenance assertion below is the load-bearing one.
+///
+/// ## The `finish_reason` here rests on observation, not on the chat tests
+///
+/// The prompt choice cannot be borrowed from the two tests above.
+/// `/v1/completions` applies NO chat template, so the model sees the bare
+/// `"The capital of France is"` rather than chat's `"user: ..."` join — a
+/// different input, which could perfectly well emit EOS as its first token the
+/// way `truncated_generation_reports_length`'s original prompt did. It does
+/// not. Observed post-fix at `temperature: 0.0`, twice: `finish_reason:
+/// "length"`, `prompt_tokens: 6`, `completion_tokens: 6`, text
+/// `"Paris.\n\n2."` — no EOS, the 6-token cap is what stops it, so `"length"`
+/// is the correct answer for this prompt and not merely the convenient one.
+#[tokio::test]
+#[ignore = "needs the TinyLlama checkpoint"]
+async fn completions_endpoint_returns_model_output() {
+    let (status, v) = post_json(
+        "/v1/completions",
+        serde_json::json!({
+            "model": "tinyllama",
+            "prompt": "The capital of France is",
+            "max_tokens": 6,
+            "temperature": 0.0
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    eprintln!("completions_endpoint_returns_model_output JSON: {v}");
+
+    let text = v["choices"][0]["text"].as_str().expect("no choices[0].text");
+    assert!(!text.trim().is_empty(), "the endpoint returned no text");
+    assert!(
+        !text.contains("placeholder completion"),
+        "the endpoint is still returning its hardcoded placeholder: {text:?}"
+    );
+    assert_eq!(
+        v["choices"][0]["finish_reason"], "length",
+        "a 6-token cap should truncate this prompt"
+    );
+}
