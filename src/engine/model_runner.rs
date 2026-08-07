@@ -47,15 +47,22 @@ pub struct CompletionResult {
 
 /// Classify how a finished request ended.
 ///
-/// **`complete()` is checked FIRST, and the order is load-bearing.** A request
-/// whose EOS lands on its final allowed token satisfies both conditions, and it
-/// stopped because the model said so — reporting `Length` there would tell a
-/// client to continue a generation the model had already finished.
+/// Reads `ctx.stopped_on_eos` rather than `ctx.state`, because
+/// `RequestState::Completed` cannot answer this question: every backend
+/// completes a request on `is_eos || tokens_generated >= max_new_tokens`
+/// (EOS-only completion would leave an ordinary budget-exhausted request
+/// stuck in `Decoding` forever, leaking its KV cache), so by the time a
+/// request reaches `Completed` the two exits are already indistinguishable
+/// from `state` alone. `stopped_on_eos` is recorded by the backend at the
+/// point where it still knows which condition fired, so there is no
+/// ordering trap here to get wrong — unlike the old `state`-based version,
+/// which had to check `Completed` before the token count precisely because
+/// EOS landing on the final allowed token satisfies both at once.
 ///
 /// A free function over `RequestContext` rather than a method, so it is
 /// unit-testable without a model, a checkpoint, or a runner thread.
 pub fn finish_reason_for(ctx: &RequestContext) -> FinishReason {
-    if matches!(ctx.state, RequestState::Completed) {
+    if ctx.stopped_on_eos {
         FinishReason::Stop
     } else {
         FinishReason::Length
@@ -469,7 +476,13 @@ mod tests {
     use super::*;
     use crate::engine::{Request, RequestContext};
 
-    fn ctx_with(max_new: usize, generated: usize, completed: bool) -> RequestContext {
+    /// Builds a context that has already been marked `Completed` — every
+    /// real backend does that unconditionally on `is_eos ||
+    /// tokens_generated >= max_new_tokens`, so `state` alone never
+    /// distinguishes the two exits. `stopped_on_eos` is set directly here,
+    /// the same way a real backend sets it: at the point completion is
+    /// decided, not reconstructed afterward.
+    fn ctx_with(max_new: usize, generated: usize, stopped_on_eos: bool) -> RequestContext {
         let mut c = RequestContext::new(Request {
             id: "t".to_string(),
             prompt: "p".to_string(),
@@ -479,17 +492,20 @@ mod tests {
         for _ in 0..generated {
             c.record_token();
         }
-        if completed {
-            c.complete();
-        }
+        c.stopped_on_eos = stopped_on_eos;
+        c.complete();
         c
     }
 
-    /// Hitting the cap must report Length. This is the defect: the API says
-    /// "stop" here, which tells a client the model finished when it was cut
-    /// off, so the client does not continue a truncated generation.
+    /// Hitting the cap without EOS must report Length. This is the original
+    /// defect: both backends call `ctx.complete()` on `tokens_generated >=
+    /// max_new_tokens` alone — EOS-only completion would leak a KV-cache
+    /// session on every ordinary budget-exhausted request — so `state`
+    /// becomes `Completed` here too, exactly like the EOS case. Only
+    /// `stopped_on_eos` (false here) tells them apart; a `finish_reason_for`
+    /// that read `state` instead would report `Stop` and fail this test.
     #[test]
-    fn reaching_the_token_cap_is_length() {
+    fn hitting_the_cap_without_eos_is_length() {
         let c = ctx_with(8, 8, false);
         assert_eq!(finish_reason_for(&c), FinishReason::Length);
     }
@@ -502,9 +518,11 @@ mod tests {
         assert_eq!(finish_reason_for(&c), FinishReason::Stop);
     }
 
-    /// EOS on the very last allowed token is Stop, not Length. Both conditions
-    /// are true at once here, and the order of the checks decides the answer —
-    /// an implementation testing the cap first gets this wrong.
+    /// EOS on the very last allowed token is Stop, not Length. Both
+    /// `stopped_on_eos` and `tokens_generated == max_new_tokens` hold at
+    /// once here; this guards that the flag — not the token count — is what
+    /// decides the answer, unlike the old state-based version where the
+    /// check order decided it.
     #[test]
     fn eos_on_the_final_allowed_token_is_stop() {
         let c = ctx_with(8, 8, true);

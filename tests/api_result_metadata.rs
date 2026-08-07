@@ -58,6 +58,20 @@ async fn post_json(path: &str, body: serde_json::Value) -> (StatusCode, serde_js
 /// A generation cut off by `max_tokens` must say so. Reporting "stop" here
 /// tells a client the model finished when it was truncated, so the client does
 /// not continue. This FAILS before the fix.
+///
+/// ## Prompt choice is load-bearing here
+///
+/// The original prompt, "Write a long essay about the sea.", does NOT
+/// exercise this at all: at `temperature: 0.0` it makes TinyLlama emit EOS
+/// as its very first generated token (`completion_tokens: 1`, content
+/// `"</s>"`), so the 6-token cap is never reached and `finish_reason:
+/// "stop"` is the CORRECT answer for that generation — the test failed for
+/// the wrong reason (an unrepresentative prompt), not because the fix was
+/// broken. Confirmed independently on `usage_counts_real_tokens`'s prompt
+/// below, which reliably runs to the cap (`completion_tokens: 6`,
+/// non-EOS-looking text `"\n\n1. Answer:"`) across two separate runs and,
+/// post-fix, correctly reports `"length"` there. This test reuses that
+/// same proven-to-truncate prompt rather than gambling on an untested one.
 #[tokio::test]
 #[ignore = "needs the TinyLlama checkpoint"]
 async fn truncated_generation_reports_length() {
@@ -65,13 +79,14 @@ async fn truncated_generation_reports_length() {
         "/v1/chat/completions",
         serde_json::json!({
             "model": "tinyllama",
-            "messages": [{"role": "user", "content": "Write a long essay about the sea."}],
+            "messages": [{"role": "user", "content": "Name the capital of France."}],
             "max_tokens": 6,
             "temperature": 0.0
         }),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
+    eprintln!("truncated_generation_reports_length JSON: {v}");
     assert_eq!(
         v["choices"][0]["finish_reason"], "length",
         "a generation stopped by max_tokens reported {:?}",
@@ -95,6 +110,7 @@ async fn usage_counts_real_tokens() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
+    eprintln!("usage_counts_real_tokens JSON: {v}");
 
     let completion = v["usage"]["completion_tokens"].as_u64().expect("no completion_tokens");
     let prompt = v["usage"]["prompt_tokens"].as_u64().expect("no prompt_tokens");
