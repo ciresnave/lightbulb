@@ -87,12 +87,37 @@ builder. Splitting them invites a caller to have three of the four.
 **They are observed, not derived.** This is the point of the change: today the
 handler guesses because the runner never tells it.
 
-- **`finish_reason`** — `run_jobs` already distinguishes the two exits. A
-  request whose state reaches `Completed` stopped on EOS
-  (`ctx.complete()` is called from the EOS check in both backends). A request
-  that leaves the loop with `state == Decoding` and
-  `tokens_generated >= max_new_tokens` hit the cap. That distinction exists in
-  `RequestContext` today and is discarded.
+- **`finish_reason`** — recorded by a `RequestContext.stopped_on_eos: bool`,
+  set at the point where the fact is known.
+
+  > **CORRECTED 2026-08-07, mid-implementation.** This section originally
+  > claimed *"a request whose state reaches `Completed` stopped on EOS
+  > (`ctx.complete()` is called from the EOS check in both backends)"*. **That
+  > is false.** Both backends complete on `is_eos || tokens_generated >=
+  > max_new_tokens` — `parallel_model_manager.rs:1510` and
+  > `engine_model.rs:247`. `Completed` therefore does not distinguish the two
+  > exits, and a classifier reading it can never return `Length`.
+  >
+  > The Fuel path's `|| cap` clause was added deliberately, by this project's
+  > own session-leak fix: EOS-only completion left ordinary requests in
+  > `Decoding` forever, so nothing removed their session and each leaked a
+  > ~92 MiB KV cache. That fix is correct and must not be reverted. It also
+  > destroyed the signal this spec assumed — two correct local changes
+  > composing into a defect.
+  >
+  > Caught by Task 2's checkpoint test failing with `"stop"` on a generation
+  > capped at 6 tokens. Reading the code would have caught it earlier; the
+  > spec asserted the mechanism without checking it.
+
+  `stopped_on_eos` defaults to `false` and is set `true` only in the EOS half of
+  the existing condition, in both backends. `finish_reason_for` reads it
+  directly.
+
+  **The ordering trap dissolves rather than moving.** An EOS landing on the
+  final allowed token sets the flag, so it reports `Stop` — correct — without
+  anyone having to order two conditions correctly. The test guarding it stays,
+  because it now guards that the *flag* is set on that path rather than that a
+  comparison is written the right way round.
 
   **These two are exhaustive for a `CompletionResult`, and only because the
   other exits do not produce one.** A mid-decode error, a `decode_text` failure,
