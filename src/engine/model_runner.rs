@@ -419,7 +419,10 @@ fn run_jobs<M: EngineModel>(mut model: M, rx: Receiver<InferenceJob>) {
                             {
                                 match model.decode_text(&[last_token], false) {
                                     Ok(token_text) => {
-                                        if stream_tx.send(Ok(StreamItem::Token(token_text))).is_err() {
+                                        if stream_tx
+                                            .send(Ok(StreamItem::Token(token_text)))
+                                            .is_err()
+                                        {
                                             // Receiver dropped, stop generation
                                             break;
                                         }

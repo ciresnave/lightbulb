@@ -434,12 +434,12 @@ fn create_chat_stream(
         let chat_id_for_stream = chat_id.clone();
         let model_for_stream = model.clone();
 
+        use crate::engine::model_runner::StreamItem;
         use futures::stream::StreamExt as FuturesStreamExt;
         use tokio_stream::wrappers::UnboundedReceiverStream;
-        use crate::engine::model_runner::StreamItem;
 
-        let token_stream = UnboundedReceiverStream::new(stream_rx)
-            .scan(true, move |is_first, result| {
+        let token_stream =
+            UnboundedReceiverStream::new(stream_rx).scan(true, move |is_first, result| {
                 let chat_id = chat_id_for_stream.clone();
                 let model = model_for_stream.clone();
                 let first = *is_first;
