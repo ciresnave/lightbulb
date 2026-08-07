@@ -160,6 +160,12 @@ pub struct RequestContext {
     /// `0.0` means greedy. Defaults to `0.0` so existing constructors are
     /// unchanged and deterministic.
     pub temperature: f64,
+    /// How many tokens the model's own tokenizer produced for the prompt.
+    ///
+    /// Set by whichever backend tokenized during prefill. Defaults to 0 so
+    /// existing constructors are unchanged; a handler must not substitute its
+    /// own tokenizer, which is how this number drifts from what the model saw.
+    pub prompt_tokens: usize,
 }
 
 impl RequestContext {
@@ -172,6 +178,7 @@ impl RequestContext {
             cache_index: None,
             generated_tokens: Vec::new(),
             temperature: 0.0,
+            prompt_tokens: 0,
         }
     }
 

@@ -1244,6 +1244,11 @@ impl ParallelModelManager {
                     // Tokenize the prompt
                     let tokens = self.tokenize(&ctx.request.prompt, true)?;
 
+                    // Record the real count before any prefix-cache shortcut:
+                    // `usage.prompt_tokens` must describe the whole prompt, not
+                    // the uncached remainder.
+                    ctx.prompt_tokens = tokens.len();
+
                     // Try to get cached prefix KV (find best matching prefix)
                     if let Some(cached_entry) = self.prefix_cache.get_best_prefix(&tokens) {
                         // Cache hit! Restore KV and treat as if we just finished prefill

@@ -200,7 +200,8 @@ async fn create_chat_completion(
 
     // If a model runner is available, enqueue the request and wait for generated text.
     if let Some(tx) = &state.inference_tx {
-        let text = run_inference_once(tx, prompt.clone(), max_new_tokens, temperature).await?;
+        let result = run_inference_once(tx, prompt.clone(), max_new_tokens, temperature).await?;
+        let text = result.text.clone();
 
         let created = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)?
@@ -270,7 +271,7 @@ pub(crate) async fn run_inference_once(
     prompt: String,
     max_new_tokens: usize,
     temperature: f64,
-) -> anyhow::Result<String> {
+) -> anyhow::Result<crate::engine::model_runner::CompletionResult> {
     let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
     let job = crate::engine::model_runner::InferenceJob {
         id: uuid::Uuid::new_v4().to_string(),
@@ -294,7 +295,9 @@ pub(crate) async fn run_inference_once_owned(
     max_new_tokens: usize,
     temperature: f64,
 ) -> anyhow::Result<String> {
-    run_inference_once(&tx, prompt, max_new_tokens, temperature).await
+    run_inference_once(&tx, prompt, max_new_tokens, temperature)
+        .await
+        .map(|r| r.text)
 }
 
 /// Drive the contract retry loop for a request that carries an

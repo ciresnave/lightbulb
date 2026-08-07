@@ -12,11 +12,61 @@ use crate::engine::{Request, RequestContext, RequestState};
 #[cfg(not(feature = "fuel-engine"))]
 use crate::model::ParallelModelManager;
 
+/// Why generation stopped, in OpenAI's vocabulary.
+///
+/// Two variants only. OpenAI also defines `content_filter` and `tool_calls`;
+/// nothing in Lightbulb produces either, and an enum carrying variants no
+/// code can construct is worse than one that grows when a producer appears.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FinishReason {
+    /// The model emitted an end-of-sequence token.
+    Stop,
+    /// `max_new_tokens` was reached with no EOS. Continuing is meaningful,
+    /// which is why a client needs to be able to tell this from `Stop`.
+    Length,
+}
+
+impl FinishReason {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            FinishReason::Stop => "stop",
+            FinishReason::Length => "length",
+        }
+    }
+}
+
+/// Everything a completion response needs, reported by the runner rather than
+/// guessed by the handler.
+#[derive(Debug)]
+pub struct CompletionResult {
+    pub text: String,
+    pub prompt_tokens: usize,
+    pub completion_tokens: usize,
+    pub finish_reason: FinishReason,
+}
+
+/// Classify how a finished request ended.
+///
+/// **`complete()` is checked FIRST, and the order is load-bearing.** A request
+/// whose EOS lands on its final allowed token satisfies both conditions, and it
+/// stopped because the model said so — reporting `Length` there would tell a
+/// client to continue a generation the model had already finished.
+///
+/// A free function over `RequestContext` rather than a method, so it is
+/// unit-testable without a model, a checkpoint, or a runner thread.
+pub fn finish_reason_for(ctx: &RequestContext) -> FinishReason {
+    if matches!(ctx.state, RequestState::Completed) {
+        FinishReason::Stop
+    } else {
+        FinishReason::Length
+    }
+}
+
 /// Response mode for inference jobs
 #[derive(Debug)]
 pub enum ResponseMode {
     /// Complete response - send final text when done
-    Complete(oneshot::Sender<anyhow::Result<String>>),
+    Complete(oneshot::Sender<anyhow::Result<CompletionResult>>),
     /// Streaming response - send tokens as they are generated
     Streaming(async_mpsc::UnboundedSender<Result<String>>),
 }
@@ -365,7 +415,7 @@ fn run_jobs<M: EngineModel>(mut model: M, rx: Receiver<InferenceJob>) {
             }
             ResponseMode::Complete(resp_tx) => {
                 // Complete mode: generate all tokens then send final text
-                let mut final_result: Option<anyhow::Result<String>> = None;
+                let mut final_result: Option<anyhow::Result<CompletionResult>> = None;
 
                 loop {
                     match model.step_batch(&mut batch) {
@@ -392,7 +442,14 @@ fn run_jobs<M: EngineModel>(mut model: M, rx: Receiver<InferenceJob>) {
                 if final_result.is_none() {
                     let generated_tokens = batch[0].generated_tokens.clone();
                     match model.decode_text(&generated_tokens, false) {
-                        Ok(text) => final_result = Some(Ok(text)),
+                        Ok(text) => {
+                            final_result = Some(Ok(CompletionResult {
+                                text,
+                                prompt_tokens: batch[0].prompt_tokens,
+                                completion_tokens: batch[0].tokens_generated,
+                                finish_reason: finish_reason_for(&batch[0]),
+                            }))
+                        }
                         Err(e) => final_result = Some(Err(e)),
                     }
                 }
@@ -405,4 +462,52 @@ fn run_jobs<M: EngineModel>(mut model: M, rx: Receiver<InferenceJob>) {
     }
 
     println!("Model runner thread exiting (receiver closed)");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::{Request, RequestContext};
+
+    fn ctx_with(max_new: usize, generated: usize, completed: bool) -> RequestContext {
+        let mut c = RequestContext::new(Request {
+            id: "t".to_string(),
+            prompt: "p".to_string(),
+            max_new_tokens: max_new,
+        });
+        c.start_decoding();
+        for _ in 0..generated {
+            c.record_token();
+        }
+        if completed {
+            c.complete();
+        }
+        c
+    }
+
+    /// Hitting the cap must report Length. This is the defect: the API says
+    /// "stop" here, which tells a client the model finished when it was cut
+    /// off, so the client does not continue a truncated generation.
+    #[test]
+    fn reaching_the_token_cap_is_length() {
+        let c = ctx_with(8, 8, false);
+        assert_eq!(finish_reason_for(&c), FinishReason::Length);
+    }
+
+    /// EOS must report Stop. Guards the inverse error — an implementation that
+    /// hardcoded Length would pass the test above and fail this one.
+    #[test]
+    fn completing_before_the_cap_is_stop() {
+        let c = ctx_with(8, 3, true);
+        assert_eq!(finish_reason_for(&c), FinishReason::Stop);
+    }
+
+    /// EOS on the very last allowed token is Stop, not Length. Both conditions
+    /// are true at once here, and the order of the checks decides the answer —
+    /// an implementation testing the cap first gets this wrong.
+    #[test]
+    fn eos_on_the_final_allowed_token_is_stop() {
+        let c = ctx_with(8, 8, true);
+        assert_eq!(finish_reason_for(&c), FinishReason::Stop);
+    }
 }

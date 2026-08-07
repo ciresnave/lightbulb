@@ -65,6 +65,7 @@ pub async fn execute_contract_with_runner(
                 resp_rx
                     .await
                     .map_err(|e| anyhow::anyhow!("inference runner dropped: {}", e))?
+                    .map(|r| r.text)
             }
         },
     )

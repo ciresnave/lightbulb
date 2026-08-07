@@ -135,9 +135,12 @@ async fn live_smoke_plain_generation() {
     .expect("send failed");
 
     match resp_rx.await {
-        Ok(Ok(text)) => {
-            println!("[smoke] model output: {text:?}");
-            assert!(!text.is_empty(), "model should produce at least one token");
+        Ok(Ok(result)) => {
+            println!("[smoke] model output: {:?}", result.text);
+            assert!(
+                !result.text.is_empty(),
+                "model should produce at least one token"
+            );
         }
         Ok(Err(e)) => panic!("inference error: {e}"),
         Err(e) => panic!("channel error: {e}"),

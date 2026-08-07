@@ -168,6 +168,8 @@ impl FuelEngineModel {
                     .get_ids()
                     .to_vec();
 
+                ctx.prompt_tokens = ids.len();
+
                 // Generation can overflow the context even when the prompt
                 // alone fits: shrink the request's own budget up front so the
                 // decode loop's `should_continue()` stops naturally instead
