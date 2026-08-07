@@ -174,6 +174,28 @@ it makes the API's truthfulness depend on which mode you called.
 will not be found by looking at `api/`. It uses only the text, so it takes
 `.text` and is otherwise unaffected.
 
+> **CORRECTED 2026-08-07, after the whole-branch review.** The last sentence is
+> false, and it contradicted this spec's own defect table.
+>
+> The table names `chat.rs:376` on `main` as a defect-2 site. That line is in
+> `build_contract_response`, which is reachable whenever a request sets
+> `lightbulb.output_contract` — and it **cannot** be fixed while
+> `contracts/executor.rs` takes `.text`, because the metadata has to travel
+> through the contract retry loop to reach it. So §4 asserted the executor was
+> unaffected while the defect table required changing it.
+>
+> The plan inherited §4's version, no task touched the contract path, and all
+> four per-task reviews passed. Three of the four enumerated defect sites were
+> fixed and the branch claimed the set. `execute_contract`'s closure now yields
+> `CompletionResult`, and `ContractExecutionResult` carries usage **summed over
+> every attempt** with `finish_reason` from the **final** attempt.
+>
+> Worth stating why this survived: §4 was a *coverage claim*, and coverage
+> claims read as bookkeeping rather than as assertions, so nothing tested it.
+> Same shape as this spec's §2 correction and as Task 3's "no streaming client
+> exists" ruling — three instances on one branch of a premise that was never
+> checked because of the category it belonged to.
+
 ## §5 — `/v1/completions`
 
 `create_completion` takes `state` rather than `_state` and dispatches through

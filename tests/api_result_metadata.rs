@@ -4,7 +4,13 @@
 //! routing, JSON, the channel and the runner are all exercised. Only the TCP
 //! socket is skipped, and the socket is not what is at risk.
 //!
-//! Run: `cargo test --release --features fuel-engine --test api_result_metadata -- --ignored --nocapture`
+//! Run: `cargo test --release --features fuel-engine --test api_result_metadata -- --ignored --nocapture --test-threads=1`
+//!
+//! `--test-threads=1` is load-bearing, not tidiness: every test here starts its
+//! own runner and so loads its own ~2.2 GB copy of the checkpoint. Run in
+//! parallel they exhaust host memory and the process dies with
+//! `STATUS_STACK_BUFFER_OVERRUN` (or `memory allocation of N bytes failed`)
+//! before any assertion is reached.
 #![cfg(feature = "fuel-engine")]
 
 use std::path::PathBuf;
@@ -25,6 +31,32 @@ fn tinyllama_dir() -> Option<PathBuf> {
         ),
     };
     p.join("model.safetensors").is_file().then_some(p)
+}
+
+/// Count `text` with the **model's own** tokenizer, on the same checkpoint the
+/// runner loaded.
+///
+/// This is the whole point of the `prompt_tokens` assertions: a word count is
+/// the defect (`chat.rs` used `prompt.split_whitespace()`), and a word count
+/// satisfies `> 0` just as happily as a real token count does, so only an
+/// equality check against the tokenizer has any teeth.
+///
+/// `add_special_tokens = true` is not a guess, and must never be traded for a
+/// fudge factor. It mirrors the single call the backend makes during
+/// prefill — `model_fuel/engine_model.rs`'s `encode(ctx.request.prompt, true)`,
+/// whose `ids.len()` becomes `ctx.prompt_tokens` verbatim. For TinyLlama that
+/// prepends BOS, which is why `"The capital of France is"` counts 6 (`<s> ▁The
+/// ▁capital ▁of ▁France ▁is`) and not 5. If a count here is ever off by one,
+/// the fix is this flag, never a `+ 1` at the call site.
+fn tokenizer_count(text: &str) -> u64 {
+    let dir = tinyllama_dir()
+        .expect("no TinyLlama snapshot — this asserts API behaviour, so it fails rather than skipping");
+    let tok = tokenizers::Tokenizer::from_file(dir.join("tokenizer.json"))
+        .expect("loading the checkpoint's tokenizer.json");
+    tok.encode(text, true)
+        .expect("tokenizing the prompt")
+        .get_ids()
+        .len() as u64
 }
 
 /// Drive the real router with a real runner and collect the whole response
@@ -141,9 +173,94 @@ async fn usage_counts_real_tokens() {
 
     // Exact, not `> 0`: the request caps generation at 6, and a truncated
     // generation produces exactly that. `> 0` would pass on 1.
+    //
+    // Note this one alone does NOT close the "always report the cap" mutation
+    // (`completion_tokens: batch[0].request.max_new_tokens`), because here the
+    // right answer and the cap are the same number. `eos_terminated_generation_
+    // reports_stop` below is what discriminates them: 1 against a cap of 32.
     assert_eq!(completion, 6, "completion_tokens should equal the tokens generated");
-    assert!(prompt > 0, "prompt_tokens is zero — the prompt was never counted");
+
+    // The string the model saw is NOT the message content. `create_chat_
+    // completion` joins messages as `format!("{}: {}", role, content)` and
+    // `join("\n")`s them, so a single user message reaches the tokenizer as the
+    // literal below. Counting the bare content would compare against a prompt
+    // nothing ever tokenized.
+    let expected_prompt = tokenizer_count("user: Name the capital of France.");
+    eprintln!("tokenizer says prompt_tokens should be {expected_prompt}");
+    assert_eq!(
+        prompt, expected_prompt,
+        "prompt_tokens disagrees with the model's own tokenizer — \
+         a word count of this prompt is 6, which is why `> 0` never caught it"
+    );
     assert_eq!(total, prompt + completion, "total_tokens is not the sum of its parts");
+}
+
+/// A generation that ends on EOS must say `"stop"` — the inverse of
+/// `truncated_generation_reports_length`, and the only test in the suite that
+/// exercises `stopped_on_eos == true` from a real backend.
+///
+/// ## Why the whole suite needed this
+///
+/// Every other integration test here asserts `"length"`, and the unit tests in
+/// `model_runner.rs` set `stopped_on_eos` directly, so they exercise the
+/// direction of `finish_reason_for`'s if/else and nothing that produces the
+/// flag. Making the EOS check unconditionally false at all four completion
+/// sites — `model/parallel_model_manager.rs` and `model_fuel/engine_model.rs`
+/// — left the entire suite green: every EOS-terminated response would have
+/// reported `"length"`. This test is what turns that mutation red.
+///
+/// ## Prompt choice, and why `completion_tokens < 32` is half the assertion
+///
+/// `"Write a long essay about the sea."` at `temperature: 0.0` makes TinyLlama
+/// emit EOS as its FIRST generated token (`completion_tokens: 1`, content
+/// `"</s>"`) — observed while `truncated_generation_reports_length` was being
+/// debugged, where that behaviour was the problem rather than the point. A cap
+/// of 32 against a run that ends at 1 means `"stop"` cannot be arrived at by
+/// running out of budget, and the token assertion is what proves it: `"stop"`
+/// alone would also pass if the run went the full 32 and the reason were
+/// hardcoded.
+///
+/// ## The `"</s>"` in the content is a real, pre-existing wart
+///
+/// Expect `choices[0].message.content` to be the literal `"</s>"`. Both
+/// backends push the sampled token and count it BEFORE testing it for EOS, and
+/// `run_jobs` calls `decode_text(.., false)` — `skip_special = false` — so the
+/// EOS token is decoded straight into the returned text. That is a real
+/// pre-existing defect and deliberately NOT fixed here; it is out of this
+/// pass's scope. It is recorded rather than asserted so that fixing it later
+/// does not break this test, which is about `finish_reason`.
+#[tokio::test]
+#[ignore = "needs the TinyLlama checkpoint"]
+async fn eos_terminated_generation_reports_stop() {
+    let (status, v) = post_json(
+        "/v1/chat/completions",
+        serde_json::json!({
+            "model": "tinyllama",
+            "messages": [{"role": "user", "content": "Write a long essay about the sea."}],
+            "max_tokens": 32,
+            "temperature": 0.0
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    eprintln!("eos_terminated_generation_reports_stop JSON: {v}");
+
+    assert_eq!(
+        v["choices"][0]["finish_reason"], "stop",
+        "a generation that ended on EOS reported {:?}",
+        v["choices"][0]["finish_reason"]
+    );
+
+    // The other half: `"stop"` is only meaningful if the run ended early. A
+    // generation that reached the cap and still said "stop" is the bug.
+    let completion = v["usage"]["completion_tokens"]
+        .as_u64()
+        .expect("no completion_tokens");
+    assert!(
+        completion < 32,
+        "reported \"stop\" but generated {completion} of 32 tokens — \
+         this ran to the cap, so \"stop\" is not an observed EOS"
+    );
 }
 
 /// The streaming terminal chunk must carry the reason the runner observed.
@@ -247,4 +364,28 @@ async fn completions_endpoint_returns_model_output() {
         v["choices"][0]["finish_reason"], "length",
         "a 6-token cap should truncate this prompt"
     );
+
+    // `usage` needs its own assertions here. `completions.rs` declares its OWN
+    // `Usage` struct and writes its own sum, a code path `usage_counts_real_
+    // tokens` never reaches, so chat's coverage buys this endpoint nothing.
+    // The stub this replaced returned `prompt_tokens: 10, completion_tokens:
+    // 15, total_tokens: 25` — internally consistent, so even a `total ==
+    // prompt + completion` check passes against it. Only the two exact values
+    // below rule it out.
+    let completion = v["usage"]["completion_tokens"]
+        .as_u64()
+        .expect("no completion_tokens");
+    let prompt = v["usage"]["prompt_tokens"].as_u64().expect("no prompt_tokens");
+    let total = v["usage"]["total_tokens"].as_u64().expect("no total_tokens");
+
+    assert_eq!(completion, 6, "completion_tokens should equal the tokens generated");
+    // NO chat template on this endpoint, so the model sees the prompt exactly
+    // as sent — no `"user: "` prefix, unlike the chat tests above.
+    let expected_prompt = tokenizer_count("The capital of France is");
+    eprintln!("tokenizer says prompt_tokens should be {expected_prompt}");
+    assert_eq!(
+        prompt, expected_prompt,
+        "prompt_tokens disagrees with the model's own tokenizer"
+    );
+    assert_eq!(total, prompt + completion, "total_tokens is not the sum of its parts");
 }

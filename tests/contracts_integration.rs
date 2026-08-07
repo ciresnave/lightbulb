@@ -18,14 +18,31 @@ use lightbulb::contracts::{
     executor::execute_contract,
     validation::RawMessage,
 };
+use lightbulb::engine::model_runner::{CompletionResult, FinishReason};
 
 // ─── Mock helpers ──────────────────────────────────────────────────────────
+
+/// Wrap scripted text as a [`CompletionResult`], which is what the inference
+/// closure yields.
+///
+/// The token counts and finish reason are placeholders: these tests are about
+/// parsing, retry counting and fallback chaining, and assert nothing about
+/// metadata. How `execute_contract` aggregates that metadata across attempts
+/// is covered by the unit tests in `src/contracts/executor.rs`.
+fn canned(text: impl Into<String>) -> CompletionResult {
+    CompletionResult {
+        text: text.into(),
+        prompt_tokens: 0,
+        completion_tokens: 0,
+        finish_reason: FinishReason::Stop,
+    }
+}
 
 /// Create an async inference closure that returns scripted responses in order.
 /// Panics if called more times than there are scripted responses.
 fn mock_infer(responses: Vec<&'static str>) -> (
     Arc<Mutex<VecDeque<String>>>,
-    impl Fn(String) -> std::future::Ready<anyhow::Result<String>> + Clone,
+    impl Fn(String) -> std::future::Ready<anyhow::Result<CompletionResult>> + Clone,
 ) {
     let queue: Arc<Mutex<VecDeque<String>>> = Arc::new(Mutex::new(
         responses.iter().map(|s| s.to_string()).collect(),
@@ -37,7 +54,7 @@ fn mock_infer(responses: Vec<&'static str>) -> (
             .unwrap()
             .pop_front()
             .expect("mock_infer called more times than scripted responses");
-        std::future::ready(Ok::<String, anyhow::Error>(text))
+        std::future::ready(Ok::<CompletionResult, anyhow::Error>(canned(text)))
     };
     (queue, f)
 }
@@ -321,7 +338,7 @@ async fn contract_instruction_injected_into_prompt() {
 
     let infer = move |prompt: String| {
         *captured.lock().unwrap() = Some(prompt);
-        std::future::ready(Ok::<String, anyhow::Error>("alpha".to_string()))
+        std::future::ready(Ok::<CompletionResult, anyhow::Error>(canned("alpha")))
     };
 
     execute_contract(
@@ -373,7 +390,7 @@ async fn retry_appends_context_and_tightening_message() {
             i
         };
         let response = if idx == 0 { "I cannot decide." } else { "yes" };
-        std::future::ready(Ok::<String, anyhow::Error>(response.to_string()))
+        std::future::ready(Ok::<CompletionResult, anyhow::Error>(canned(response)))
     };
 
     execute_contract(

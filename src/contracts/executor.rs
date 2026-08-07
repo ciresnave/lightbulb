@@ -13,15 +13,16 @@
 //! # Testability
 //!
 //! The inference callable is a generic `Fn(String) -> impl Future<Output =
-//! anyhow::Result<String>>`.  Production code passes a closure that wraps the
-//! `mpsc::Sender` to the model runner thread.  Tests pass a closure that
-//! returns scripted responses, so every branch of this loop can be exercised
-//! without a real model.
+//! anyhow::Result<CompletionResult>>`.  Production code passes a closure that
+//! wraps the `mpsc::Sender` to the model runner thread.  Tests pass a closure
+//! that returns scripted results, so every branch of this loop can be
+//! exercised without a real model.
 
 use std::future::Future;
 
 use super::{ContractOutput, ContractResult, OutputContractSpec};
 use super::validation::{self, RawMessage};
+use crate::engine::model_runner::{CompletionResult, FinishReason};
 
 // ─── Convenience wrapper for ModelRunner-backed inference ──────────────────
 
@@ -65,7 +66,6 @@ pub async fn execute_contract_with_runner(
                 resp_rx
                     .await
                     .map_err(|e| anyhow::anyhow!("inference runner dropped: {}", e))?
-                    .map(|r| r.text)
             }
         },
     )
@@ -75,6 +75,28 @@ pub async fn execute_contract_with_runner(
 // ─── Public result type ────────────────────────────────────────────────────
 
 /// Everything the caller needs after the loop is done.
+///
+/// # How the aggregate metadata is aggregated
+///
+/// One call to [`execute_contract`] can run many inferences: up to
+/// `max_attempts` for the primary contract, then up to `max_attempts` again
+/// for each fallback. The token counts and the finish reason are therefore
+/// combined in **deliberately different** ways, and neither rule is derivable
+/// from the types:
+///
+/// - **`prompt_tokens` and `completion_tokens` are SUMMED over every attempt**,
+///   including attempts whose text was thrown away. Each retry sent a real
+///   prompt through a real model and got real tokens back; reporting only the
+///   final attempt would under-report work the server actually performed —
+///   the same class of untruth the rest of this change set exists to remove.
+///   Divide by [`ContractResult::attempts`] if a per-attempt average is wanted.
+/// - **`finish_reason` is the FINAL attempt's**, not a merge and not the first
+///   one's. It describes `final_text` — the text that becomes
+///   `choices[0].message.content`. A reason inherited from a discarded attempt
+///   would describe output the client never sees, and there is no meaningful
+///   way to combine `Stop` and `Length` into one answer anyway.
+///
+/// [`ContractResult::attempts`]: super::ContractResult::attempts
 #[derive(Debug)]
 pub struct ContractExecutionResult {
     /// The structured (or raw-fallback) output.
@@ -82,6 +104,15 @@ pub struct ContractExecutionResult {
     /// The final raw text from the model (used as the `choices[0].content`
     /// in the HTTP response).
     pub final_text: String,
+    /// Prompt tokens **summed across every attempt**. See the type docs.
+    pub prompt_tokens: usize,
+    /// Generated tokens **summed across every attempt**. See the type docs.
+    pub completion_tokens: usize,
+    /// Why the **final** attempt stopped. See the type docs.
+    ///
+    /// `None` only when no inference ran at all (`max_attempts == 0`), where
+    /// there is no generation for a reason to describe.
+    pub finish_reason: Option<FinishReason>,
 }
 
 // ─── Core loop ─────────────────────────────────────────────────────────────
@@ -98,8 +129,12 @@ pub struct ContractExecutionResult {
 ///                    moving to the next one.
 /// - `fallbacks`    — additional contracts tried (in order) after `primary`
 ///                    exhausts all attempts.
-/// - `infer`        — async callable `(prompt: String) -> Result<String>`.
+/// - `infer`        — async callable `(prompt: String) -> Result<CompletionResult>`.
 ///                    Called once per attempt.
+///
+/// Each `infer` result's `text` drives contract validation; its token counts
+/// and finish reason are aggregated into the returned
+/// [`ContractExecutionResult`] under the rules documented on that type.
 pub async fn execute_contract<F, Fut>(
     messages: &[RawMessage],
     model_id: &str,
@@ -110,11 +145,17 @@ pub async fn execute_contract<F, Fut>(
 ) -> anyhow::Result<ContractExecutionResult>
 where
     F: Fn(String) -> Fut,
-    Fut: Future<Output = anyhow::Result<String>>,
+    Fut: Future<Output = anyhow::Result<CompletionResult>>,
 {
     let start = std::time::Instant::now();
     let mut total_attempts: u32 = 0;
     let mut last_raw = String::new();
+
+    // Aggregates. Tokens accumulate over every attempt; the finish reason is
+    // overwritten each attempt so it ends up holding the last one's.
+    let mut prompt_tokens: usize = 0;
+    let mut completion_tokens: usize = 0;
+    let mut finish_reason: Option<FinishReason> = None;
 
     let contracts: Vec<&OutputContractSpec> = std::iter::once(primary)
         .chain(fallbacks.iter())
@@ -142,9 +183,16 @@ where
             let prompt = validation::messages_to_prompt(&msgs);
 
             let attempt_start = std::time::Instant::now();
-            let raw_text = infer(prompt).await?;
+            let completion = infer(prompt).await?;
             let attempt_ms = attempt_start.elapsed().as_millis() as u64;
 
+            // This attempt's tokens were spent whether or not its text is kept.
+            prompt_tokens += completion.prompt_tokens;
+            completion_tokens += completion.completion_tokens;
+            // Last write wins, so this ends as the final attempt's reason.
+            finish_reason = Some(completion.finish_reason);
+
+            let raw_text = completion.text;
             last_raw = raw_text.clone();
 
             let parsed = validation::try_parse(&raw_text, contract);
@@ -166,6 +214,9 @@ where
                 let latency_ms = start.elapsed().as_millis() as u64;
                 return Ok(ContractExecutionResult {
                     final_text: raw_text,
+                    prompt_tokens,
+                    completion_tokens,
+                    finish_reason,
                     result: ContractResult {
                         contract_type: contract.type_name().to_string(),
                         attempts: total_attempts,
@@ -198,6 +249,9 @@ where
 
     Ok(ContractExecutionResult {
         final_text: last_raw.clone(),
+        prompt_tokens,
+        completion_tokens,
+        finish_reason,
         result: ContractResult {
             contract_type: primary.type_name().to_string(),
             attempts: total_attempts,
@@ -207,4 +261,144 @@ where
             output: ContractOutput::Raw { text: last_raw },
         },
     })
+}
+
+// ─── Aggregation tests ─────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::VecDeque;
+    use std::sync::{Arc, Mutex};
+
+    /// An inference stub that replays canned [`CompletionResult`]s in order.
+    fn scripted(
+        results: Vec<CompletionResult>,
+    ) -> impl Fn(String) -> std::future::Ready<anyhow::Result<CompletionResult>> {
+        let queue = Arc::new(Mutex::new(VecDeque::from(results)));
+        move |_prompt: String| {
+            let next = queue
+                .lock()
+                .unwrap()
+                .pop_front()
+                .expect("execute_contract called infer more times than scripted");
+            std::future::ready(Ok(next))
+        }
+    }
+
+    fn completion(
+        text: &str,
+        prompt_tokens: usize,
+        completion_tokens: usize,
+        finish_reason: FinishReason,
+    ) -> CompletionResult {
+        CompletionResult {
+            text: text.to_string(),
+            prompt_tokens,
+            completion_tokens,
+            finish_reason,
+        }
+    }
+
+    fn user_msgs(content: &str) -> Vec<RawMessage> {
+        vec![RawMessage {
+            role: "user".to_string(),
+            content: content.to_string(),
+        }]
+    }
+
+    fn yes_no() -> OutputContractSpec {
+        OutputContractSpec::EnumChoice {
+            choices: vec!["yes".to_string(), "no".to_string()],
+            case_sensitive: false,
+            allow_index: true,
+        }
+    }
+
+    /// Success-on-retry path. Guards both aggregation rules at once:
+    /// summing the discarded first attempt's tokens, and reporting the
+    /// *second* attempt's finish reason. Deliberately gives the two attempts
+    /// different reasons so a "first attempt wins" bug cannot pass.
+    #[tokio::test]
+    async fn sums_usage_over_attempts_and_reports_final_finish_reason() {
+        let exec = execute_contract(
+            &user_msgs("Is it raining?"),
+            "test-model",
+            &yes_no(),
+            3,
+            &[],
+            scripted(vec![
+                completion("I cannot decide.", 11, 7, FinishReason::Length),
+                completion("yes", 23, 3, FinishReason::Stop),
+            ]),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            exec.result.attempts, 2,
+            "test is only meaningful if two attempts actually ran"
+        );
+        assert_eq!(
+            exec.prompt_tokens,
+            11 + 23,
+            "prompt tokens must be summed across attempts, not taken from the last"
+        );
+        assert_eq!(
+            exec.completion_tokens,
+            7 + 3,
+            "completion tokens must be summed across attempts, not taken from the last"
+        );
+        assert_eq!(
+            exec.finish_reason,
+            Some(FinishReason::Stop),
+            "finish reason must come from the final attempt, not the discarded first"
+        );
+        assert_eq!(exec.final_text, "yes");
+    }
+
+    /// Total-failure path — the other `ContractExecutionResult` construction
+    /// site. Spans the primary contract and a fallback so the sum crosses the
+    /// contract boundary too.
+    #[tokio::test]
+    async fn aggregates_across_contracts_on_total_failure() {
+        let fallback = OutputContractSpec::EnumChoice {
+            choices: vec!["positive".to_string(), "negative".to_string()],
+            case_sensitive: false,
+            allow_index: true,
+        };
+
+        let exec = execute_contract(
+            &user_msgs("Pick one."),
+            "test-model",
+            &yes_no(),
+            2,
+            &[fallback],
+            scripted(vec![
+                // Every term distinct on BOTH axes. Four equal
+                // `completion_tokens` would let `attempts * last` produce the
+                // right total, so the assertion could not tell summing from
+                // multiplying — the same class of hole this branch has been
+                // closing all along.
+                completion("I cannot say.", 10, 5, FinishReason::Stop),
+                completion("Still unclear.", 20, 6, FinishReason::Stop),
+                completion("Hmm.", 30, 7, FinishReason::Stop),
+                completion("Truncated mid-thoug", 40, 8, FinishReason::Length),
+            ]),
+        )
+        .await
+        .unwrap();
+
+        assert!(!exec.result.parse_success);
+        assert_eq!(exec.result.attempts, 4, "2 attempts x 2 contracts");
+        assert_eq!(exec.prompt_tokens, 10 + 20 + 30 + 40);
+        assert_eq!(exec.completion_tokens, 5 + 6 + 7 + 8);
+        assert_eq!(
+            exec.finish_reason,
+            Some(FinishReason::Length),
+            "the raw fallback returns the last attempt's text, so it must \
+             carry the last attempt's reason"
+        );
+        assert_eq!(exec.final_text, "Truncated mid-thoug");
+    }
 }

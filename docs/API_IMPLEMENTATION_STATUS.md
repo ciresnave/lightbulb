@@ -8,14 +8,22 @@
   * Streaming support (Server-Sent Events)
   * Non-streaming support (JSON response)
   * Lightbulb extensions (reasoning_budget, use_knowledge_base, metadata, state_branch)
-  * Mock implementation (TODO: integrate with actual inference engine)
+  * Wired to the model runner. `finish_reason` and `usage` are reported from
+    what the runner observed, not guessed (see
+    `docs/superpowers/specs/2026-08-06-runner-result-metadata-design.md`).
+  * Known gap: the no-runner fallback still reports a whitespace word count as
+    `usage.prompt_tokens`.
 
 - **`src/api/openai/completions.rs`** (135 lines) - POST /v1/completions
   * Raw text completion endpoint
   * Supports single prompt or array of prompts
   * Echo support (include prompt in response)
   * OpenAI-compatible response format
-  * Mock implementation (TODO: integrate with actual inference engine)
+  * Wired to the model runner as of the runner-result-metadata branch; no chat
+    template is applied, since this is OpenAI's raw-text endpoint.
+  * Known gaps: `echo` concatenates the prompt and the decoded completion, and
+    the tokenizer's decoder strips the completion's leading space, so the two
+    run together. `stream`, `top_p`, `n` and `stop` are accepted and ignored.
 
 - **`src/api/openai/models.rs`** (68 lines) - GET /v1/models
   * Lists available models in OpenAI format

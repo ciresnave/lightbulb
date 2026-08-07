@@ -548,20 +548,24 @@ mod tests {
 
     /// EOS must report Stop. Guards the inverse error — an implementation that
     /// hardcoded Length would pass the test above and fail this one.
+    ///
+    /// **The old ordering trap dissolved rather than moving, which is why
+    /// there is no separate "EOS on the final allowed token" case here.** A
+    /// state-based classifier had to check `Completed` before the token count,
+    /// because an EOS landing on the last allowed token satisfies both at
+    /// once; get the order wrong and that generation reports Length.
+    /// `finish_reason_for` reads exactly one field, so `ctx_with(8, 8, true)`
+    /// and `ctx_with(8, 3, true)` differ only in fields it never looks at —
+    /// the same test twice. The `tokens_generated == max_new_tokens && EOS`
+    /// case is therefore covered by this one, not by omission.
+    ///
+    /// What this canNOT cover: `stopped_on_eos` is assigned directly above,
+    /// the way a backend assigns it, so nothing here exercises a producer.
+    /// `tests/api_result_metadata.rs::eos_terminated_generation_reports_stop`
+    /// is what catches a backend that stops setting the flag.
     #[test]
     fn completing_before_the_cap_is_stop() {
         let c = ctx_with(8, 3, true);
-        assert_eq!(finish_reason_for(&c), FinishReason::Stop);
-    }
-
-    /// EOS on the very last allowed token is Stop, not Length. Both
-    /// `stopped_on_eos` and `tokens_generated == max_new_tokens` hold at
-    /// once here; this guards that the flag — not the token count — is what
-    /// decides the answer, unlike the old state-based version where the
-    /// check order decided it.
-    #[test]
-    fn eos_on_the_final_allowed_token_is_stop() {
-        let c = ctx_with(8, 8, true);
         assert_eq!(finish_reason_for(&c), FinishReason::Stop);
     }
 }
