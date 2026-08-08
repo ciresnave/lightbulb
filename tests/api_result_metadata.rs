@@ -23,6 +23,13 @@ use tower::ServiceExt;
 use lightbulb::api::{ApiConfig, AppState};
 use lightbulb::engine::{MemoryAwareConfig, MemoryAwareScheduler, ModelRunner};
 
+/// Locate the checkpoint, preferring `TINYLLAMA_DIR`.
+///
+/// The hardcoded fallback is one developer's HuggingFace cache and exists
+/// only so the common case needs no environment setup. It is deliberately
+/// *not* the sole path, and its absence is never silent: every caller
+/// `.expect()`s on the `None`, so on a machine without it these tests fail
+/// loudly rather than passing by doing nothing. See `MISSING_CHECKPOINT`.
 fn tinyllama_dir() -> Option<PathBuf> {
     let p = match std::env::var_os("TINYLLAMA_DIR") {
         Some(v) => PathBuf::from(v),
@@ -32,6 +39,16 @@ fn tinyllama_dir() -> Option<PathBuf> {
     };
     p.join("model.safetensors").is_file().then_some(p)
 }
+
+/// Failure text for a missing checkpoint.
+///
+/// Names the variable to set. The previous message said only "no TinyLlama
+/// snapshot", which is a true statement that leaves the reader no action —
+/// the fallback path is another user's home directory, so on any other
+/// machine this is the *expected* state, not an anomaly.
+const MISSING_CHECKPOINT: &str = "no TinyLlama checkpoint. Set TINYLLAMA_DIR to a \
+     directory containing model.safetensors and tokenizer.json. These tests assert \
+     real API behaviour against a real model, so they fail rather than skipping.";
 
 /// Count `text` with the **model's own** tokenizer, on the same checkpoint the
 /// runner loaded.
@@ -49,8 +66,7 @@ fn tinyllama_dir() -> Option<PathBuf> {
 /// ▁capital ▁of ▁France ▁is`) and not 5. If a count here is ever off by one,
 /// the fix is this flag, never a `+ 1` at the call site.
 fn tokenizer_count(text: &str) -> u64 {
-    let dir = tinyllama_dir()
-        .expect("no TinyLlama snapshot — this asserts API behaviour, so it fails rather than skipping");
+    let dir = tinyllama_dir().expect(MISSING_CHECKPOINT);
     let tok = tokenizers::Tokenizer::from_file(dir.join("tokenizer.json"))
         .expect("loading the checkpoint's tokenizer.json");
     tok.encode(text, true)
@@ -64,8 +80,7 @@ fn tokenizer_count(text: &str) -> u64 {
 /// too: the stream ends when the runner drops `stream_tx` at the end of its
 /// `Streaming` arm.
 async fn post_raw(path: &str, body: serde_json::Value) -> (StatusCode, Vec<u8>) {
-    let dir = tinyllama_dir()
-        .expect("no TinyLlama snapshot — this asserts API behaviour, so it fails rather than skipping");
+    let dir = tinyllama_dir().expect(MISSING_CHECKPOINT);
     let tx = ModelRunner::start(&dir, 1, 512, Some("f32".to_string()))
         .expect("starting the model runner");
     let state = AppState {
@@ -87,13 +102,18 @@ async fn post_raw(path: &str, body: serde_json::Value) -> (StatusCode, Vec<u8>) 
         .await
         .expect("router returned no response");
     let status = resp.status();
-    let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20).await.unwrap();
+    let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20)
+        .await
+        .unwrap();
     (status, bytes.to_vec())
 }
 
 async fn post_json(path: &str, body: serde_json::Value) -> (StatusCode, serde_json::Value) {
     let (status, bytes) = post_raw(path, body).await;
-    (status, serde_json::from_slice(&bytes).expect("response was not JSON"))
+    (
+        status,
+        serde_json::from_slice(&bytes).expect("response was not JSON"),
+    )
 }
 
 /// Parse an SSE body into its `data:` payloads, decoded as JSON.
@@ -167,9 +187,15 @@ async fn usage_counts_real_tokens() {
     assert_eq!(status, StatusCode::OK);
     eprintln!("usage_counts_real_tokens JSON: {v}");
 
-    let completion = v["usage"]["completion_tokens"].as_u64().expect("no completion_tokens");
-    let prompt = v["usage"]["prompt_tokens"].as_u64().expect("no prompt_tokens");
-    let total = v["usage"]["total_tokens"].as_u64().expect("no total_tokens");
+    let completion = v["usage"]["completion_tokens"]
+        .as_u64()
+        .expect("no completion_tokens");
+    let prompt = v["usage"]["prompt_tokens"]
+        .as_u64()
+        .expect("no prompt_tokens");
+    let total = v["usage"]["total_tokens"]
+        .as_u64()
+        .expect("no total_tokens");
 
     // Exact, not `> 0`: the request caps generation at 6, and a truncated
     // generation produces exactly that. `> 0` would pass on 1.
@@ -178,7 +204,10 @@ async fn usage_counts_real_tokens() {
     // (`completion_tokens: batch[0].request.max_new_tokens`), because here the
     // right answer and the cap are the same number. `eos_terminated_generation_
     // reports_stop` below is what discriminates them: 1 against a cap of 32.
-    assert_eq!(completion, 6, "completion_tokens should equal the tokens generated");
+    assert_eq!(
+        completion, 6,
+        "completion_tokens should equal the tokens generated"
+    );
 
     // The string the model saw is NOT the message content. `create_chat_
     // completion` joins messages as `format!("{}: {}", role, content)` and
@@ -192,7 +221,11 @@ async fn usage_counts_real_tokens() {
         "prompt_tokens disagrees with the model's own tokenizer — \
          a word count of this prompt is 6, which is why `> 0` never caught it"
     );
-    assert_eq!(total, prompt + completion, "total_tokens is not the sum of its parts");
+    assert_eq!(
+        total,
+        prompt + completion,
+        "total_tokens is not the sum of its parts"
+    );
 }
 
 /// A generation that ends on EOS must say `"stop"` — the inverse of
@@ -375,7 +408,9 @@ async fn completions_endpoint_returns_model_output() {
     assert_eq!(status, StatusCode::OK);
     eprintln!("completions_endpoint_returns_model_output JSON: {v}");
 
-    let text = v["choices"][0]["text"].as_str().expect("no choices[0].text");
+    let text = v["choices"][0]["text"]
+        .as_str()
+        .expect("no choices[0].text");
     assert!(!text.trim().is_empty(), "the endpoint returned no text");
     assert!(
         !text.contains("placeholder completion"),
@@ -396,10 +431,17 @@ async fn completions_endpoint_returns_model_output() {
     let completion = v["usage"]["completion_tokens"]
         .as_u64()
         .expect("no completion_tokens");
-    let prompt = v["usage"]["prompt_tokens"].as_u64().expect("no prompt_tokens");
-    let total = v["usage"]["total_tokens"].as_u64().expect("no total_tokens");
+    let prompt = v["usage"]["prompt_tokens"]
+        .as_u64()
+        .expect("no prompt_tokens");
+    let total = v["usage"]["total_tokens"]
+        .as_u64()
+        .expect("no total_tokens");
 
-    assert_eq!(completion, 6, "completion_tokens should equal the tokens generated");
+    assert_eq!(
+        completion, 6,
+        "completion_tokens should equal the tokens generated"
+    );
     // NO chat template on this endpoint, so the model sees the prompt exactly
     // as sent — no `"user: "` prefix, unlike the chat tests above.
     let expected_prompt = tokenizer_count("The capital of France is");
@@ -408,5 +450,9 @@ async fn completions_endpoint_returns_model_output() {
         prompt, expected_prompt,
         "prompt_tokens disagrees with the model's own tokenizer"
     );
-    assert_eq!(total, prompt + completion, "total_tokens is not the sum of its parts");
+    assert_eq!(
+        total,
+        prompt + completion,
+        "total_tokens is not the sum of its parts"
+    );
 }

@@ -11,8 +11,10 @@
   * Wired to the model runner. `finish_reason` and `usage` are reported from
     what the runner observed, not guessed (see
     `docs/superpowers/specs/2026-08-06-runner-result-metadata-design.md`).
-  * Known gap: the no-runner fallback still reports a whitespace word count as
-    `usage.prompt_tokens`.
+  * The no-runner fallback reports `usage: None` rather than guessing. It has
+    no tokenizer, so any count it produced would be invented; omitting the
+    field says "unknown" where a word count said "9 tokens" and meant it.
+    `/v1/completions` degrades identically (`completions.rs:133`).
 
 - **`src/api/openai/completions.rs`** (135 lines) - POST /v1/completions
   * Raw text completion endpoint
