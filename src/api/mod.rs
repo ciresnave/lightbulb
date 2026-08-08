@@ -28,6 +28,7 @@
 
 pub mod admin;
 pub mod auth_middleware;
+pub mod chat_template;
 pub mod lightbulb;
 pub mod openai;
 pub mod types;

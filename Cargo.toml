@@ -81,6 +81,10 @@
     clap               = { version = "4", features = ["derive"] }
     ggml-quants        = "0.1.0"
     memmap2            = "0.9"
+    # Chat-template rendering. HuggingFace `chat_template` values are Jinja.
+    # minijinja is pure Rust with no C dependencies, which keeps the CUDA build
+    # unaffected. `loader` is not needed — templates arrive as strings, never paths.
+    minijinja          = { version = "2", default-features = false, features = ["builtins"] }
     parking_lot        = "0.12"
     rand               = "0.9"
     rayon              = "1.10"
