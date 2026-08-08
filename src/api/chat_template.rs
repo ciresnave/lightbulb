@@ -12,6 +12,8 @@
 //! three sites above are still on the join until Tasks 3 and 4 route them
 //! through `ChatTemplate::render`.
 
+use std::path::Path;
+
 use serde::{Deserialize, Serialize};
 
 use crate::contracts::validation::RawMessage;
@@ -164,5 +166,121 @@ impl ChatTemplate {
             add_generation_prompt => true,
         })?;
         Ok(out)
+    }
+}
+
+pub const SIDECAR_NAME: &str = "lightbulb-chat-template.json";
+
+/// A template pinned to a checkpoint on disk, with the reasoning that produced
+/// it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Sidecar {
+    pub template: String,
+    pub resolved_by: Resolution,
+    /// What justified the choice, in prose. Load-bearing: without it a guess
+    /// and a measurement look the same on disk.
+    pub evidence: String,
+    pub resolved_at: String,
+    pub model_fingerprint: String,
+}
+
+/// Hash of `config.json`. Cheap, and it changes whenever the checkpoint does.
+///
+/// `DefaultHasher` is explicitly not a stable hash across Rust releases, so a
+/// toolchain upgrade can invalidate every sidecar on disk. That is acceptable
+/// here and nowhere near acceptable for a cache key: the consequence is
+/// re-running a probe, and the failure direction is "ignored a valid sidecar",
+/// never "accepted one from a different checkpoint".
+pub fn fingerprint(model_dir: &Path) -> String {
+    use std::hash::{Hash, Hasher};
+    let bytes = std::fs::read(model_dir.join("config.json")).unwrap_or_default();
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    bytes.hash(&mut h);
+    format!("{:016x}", h.finish())
+}
+
+pub fn write_sidecar(model_dir: &Path, sc: &Sidecar) -> anyhow::Result<()> {
+    let json = serde_json::to_string_pretty(sc)?;
+    std::fs::write(model_dir.join(SIDECAR_NAME), json)?;
+    Ok(())
+}
+
+/// Read the sidecar, rejecting one written for a different checkpoint.
+///
+/// The fingerprint comparison is the whole point of the function. A model
+/// directory that gets re-pointed at another checkpoint — a common enough thing
+/// to do with a symlink or a re-download — would otherwise inherit the previous
+/// model's template at the highest-authority tier, with a `resolved_by: Probe`
+/// on it claiming it was measured.
+pub fn read_sidecar(model_dir: &Path) -> Option<Sidecar> {
+    let raw = std::fs::read_to_string(model_dir.join(SIDECAR_NAME)).ok()?;
+    let sc: Sidecar = serde_json::from_str(&raw).ok()?;
+    let actual = fingerprint(model_dir);
+    if sc.model_fingerprint != actual {
+        tracing::warn!(
+            "ignoring {SIDECAR_NAME}: fingerprint {} does not match checkpoint {}",
+            sc.model_fingerprint,
+            actual
+        );
+        return None;
+    }
+    Some(sc)
+}
+
+/// Resolve a template, cheapest tier first. Stops at the first hit.
+///
+/// Tier 4 (the probe) is deliberately absent: it costs generations and its
+/// conclusion gets persisted, so it is an operator action. See spec §4.
+pub fn resolve(model_dir: &Path) -> ChatTemplate {
+    // Tier 0 — sidecar.
+    if let Some(sc) = read_sidecar(model_dir) {
+        tracing::info!("chat template: sidecar ({:?})", sc.resolved_by);
+        return ChatTemplate {
+            source: sc.template,
+            resolved_by: Resolution::Sidecar,
+        };
+    }
+
+    // Tier 1 — the authoritative source, when the checkpoint ships one.
+    if let Ok(raw) = std::fs::read_to_string(model_dir.join("tokenizer_config.json")) {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) {
+            if let Some(t) = v.get("chat_template").and_then(|t| t.as_str()) {
+                tracing::info!("chat template: tokenizer_config.json");
+                return ChatTemplate {
+                    source: t.to_string(),
+                    resolved_by: Resolution::TokenizerConfig,
+                };
+            }
+        }
+    }
+
+    // Tier 2 — vocabulary signature. Only fires when markers are *added
+    // tokens*; TinyLlama's `<|user|>` is ordinary text, so this misses it.
+    if let Some(t) = registry::from_vocab_signature(model_dir) {
+        tracing::info!("chat template: vocabulary signature");
+        return ChatTemplate {
+            source: t,
+            resolved_by: Resolution::VocabSignature,
+        };
+    }
+
+    // Tier 3 — family registry. Heuristic; §3's monitor exists for when it is
+    // wrong.
+    if let Some(t) = registry::from_family(model_dir) {
+        tracing::info!("chat template: family registry (heuristic)");
+        return ChatTemplate {
+            source: t,
+            resolved_by: Resolution::Registry,
+        };
+    }
+
+    tracing::warn!(
+        "no chat template resolved for {}; falling back to the legacy role: content join. \
+         Run `lightbulb-cli chat-template probe` to determine one.",
+        model_dir.display()
+    );
+    ChatTemplate {
+        source: String::new(),
+        resolved_by: Resolution::None,
     }
 }

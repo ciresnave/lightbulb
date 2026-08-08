@@ -316,3 +316,224 @@ fn mistral_available_tools_branch_renders() {
          \"parameters\": {\"type\":\"object\"}}}][/AVAILABLE_TOOLS]"
     );
 }
+
+// ── Tier resolution and the sidecar ─────────────────────────────────────────
+//
+// Every fixture below is a temp directory, never the real checkpoint.
+// TinyLlama-1.1B-Chat's snapshot ships only `config.json`, `model.safetensors`
+// and `tokenizer.json` — no `tokenizer_config.json`, and its `<|user|>` markers
+// are ordinary text rather than added tokens — so it resolves at tier 3 and
+// cannot exercise tiers 1 or 2 at all.
+
+use std::io::Write;
+
+fn tmp_model_dir(name: &str) -> std::path::PathBuf {
+    let d = std::env::temp_dir().join(format!("lb-chat-tmpl-{name}"));
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(&d).unwrap();
+    // config.json is what fingerprint() hashes; every fixture needs one.
+    let mut f = std::fs::File::create(d.join("config.json")).unwrap();
+    f.write_all(br#"{"model_type":"llama"}"#).unwrap();
+    d
+}
+
+/// Tier order is honoured: a model that satisfies tiers 1, 2 AND 3 resolves via
+/// tier 1. Fails if the tiers are reordered or a later tier overwrites an
+/// earlier result.
+///
+/// The fixture is built up one tier at a time, asserting at each step, because
+/// "tier 1 wins" is only a claim about ORDER if the lower tiers demonstrably
+/// fire for this same directory. A fixture that satisfied tier 1 alone would
+/// pass this test unchanged against an implementation with no registry at all.
+///
+/// Concretely: the directory name carries `tinyllama` and `chat`, which is what
+/// `registry::from_family` matches on, and the `tokenizer.json` lists
+/// `<|im_start|>` as an *added token*, which is what `from_vocab_signature`
+/// matches on. All three answers are distinguishable from each other.
+#[test]
+fn tokenizer_config_wins_over_registry() {
+    use lightbulb::api::chat_template::registry;
+    let d = tmp_model_dir("tinyllama-chat-tier-order");
+
+    // Tier 3 alone.
+    let t3 = lightbulb::api::chat_template::resolve(&d);
+    assert_eq!(
+        t3.resolved_by,
+        Resolution::Registry,
+        "tier 3 does not fire for this fixture, so the test below would prove \
+         nothing about tier ORDER"
+    );
+    assert_eq!(t3.source, registry::ZEPHYR);
+
+    // Tier 2 added — it must beat tier 3.
+    std::fs::write(
+        d.join("tokenizer.json"),
+        r#"{"added_tokens":[{"id":1,"content":"<|im_start|>"}]}"#,
+    )
+    .unwrap();
+    let t2 = lightbulb::api::chat_template::resolve(&d);
+    assert_eq!(
+        t2.resolved_by,
+        Resolution::VocabSignature,
+        "tier 2 does not fire for this fixture"
+    );
+    assert_eq!(t2.source, registry::CHATML);
+
+    // Tier 1 added — it must beat both.
+    std::fs::write(
+        d.join("tokenizer_config.json"),
+        r#"{"chat_template":"FROM_TOKENIZER_CONFIG"}"#,
+    )
+    .unwrap();
+    let t1 = lightbulb::api::chat_template::resolve(&d);
+    assert_eq!(t1.resolved_by, Resolution::TokenizerConfig);
+    assert_eq!(t1.source, "FROM_TOKENIZER_CONFIG");
+}
+
+/// The sidecar outranks everything — it is the probe's persisted answer.
+///
+/// The tier-1 source is asserted to fire *before* the sidecar is written, for
+/// the same reason as above: without that control the test would pass against
+/// an implementation that never read `tokenizer_config.json`.
+#[test]
+fn sidecar_wins_over_tokenizer_config() {
+    let d = tmp_model_dir("sidecar-wins");
+    std::fs::write(
+        d.join("tokenizer_config.json"),
+        r#"{"chat_template":"FROM_TOKENIZER_CONFIG"}"#,
+    )
+    .unwrap();
+
+    let before = lightbulb::api::chat_template::resolve(&d);
+    assert_eq!(
+        before.resolved_by,
+        Resolution::TokenizerConfig,
+        "the tier this one must outrank never fired"
+    );
+    assert_eq!(before.source, "FROM_TOKENIZER_CONFIG");
+
+    let sc = lightbulb::api::chat_template::Sidecar {
+        template: "FROM_SIDECAR".into(),
+        resolved_by: Resolution::Probe,
+        evidence: "EOS 8/8 zephyr".into(),
+        resolved_at: "2026-08-08T00:00:00Z".into(),
+        model_fingerprint: lightbulb::api::chat_template::fingerprint(&d),
+    };
+    lightbulb::api::chat_template::write_sidecar(&d, &sc).unwrap();
+    let t = lightbulb::api::chat_template::resolve(&d);
+    assert_eq!(t.resolved_by, Resolution::Sidecar);
+    assert_eq!(t.source, "FROM_SIDECAR");
+}
+
+/// Provenance survives a round trip. Fails if the writer drops the fields for
+/// brevity — which is the likely slip, since they are not needed to render.
+#[test]
+fn sidecar_round_trips_with_provenance() {
+    let d = tmp_model_dir("round-trip");
+    let sc = lightbulb::api::chat_template::Sidecar {
+        template: "T".into(),
+        resolved_by: Resolution::Probe,
+        evidence: "EOS 8/8 with zephyr, 1/8 with llama2".into(),
+        resolved_at: "2026-08-08T00:00:00Z".into(),
+        model_fingerprint: lightbulb::api::chat_template::fingerprint(&d),
+    };
+    lightbulb::api::chat_template::write_sidecar(&d, &sc).unwrap();
+    let back = lightbulb::api::chat_template::read_sidecar(&d).expect("sidecar did not read back");
+    assert_eq!(back.template, "T");
+    assert_eq!(back.resolved_by, Resolution::Probe);
+    assert_eq!(back.evidence, "EOS 8/8 with zephyr, 1/8 with llama2");
+    assert_eq!(back.resolved_at, "2026-08-08T00:00:00Z");
+}
+
+/// A sidecar written for a different checkpoint must be rejected, so a
+/// directory reused for another model does not silently inherit its template.
+/// This exists because writing the fingerprint but never checking it is the
+/// likely slip.
+///
+/// The `is_some` control is not redundant with the rejection: it separates
+/// "rejected because the fingerprint mismatched" from "rejected because
+/// `read_sidecar` never reads anything", which would satisfy the assertion
+/// below for entirely the wrong reason.
+#[test]
+fn stale_sidecar_is_rejected() {
+    let d = tmp_model_dir("stale");
+    let good = lightbulb::api::chat_template::Sidecar {
+        template: "STALE".into(),
+        resolved_by: Resolution::Probe,
+        evidence: "e".into(),
+        resolved_at: "2026-08-08T00:00:00Z".into(),
+        model_fingerprint: lightbulb::api::chat_template::fingerprint(&d),
+    };
+    lightbulb::api::chat_template::write_sidecar(&d, &good).unwrap();
+    assert!(
+        lightbulb::api::chat_template::read_sidecar(&d).is_some(),
+        "a MATCHING sidecar was not accepted, so the rejection below would \
+         prove nothing"
+    );
+
+    let stale = lightbulb::api::chat_template::Sidecar {
+        model_fingerprint: "0000000000000000".into(), // deliberately wrong
+        ..good
+    };
+    lightbulb::api::chat_template::write_sidecar(&d, &stale).unwrap();
+    assert!(
+        lightbulb::api::chat_template::read_sidecar(&d).is_none(),
+        "a sidecar whose fingerprint does not match the checkpoint was accepted"
+    );
+    let t = lightbulb::api::chat_template::resolve(&d);
+    assert_ne!(t.source, "STALE", "resolution used a stale sidecar");
+}
+
+/// Every registry constant must actually render to its generation prompt.
+///
+/// This exists because Task 1 shipped a template whose trailing newline sat in
+/// source position and was silently stripped — and the test written alongside
+/// it could not detect that, because the template had been flattened until the
+/// whitespace settings no longer applied to it. A constant that renders to the
+/// wrong shape still renders, so nothing falls through and nothing is logged.
+/// Parameterised over all three so adding a fourth without a test is not
+/// possible.
+#[test]
+fn every_registry_constant_ends_with_its_generation_prompt() {
+    use lightbulb::api::chat_template::registry;
+    let expected = [
+        ("zephyr", registry::ZEPHYR, "<|assistant|>\n"),
+        ("chatml", registry::CHATML, "<|im_start|>assistant\n"),
+        ("llama2", registry::LLAMA2, "[/INST]"),
+    ];
+    assert_eq!(
+        expected.len(),
+        registry::candidates().len(),
+        "a candidate was added to the registry without a render assertion"
+    );
+    for (name, src, tail) in expected {
+        assert!(
+            registry::candidates()
+                .iter()
+                .any(|(n, s)| *n == name && *s == src),
+            "{name} is not the constant candidates() offers under that name"
+        );
+        let t = ChatTemplate {
+            source: src.to_string(),
+            resolved_by: Resolution::Registry,
+        };
+        let out = t
+            .render(&msgs(), "<s>", "</s>")
+            .unwrap_or_else(|e| panic!("{name} failed to render: {e}"));
+        assert!(
+            out.ends_with(tail),
+            "{name} rendered {out:?}, which does not end with {tail:?} — a \
+             trailing newline in source position is stripped by Jinja"
+        );
+    }
+}
+
+/// No tier fires: resolution reports None rather than inventing a template.
+#[test]
+fn missing_everything_falls_through() {
+    let d = tmp_model_dir("nothing");
+    std::fs::write(d.join("config.json"), r#"{"model_type":"unknown-xyz"}"#).unwrap();
+    let t = lightbulb::api::chat_template::resolve(&d);
+    assert_eq!(t.resolved_by, Resolution::None);
+    assert_eq!(t.source, "");
+}
