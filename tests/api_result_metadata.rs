@@ -302,6 +302,27 @@ async fn streaming_terminal_chunk_reports_length() {
     eprintln!("streaming_terminal_chunk_reports_length chunks: {chunks:#?}");
     assert!(!chunks.is_empty(), "the stream produced no data frames");
 
+    // An inference failure mid-stream emits an `error` frame (`chat.rs:498`)
+    // that carries no `choices` at all. Without this check the run still
+    // fails, but on the terminal-count assertion below, whose message
+    // ("got 0") says nothing about the actual cause. Surface the message.
+    if let Some(err) = chunks.iter().find(|c| !c["error"].is_null()) {
+        panic!("the stream carried an error frame: {}", err["error"]);
+    }
+
+    // Chunks must not carry `usage`. OpenAI reports token counts on a stream
+    // only when `stream_options.include_usage` is set, which this server does
+    // not implement. The four chunk sites in `chat.rs` are built from inline
+    // `json!`, so nothing structurally prevents a future edit from adding the
+    // field unconditionally; this fails that edit rather than letting it ship.
+    for c in &chunks {
+        assert!(
+            c["usage"].is_null(),
+            "no stream chunk may carry usage, got {}",
+            c["usage"]
+        );
+    }
+
     // Exactly one chunk carries a finish_reason, and it is the last one.
     // Asserting on the count as well as the value catches a regression that
     // emits a terminal chunk per token, which a "last chunk" check alone
