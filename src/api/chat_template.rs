@@ -46,6 +46,29 @@ impl ChatTemplate {
     ///
     /// Errors rather than panicking: a template that fails to render must fall
     /// through to the next tier, not fail the request.
+    ///
+    /// A fresh `Environment` is built and the source re-parsed on **every**
+    /// call. That is deliberate, and it was measured rather than assumed.
+    ///
+    /// Measured 2026-08-08, `--release`, N=20000 after a 200-iteration warmup,
+    /// on Llama-3.1-8B-Instruct's real template (4723 bytes — the largest of
+    /// the nine Hub templates checked), two messages:
+    ///
+    ///   this code (fresh `Environment` + parse per call)   235.2 us/call
+    ///   `Environment` + parsed template reused              16.8 us/call
+    ///   difference                                         218.4 us/call
+    ///
+    /// 218 us is under a quarter of ONE forward pass, and `render` is called
+    /// once per request (or per contract retry), never per token — a request
+    /// that emits a hundred tokens spends three orders of magnitude more time
+    /// in the model than the whole prompt build costs. Caching would buy that
+    /// 218 us in exchange for either an owned-template registry keyed by
+    /// source, or a self-referential struct to escape `Environment<'source>`
+    /// borrowing `&self.source`.
+    ///
+    /// Not worth it. Do not re-open this without a measurement that shows the
+    /// call rate changed — e.g. `render` moving onto a per-token path, which
+    /// would be a design error for other reasons.
     pub fn render(
         &self,
         messages: &[RawMessage],
@@ -70,6 +93,25 @@ impl ChatTemplate {
         // source position is stripped by both engines.
         env.set_trim_blocks(true);
         env.set_lstrip_blocks(true);
+
+        // Jinja2's values are Python objects, so a template author gets
+        // `str.startswith`, `str.strip('\n')`, `str.split(...)` and
+        // `dict.items()` without asking. minijinja's are not, and it reports
+        // `unknown method: string has no method named startswith`.
+        //
+        // This is not hypothetical. Of the nine real Hub `chat_template`
+        // values checked, two fail without this callback:
+        //   Qwen3-8B                   `.startswith`/`.endswith` at chat:20,
+        //                              then `.split`/`.strip('\n')`/`.lstrip`/
+        //                              `.rstrip` in its `<think>` handling
+        //   Mistral-7B-Instruct-v0.3   `tool.items()`, in the branch a
+        //                              no-tools message list never reaches
+        //
+        // The Mistral case is why this is registered rather than patched per
+        // template: the gap is latent until someone passes `tools`, at which
+        // point it becomes a render failure on a template that has "always
+        // worked".
+        env.set_unknown_method_callback(minijinja_contrib::pycompat::unknown_method_callback);
 
         // Templates call this to reject unsupported message orders. Without it
         // minijinja reports "unknown function", which reads like our bug.

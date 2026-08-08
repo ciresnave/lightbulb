@@ -103,6 +103,21 @@
     #
     # `loader` stays out: templates arrive as strings, never paths.
     minijinja          = { version = "2", features = ["macros", "loop_controls", "json", "serde", "debug"] }
+    # Python method compatibility for the same templates. Jinja2's values ARE
+    # Python objects, so `"x".startswith(...)`, `s.strip('\n')`, `s.split(...)`
+    # and `d.items()` come free there; minijinja's do not, and it reports
+    # "string has no method named startswith". Measured: Qwen3-8B's real
+    # template fails at chat:20 without this, and Mistral-7B-Instruct-v0.3's
+    # tools branch fails at `tool.items()`.
+    #
+    # `pycompat` is the module minijinja's own docs point at for this, wired
+    # through `Environment::set_unknown_method_callback` in
+    # `api/chat_template.rs`.
+    #
+    # Pinned to 2.23 rather than "2": `pycompat` did not exist in 2.0, and the
+    # callback signature is tied to the `minijinja` version — both crates
+    # resolve to the same 2.x release, so they must move together.
+    minijinja-contrib  = { version = "2.23", features = ["pycompat"] }
     parking_lot        = "0.12"
     rand               = "0.9"
     rayon              = "1.10"

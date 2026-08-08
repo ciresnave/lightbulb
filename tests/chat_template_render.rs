@@ -183,3 +183,136 @@ fn strftime_now_is_registered() {
         "strftime_now('%d %b %Y') rendered {llama:?}"
     );
 }
+
+// ── Python methods on primitives ────────────────────────────────────────────
+//
+// Jinja2's values ARE Python objects, so template authors call `str` and `dict`
+// methods without a second thought. minijinja's are not, and reports
+// `unknown method: string has no method named startswith`. `render` wires
+// `minijinja_contrib::pycompat` through `set_unknown_method_callback` to close
+// that gap.
+//
+// One test per method rather than one "Qwen3 renders" smoke test, on purpose:
+// pycompat is an upstream crate whose method list can change, and a smoke test
+// would report only that *something* broke. These name which one.
+//
+// Every construct below is copied from a real Hub `chat_template`, not
+// invented. Each was measured to fail without the callback — `.startswith`,
+// `.endswith`, `.strip`, `.lstrip`, `.rstrip`, `.split` and `.items` all report
+// `unknown method`.
+
+/// `str.startswith` / `str.endswith` — Qwen3-8B, `chat:20`, the line that
+/// produced the original failure report.
+#[test]
+fn python_str_startswith_and_endswith() {
+    let src = "{{ 'ab' if '<tool_response>x</tool_response>'.startswith('<tool_response>') else 'no' }}\
+               {{ 'cd' if '<tool_response>x</tool_response>'.endswith('</tool_response>') else 'no' }}\
+               {{ 'e' if 'plain'.startswith('<tool_response>') else 'f' }}";
+    assert_eq!(tmpl(src).render(&msgs(), "<s>", "</s>").unwrap(), "abcdf");
+}
+
+/// `str.strip` / `str.lstrip` / `str.rstrip` **with an argument** — Qwen3-8B
+/// strips `'\n'` specifically, not whitespace generally. The argument is the
+/// load-bearing part: minijinja's `| trim` filter is not a substitute, because
+/// `trim` cannot be told which characters to remove.
+#[test]
+fn python_str_strip_family_takes_a_character_argument() {
+    let src = "[{{ '\\n\\nx y\\n\\n'.strip('\\n') }}]\
+               [{{ '\\n\\nx y\\n\\n'.lstrip('\\n') }}]\
+               [{{ '\\n\\nx y\\n\\n'.rstrip('\\n') }}]\
+               [{{ '..x..'.strip('.') }}]";
+    assert_eq!(
+        tmpl(src).render(&msgs(), "<s>", "</s>").unwrap(),
+        "[x y][x y\n\n][\n\nx y][x]"
+    );
+}
+
+/// `str.split` plus the negative index Qwen3-8B pairs it with —
+/// `content.split('</think>')[-1]`. A `split` that returned the wrong arity, or
+/// an index that counted from the front, both survive a "renders OK" check.
+#[test]
+fn python_str_split_indexes_from_both_ends() {
+    let src = "{{ 'a</think>b</think>c'.split('</think>') | length }}\
+               |{{ 'a</think>b</think>c'.split('</think>')[0] }}\
+               |{{ 'a</think>b</think>c'.split('</think>')[-1] }}";
+    assert_eq!(tmpl(src).render(&msgs(), "<s>", "</s>").unwrap(), "3|a|c");
+}
+
+/// Qwen3-8B's `<think>` extraction, verbatim from its Hub template (lines 39,
+/// 40 and 45) — the chained form, which is where a per-method fix that got the
+/// return types subtly wrong would show up and the isolated tests above would
+/// not.
+#[test]
+fn qwen3_think_extraction_renders() {
+    let src = "{%- set content = '<think>\\nreasoning\\n</think>\\n\\nanswer' %}\
+               {%- set reasoning_content = \
+                   content.split('</think>')[0].rstrip('\\n').split('<think>')[-1].lstrip('\\n') %}\
+               {%- set content = content.split('</think>')[-1].lstrip('\\n') %}\
+               {{- '<think>\\n' + reasoning_content.strip('\\n') + '\\n</think>\\n\\n' + content.lstrip('\\n') }}";
+    assert_eq!(
+        tmpl(src).render(&msgs(), "<s>", "</s>").unwrap(),
+        "<think>\nreasoning\n</think>\n\nanswer"
+    );
+}
+
+/// `dict.items()` — Mistral-7B-Instruct-v0.3 serialises each tool with it.
+///
+/// This one is latent rather than loud: the branch sits behind
+/// `tools is not none`, so every no-tools request renders fine and the gap only
+/// surfaces the day tools are wired. Asserted here so it cannot.
+///
+/// Key order is the map's iteration order, not source order — `description`
+/// sorts before `name`. That is observed behaviour, pinned so a change in it is
+/// a test failure rather than a silent change in every tool-calling prompt.
+#[test]
+fn python_dict_items() {
+    let src = "{%- set tool = {\"name\": \"get_weather\", \"description\": \"Get it\", \"return\": \"skipped\"} %}\
+               {%- for key, val in tool.items() if key != \"return\" %}\
+               {{- key }}={{ val }};\
+               {%- endfor %}";
+    assert_eq!(
+        tmpl(src).render(&msgs(), "<s>", "</s>").unwrap(),
+        "description=Get it;name=get_weather;"
+    );
+}
+
+/// Mistral-7B-Instruct-v0.3's `[AVAILABLE_TOOLS]` loop, verbatim from its Hub
+/// template, driven by a tool definition of the shape the OpenAI API delivers.
+///
+/// `tools` is not a `render` parameter yet, so it is bound in template source —
+/// which is what `transformers` does when a caller passes tools. Without this,
+/// "Mistral renders" only ever means "the branch was skipped".
+#[test]
+fn mistral_available_tools_branch_renders() {
+    let src = "{%- set tools = [{\"function\": {\"name\": \"get_weather\", \
+                 \"description\": \"Get the weather\", \
+                 \"parameters\": {\"type\": \"object\"}}}] %}\
+        {{- \"[AVAILABLE_TOOLS] [\" }}\n\
+        {%- for tool in tools %}\n\
+            {%- set tool = tool.function %}\n\
+            {{- '{\"type\": \"function\", \"function\": {' }}\n\
+            {%- for key, val in tool.items() if key != \"return\" %}\n\
+                {%- if val is string %}\n\
+                    {{- '\"' + key + '\": \"' + val + '\"' }}\n\
+                {%- else %}\n\
+                    {{- '\"' + key + '\": ' + val|tojson }}\n\
+                {%- endif %}\n\
+                {%- if not loop.last %}\n\
+                    {{- \", \" }}\n\
+                {%- endif %}\n\
+            {%- endfor %}\n\
+            {{- \"}}\" }}\n\
+            {%- if not loop.last %}\n\
+                {{- \", \" }}\n\
+            {%- else %}\n\
+                {{- \"]\" }}\n\
+            {%- endif %}\n\
+        {%- endfor %}\n\
+        {{- \"[/AVAILABLE_TOOLS]\" }}";
+    assert_eq!(
+        tmpl(src).render(&msgs(), "<s>", "</s>").unwrap(),
+        "[AVAILABLE_TOOLS] [{\"type\": \"function\", \"function\": \
+         {\"description\": \"Get the weather\", \"name\": \"get_weather\", \
+         \"parameters\": {\"type\":\"object\"}}}][/AVAILABLE_TOOLS]"
+    );
+}
