@@ -160,6 +160,22 @@ pub struct RequestContext {
     /// `0.0` means greedy. Defaults to `0.0` so existing constructors are
     /// unchanged and deterministic.
     pub temperature: f64,
+    /// How many tokens the model's own tokenizer produced for the prompt.
+    ///
+    /// Set by whichever backend tokenized during prefill. Defaults to 0 so
+    /// existing constructors are unchanged; a handler must not substitute its
+    /// own tokenizer, which is how this number drifts from what the model saw.
+    pub prompt_tokens: usize,
+    /// Whether the model emitted EOS, as opposed to generation hitting
+    /// `max_new_tokens`.
+    ///
+    /// `RequestState::Completed` cannot carry this: both backends complete on
+    /// `is_eos || tokens_generated >= max_new_tokens`, because EOS-only
+    /// completion leaves an ordinary request in `Decoding` forever and leaks
+    /// its KV cache. So the distinction is recorded here, at the point where
+    /// it is known, rather than reconstructed later from state that has
+    /// already merged the two cases.
+    pub stopped_on_eos: bool,
 }
 
 impl RequestContext {
@@ -172,6 +188,8 @@ impl RequestContext {
             cache_index: None,
             generated_tokens: Vec::new(),
             temperature: 0.0,
+            prompt_tokens: 0,
+            stopped_on_eos: false,
         }
     }
 

@@ -1244,6 +1244,11 @@ impl ParallelModelManager {
                     // Tokenize the prompt
                     let tokens = self.tokenize(&ctx.request.prompt, true)?;
 
+                    // Record the real count before any prefix-cache shortcut:
+                    // `usage.prompt_tokens` must describe the whole prompt, not
+                    // the uncached remainder.
+                    ctx.prompt_tokens = tokens.len();
+
                     // Try to get cached prefix KV (find best matching prefix)
                     if let Some(cached_entry) = self.prefix_cache.get_best_prefix(&tokens) {
                         // Cache hit! Restore KV and treat as if we just finished prefill
@@ -1502,9 +1507,9 @@ impl ParallelModelManager {
                         ctx.position
                     );
 
-                    if self.is_eos_token(next_token)
-                        || ctx.tokens_generated >= ctx.request.max_new_tokens
-                    {
+                    let hit_eos = self.is_eos_token(next_token);
+                    if hit_eos || ctx.tokens_generated >= ctx.request.max_new_tokens {
+                        ctx.stopped_on_eos = hit_eos;
                         ctx.complete();
                         // Automatically release cache index when request completes
                         if let Some(cache_idx) = ctx.cache_index {
@@ -1859,9 +1864,8 @@ impl ParallelModelManager {
                     }
                 }
 
-                if self.is_eos_token(next_token)
-                    || ctx.tokens_generated >= ctx.request.max_new_tokens
-                {
+                let hit_eos = self.is_eos_token(next_token);
+                if hit_eos || ctx.tokens_generated >= ctx.request.max_new_tokens {
                     // Segmented cache: end ModelGeneration span on completion
                     if self.is_segmented_cache_enabled() {
                         if let Some(cache_idx) = ctx.cache_index {
@@ -1878,6 +1882,7 @@ impl ParallelModelManager {
                         }
                     }
 
+                    ctx.stopped_on_eos = hit_eos;
                     ctx.complete();
                     // Automatically release cache index when request completes
                     if let Some(cache_idx) = ctx.cache_index {

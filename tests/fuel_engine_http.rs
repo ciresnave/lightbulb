@@ -13,20 +13,28 @@
 //!
 //! ## Deviation from the brief: `/v1/chat/completions`, not `/v1/completions`
 //!
-//! The brief that generated this file targeted `/v1/completions`. As written,
-//! `src/api/openai/completions.rs::create_completion` takes `_state: AppState`
-//! (leading underscore — never reads it) and is an explicit
+//! The brief that generated this file targeted `/v1/completions`. At the time,
+//! `src/api/openai/completions.rs::create_completion` took `_state: AppState`
+//! (leading underscore — never read it) and was an explicit
 //! `// TODO: Integrate with actual inference engine / For now, return a mock
-//! response` stub: it always returns the literal string `"This is a
+//! response` stub: it always returned the literal string `"This is a
 //! placeholder completion. Inference engine integration pending."`, no matter
-//! what `inference_tx` is. That predates this whole engine-wiring plan.
+//! what `inference_tx` was.
 //!
-//! Pointing an acceptance gate at that handler would make the content
+//! Pointing an acceptance gate at that handler would have made the content
 //! assertion fail on every run, including a perfectly-wired Fuel engine — a
 //! gate that is always red proves nothing, and is arguably worse than the
 //! "gate reports success having verified nothing" failure mode this project
 //! exists to stop, because there the correct-implementation case at least
 //! COULD pass.
+//!
+//! **That is no longer true, as of `d65bafd` (the runner-result-metadata
+//! branch): `/v1/completions` now dispatches through the runner and is covered
+//! by `tests/api_result_metadata.rs`.** The paragraphs above are kept as the
+//! record of why this gate was aimed where it was, not as a live description
+//! of `completions.rs`. The target stays `/v1/chat/completions` because that
+//! is what this gate has always measured and moving it would silently change
+//! what a green run means — not because the other endpoint is still a stub.
 //!
 //! `src/api/openai/chat.rs::create_chat_completion` does read
 //! `state.inference_tx` and drives exactly the `InferenceJob` /

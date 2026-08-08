@@ -187,20 +187,12 @@ async fn create_chat_completion(
         .collect::<Vec<_>>()
         .join("\n");
 
-    // For now, use a simple tokenizer approximation (split by whitespace)
-    // TODO: Use proper tokenizer
-    let prompt_tokens: Vec<u32> = prompt
-        .split_whitespace()
-        .enumerate()
-        .map(|(i, _)| i as u32)
-        .collect();
-
     let max_new_tokens = request.max_tokens.unwrap_or(100);
     let temperature = request.temperature as f64;
 
     // If a model runner is available, enqueue the request and wait for generated text.
     if let Some(tx) = &state.inference_tx {
-        let text = run_inference_once(tx, prompt.clone(), max_new_tokens, temperature).await?;
+        let result = run_inference_once(tx, prompt.clone(), max_new_tokens, temperature).await?;
 
         let created = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)?
@@ -215,15 +207,15 @@ async fn create_chat_completion(
                 index: 0,
                 message: ChatMessage {
                     role: "assistant".to_string(),
-                    content: text,
+                    content: result.text,
                     name: None,
                 },
-                finish_reason: "stop".to_string(),
+                finish_reason: result.finish_reason.as_str().to_string(),
             }],
             usage: Some(Usage {
-                prompt_tokens: prompt_tokens.len(),
-                completion_tokens: 0,
-                total_tokens: prompt_tokens.len(),
+                prompt_tokens: result.prompt_tokens,
+                completion_tokens: result.completion_tokens,
+                total_tokens: result.prompt_tokens + result.completion_tokens,
             }),
             lightbulb_result: None,
         });
@@ -235,9 +227,8 @@ async fn create_chat_completion(
         .as_secs();
 
     let response_content = format!(
-        "Received request for model '{}' with {} prompt tokens. No model available on the server.",
-        request.model,
-        prompt_tokens.len()
+        "Received request for model '{}'. No model available on the server.",
+        request.model
     );
 
     Ok(ChatCompletionResponse {
@@ -254,11 +245,18 @@ async fn create_chat_completion(
             },
             finish_reason: "stop".to_string(),
         }],
-        usage: Some(Usage {
-            prompt_tokens: prompt_tokens.len(),
-            completion_tokens: 0,
-            total_tokens: prompt_tokens.len(),
-        }),
+        // `None`, not zeros and not a word count. There is no model here, so
+        // there is no tokenizer, so the prompt's token count is genuinely
+        // unknown — and this arm previously reported
+        // `prompt.split_whitespace().count()` under a `TODO: Use proper
+        // tokenizer`, which is defect 4 in the spec's table. Reporting a word
+        // count as a token count is the exact lie this branch exists to remove;
+        // it survived here because the plan's justification for keeping this
+        // fallback ("it generated nothing, so `stop` and zero counts are
+        // accurate") covers `finish_reason` and `completion_tokens` and says
+        // nothing about `prompt_tokens`. `/v1/completions` already degrades
+        // this way, so the two endpoints now match.
+        usage: None,
         lightbulb_result: None,
     })
 }
@@ -270,7 +268,7 @@ pub(crate) async fn run_inference_once(
     prompt: String,
     max_new_tokens: usize,
     temperature: f64,
-) -> anyhow::Result<String> {
+) -> anyhow::Result<crate::engine::model_runner::CompletionResult> {
     let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
     let job = crate::engine::model_runner::InferenceJob {
         id: uuid::Uuid::new_v4().to_string(),
@@ -293,7 +291,7 @@ pub(crate) async fn run_inference_once_owned(
     prompt: String,
     max_new_tokens: usize,
     temperature: f64,
-) -> anyhow::Result<String> {
+) -> anyhow::Result<crate::engine::model_runner::CompletionResult> {
     run_inference_once(&tx, prompt, max_new_tokens, temperature).await
 }
 
@@ -348,19 +346,34 @@ async fn create_chat_completion_with_contract(
     )
     .await?;
 
-    build_contract_response(&request, &exec.final_text, exec.result)
+    build_contract_response(&request, exec)
 }
 
 /// Build a [`ChatCompletionResponse`] that carries a contract result in the
 /// `lightbulb_result` field alongside the raw model output in `choices`.
+///
+/// `finish_reason` and `usage` come from the runner via
+/// [`ContractExecutionResult`], not from this function. `usage` therefore
+/// covers **every** attempt the retry loop made, while `finish_reason`
+/// describes only the final attempt — the one whose text is in `choices[0]`.
+/// Both rules are documented on the type.
+///
+/// [`ContractExecutionResult`]: crate::contracts::executor::ContractExecutionResult
 fn build_contract_response(
     request: &ChatCompletionRequest,
-    content: &str,
-    result: crate::contracts::ContractResult,
+    exec: crate::contracts::executor::ContractExecutionResult,
 ) -> anyhow::Result<ChatCompletionResponse> {
     let created = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)?
         .as_secs();
+    let finish_reason = exec
+        .finish_reason
+        .map(|r| r.as_str().to_string())
+        // `None` means the loop ran zero inferences, which requires
+        // `max_attempts == 0`. The caller above clamps it to `>= 1`, so this
+        // arm is unreachable from the HTTP path; it exists so a direct
+        // `execute_contract` caller does not get a panic.
+        .unwrap_or_else(|| "stop".to_string());
     Ok(ChatCompletionResponse {
         id: format!("chatcmpl-{}", uuid::Uuid::new_v4()),
         object: "chat.completion".to_string(),
@@ -370,13 +383,17 @@ fn build_contract_response(
             index: 0,
             message: ChatMessage {
                 role: "assistant".to_string(),
-                content: content.to_string(),
+                content: exec.final_text,
                 name: None,
             },
-            finish_reason: "stop".to_string(),
+            finish_reason,
         }],
-        usage: None,
-        lightbulb_result: Some(result),
+        usage: Some(Usage {
+            prompt_tokens: exec.prompt_tokens,
+            completion_tokens: exec.completion_tokens,
+            total_tokens: exec.prompt_tokens + exec.completion_tokens,
+        }),
+        lightbulb_result: Some(exec.result),
     })
 }
 
@@ -429,24 +446,24 @@ fn create_chat_stream(
             .unwrap()
             .as_secs();
         let chat_id = format!("chatcmpl-{}", uuid::Uuid::new_v4());
-        let chat_id_for_stream = chat_id.clone();
-        let model_for_stream = model.clone();
-        let chat_id_for_done = chat_id.clone();
-        let model_for_done = model.clone();
 
+        use crate::engine::model_runner::StreamItem;
         use futures::stream::StreamExt as FuturesStreamExt;
         use tokio_stream::wrappers::UnboundedReceiverStream;
 
-        let token_stream = UnboundedReceiverStream::new(stream_rx)
-            .scan(true, move |is_first, result| {
-                let chat_id = chat_id_for_stream.clone();
-                let model = model_for_stream.clone();
+        // `chat_id` and `model` are moved into the closure and re-cloned per
+        // chunk; nothing after this point uses either (the no-runner fallback
+        // below re-derives the model name from `request`).
+        let token_stream =
+            UnboundedReceiverStream::new(stream_rx).scan(true, move |is_first, result| {
+                let chat_id = chat_id.clone();
+                let model = model.clone();
                 let first = *is_first;
                 *is_first = false;
 
                 async move {
                     match result {
-                        Ok(token_text) => Some(Ok(Event::default().data(
+                        Ok(StreamItem::Token(token_text)) => Some(Ok(Event::default().data(
                             serde_json::json!({
                                 "id": chat_id,
                                 "object": "chat.completion.chunk",
@@ -463,6 +480,20 @@ fn create_chat_stream(
                             })
                             .to_string(),
                         ))),
+                        Ok(StreamItem::Done { finish_reason }) => Some(Ok(Event::default().data(
+                            serde_json::json!({
+                                "id": chat_id,
+                                "object": "chat.completion.chunk",
+                                "created": created,
+                                "model": model,
+                                "choices": [{
+                                    "index": 0,
+                                    "delta": {},
+                                    "finish_reason": finish_reason.as_str()
+                                }]
+                            })
+                            .to_string(),
+                        ))),
                         Err(e) => Some(Ok(Event::default().data(
                             serde_json::json!({
                                 "error": {
@@ -474,27 +505,7 @@ fn create_chat_stream(
                         ))),
                     }
                 }
-            })
-            .chain(stream::once({
-                let chat_id = chat_id_for_done.clone();
-                let model = model_for_done.clone();
-                async move {
-                    Ok(Event::default().data(
-                        serde_json::json!({
-                            "id": chat_id,
-                            "object": "chat.completion.chunk",
-                            "created": created,
-                            "model": model,
-                            "choices": [{
-                                "index": 0,
-                                "delta": {},
-                                "finish_reason": "stop"
-                            }]
-                        })
-                        .to_string(),
-                    ))
-                }
-            }));
+            });
 
         return token_stream.boxed();
     }
@@ -541,4 +552,66 @@ fn default_temperature() -> f32 {
 
 fn default_n() -> usize {
     1
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::contracts::executor::ContractExecutionResult;
+    use crate::contracts::{ContractOutput, ContractResult};
+    use crate::engine::model_runner::FinishReason;
+
+    fn request() -> ChatCompletionRequest {
+        serde_json::from_value(serde_json::json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "hi"}],
+        }))
+        .unwrap()
+    }
+
+    fn exec_result(finish_reason: Option<FinishReason>) -> ContractExecutionResult {
+        ContractExecutionResult {
+            final_text: "yes".to_string(),
+            prompt_tokens: 34,
+            completion_tokens: 10,
+            finish_reason,
+            result: ContractResult {
+                contract_type: "enum_choice".to_string(),
+                attempts: 2,
+                parse_success: true,
+                model_id: "test-model".to_string(),
+                latency_ms: 7,
+                output: ContractOutput::EnumChoice { choice: "yes".to_string() },
+            },
+        }
+    }
+
+    /// The contract path used to hardcode `finish_reason: "stop"` and
+    /// `usage: None` regardless of what the runner reported. Fails if either
+    /// regresses to a constant.
+    #[test]
+    fn contract_response_reports_runner_metadata_not_constants() {
+        let resp = build_contract_response(&request(), exec_result(Some(FinishReason::Length)))
+            .expect("response should build");
+
+        assert_eq!(
+            resp.choices[0].finish_reason, "length",
+            "finish_reason must come from the runner, not a hardcoded \"stop\""
+        );
+        let usage = resp.usage.expect("usage must be reported, not None");
+        assert_eq!(usage.prompt_tokens, 34);
+        assert_eq!(usage.completion_tokens, 10);
+        assert_eq!(usage.total_tokens, 44);
+        // The one thing this change must NOT touch.
+        assert_eq!(resp.choices[0].message.content, "yes");
+        assert!(resp.lightbulb_result.is_some());
+    }
+
+    /// `None` (zero inferences ran) degrades to `"stop"` rather than panicking.
+    /// Unreachable from the handler, which clamps `max_attempts` to `>= 1`.
+    #[test]
+    fn contract_response_tolerates_absent_finish_reason() {
+        let resp = build_contract_response(&request(), exec_result(None)).unwrap();
+        assert_eq!(resp.choices[0].finish_reason, "stop");
+    }
 }

@@ -12,13 +12,83 @@ use crate::engine::{Request, RequestContext, RequestState};
 #[cfg(not(feature = "fuel-engine"))]
 use crate::model::ParallelModelManager;
 
+/// Why generation stopped, in OpenAI's vocabulary.
+///
+/// Two variants only. OpenAI also defines `content_filter` and `tool_calls`;
+/// nothing in Lightbulb produces either, and an enum carrying variants no
+/// code can construct is worse than one that grows when a producer appears.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FinishReason {
+    /// The model emitted an end-of-sequence token.
+    Stop,
+    /// `max_new_tokens` was reached with no EOS. Continuing is meaningful,
+    /// which is why a client needs to be able to tell this from `Stop`.
+    Length,
+}
+
+impl FinishReason {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            FinishReason::Stop => "stop",
+            FinishReason::Length => "length",
+        }
+    }
+}
+
+/// Everything a completion response needs, reported by the runner rather than
+/// guessed by the handler.
+#[derive(Debug)]
+pub struct CompletionResult {
+    pub text: String,
+    pub prompt_tokens: usize,
+    pub completion_tokens: usize,
+    pub finish_reason: FinishReason,
+}
+
+/// One item on the streaming channel.
+///
+/// `Done` carries ONLY the finish reason. Adding `completion_tokens` for
+/// symmetry with `CompletionResult` is deliberately rejected: OpenAI omits
+/// `usage` from stream chunks, so nothing would consume it, and a field that
+/// exists because it looked symmetrical is one the next reader has to work out
+/// is unused.
+#[derive(Debug)]
+pub enum StreamItem {
+    Token(String),
+    Done { finish_reason: FinishReason },
+}
+
+/// Classify how a finished request ended.
+///
+/// Reads `ctx.stopped_on_eos` rather than `ctx.state`, because
+/// `RequestState::Completed` cannot answer this question: every backend
+/// completes a request on `is_eos || tokens_generated >= max_new_tokens`
+/// (EOS-only completion would leave an ordinary budget-exhausted request
+/// stuck in `Decoding` forever, leaking its KV cache), so by the time a
+/// request reaches `Completed` the two exits are already indistinguishable
+/// from `state` alone. `stopped_on_eos` is recorded by the backend at the
+/// point where it still knows which condition fired, so there is no
+/// ordering trap here to get wrong — unlike the old `state`-based version,
+/// which had to check `Completed` before the token count precisely because
+/// EOS landing on the final allowed token satisfies both at once.
+///
+/// A free function over `RequestContext` rather than a method, so it is
+/// unit-testable without a model, a checkpoint, or a runner thread.
+pub fn finish_reason_for(ctx: &RequestContext) -> FinishReason {
+    if ctx.stopped_on_eos {
+        FinishReason::Stop
+    } else {
+        FinishReason::Length
+    }
+}
+
 /// Response mode for inference jobs
 #[derive(Debug)]
 pub enum ResponseMode {
     /// Complete response - send final text when done
-    Complete(oneshot::Sender<anyhow::Result<String>>),
+    Complete(oneshot::Sender<anyhow::Result<CompletionResult>>),
     /// Streaming response - send tokens as they are generated
-    Streaming(async_mpsc::UnboundedSender<Result<String>>),
+    Streaming(async_mpsc::UnboundedSender<Result<StreamItem>>),
 }
 
 /// Job submitted to the model runner thread
@@ -308,7 +378,16 @@ fn run_jobs<M: EngineModel>(mut model: M, rx: Receiver<InferenceJob>) {
         // Process based on response mode (move out of job to avoid borrow issues)
         match job.response_mode {
             ResponseMode::Streaming(stream_tx) => {
-                // Streaming mode: decode and send tokens incrementally
+                // Streaming mode: decode and send tokens incrementally.
+                //
+                // `finished_normally` distinguishes the loop's four `break`
+                // paths: a dropped receiver, a `decode_text` failure, a
+                // `step_batch` failure, and `should_continue()` going false.
+                // Only the last is a normal completion — the other three have
+                // either already sent `Err` or can no longer be received by
+                // anyone — so it is the only path that sets the flag before
+                // breaking.
+                let mut finished_normally = false;
                 loop {
                     match model.step_batch(&mut batch) {
                         Ok(_) => {
@@ -340,7 +419,10 @@ fn run_jobs<M: EngineModel>(mut model: M, rx: Receiver<InferenceJob>) {
                             {
                                 match model.decode_text(&[last_token], false) {
                                     Ok(token_text) => {
-                                        if stream_tx.send(Ok(token_text)).is_err() {
+                                        if stream_tx
+                                            .send(Ok(StreamItem::Token(token_text)))
+                                            .is_err()
+                                        {
                                             // Receiver dropped, stop generation
                                             break;
                                         }
@@ -353,6 +435,7 @@ fn run_jobs<M: EngineModel>(mut model: M, rx: Receiver<InferenceJob>) {
                             }
 
                             if !batch[0].should_continue() {
+                                finished_normally = true;
                                 break;
                             }
                         }
@@ -362,10 +445,20 @@ fn run_jobs<M: EngineModel>(mut model: M, rx: Receiver<InferenceJob>) {
                         }
                     }
                 }
+
+                // Exactly one Done, carrying what the runner observed rather
+                // than what the handler would otherwise assume. Sent on the
+                // normal exit only — an error path already sent Err, and a
+                // dropped receiver cannot receive this either.
+                if finished_normally {
+                    let _ = stream_tx.send(Ok(StreamItem::Done {
+                        finish_reason: finish_reason_for(&batch[0]),
+                    }));
+                }
             }
             ResponseMode::Complete(resp_tx) => {
                 // Complete mode: generate all tokens then send final text
-                let mut final_result: Option<anyhow::Result<String>> = None;
+                let mut final_result: Option<anyhow::Result<CompletionResult>> = None;
 
                 loop {
                     match model.step_batch(&mut batch) {
@@ -392,7 +485,14 @@ fn run_jobs<M: EngineModel>(mut model: M, rx: Receiver<InferenceJob>) {
                 if final_result.is_none() {
                     let generated_tokens = batch[0].generated_tokens.clone();
                     match model.decode_text(&generated_tokens, false) {
-                        Ok(text) => final_result = Some(Ok(text)),
+                        Ok(text) => {
+                            final_result = Some(Ok(CompletionResult {
+                                text,
+                                prompt_tokens: batch[0].prompt_tokens,
+                                completion_tokens: batch[0].tokens_generated,
+                                finish_reason: finish_reason_for(&batch[0]),
+                            }))
+                        }
                         Err(e) => final_result = Some(Err(e)),
                     }
                 }
@@ -405,4 +505,67 @@ fn run_jobs<M: EngineModel>(mut model: M, rx: Receiver<InferenceJob>) {
     }
 
     println!("Model runner thread exiting (receiver closed)");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::{Request, RequestContext};
+
+    /// Builds a context that has already been marked `Completed` — every
+    /// real backend does that unconditionally on `is_eos ||
+    /// tokens_generated >= max_new_tokens`, so `state` alone never
+    /// distinguishes the two exits. `stopped_on_eos` is set directly here,
+    /// the same way a real backend sets it: at the point completion is
+    /// decided, not reconstructed afterward.
+    fn ctx_with(max_new: usize, generated: usize, stopped_on_eos: bool) -> RequestContext {
+        let mut c = RequestContext::new(Request {
+            id: "t".to_string(),
+            prompt: "p".to_string(),
+            max_new_tokens: max_new,
+        });
+        c.start_decoding();
+        for _ in 0..generated {
+            c.record_token();
+        }
+        c.stopped_on_eos = stopped_on_eos;
+        c.complete();
+        c
+    }
+
+    /// Hitting the cap without EOS must report Length. This is the original
+    /// defect: both backends call `ctx.complete()` on `tokens_generated >=
+    /// max_new_tokens` alone — EOS-only completion would leak a KV-cache
+    /// session on every ordinary budget-exhausted request — so `state`
+    /// becomes `Completed` here too, exactly like the EOS case. Only
+    /// `stopped_on_eos` (false here) tells them apart; a `finish_reason_for`
+    /// that read `state` instead would report `Stop` and fail this test.
+    #[test]
+    fn hitting_the_cap_without_eos_is_length() {
+        let c = ctx_with(8, 8, false);
+        assert_eq!(finish_reason_for(&c), FinishReason::Length);
+    }
+
+    /// EOS must report Stop. Guards the inverse error — an implementation that
+    /// hardcoded Length would pass the test above and fail this one.
+    ///
+    /// **The old ordering trap dissolved rather than moving, which is why
+    /// there is no separate "EOS on the final allowed token" case here.** A
+    /// state-based classifier had to check `Completed` before the token count,
+    /// because an EOS landing on the last allowed token satisfies both at
+    /// once; get the order wrong and that generation reports Length.
+    /// `finish_reason_for` reads exactly one field, so `ctx_with(8, 8, true)`
+    /// and `ctx_with(8, 3, true)` differ only in fields it never looks at —
+    /// the same test twice. The `tokens_generated == max_new_tokens && EOS`
+    /// case is therefore covered by this one, not by omission.
+    ///
+    /// What this canNOT cover: `stopped_on_eos` is assigned directly above,
+    /// the way a backend assigns it, so nothing here exercises a producer.
+    /// `tests/api_result_metadata.rs::eos_terminated_generation_reports_stop`
+    /// is what catches a backend that stops setting the flag.
+    #[test]
+    fn completing_before_the_cap_is_stop() {
+        let c = ctx_with(8, 3, true);
+        assert_eq!(finish_reason_for(&c), FinishReason::Stop);
+    }
 }

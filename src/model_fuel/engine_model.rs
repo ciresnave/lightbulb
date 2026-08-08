@@ -168,6 +168,8 @@ impl FuelEngineModel {
                     .get_ids()
                     .to_vec();
 
+                ctx.prompt_tokens = ids.len();
+
                 // Generation can overflow the context even when the prompt
                 // alone fits: shrink the request's own budget up front so the
                 // decode loop's `should_continue()` stops naturally instead
@@ -242,7 +244,9 @@ impl FuelEngineModel {
                 // ever removes this request's session, leaking its ~92 MiB KV
                 // cache on every non-EOS completion — the common case, since
                 // `chat.rs` defaults `max_tokens` to 100.
-                if self.loaded.is_eos(tok) || ctx.tokens_generated >= ctx.request.max_new_tokens {
+                let hit_eos = self.loaded.is_eos(tok);
+                if hit_eos || ctx.tokens_generated >= ctx.request.max_new_tokens {
+                    ctx.stopped_on_eos = hit_eos;
                     ctx.complete();
                     self.sessions.remove(&ctx.request.id);
                 }
@@ -263,7 +267,9 @@ impl FuelEngineModel {
                 let tok = select_token(&logits, ctx.request_temperature(), seed);
                 ctx.generated_tokens.push(tok);
                 ctx.record_token();
-                if self.loaded.is_eos(tok) || ctx.tokens_generated >= ctx.request.max_new_tokens {
+                let hit_eos = self.loaded.is_eos(tok);
+                if hit_eos || ctx.tokens_generated >= ctx.request.max_new_tokens {
+                    ctx.stopped_on_eos = hit_eos;
                     ctx.complete();
                     self.sessions.remove(&ctx.request.id);
                 }
