@@ -75,6 +75,35 @@ fn tokenizer_count(text: &str) -> u64 {
         .len() as u64
 }
 
+/// Resolve the checkpoint's chat template exactly as `ApiServer::new` does.
+///
+/// Mirroring startup is load-bearing rather than tidy. A harness that leaves
+/// this `None` builds a state the server never builds — the assertions below
+/// would then describe a prompt no client ever causes.
+fn chat_template_for(
+    dir: &std::path::Path,
+) -> Option<Arc<lightbulb::api::chat_template::ResolvedTemplate>> {
+    let t = lightbulb::api::chat_template::resolve_for_model(dir);
+    (t.resolved_by() != lightbulb::api::chat_template::Resolution::None).then(|| Arc::new(t))
+}
+
+/// Render `messages` the way the handler will, for tests that must count the
+/// tokens the model actually saw.
+fn rendered_prompt(messages: &[(&str, &str)]) -> String {
+    let dir = tinyllama_dir().expect(MISSING_CHECKPOINT);
+    let t = chat_template_for(&dir).expect("no chat template resolved for the checkpoint");
+    let raw: Vec<_> = messages
+        .iter()
+        .map(
+            |(role, content)| lightbulb::contracts::validation::RawMessage {
+                role: (*role).to_string(),
+                content: (*content).to_string(),
+            },
+        )
+        .collect();
+    t.render(&raw).expect("rendering the prompt")
+}
+
 /// Drive the real router with a real runner and collect the whole response
 /// body. `to_bytes` awaits end-of-stream, so this works for an SSE response
 /// too: the stream ends when the runner drops `stream_tx` at the end of its
@@ -88,6 +117,7 @@ async fn post_raw(path: &str, body: serde_json::Value) -> (StatusCode, Vec<u8>) 
         config: ApiConfig::default(),
         db_pool: None,
         inference_tx: Some(tx),
+        chat_template: chat_template_for(&dir),
     };
     let app = lightbulb::api::openai::routes().with_state(state);
     let resp = app
@@ -136,17 +166,28 @@ fn sse_chunks(body: &[u8]) -> Vec<serde_json::Value> {
 ///
 /// ## Prompt choice is load-bearing here
 ///
-/// The original prompt, "Write a long essay about the sea.", does NOT
-/// exercise this at all: at `temperature: 0.0` it makes TinyLlama emit EOS
+/// The original prompt, "Write a long essay about the sea.", did NOT
+/// exercise this at all: at `temperature: 0.0` it made TinyLlama emit EOS
 /// as its very first generated token (`completion_tokens: 1`, content
-/// `"</s>"`), so the 6-token cap is never reached and `finish_reason:
-/// "stop"` is the CORRECT answer for that generation — the test failed for
+/// `"</s>"`), so the 6-token cap was never reached and `finish_reason:
+/// "stop"` was the CORRECT answer for that generation — the test failed for
 /// the wrong reason (an unrepresentative prompt), not because the fix was
 /// broken. Confirmed independently on `usage_counts_real_tokens`'s prompt
-/// below, which reliably runs to the cap (`completion_tokens: 6`,
+/// below, which reliably ran to the cap (`completion_tokens: 6`,
 /// non-EOS-looking text `"\n\n1. Answer:"`) across two separate runs and,
-/// post-fix, correctly reports `"length"` there. This test reuses that
+/// post-fix, correctly reported `"length"` there. This test reuses that
 /// same proven-to-truncate prompt rather than gambling on an untested one.
+///
+/// **Both of those observations were made under the old
+/// `"{role}: {content}"` join and are kept only as the record of why this
+/// prompt was chosen.** Chat templating changed what the model generates, so
+/// they no longer describe today's behaviour — see
+/// `eos_terminated_generation_reports_stop`, where the essay prompt now runs
+/// past its cap. Re-observed 2026-08-08 under the template: this request
+/// still truncates, `completion_tokens: 6`, `prompt_tokens: 23`, content
+/// `"The capital of France is Paris"` — the answer is 8 tokens long, so a
+/// 6-token cap cuts it off and `"length"` remains the truthful answer, now
+/// for a better reason than before.
 #[tokio::test]
 #[ignore = "needs the TinyLlama checkpoint"]
 async fn truncated_generation_reports_length() {
@@ -209,13 +250,29 @@ async fn usage_counts_real_tokens() {
         "completion_tokens should equal the tokens generated"
     );
 
-    // The string the model saw is NOT the message content. `create_chat_
-    // completion` joins messages as `format!("{}: {}", role, content)` and
-    // `join("\n")`s them, so a single user message reaches the tokenizer as the
-    // literal below. Counting the bare content would compare against a prompt
-    // nothing ever tokenized.
-    let expected_prompt = tokenizer_count("user: Name the capital of France.");
+    // The string the model saw is NOT the message content, and is no longer
+    // the `"{role}: {content}"` join either. `create_chat_completion` now
+    // renders through the checkpoint's chat template, so the expected count is
+    // derived by rendering the same message list through the same code the
+    // handler uses. Hardcoding a number here would re-break the moment the
+    // resolved tier changes; counting the bare content would compare against a
+    // prompt nothing ever tokenized.
+    let expected_prompt =
+        tokenizer_count(&rendered_prompt(&[("user", "Name the capital of France.")]));
     eprintln!("tokenizer says prompt_tokens should be {expected_prompt}");
+
+    // Expectation and behaviour share a derivation here — both go through
+    // `ResolvedTemplate::render` — so on its own the equality below would still
+    // hold if templating stopped reaching the handler and BOTH sides fell back
+    // together. This pins the expectation to a value that is demonstrably not
+    // the pre-template one: observed 9 under the legacy join, 23 under the
+    // template.
+    assert_ne!(
+        expected_prompt,
+        tokenizer_count("user: Name the capital of France."),
+        "the expected count equals the legacy `role: content` join's — the \
+         prompt is no longer being rendered through the chat template"
+    );
     assert_eq!(
         prompt, expected_prompt,
         "prompt_tokens disagrees with the model's own tokenizer — \
@@ -242,21 +299,45 @@ async fn usage_counts_real_tokens() {
 /// — left the entire suite green: every EOS-terminated response would have
 /// reported `"length"`. This test is what turns that mutation red.
 ///
-/// ## Prompt choice, and why `completion_tokens < 32` is half the assertion
+/// ## Prompt choice was RE-GROUNDED when chat templating landed
 ///
-/// `"Write a long essay about the sea."` at `temperature: 0.0` makes TinyLlama
-/// emit EOS as its FIRST generated token (`completion_tokens: 1`, content
-/// `"</s>"`) — observed while `truncated_generation_reports_length` was being
-/// debugged, where that behaviour was the problem rather than the point. A cap
-/// of 32 against a run that ends at 1 means `"stop"` cannot be arrived at by
-/// running out of budget, and the token assertion is what proves it: `"stop"`
-/// alone would also pass if the run went the full 32 and the reason were
-/// hardcoded.
+/// This test used `"Write a long essay about the sea."`, chosen because at
+/// `temperature: 0.0` it made TinyLlama emit EOS as its FIRST generated token
+/// (`completion_tokens: 1`, content `"</s>"`).
 ///
-/// ## The `"</s>"` in the content is a real, pre-existing wart
+/// **It only did that because the prompt was broken.** Under the old
+/// `"{role}: {content}"` join the model received `"user: Write a long essay
+/// about the sea."` — a base-model continuation prompt for a chat model — and
+/// responded by terminating immediately. Once `create_chat_completion` began
+/// rendering the checkpoint's own chat template, the model started doing what
+/// was asked. Observed 2026-08-08, post-template, same request:
 ///
-/// Expect `choices[0].message.content` to be the literal `"</s>"`. Both
-/// backends push the sampled token and count it BEFORE testing it for EOS, and
+///   finish_reason "length", completion_tokens 32, prompt_tokens 26, content
+///   "The sea is a vast and endless expanse of water that covers over 70% of
+///    the Earth's surface. It is a natural wonder that"
+///
+/// That is a real behaviour change and the correct one — the essay runs past a
+/// 32-token cap, so `"length"` is now the truthful answer for that prompt. The
+/// old prompt therefore no longer exercises `stopped_on_eos == true` at all,
+/// and keeping it would have left the suite with **no** coverage of the `true`
+/// branch. The fix is a prompt the model genuinely finishes, not a weaker
+/// assertion.
+///
+/// The replacement is `"Name the capital of France."`, observed 2026-08-08 at
+/// `temperature: 0.0` under the template, twice, at caps of 64 and 32:
+///
+///   finish_reason "stop", completion_tokens 8, prompt_tokens 23, content
+///   "The capital of France is Paris.</s>"
+///
+/// 8 against a cap of 32 means `"stop"` cannot have been reached by running out
+/// of budget, which is what the `completion_tokens < 32` half of the assertion
+/// pins down: `"stop"` alone would also pass if the run went the full 32 and
+/// the reason were hardcoded.
+///
+/// ## The trailing `"</s>"` in the content is a real, pre-existing wart
+///
+/// `choices[0].message.content` ends with the literal `"</s>"`. Both backends
+/// push the sampled token and count it BEFORE testing it for EOS, and
 /// `run_jobs` calls `decode_text(.., false)` — `skip_special = false` — so the
 /// EOS token is decoded straight into the returned text. That is a real
 /// pre-existing defect and deliberately NOT fixed here; it is out of this
@@ -269,7 +350,7 @@ async fn eos_terminated_generation_reports_stop() {
         "/v1/chat/completions",
         serde_json::json!({
             "model": "tinyllama",
-            "messages": [{"role": "user", "content": "Write a long essay about the sea."}],
+            "messages": [{"role": "user", "content": "Name the capital of France."}],
             "max_tokens": 32,
             "temperature": 0.0
         }),
@@ -312,9 +393,12 @@ async fn eos_terminated_generation_reports_stop() {
 /// ## Prompt choice is load-bearing, same as above
 ///
 /// Reuses the prompt the two tests above proved runs to a 6-token cap rather
-/// than emitting EOS early. `create_chat_stream` applies the identical
-/// `"{role}: {content}"` join as the non-streaming path, so the model sees the
-/// same text and truncates the same way.
+/// than emitting EOS early. `create_chat_stream` builds its prompt through the
+/// SAME `build_prompt` as the non-streaming path — one function, called from
+/// both — so the model sees the same text and truncates the same way. That
+/// sharing is new: the two paths previously each carried their own copy of the
+/// `"{role}: {content}"` join, and this test is what would catch them diverging
+/// again.
 #[tokio::test]
 #[ignore = "needs the TinyLlama checkpoint"]
 async fn streaming_terminal_chunk_reports_length() {
@@ -384,8 +468,9 @@ async fn streaming_terminal_chunk_reports_length() {
 /// ## The `finish_reason` here rests on observation, not on the chat tests
 ///
 /// The prompt choice cannot be borrowed from the two tests above.
-/// `/v1/completions` applies NO chat template, so the model sees the bare
-/// `"The capital of France is"` rather than chat's `"user: ..."` join — a
+/// `/v1/completions` applies NO chat template — deliberately, it is OpenAI's
+/// raw-text endpoint — so the model sees the bare `"The capital of France is"`
+/// rather than chat's rendered `"<|user|>\n…</s>\n<|assistant|>\n"` — a
 /// different input, which could perfectly well emit EOS as its first token the
 /// way `truncated_generation_reports_length`'s original prompt did. It does
 /// not. Observed post-fix at `temperature: 0.0`, twice: `finish_reason:

@@ -35,16 +35,16 @@ pub mod types;
 
 use anyhow::Result;
 use axum::{
-    Router,
     routing::{get, post},
+    Router,
 };
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 
-use crate::engine::MemoryAwareScheduler;
 use crate::engine::model_runner::ModelRunner;
+use crate::engine::MemoryAwareScheduler;
 use std::path::Path;
 
 /// API server configuration
@@ -124,6 +124,20 @@ pub struct AppState {
 
     /// Sender to enqueue inference jobs to the model runner thread (if started)
     pub inference_tx: Option<std::sync::mpsc::Sender<crate::engine::model_runner::InferenceJob>>,
+
+    /// Chat template for the loaded model, plus the special tokens it renders
+    /// with — resolved once at startup.
+    ///
+    /// `None` when no model runner started, or when no tier produced a
+    /// template. In that case the handlers fall back to the legacy
+    /// `role: content` join and `chat_template::resolve` has already said so at
+    /// `warn` level, naming the model directory.
+    ///
+    /// The template and its tokens are held **together**, in one
+    /// `ResolvedTemplate`, so that no caller is ever in a position to supply
+    /// `bos`/`eos` itself — which in practice means a literal `"<s>"`/`"</s>"`,
+    /// correct for the Llama-2 family and silently wrong for every other.
+    pub chat_template: Option<Arc<crate::api::chat_template::ResolvedTemplate>>,
 }
 
 /// API server
@@ -166,6 +180,7 @@ impl ApiServer {
             config: config.clone(),
             db_pool,
             inference_tx: None,
+            chat_template: None,
         };
 
         // Try to start a model runner thread if a model directory and default model exist
@@ -180,6 +195,29 @@ impl ApiServer {
                 ) {
                     Ok(sender) => {
                         state.inference_tx = Some(sender);
+
+                        // Resolve the chat template HERE and only here. Both
+                        // halves read files, and a per-request read would put
+                        // filesystem I/O in the request path for a value that
+                        // cannot change while the process runs.
+                        //
+                        // `Resolution::None` is stored as `None` rather than as
+                        // an empty template: an empty source renders to an empty
+                        // prompt, which reaches the model as a request to
+                        // continue nothing. The handlers need to know the
+                        // difference so they can fall back to the legacy join.
+                        let t = chat_template::resolve_for_model(&model_path);
+                        if t.resolved_by() != chat_template::Resolution::None {
+                            println!(
+                                "Chat template for {} resolved via {:?} (bos {:?}, eos {:?})",
+                                model_path.display(),
+                                t.resolved_by(),
+                                t.tokens.bos,
+                                t.tokens.eos
+                            );
+                            state.chat_template = Some(Arc::new(t));
+                        }
+
                         println!("Started model runner for {}", model_path.display());
                     }
                     Err(e) => {
@@ -289,17 +327,17 @@ impl ApiServer {
             use rustls::ServerConfig;
             use std::io::Cursor;
             use tokio_rustls::TlsAcceptor;
-            
+
             let certs: Vec<CertificateDer> = rustls_pemfile::certs(&mut Cursor::new(&cert_pem))
                 .collect::<Result<Vec<_>, _>>()?;
-            
+
             let key = rustls_pemfile::private_key(&mut Cursor::new(&key_pem))?
                 .ok_or_else(|| anyhow::anyhow!("No private key found in PEM file"))?;
-            
+
             let mut tls_config = ServerConfig::builder()
                 .with_no_client_auth()
                 .with_single_cert(certs, key)?;
-            
+
             tls_config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
             let tls_acceptor = TlsAcceptor::from(Arc::new(tls_config));
 
@@ -324,7 +362,7 @@ impl ApiServer {
             // HTTPS server task with manual TLS handling
             let https_server = tokio::spawn(async move {
                 let make_service = https_app.into_make_service();
-                
+
                 loop {
                     let (tcp_stream, remote_addr) = match https_listener.accept().await {
                         Ok(conn) => conn,
@@ -356,26 +394,32 @@ impl ApiServer {
                                 return;
                             }
                         };
-                        
+
                         // Create the hyper IO wrapper
                         let io = hyper_util::rt::TokioIo::new(tls_stream);
 
                         // Serve the connection with tower-to-hyper adapter
                         let conn = hyper_util::server::conn::auto::Builder::new(
-                            hyper_util::rt::TokioExecutor::new()
+                            hyper_util::rt::TokioExecutor::new(),
                         );
 
-                        let hyper_service = hyper::service::service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
-                            let mut service = service.clone();
-                            async move {
-                                service.call(req).await.map_err(|err| {
-                                    tracing::error!("Service error: {:?}", err);
-                                    std::io::Error::new(std::io::ErrorKind::Other, "service error")
-                                })
-                            }
-                        });
+                        let hyper_service = hyper::service::service_fn(
+                            move |req: hyper::Request<hyper::body::Incoming>| {
+                                let mut service = service.clone();
+                                async move {
+                                    service.call(req).await.map_err(|err| {
+                                        tracing::error!("Service error: {:?}", err);
+                                        std::io::Error::new(
+                                            std::io::ErrorKind::Other,
+                                            "service error",
+                                        )
+                                    })
+                                }
+                            },
+                        );
 
-                        if let Err(e) = conn.serve_connection_with_upgrades(io, hyper_service).await {
+                        if let Err(e) = conn.serve_connection_with_upgrades(io, hyper_service).await
+                        {
                             tracing::debug!("Error serving HTTPS connection: {}", e);
                         }
                     });

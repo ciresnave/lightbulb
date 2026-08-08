@@ -4,10 +4,10 @@
 //! and Lightbulb-specific extensions.
 
 use axum::{
-    Json,
     extract::State,
     http::StatusCode,
-    response::{IntoResponse, Sse, sse::Event},
+    response::{sse::Event, IntoResponse, Sse},
+    Json,
 };
 use futures::stream::{self, Stream, StreamExt};
 use serde::{Deserialize, Serialize};
@@ -167,6 +167,70 @@ pub async fn chat_completions(
     }
 }
 
+/// The pre-template prompt construction: `"{role}: {content}"` per message,
+/// newline-joined.
+///
+/// This is not any model's chat template. It is kept only as the fallback for a
+/// checkpoint no tier could resolve a template for, because a server that
+/// refuses to answer is worse than one that answers badly and says why — and
+/// `chat_template::resolve` warns at startup, naming the directory, whenever
+/// this is what will run.
+///
+/// It must have exactly one definition. It previously had three (both sites in
+/// this file plus `contracts::validation::messages_to_prompt`), which is how
+/// the streaming path kept the defect after the non-streaming path was looked
+/// at.
+fn legacy_join(messages: &[crate::contracts::validation::RawMessage]) -> String {
+    messages
+        .iter()
+        .map(|msg| format!("{}: {}", msg.role, msg.content))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Build the prompt for `messages`, preferring the model's own chat template.
+///
+/// Used by BOTH `create_chat_completion` and `create_chat_stream`. Sharing one
+/// function rather than repeating the logic is the point: the two paths having
+/// separate prompt construction is the defect this replaces.
+///
+/// The template carries its own `bos`/`eos` (see
+/// `chat_template::ResolvedTemplate`), so there is no token argument here to
+/// get wrong.
+fn build_prompt(state: &AppState, messages: &[ChatMessage]) -> String {
+    let raw: Vec<crate::contracts::validation::RawMessage> = messages
+        .iter()
+        .map(|m| crate::contracts::validation::RawMessage {
+            role: m.role.clone(),
+            content: m.content.clone(),
+        })
+        .collect();
+
+    match &state.chat_template {
+        Some(t) => match t.render(&raw) {
+            Ok(p) => p,
+            // Per-request and rare, so `warn`: a template that resolved at
+            // startup and then failed on a particular message list is a real
+            // anomaly worth seeing every time it happens.
+            Err(e) => {
+                tracing::warn!(
+                    "chat template ({:?}) failed to render: {e}; using the legacy join",
+                    t.resolved_by()
+                );
+                legacy_join(&raw)
+            }
+        },
+        // `debug`, not `warn`: `resolve` already warned once at startup with the
+        // model directory and the remedy. Repeating that per request would bury
+        // the render failure above, which is the one that is genuinely new
+        // information.
+        None => {
+            tracing::debug!("no chat template for this model; using the legacy join");
+            legacy_join(&raw)
+        }
+    }
+}
+
 /// Create non-streaming chat completion
 async fn create_chat_completion(
     state: AppState,
@@ -179,13 +243,7 @@ async fn create_chat_completion(
         }
     }
 
-    // Convert messages to prompt text
-    let prompt = request
-        .messages
-        .iter()
-        .map(|msg| format!("{}: {}", msg.role, msg.content))
-        .collect::<Vec<_>>()
-        .join("\n");
+    let prompt = build_prompt(&state, &request.messages);
 
     let max_new_tokens = request.max_tokens.unwrap_or(100);
     let temperature = request.temperature as f64;
@@ -330,7 +388,10 @@ async fn create_chat_completion_with_contract(
     let msgs: Vec<RawMessage> = request
         .messages
         .iter()
-        .map(|m| RawMessage { role: m.role.clone(), content: m.content.clone() })
+        .map(|m| RawMessage {
+            role: m.role.clone(),
+            content: m.content.clone(),
+        })
         .collect();
 
     let exec = execute_contract(
@@ -402,13 +463,13 @@ fn create_chat_stream(
     state: AppState,
     request: ChatCompletionRequest,
 ) -> impl Stream<Item = Result<Event, Infallible>> {
-    // Convert messages to prompt text
-    let prompt = request
-        .messages
-        .iter()
-        .map(|msg| format!("{}: {}", msg.role, msg.content))
-        .collect::<Vec<_>>()
-        .join("\n");
+    // The SAME prompt construction as the non-streaming path. These two sites
+    // drifting apart is not hypothetical: this one was the second of the two
+    // `role: content` joins, and it is the one a fix aimed at
+    // `create_chat_completion` leaves behind — the endpoint looks correct,
+    // returns 200, and prompts a chat model like a base model on every
+    // `"stream": true` request.
+    let prompt = build_prompt(&state, &request.messages);
 
     let max_new_tokens = request.max_tokens.unwrap_or(100);
     let model = request.model.clone();
@@ -581,7 +642,9 @@ mod tests {
                 parse_success: true,
                 model_id: "test-model".to_string(),
                 latency_ms: 7,
-                output: ContractOutput::EnumChoice { choice: "yes".to_string() },
+                output: ContractOutput::EnumChoice {
+                    choice: "yes".to_string(),
+                },
             },
         }
     }

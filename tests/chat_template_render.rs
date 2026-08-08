@@ -962,3 +962,134 @@ fn an_unusable_tokenizer_config_chat_template_falls_through() {
         );
     }
 }
+
+// ─── Special tokens ─────────────────────────────────────────────────────────
+//
+// Every fixture below uses tokens that are NOT `<s>` / `</s>`. That is the
+// whole point: an implementation that hardcodes the Llama-2 pair — which is
+// what the plan for this task specified — passes any test written against
+// TinyLlama, because TinyLlama's tokens happen to BE that pair. Only a
+// checkpoint whose tokens differ can tell the two implementations apart.
+
+/// Tier 1: `tokenizer_config.json` wins, in BOTH shapes it is written in.
+///
+/// `bos_token` here is a bare string and `eos_token` a serialised `AddedToken`
+/// object, because both occur on the Hub — Llama-3.1-Instruct writes strings,
+/// TinyLlama's own Hub config writes objects. Handling only strings sends the
+/// object-shaped half of the Hub to the id fallback with nothing logged.
+#[test]
+fn tokenizer_config_special_tokens_are_read_in_both_shapes() {
+    let d = tmp_model_dir("llama3-tokens");
+    std::fs::write(
+        d.join("tokenizer_config.json"),
+        r#"{"bos_token":"<|begin_of_text|>",
+            "eos_token":{"content":"<|eot_id|>","lstrip":false,"normalized":false,
+                         "rstrip":false,"single_word":false}}"#,
+    )
+    .unwrap();
+    let t = lightbulb::api::chat_template::special_tokens(&d);
+    assert_eq!(t.bos, "<|begin_of_text|>");
+    assert_eq!(
+        t.eos, "<|eot_id|>",
+        "an eos_token written as an AddedToken object was not read"
+    );
+}
+
+/// Tier 2: no `tokenizer_config.json` at all — ids from `config.json` resolved
+/// through `tokenizer.json`'s `added_tokens`.
+///
+/// This is the tier that serves the checkpoint this project actually tests
+/// against: the TinyLlama snapshot ships no `tokenizer_config.json`. The
+/// fixture uses Qwen's ids and tokens rather than TinyLlama's so that a
+/// hardcoded `<s>`/`</s>` cannot pass it.
+#[test]
+fn token_ids_resolve_through_added_tokens() {
+    let d = tmp_model_dir("id-fallback");
+    std::fs::write(
+        d.join("config.json"),
+        r#"{"model_type":"qwen2","bos_token_id":151643,"eos_token_id":151645}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        d.join("tokenizer.json"),
+        r#"{"added_tokens":[
+             {"id":151643,"content":"<|endoftext|>","special":true},
+             {"id":151644,"content":"<|im_start|>","special":true},
+             {"id":151645,"content":"<|im_end|>","special":true}]}"#,
+    )
+    .unwrap();
+    let t = lightbulb::api::chat_template::special_tokens(&d);
+    assert_eq!(t.bos, "<|endoftext|>");
+    assert_eq!(t.eos, "<|im_end|>");
+}
+
+/// A list-valued `eos_token_id` — Llama-3.1 ships `[128001, 128008, 128009]` —
+/// resolves rather than being dropped on the floor.
+#[test]
+fn a_list_valued_token_id_resolves_to_its_first_entry() {
+    let d = tmp_model_dir("list-eos-id");
+    std::fs::write(
+        d.join("config.json"),
+        r#"{"model_type":"llama","bos_token_id":128000,"eos_token_id":[128001,128008,128009]}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        d.join("tokenizer.json"),
+        r#"{"added_tokens":[
+             {"id":128000,"content":"<|begin_of_text|>","special":true},
+             {"id":128001,"content":"<|end_of_text|>","special":true},
+             {"id":128009,"content":"<|eot_id|>","special":true}]}"#,
+    )
+    .unwrap();
+    let t = lightbulb::api::chat_template::special_tokens(&d);
+    assert_eq!(t.bos, "<|begin_of_text|>");
+    assert_eq!(t.eos, "<|end_of_text|>");
+}
+
+/// A checkpoint declaring neither gets EMPTY strings — never another model's
+/// tokens.
+///
+/// The assertion is equality with the empty pair, not merely `!= "</s>"`: the
+/// documented fallback is "invent nothing", and any non-empty default is some
+/// specific family's token being put into every other family's prompt.
+#[test]
+fn an_undeclared_checkpoint_gets_no_tokens_rather_than_another_models() {
+    let d = tmp_model_dir("no-tokens");
+    // tmp_model_dir writes `{"model_type":"llama"}` — no ids, no tokenizer.json.
+    let t = lightbulb::api::chat_template::special_tokens(&d);
+    assert_eq!(t, lightbulb::api::chat_template::SpecialTokens::default());
+}
+
+/// The load-bearing one: rendering uses the CHECKPOINT'S tokens.
+///
+/// A single call chain — `resolve_for_model` then `render` — with a Llama-3
+/// template and Llama-3 tokens. An implementation that renders with a hardcoded
+/// `"<s>"`/`"</s>"` produces `…France.</s><|start_header_id|>assistant…`, which
+/// still renders successfully and is never logged, so only an exact-match
+/// assertion here separates the two.
+#[test]
+fn rendering_uses_the_checkpoints_own_tokens() {
+    let d = tmp_model_dir("render-with-own-tokens");
+    std::fs::write(
+        d.join("tokenizer_config.json"),
+        r#"{"bos_token":"<|begin_of_text|>",
+            "eos_token":"<|eot_id|>",
+            "chat_template":"{{ bos_token }}{% for m in messages %}{{ '<|start_header_id|>' + m.role + '<|end_header_id|>\n\n' + m.content + eos_token }}{% endfor %}{{ '<|start_header_id|>assistant<|end_header_id|>\n\n' }}"}"#,
+    )
+    .unwrap();
+
+    let r = lightbulb::api::chat_template::resolve_for_model(&d);
+    assert_eq!(r.resolved_by(), Resolution::TokenizerConfig);
+
+    let out = r.render(&msgs()).expect("render failed");
+    assert_eq!(
+        out,
+        "<|begin_of_text|><|start_header_id|>user<|end_header_id|>\n\n\
+         Name the capital of France.<|eot_id|>\
+         <|start_header_id|>assistant<|end_header_id|>\n\n"
+    );
+    assert!(
+        !out.contains("</s>") && !out.contains("<s>"),
+        "a Llama-2 special token reached a Llama-3 prompt: {out:?}"
+    );
+}

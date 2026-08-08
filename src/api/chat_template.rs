@@ -8,9 +8,20 @@
 //! continues text rather than answering, and does not reliably emit EOS.
 //! Measured on TinyLlama-1.1B-Chat, EOS fired in 1 of 6 trials.
 //!
-//! This module exists to replace that join. Nothing is wired to it yet — the
-//! three sites above are still on the join until Tasks 3 and 4 route them
-//! through `ChatTemplate::render`.
+//! This module exists to replace that join. Both `openai/chat.rs` sites now
+//! render through `ResolvedTemplate::render` — measured on TinyLlama, the same
+//! request that previously ran its whole 64-token budget inventing a Q&A
+//! transcript now answers `"The capital of France is Paris.</s>"` in 8 tokens
+//! and reports `finish_reason: "stop"`. `contracts/executor.rs` is still on
+//! the join; it cannot be fixed by rendering upstream because it MUTATES the
+//! message list between retry attempts, so its callback signature has to
+//! change. That is Task 4.
+//!
+//! A template is always paired with the special tokens it renders with — see
+//! `SpecialTokens` and `ResolvedTemplate`. Handing `render` a literal
+//! `"<s>"`/`"</s>"` is correct for the Llama-2 family and silently wrong
+//! everywhere else, and it fails in the one way this module cannot detect: the
+//! render succeeds, so nothing falls through and nothing is logged.
 
 use std::path::Path;
 
@@ -420,5 +431,200 @@ pub fn resolve(model_dir: &Path) -> ChatTemplate {
     ChatTemplate {
         source: String::new(),
         resolved_by: Resolution::None,
+    }
+}
+
+// ─── Special tokens ─────────────────────────────────────────────────────────
+//
+// `render` takes `bos_token` and `eos_token` because real templates reference
+// them as bare variables. They must come FROM THE CHECKPOINT.
+//
+// Passing a hardcoded `"<s>"` / `"</s>"` is correct for exactly the Llama-2
+// family and silently wrong everywhere else: Llama-3 uses `<|begin_of_text|>`
+// and `<|eot_id|>`, Qwen/ChatML uses `<|endoftext|>` and `<|im_end|>`. A
+// template rendered with another model's special tokens still renders — so it
+// does not fall through to the next tier, nothing is logged, and the model is
+// prompted with text it has never seen in training. That is the same
+// silent-wrong-output failure this whole module exists to remove, and it is
+// worse than the one it replaced because the prompt now LOOKS right.
+
+/// The special tokens a chat template is rendered with, read from the
+/// checkpoint.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SpecialTokens {
+    pub bos: String,
+    pub eos: String,
+}
+
+/// Read one `*_token` field out of a parsed `tokenizer_config.json`.
+///
+/// Two shapes are real and both appear on the Hub. Most checkpoints store a
+/// bare string (`"eos_token": "<|eot_id|>"`). Checkpoints saved by an older
+/// `transformers` store the serialised `AddedToken` object
+/// (`"eos_token": {"content": "</s>", "lstrip": false, "normalized": false, …}`)
+/// — TinyLlama's own Hub `tokenizer_config.json` is of that second kind.
+/// Handling only the string form would send half the Hub to the id fallback
+/// below with nothing logged.
+fn token_field(v: &serde_json::Value, key: &str) -> Option<String> {
+    let t = v.get(key)?;
+    if let Some(s) = t.as_str() {
+        return Some(s.to_string());
+    }
+    t.get("content")?.as_str().map(str::to_string)
+}
+
+/// `config.json`'s `bos_token_id` / `eos_token_id`.
+///
+/// The value is usually an integer but may be a **list**: Llama-3.1-Instruct
+/// ships `"eos_token_id": [128001, 128008, 128009]`, the set of ids that end
+/// generation. Nothing in that list says which one a template should append
+/// after a message, so a list is a guess and is logged as one. The first entry
+/// is taken because it is deterministic and no ordering there is meaningful —
+/// and this path is only reached by a checkpoint that ships **no**
+/// `tokenizer_config.json`, which no multi-EOS model does, since such a model
+/// needs one for its own template.
+fn token_id(cfg: &serde_json::Value, key: &str) -> Option<u64> {
+    let v = cfg.get(key)?;
+    if let Some(n) = v.as_u64() {
+        return Some(n);
+    }
+    let arr = v.as_array()?;
+    if arr.len() > 1 {
+        tracing::warn!(
+            "config.json {key} is a list {v}; using the first entry. Ship a \
+             tokenizer_config.json with an explicit {} to remove the guess.",
+            key.trim_end_matches("_id")
+        );
+    }
+    arr.first()?.as_u64()
+}
+
+/// Look an id up in `tokenizer.json`'s `added_tokens`.
+///
+/// `added_tokens` rather than the full `model.vocab`: BOS/EOS are always added
+/// tokens, the array is short, and reading the whole vocab of a 150k-token
+/// tokenizer to find two entries is work for nothing.
+fn added_token_text(tokenizer: &serde_json::Value, id: u64) -> Option<String> {
+    tokenizer
+        .get("added_tokens")?
+        .as_array()?
+        .iter()
+        .find(|t| t.get("id").and_then(serde_json::Value::as_u64) == Some(id))
+        .and_then(|t| t.get("content").and_then(serde_json::Value::as_str))
+        .map(str::to_string)
+}
+
+/// Resolve the checkpoint's BOS and EOS token text.
+///
+/// Sources, in order:
+///
+/// 1. `tokenizer_config.json`'s `bos_token` / `eos_token` — authoritative, and
+///    the same field `transformers` reads.
+/// 2. `config.json`'s `bos_token_id` / `eos_token_id`, looked up in
+///    `tokenizer.json`'s `added_tokens`. This is what serves the checkpoint
+///    this project tests against: the TinyLlama-1.1B-Chat snapshot has no
+///    `tokenizer_config.json` at all (only `config.json`, `model.safetensors`
+///    and `tokenizer.json`), and its ids 1 and 2 map to `<s>` and `</s>` there.
+/// 3. **Empty string, with a warning naming the checkpoint.**
+///
+/// Tier 3 is empty rather than `"<s>"` / `"</s>"` deliberately. A default of
+/// `</s>` is a *specific model family's* token, so it would put a foreign
+/// special token into the prompt of every checkpoint that declares nothing —
+/// unrecoverably, because the render succeeds and no tier falls through. An
+/// empty string omits the marker instead: the prompt is then merely incomplete
+/// rather than actively lying, single-turn prompting (where the marker sits
+/// after the user's message and before the generation prompt) is barely
+/// affected, and the warning names the directory so the gap is fixable. The
+/// rule is "never invent a token", and empty is the only value that obeys it.
+pub fn special_tokens(model_path: &Path) -> SpecialTokens {
+    let mut out = SpecialTokens::default();
+
+    // Tier 1 — the checkpoint's own declaration.
+    if let Ok(raw) = std::fs::read_to_string(model_path.join("tokenizer_config.json")) {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) {
+            out.bos = token_field(&v, "bos_token").unwrap_or_default();
+            out.eos = token_field(&v, "eos_token").unwrap_or_default();
+        }
+    }
+
+    // Tier 2 — ids from config.json, resolved through tokenizer.json. Applied
+    // per token, not per file: a checkpoint that declares one and not the other
+    // gets the one it declares plus a resolved fallback for the other.
+    if out.bos.is_empty() || out.eos.is_empty() {
+        let cfg = std::fs::read_to_string(model_path.join("config.json"))
+            .ok()
+            .and_then(|r| serde_json::from_str::<serde_json::Value>(&r).ok());
+        let tok = std::fs::read_to_string(model_path.join("tokenizer.json"))
+            .ok()
+            .and_then(|r| serde_json::from_str::<serde_json::Value>(&r).ok());
+        if let (Some(cfg), Some(tok)) = (cfg, tok) {
+            for (slot, key) in [
+                (&mut out.bos, "bos_token_id"),
+                (&mut out.eos, "eos_token_id"),
+            ] {
+                if slot.is_empty() {
+                    if let Some(text) =
+                        token_id(&cfg, key).and_then(|id| added_token_text(&tok, id))
+                    {
+                        *slot = text;
+                    }
+                }
+            }
+        }
+    }
+
+    // Tier 3 — nothing declared. Say so; do not invent one.
+    if out.bos.is_empty() || out.eos.is_empty() {
+        tracing::warn!(
+            "{} declares no {}; rendering its chat template with an empty string there. \
+             A chat template that references the missing token will omit it. Add a \
+             tokenizer_config.json with bos_token/eos_token, or a config.json with \
+             bos_token_id/eos_token_id whose ids appear in tokenizer.json's added_tokens.",
+            model_path.display(),
+            match (out.bos.is_empty(), out.eos.is_empty()) {
+                (true, true) => "BOS or EOS token",
+                (true, false) => "BOS token",
+                _ => "EOS token",
+            }
+        );
+    }
+
+    out
+}
+
+/// A resolved template together with the special tokens it must be rendered
+/// with.
+///
+/// The pair travels together because separating them is how a template ends up
+/// rendered with another model's tokens: both are read from the same checkpoint
+/// at the same moment, and a caller holding only a `ChatTemplate` has to supply
+/// `bos`/`eos` from somewhere, which in practice means a literal.
+#[derive(Debug, Clone)]
+pub struct ResolvedTemplate {
+    pub template: ChatTemplate,
+    pub tokens: SpecialTokens,
+}
+
+impl ResolvedTemplate {
+    /// Render `messages` with this checkpoint's own special tokens.
+    pub fn render(&self, messages: &[RawMessage]) -> anyhow::Result<String> {
+        self.template
+            .render(messages, &self.tokens.bos, &self.tokens.eos)
+    }
+
+    /// Which tier produced the template.
+    pub fn resolved_by(&self) -> Resolution {
+        self.template.resolved_by
+    }
+}
+
+/// Resolve both the template and the special tokens for `model_path`.
+///
+/// Called once at startup, where `model_path` is known. Both halves read files,
+/// and neither can change while the process runs.
+pub fn resolve_for_model(model_path: &Path) -> ResolvedTemplate {
+    ResolvedTemplate {
+        template: resolve(model_path),
+        tokens: special_tokens(model_path),
     }
 }

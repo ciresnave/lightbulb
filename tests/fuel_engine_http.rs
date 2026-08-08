@@ -46,13 +46,18 @@
 //! "do not modify `src/api/` to suit the test") — applied here to a routing
 //! assumption instead of a struct signature.
 //!
-//! One consequence: `chat.rs` builds its prompt as `"{role}: {content}"` per
-//! message, so the model actually receives `"user: The capital of France
-//! is"`, not the bare prompt string. That prefixing is `chat.rs`'s existing
-//! behaviour, not something introduced here, which is why the diagnosis
-//! order below cross-checks against `generate_greedy` on the UNPREFIXED
-//! prompt: if that passes and this fails, the Fuel wiring is exonerated and
-//! the defect is `chat.rs`'s prompt formatting, not the engine.
+//! One consequence: `chat.rs` does not send the bare prompt string. It used to
+//! build `"{role}: {content}"` per message, so the model received `"user: The
+//! capital of France is"`; as of the chat-template work it renders the
+//! checkpoint's own template instead, so TinyLlama receives
+//! `"<|user|>\nThe capital of France is</s>\n<|assistant|>\n"`. Either way the
+//! text is not the bare prompt, which is why the diagnosis order below
+//! cross-checks against `generate_greedy` on the UNPREFIXED prompt: if that
+//! passes and this fails, the Fuel wiring is exonerated and the defect is
+//! `chat.rs`'s prompt construction, not the engine.
+//!
+//! The state built below resolves the template exactly as `ApiServer::new`
+//! does, so this gate measures the prompt path the server actually ships.
 //!
 //! Diagnose in this order, because it separates plumbing from maths:
 //!   1. Non-200 -> the handler or the channel. Plumbing.
@@ -92,11 +97,25 @@ fn tinyllama_dir() -> Option<PathBuf> {
     p.join("model.safetensors").is_file().then_some(p)
 }
 
+/// Resolve the checkpoint's chat template exactly as `ApiServer::new` does.
+///
+/// An acceptance gate that builds a state the server never builds is not an
+/// acceptance gate for the server. Leaving this `None` would keep these two
+/// tests on the pre-template `"{role}: {content}"` join for ever, so they would
+/// go on passing while the shipped prompt path was never exercised.
+fn chat_template_for(
+    dir: &std::path::Path,
+) -> Option<Arc<lightbulb::api::chat_template::ResolvedTemplate>> {
+    let t = lightbulb::api::chat_template::resolve_for_model(dir);
+    (t.resolved_by() != lightbulb::api::chat_template::Resolution::None).then(|| Arc::new(t))
+}
+
 #[tokio::test]
 #[ignore = "needs the TinyLlama checkpoint; minutes on CPU"]
 async fn fuel_runner_serves_a_coherent_completion_over_http() {
-    let dir = tinyllama_dir()
-        .expect("no TinyLlama snapshot — this is an acceptance gate, so it fails rather than skipping");
+    let dir = tinyllama_dir().expect(
+        "no TinyLlama snapshot — this is an acceptance gate, so it fails rather than skipping",
+    );
 
     let tx = ModelRunner::start(&dir, 1, 512, Some("f32".to_string()))
         .expect("starting the Fuel model runner");
@@ -106,6 +125,7 @@ async fn fuel_runner_serves_a_coherent_completion_over_http() {
         config: ApiConfig::default(),
         db_pool: None,
         inference_tx: Some(tx),
+        chat_template: chat_template_for(&dir),
     };
 
     let app = lightbulb::api::openai::routes().with_state(state);
@@ -208,8 +228,9 @@ async fn fuel_runner_serves_a_coherent_completion_over_http() {
 #[tokio::test]
 #[ignore = "needs the TinyLlama checkpoint; minutes on CPU"]
 async fn fuel_runner_serves_a_default_temperature_completion() {
-    let dir = tinyllama_dir()
-        .expect("no TinyLlama snapshot — this is an acceptance gate, so it fails rather than skipping");
+    let dir = tinyllama_dir().expect(
+        "no TinyLlama snapshot — this is an acceptance gate, so it fails rather than skipping",
+    );
 
     let tx = ModelRunner::start(&dir, 1, 512, Some("f32".to_string()))
         .expect("starting the Fuel model runner");
@@ -219,6 +240,7 @@ async fn fuel_runner_serves_a_default_temperature_completion() {
         config: ApiConfig::default(),
         db_pool: None,
         inference_tx: Some(tx),
+        chat_template: chat_template_for(&dir),
     };
 
     let app = lightbulb::api::openai::routes().with_state(state);
