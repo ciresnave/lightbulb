@@ -184,47 +184,179 @@ pub struct Sidecar {
     pub model_fingerprint: String,
 }
 
-/// Hash of `config.json`. Cheap, and it changes whenever the checkpoint does.
-///
-/// `DefaultHasher` is explicitly not a stable hash across Rust releases, so a
-/// toolchain upgrade can invalidate every sidecar on disk. That is acceptable
-/// here and nowhere near acceptable for a cache key: the consequence is
-/// re-running a probe, and the failure direction is "ignored a valid sidecar",
-/// never "accepted one from a different checkpoint".
-pub fn fingerprint(model_dir: &Path) -> String {
-    use std::hash::{Hash, Hasher};
-    let bytes = std::fs::read(model_dir.join("config.json")).unwrap_or_default();
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    bytes.hash(&mut h);
-    format!("{:016x}", h.finish())
+fn digest(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    // Truncated to 8 bytes. This identifies a checkpoint; it is not defending
+    // against an adversary who gets to pick the file contents.
+    hex::encode(&Sha256::digest(bytes)[..8])
 }
 
-pub fn write_sidecar(model_dir: &Path, sc: &Sidecar) -> anyhow::Result<()> {
+/// Fingerprint of the checkpoint at `model_path`, or `None` when one cannot be
+/// computed.
+///
+/// **`None` is the point of the return type.** This previously read
+/// `config.json` through `unwrap_or_default()`, so every path without a
+/// readable one hashed to the same constant — two unrelated empty directories
+/// and every `.gguf` file path all produced `bd60acb658c79e45`. A sidecar
+/// carrying that constant then matched any such checkpoint and was served at
+/// `Resolution::Sidecar`, the highest-authority tier, with `evidence` claiming
+/// it had been measured on that model. `ModelRunner::start` accepts "either a
+/// directory … or a `.gguf` file", so that path was reachable. A fingerprint
+/// that cannot be computed must never compare equal to a stored one, which is
+/// exactly what no value at all guarantees.
+///
+/// SHA-256 rather than `DefaultHasher`: the latter is explicitly unstable
+/// across Rust releases, so a toolchain upgrade silently invalidates every
+/// sidecar on disk. `sha2` is already a direct dependency, so that was a cost
+/// paid for nothing.
+pub fn fingerprint(model_path: &Path) -> Option<String> {
+    // A single-file checkpoint (`.gguf`) has no `config.json` to hash, so the
+    // file itself is the checkpoint: size + mtime + file name.
+    //
+    // Deliberately NOT the contents. A quantized 7B is several gigabytes and
+    // this runs on the first resolve for the model. The three fields together
+    // separate the cases that actually occur — a different model at the same
+    // path, a different quant of the same model, a re-download — because each
+    // changes the length or the mtime. They will not notice an in-place edit
+    // that preserves both, which no checkpoint swap does.
+    //
+    // File NAME, not full path: the sidecar lives beside the file and travels
+    // with it, so keying on the full path would invalidate every sidecar when
+    // a checkpoint tree is moved, and buy no safety in return.
+    if model_path.is_file() {
+        let md = std::fs::metadata(model_path).ok()?;
+        let mtime = md
+            .modified()
+            .ok()?
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()?;
+        let name = model_path.file_name()?.to_string_lossy().into_owned();
+        return Some(digest(
+            format!("gguf:{name}:{}:{}", md.len(), mtime.as_nanos()).as_bytes(),
+        ));
+    }
+    Some(digest(&std::fs::read(model_path.join("config.json")).ok()?))
+}
+
+/// Where the sidecar for `model_path` lives.
+///
+/// A directory checkpoint holds it inside. A single-file `.gguf` checkpoint
+/// holds it beside the file, because a file has no inside — and both are paths
+/// `ModelRunner::start` accepts, so an operator running the probe against
+/// either has to find the answer where the model is.
+pub fn sidecar_path(model_path: &Path) -> std::path::PathBuf {
+    if model_path.is_file() {
+        let mut name = model_path.as_os_str().to_os_string();
+        name.push(".");
+        name.push(SIDECAR_NAME);
+        std::path::PathBuf::from(name)
+    } else {
+        model_path.join(SIDECAR_NAME)
+    }
+}
+
+pub fn write_sidecar(model_path: &Path, sc: &Sidecar) -> anyhow::Result<()> {
     let json = serde_json::to_string_pretty(sc)?;
-    std::fs::write(model_dir.join(SIDECAR_NAME), json)?;
+    std::fs::write(sidecar_path(model_path), json)?;
     Ok(())
 }
 
-/// Read the sidecar, rejecting one written for a different checkpoint.
+/// Read the sidecar, rejecting one that cannot be shown to belong to this
+/// checkpoint.
 ///
 /// The fingerprint comparison is the whole point of the function. A model
 /// directory that gets re-pointed at another checkpoint — a common enough thing
 /// to do with a symlink or a re-download — would otherwise inherit the previous
 /// model's template at the highest-authority tier, with a `resolved_by: Probe`
 /// on it claiming it was measured.
-pub fn read_sidecar(model_dir: &Path) -> Option<Sidecar> {
-    let raw = std::fs::read_to_string(model_dir.join(SIDECAR_NAME)).ok()?;
-    let sc: Sidecar = serde_json::from_str(&raw).ok()?;
-    let actual = fingerprint(model_dir);
+///
+/// Every rejection is logged, because the observable consequence of one is that
+/// the server quietly falls to a registry guess. The single silent path is a
+/// sidecar that is simply not there, which is the ordinary case for every
+/// checkpoint that has never been probed.
+pub fn read_sidecar(model_path: &Path) -> Option<Sidecar> {
+    let path = sidecar_path(model_path);
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(e) => {
+            tracing::warn!("ignoring {}: cannot be read: {e}", path.display());
+            return None;
+        }
+    };
+    let sc: Sidecar = match serde_json::from_str(&raw) {
+        Ok(sc) => sc,
+        Err(e) => {
+            tracing::warn!(
+                "ignoring {}: not a valid {SIDECAR_NAME} document: {e}",
+                path.display()
+            );
+            return None;
+        }
+    };
+    let Some(actual) = fingerprint(model_path) else {
+        tracing::warn!(
+            "ignoring {}: no fingerprint can be computed for {} (a directory checkpoint needs a \
+             readable config.json), so the sidecar cannot be shown to belong to this checkpoint",
+            path.display(),
+            model_path.display()
+        );
+        return None;
+    };
     if sc.model_fingerprint != actual {
         tracing::warn!(
-            "ignoring {SIDECAR_NAME}: fingerprint {} does not match checkpoint {}",
+            "ignoring {}: fingerprint {} does not match checkpoint {}",
+            path.display(),
             sc.model_fingerprint,
             actual
         );
         return None;
     }
     Some(sc)
+}
+
+/// Extract `chat_template` from a parsed `tokenizer_config.json`.
+///
+/// Two shapes are real. Most checkpoints store a string. Some store a **list**
+/// of `{"name": …, "template": …}` entries — Hermes-3 ships `default` and
+/// `tool_use` — which `transformers` supports, resolving to the entry named
+/// `default` when the caller names no template.
+///
+/// Handling only the string form sent every such checkpoint to a registry
+/// guess, reported as a successful tier-3 match, with nothing logged: the
+/// checkpoint's own authoritative template was on disk and was skipped. The
+/// list form costs ten lines, so it is handled rather than merely warned about.
+/// Everything this still cannot use is logged, because the alternative is an
+/// operator seeing a family guess for a model that ships a template.
+fn chat_template_field(v: &serde_json::Value) -> Option<String> {
+    let ct = v.get("chat_template")?;
+    if let Some(s) = ct.as_str() {
+        return Some(s.to_string());
+    }
+    if let Some(entries) = ct.as_array() {
+        for e in entries {
+            if e.get("name").and_then(serde_json::Value::as_str) != Some("default") {
+                continue;
+            }
+            if let Some(t) = e.get("template").and_then(serde_json::Value::as_str) {
+                return Some(t.to_string());
+            }
+        }
+        let names: Vec<&str> = entries
+            .iter()
+            .filter_map(|e| e.get("name").and_then(serde_json::Value::as_str))
+            .collect();
+        tracing::warn!(
+            "tokenizer_config.json lists chat_template entries {names:?}, none of which is a \
+             \"default\" with a string template; falling through to the next tier"
+        );
+        return None;
+    }
+    tracing::warn!(
+        "tokenizer_config.json has a chat_template that is neither a string nor a list of named \
+         templates; falling through to the next tier"
+    );
+    None
 }
 
 /// Resolve a template, cheapest tier first. Stops at the first hit.
@@ -234,20 +366,26 @@ pub fn read_sidecar(model_dir: &Path) -> Option<Sidecar> {
 pub fn resolve(model_dir: &Path) -> ChatTemplate {
     // Tier 0 — sidecar.
     if let Some(sc) = read_sidecar(model_dir) {
-        tracing::info!("chat template: sidecar ({:?})", sc.resolved_by);
+        tracing::info!("chat template: sidecar, recorded as {:?}", sc.resolved_by);
         return ChatTemplate {
             source: sc.template,
-            resolved_by: Resolution::Sidecar,
+            // The sidecar's OWN `resolved_by`, not `Resolution::Sidecar`.
+            // Spec §1 gives tier 0 the confidence "whatever produced it —
+            // recorded"; flattening every sidecar to `Sidecar` erases the one
+            // distinction the file exists to carry, between a probe's
+            // measurement and a hand-written guess. `Sidecar` is still the
+            // right answer when that is literally what the file records.
+            resolved_by: sc.resolved_by,
         };
     }
 
     // Tier 1 — the authoritative source, when the checkpoint ships one.
     if let Ok(raw) = std::fs::read_to_string(model_dir.join("tokenizer_config.json")) {
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) {
-            if let Some(t) = v.get("chat_template").and_then(|t| t.as_str()) {
+            if let Some(t) = chat_template_field(&v) {
                 tracing::info!("chat template: tokenizer_config.json");
                 return ChatTemplate {
-                    source: t.to_string(),
+                    source: t,
                     resolved_by: Resolution::TokenizerConfig,
                 };
             }

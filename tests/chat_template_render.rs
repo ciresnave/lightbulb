@@ -327,14 +327,42 @@ fn mistral_available_tools_branch_renders() {
 
 use std::io::Write;
 
+/// A fresh fixture directory under `CARGO_TARGET_TMPDIR`.
+///
+/// **`CARGO_TARGET_TMPDIR`, not `std::env::temp_dir()`**, because tier 3 reads
+/// the *path*: a system temp directory that happened to sit under a folder
+/// named `qwen`, `chatml`, `llama-2` or `mistral` silently turned
+/// `missing_everything_falls_through` into a test of nothing. The target tmpdir
+/// is inside the checkout, so it is the repo layout that has to stay clean, and
+/// that is visible to whoever breaks it.
+///
+/// **Nonce, not a fixed name.** The old version did `remove_dir_all` +
+/// `create_dir_all` on a name derived only from `name`, so two concurrent
+/// `cargo test` runs — or `cargo test` and `cargo mutants` — deleted each
+/// other's fixtures mid-test.
 fn tmp_model_dir(name: &str) -> std::path::PathBuf {
-    let d = std::env::temp_dir().join(format!("lb-chat-tmpl-{name}"));
-    let _ = std::fs::remove_dir_all(&d);
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static N: AtomicUsize = AtomicUsize::new(0);
+    let nonce = format!(
+        "{}-{}",
+        std::process::id(),
+        N.fetch_add(1, Ordering::Relaxed)
+    );
+    let d = std::path::Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("lb-chat-tmpl-{name}-{nonce}"));
     std::fs::create_dir_all(&d).unwrap();
     // config.json is what fingerprint() hashes; every fixture needs one.
     let mut f = std::fs::File::create(d.join("config.json")).unwrap();
     f.write_all(br#"{"model_type":"llama"}"#).unwrap();
     d
+}
+
+/// `fingerprint`, for fixtures that are supposed to have one. It returns
+/// `Option` so that a checkpoint it cannot identify fails closed rather than
+/// collapsing to a constant every foreign sidecar matches.
+fn fp(p: &std::path::Path) -> String {
+    lightbulb::api::chat_template::fingerprint(p)
+        .unwrap_or_else(|| panic!("no fingerprint for fixture {}", p.display()))
 }
 
 /// Tier order is honoured: a model that satisfies tiers 1, 2 AND 3 resolves via
@@ -395,6 +423,14 @@ fn tokenizer_config_wins_over_registry() {
 /// The tier-1 source is asserted to fire *before* the sidecar is written, for
 /// the same reason as above: without that control the test would pass against
 /// an implementation that never read `tokenizer_config.json`.
+///
+/// `resolved_by` comes back as the sidecar's OWN recorded value, not
+/// `Resolution::Sidecar`. Spec §1 gives tier 0 the confidence "whatever
+/// produced it — recorded", and §5 makes `resolved_by`/`evidence` the
+/// load-bearing fields; flattening them would make a probed measurement and a
+/// hand-written guess indistinguishable to Task 5's monitor. The `source`
+/// assertion is what proves tier 0 outranks tier 1 now that the tier tag no
+/// longer names the file it came from.
 #[test]
 fn sidecar_wins_over_tokenizer_config() {
     let d = tmp_model_dir("sidecar-wins");
@@ -417,12 +453,63 @@ fn sidecar_wins_over_tokenizer_config() {
         resolved_by: Resolution::Probe,
         evidence: "EOS 8/8 zephyr".into(),
         resolved_at: "2026-08-08T00:00:00Z".into(),
-        model_fingerprint: lightbulb::api::chat_template::fingerprint(&d),
+        model_fingerprint: fp(&d),
     };
     lightbulb::api::chat_template::write_sidecar(&d, &sc).unwrap();
     let t = lightbulb::api::chat_template::resolve(&d);
-    assert_eq!(t.resolved_by, Resolution::Sidecar);
+    assert_eq!(
+        t.source, "FROM_SIDECAR",
+        "the sidecar did not outrank tokenizer_config.json"
+    );
+    assert_eq!(
+        t.resolved_by,
+        Resolution::Probe,
+        "resolution flattened the sidecar's recorded provenance; a probe and a \
+         hand-written guess are now indistinguishable"
+    );
+
+    // A sidecar that records a guess reports a guess — the same file, the same
+    // tier, a different confidence.
+    let guess = lightbulb::api::chat_template::Sidecar {
+        resolved_by: Resolution::Registry,
+        evidence: "hand-written by an operator; not measured".into(),
+        ..sc
+    };
+    lightbulb::api::chat_template::write_sidecar(&d, &guess).unwrap();
+    let t = lightbulb::api::chat_template::resolve(&d);
     assert_eq!(t.source, "FROM_SIDECAR");
+    assert_eq!(t.resolved_by, Resolution::Registry);
+}
+
+/// `SIDECAR_NAME` is part of the on-disk contract, not an internal detail: the
+/// spec names it in §1 and §5, and Task 6's CLI writes it for an operator to go
+/// and read. Renaming the constant is an API break for them, so the literal is
+/// asserted here and the file is asserted to appear on disk under it.
+#[test]
+fn the_sidecar_filename_is_part_of_the_on_disk_contract() {
+    assert_eq!(
+        lightbulb::api::chat_template::SIDECAR_NAME,
+        "lightbulb-chat-template.json"
+    );
+
+    let d = tmp_model_dir("sidecar-name");
+    let sc = lightbulb::api::chat_template::Sidecar {
+        template: "T".into(),
+        resolved_by: Resolution::Probe,
+        evidence: "e".into(),
+        resolved_at: "2026-08-08T00:00:00Z".into(),
+        model_fingerprint: fp(&d),
+    };
+    lightbulb::api::chat_template::write_sidecar(&d, &sc).unwrap();
+    assert!(
+        d.join("lightbulb-chat-template.json").is_file(),
+        "write_sidecar did not produce {}/lightbulb-chat-template.json; contents: {:?}",
+        d.display(),
+        std::fs::read_dir(&d)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect::<Vec<_>>()
+    );
 }
 
 /// Provenance survives a round trip. Fails if the writer drops the fields for
@@ -435,7 +522,7 @@ fn sidecar_round_trips_with_provenance() {
         resolved_by: Resolution::Probe,
         evidence: "EOS 8/8 with zephyr, 1/8 with llama2".into(),
         resolved_at: "2026-08-08T00:00:00Z".into(),
-        model_fingerprint: lightbulb::api::chat_template::fingerprint(&d),
+        model_fingerprint: fp(&d),
     };
     lightbulb::api::chat_template::write_sidecar(&d, &sc).unwrap();
     let back = lightbulb::api::chat_template::read_sidecar(&d).expect("sidecar did not read back");
@@ -447,11 +534,16 @@ fn sidecar_round_trips_with_provenance() {
 
 /// A sidecar written for a different checkpoint must be rejected, so a
 /// directory reused for another model does not silently inherit its template.
-/// This exists because writing the fingerprint but never checking it is the
-/// likely slip.
+///
+/// **The CHECKPOINT is mutated, not the recorded fingerprint.** The previous
+/// version of this test wrote a hard-coded wrong fingerprint into the sidecar,
+/// which constrains only the `!=`: replacing `fingerprint`'s body with a
+/// constant left it passing, and a constant is exactly the bug that shipped —
+/// every path without a readable `config.json` hashed to `bd60acb658c79e45`.
+/// Overwriting `config.json` puts the real function on the hook.
 ///
 /// The `is_some` control is not redundant with the rejection: it separates
-/// "rejected because the fingerprint mismatched" from "rejected because
+/// "rejected because the checkpoint changed" from "rejected because
 /// `read_sidecar` never reads anything", which would satisfy the assertion
 /// below for entirely the wrong reason.
 #[test]
@@ -462,7 +554,7 @@ fn stale_sidecar_is_rejected() {
         resolved_by: Resolution::Probe,
         evidence: "e".into(),
         resolved_at: "2026-08-08T00:00:00Z".into(),
-        model_fingerprint: lightbulb::api::chat_template::fingerprint(&d),
+        model_fingerprint: fp(&d),
     };
     lightbulb::api::chat_template::write_sidecar(&d, &good).unwrap();
     assert!(
@@ -471,42 +563,212 @@ fn stale_sidecar_is_rejected() {
          prove nothing"
     );
 
-    let stale = lightbulb::api::chat_template::Sidecar {
-        model_fingerprint: "0000000000000000".into(), // deliberately wrong
-        ..good
-    };
-    lightbulb::api::chat_template::write_sidecar(&d, &stale).unwrap();
+    // Re-point the directory at another checkpoint, the way a re-download or a
+    // moved symlink does. The sidecar on disk is untouched.
+    std::fs::write(
+        d.join("config.json"),
+        br#"{"model_type":"llama","vocab_size":128256}"#,
+    )
+    .unwrap();
+    assert_ne!(
+        fp(&d),
+        good.model_fingerprint,
+        "fingerprint did not change when config.json did, so it is not \
+         reading the checkpoint"
+    );
     assert!(
         lightbulb::api::chat_template::read_sidecar(&d).is_none(),
-        "a sidecar whose fingerprint does not match the checkpoint was accepted"
+        "a sidecar written for a different checkpoint was accepted"
     );
     let t = lightbulb::api::chat_template::resolve(&d);
     assert_ne!(t.source, "STALE", "resolution used a stale sidecar");
 }
 
-/// Every registry constant must actually render to its generation prompt.
+/// A checkpoint whose fingerprint cannot be computed accepts NO sidecar.
 ///
-/// This exists because Task 1 shipped a template whose trailing newline sat in
-/// source position and was silently stripped — and the test written alongside
-/// it could not detect that, because the template had been flattened until the
-/// whitespace settings no longer applied to it. A constant that renders to the
-/// wrong shape still renders, so nothing falls through and nothing is logged.
-/// Parameterised over all three so adding a fourth without a test is not
-/// possible.
+/// This is the shipped bug in its own right. `fingerprint` read `config.json`
+/// through `unwrap_or_default()`, so every path without a readable one — two
+/// unrelated empty directories among them — hashed to the same constant
+/// `bd60acb658c79e45`, and a sidecar carrying it matched all of them. It was
+/// then served at the highest-authority tier with `evidence` claiming it had
+/// been measured on that model. Absent identity must fail closed.
 #[test]
-fn every_registry_constant_ends_with_its_generation_prompt() {
+fn a_checkpoint_with_no_config_json_accepts_no_sidecar() {
+    let a = tmp_model_dir("no-config-a");
+    let b = tmp_model_dir("no-config-b");
+    std::fs::remove_file(a.join("config.json")).unwrap();
+    std::fs::remove_file(b.join("config.json")).unwrap();
+
+    assert!(
+        lightbulb::api::chat_template::fingerprint(&a).is_none(),
+        "a directory with no config.json reported a fingerprint"
+    );
+    assert!(lightbulb::api::chat_template::fingerprint(&b).is_none());
+
+    // The literal constant the old `unwrap_or_default()` produced, so this
+    // fails if that behaviour ever comes back under another name.
+    let foreign = lightbulb::api::chat_template::Sidecar {
+        template: "FROM_SOME_OTHER_MODEL".into(),
+        resolved_by: Resolution::Probe,
+        evidence: "EOS 8/8 zephyr".into(),
+        resolved_at: "2026-08-08T00:00:00Z".into(),
+        model_fingerprint: "bd60acb658c79e45".into(),
+    };
+    lightbulb::api::chat_template::write_sidecar(&b, &foreign).unwrap();
+    assert!(
+        lightbulb::api::chat_template::read_sidecar(&b).is_none(),
+        "a sidecar was accepted for a checkpoint that cannot be identified"
+    );
+    assert_ne!(
+        lightbulb::api::chat_template::resolve(&b).source,
+        "FROM_SOME_OTHER_MODEL"
+    );
+}
+
+/// A `.gguf` file is a checkpoint too — `ModelRunner::start` accepts "either a
+/// directory … or a `.gguf` file" — so it gets a real fingerprint and holds its
+/// sidecar beside itself.
+///
+/// The swap below is the operator story from the review: probe a GGUF, later
+/// drop a different model or quant at the same path. Under the constant
+/// fingerprint the stale template was served at `Resolution::Sidecar` with
+/// evidence claiming it had been measured on the new file.
+///
+/// The two file bodies differ in LENGTH deliberately: mtime resolution is
+/// coarse enough that two writes this close together can share a timestamp, and
+/// size alone must already separate them.
+#[test]
+fn a_gguf_file_is_fingerprinted_and_keeps_its_sidecar_beside_it() {
+    let d = tmp_model_dir("gguf");
+    let f = d.join("model-q4_k_m.gguf");
+    std::fs::write(&f, b"GGUF\x03weights-v1").unwrap();
+
+    let before = fp(&f);
+    let sc = lightbulb::api::chat_template::Sidecar {
+        template: "FROM_GGUF_SIDECAR".into(),
+        resolved_by: Resolution::Probe,
+        evidence: "EOS 8/8 zephyr".into(),
+        resolved_at: "2026-08-08T00:00:00Z".into(),
+        model_fingerprint: before.clone(),
+    };
+    lightbulb::api::chat_template::write_sidecar(&f, &sc).unwrap();
+    assert_eq!(
+        lightbulb::api::chat_template::resolve(&f).source,
+        "FROM_GGUF_SIDECAR",
+        "a .gguf checkpoint could not read back its own sidecar"
+    );
+
+    // A different model at the same path.
+    std::fs::write(&f, b"GGUF\x03an-entirely-different-model-and-quantization").unwrap();
+    assert_ne!(
+        fp(&f),
+        before,
+        "swapping the .gguf file left the fingerprint unchanged"
+    );
+    assert!(
+        lightbulb::api::chat_template::read_sidecar(&f).is_none(),
+        "the previous model's sidecar was accepted for the new .gguf file"
+    );
+    assert_ne!(
+        lightbulb::api::chat_template::resolve(&f).source,
+        "FROM_GGUF_SIDECAR"
+    );
+}
+
+/// A hand-edited sidecar that no longer parses is rejected rather than
+/// panicking, and resolution carries on to the next tier.
+#[test]
+fn a_malformed_sidecar_is_rejected() {
+    let d = tmp_model_dir("malformed");
+    std::fs::write(
+        d.join("tokenizer_config.json"),
+        r#"{"chat_template":"FROM_TOKENIZER_CONFIG"}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        d.join(lightbulb::api::chat_template::SIDECAR_NAME),
+        "{ not json at all",
+    )
+    .unwrap();
+
+    assert!(lightbulb::api::chat_template::read_sidecar(&d).is_none());
+    let t = lightbulb::api::chat_template::resolve(&d);
+    assert_eq!(t.resolved_by, Resolution::TokenizerConfig);
+    assert_eq!(t.source, "FROM_TOKENIZER_CONFIG");
+}
+
+/// A multi-turn conversation, so the branches a single user message never
+/// reaches are rendered too — LLAMA2's whole `{% else %}` arm, the one that
+/// emits assistant turns and the EOS between them, is dead under `msgs()`.
+fn convo() -> Vec<RawMessage> {
+    vec![
+        RawMessage {
+            role: "user".into(),
+            content: "Name the capital of France.".into(),
+        },
+        RawMessage {
+            role: "assistant".into(),
+            content: "Paris.".into(),
+        },
+        RawMessage {
+            role: "user".into(),
+            content: "And of Spain?".into(),
+        },
+    ]
+}
+
+/// Every registry constant's FULL rendered output, as an exact string.
+///
+/// The tail assertion below is kept — it is the Task 1 regression, where a
+/// trailing newline sat in source position and was silently stripped — but a
+/// tail is not a template. With only the tails pinned, replacing ZEPHYR's
+/// entire per-message body with `{{ 'MANGLED' }}` left the suite passing, and
+/// so did CHATML's, and so did turning LLAMA2's `[INST] ` into `XXX `. These
+/// three constants are the only thing tiers 2 and 3 can EVER return, and a
+/// wrong shape renders successfully: it does not fall through to another tier
+/// and it is not logged. Exact output is the only assertion that sees it.
+///
+/// Parameterised over all three so adding a fourth without a render assertion
+/// is not possible.
+#[test]
+fn every_registry_constant_renders_exactly() {
     use lightbulb::api::chat_template::registry;
     let expected = [
-        ("zephyr", registry::ZEPHYR, "<|assistant|>\n"),
-        ("chatml", registry::CHATML, "<|im_start|>assistant\n"),
-        ("llama2", registry::LLAMA2, "[/INST]"),
+        (
+            "zephyr",
+            registry::ZEPHYR,
+            "<|assistant|>\n",
+            "<|user|>\nName the capital of France.</s>\n<|assistant|>\n",
+            "<|user|>\nName the capital of France.</s>\n\
+             <|assistant|>\nParis.</s>\n\
+             <|user|>\nAnd of Spain?</s>\n\
+             <|assistant|>\n",
+        ),
+        (
+            "chatml",
+            registry::CHATML,
+            "<|im_start|>assistant\n",
+            "<|im_start|>user\nName the capital of France.<|im_end|>\n\
+             <|im_start|>assistant\n",
+            "<|im_start|>user\nName the capital of France.<|im_end|>\n\
+             <|im_start|>assistant\nParis.<|im_end|>\n\
+             <|im_start|>user\nAnd of Spain?<|im_end|>\n\
+             <|im_start|>assistant\n",
+        ),
+        (
+            "llama2",
+            registry::LLAMA2,
+            "[/INST]",
+            "[INST] Name the capital of France. [/INST]",
+            "[INST] Name the capital of France. [/INST]Paris.</s>[INST] And of Spain? [/INST]",
+        ),
     ];
     assert_eq!(
         expected.len(),
         registry::candidates().len(),
         "a candidate was added to the registry without a render assertion"
     );
-    for (name, src, tail) in expected {
+    for (name, src, tail, one_turn, multi_turn) in expected {
         assert!(
             registry::candidates()
                 .iter()
@@ -525,15 +787,178 @@ fn every_registry_constant_ends_with_its_generation_prompt() {
             "{name} rendered {out:?}, which does not end with {tail:?} — a \
              trailing newline in source position is stripped by Jinja"
         );
+        assert_eq!(out, one_turn, "{name} rendered the wrong prompt");
+        assert_eq!(
+            t.render(&convo(), "<s>", "</s>")
+                .unwrap_or_else(|e| panic!("{name} failed to render a conversation: {e}")),
+            multi_turn,
+            "{name} rendered the wrong multi-turn prompt"
+        );
+    }
+}
+
+// ── Tier 3: which path component names the model ────────────────────────────
+//
+// `from_family` reads the PATH, so these need no filesystem — the literal is
+// the whole input.
+
+/// Path components are scanned leaf-first, and the first one matching any rule
+/// wins.
+///
+/// The `qwen-experiments` case is the measured false positive: matching the
+/// whole path as one lowercased string returned CHATML for a Llama-2
+/// checkpoint. `api/mod.rs` builds the path as
+/// `LIGHTBULB_MODELS_DIR.join(default_model)`, so a models root named `D:\qwen\`
+/// mapped every model beneath it to one family — reported as
+/// `Resolution::Registry`, which reads as "matched the model", not "matched
+/// your folder layout".
+///
+/// Basename-only is not the fix, which is what the HF cache case pins: that
+/// layout's leaf is a sha and names nothing.
+#[test]
+fn family_registry_scans_path_components_leaf_first() {
+    use lightbulb::api::chat_template::registry::{self, from_family};
+    use std::path::Path;
+
+    let cases: [(&str, Option<&str>); 7] = [
+        // The HF cache layout: the leaf is a snapshot sha, the name is two up.
+        (
+            "/home/x/.cache/huggingface/hub/models--TinyLlama--TinyLlama-1.1B-Chat-v1.0/\
+             snapshots/fe8a4ea1ffedaf415f4da2f062534de366a451e6",
+            Some(registry::ZEPHYR),
+        ),
+        (
+            "/hub/models--Qwen--Qwen2.5-7B-Instruct/snapshots/abc123",
+            Some(registry::CHATML),
+        ),
+        // The measured false positive: a parent must not outvote the model.
+        (
+            r"C:\models\qwen-experiments\Llama-2-7b-chat-hf",
+            Some(registry::LLAMA2),
+        ),
+        (
+            r"C:\models\qwen\Mistral-7B-Instruct-v0.3",
+            Some(registry::LLAMA2),
+        ),
+        // A parent still answers when NOTHING nearer does — leaf-first is a
+        // priority order, not a restriction to the leaf.
+        (
+            r"D:\qwen\some-unlabelled-checkpoint",
+            Some(registry::CHATML),
+        ),
+        (
+            r"C:\models\TinyLlama-1.1B-Chat-v1.0",
+            Some(registry::ZEPHYR),
+        ),
+        // No component names a family anywhere.
+        (r"C:\models\some-unlabelled-checkpoint", None),
+    ];
+
+    for (path, want) in cases {
+        assert_eq!(
+            from_family(Path::new(path)).as_deref(),
+            want,
+            "from_family({path:?}) picked the wrong family"
+        );
+    }
+}
+
+/// Rule order inside a single component. Every rule is exercised by a component
+/// that satisfies it and at least one rule below it, so deleting or reordering
+/// any of them fails here.
+#[test]
+fn family_registry_rule_precedence_within_one_component() {
+    use lightbulb::api::chat_template::registry::{self, from_family};
+    use std::path::Path;
+
+    let cases: [(&str, Option<&str>); 5] = [
+        // tinyllama+chat beats chatml…
+        ("TinyLlama-1.1B-Chatml-merge", Some(registry::ZEPHYR)),
+        // …and qwen beats llama-2.
+        ("qwen-llama-2-merge", Some(registry::CHATML)),
+        ("chatml-mistral-merge", Some(registry::CHATML)),
+        // `tinyllama` alone is a BASE model: the `&& chat` is load-bearing, and
+        // this must not reach ZEPHYR.
+        ("TinyLlama-1.1B-intermediate-step-1431k", None),
+        ("llama2-chat", Some(registry::LLAMA2)),
+    ];
+
+    for (name, want) in cases {
+        assert_eq!(
+            from_family(Path::new(name)).as_deref(),
+            want,
+            "from_family({name:?}) picked the wrong family"
+        );
     }
 }
 
 /// No tier fires: resolution reports None rather than inventing a template.
+///
+/// The `from_family` precondition is asserted separately because tier 3 reads
+/// the whole path: if the checkout ever lives under a directory named `qwen`,
+/// `mistral` or the like, this test stops testing anything, and the failure
+/// should say so rather than surface as a bare `Registry != None`.
 #[test]
 fn missing_everything_falls_through() {
     let d = tmp_model_dir("nothing");
     std::fs::write(d.join("config.json"), r#"{"model_type":"unknown-xyz"}"#).unwrap();
+    assert!(
+        lightbulb::api::chat_template::registry::from_family(&d).is_none(),
+        "the fixture path {} names a model family, so no tier could be shown \
+         to fall through",
+        d.display()
+    );
     let t = lightbulb::api::chat_template::resolve(&d);
     assert_eq!(t.resolved_by, Resolution::None);
     assert_eq!(t.source, "");
+}
+
+// ── Tier 1: the shapes `chat_template` actually takes on disk ───────────────
+
+/// `tokenizer_config.json` may store `chat_template` as a LIST of named
+/// templates rather than a string — Hermes-3 ships `default` and `tool_use` —
+/// and `transformers` resolves that to the `default` entry.
+///
+/// Requiring `.as_str()` sent every such checkpoint to a registry guess
+/// reported as a successful tier-3 match, with nothing logged: its own
+/// authoritative template was sitting on disk, unread.
+#[test]
+fn tokenizer_config_list_form_selects_the_default_entry() {
+    let d = tmp_model_dir("list-form");
+    std::fs::write(
+        d.join("tokenizer_config.json"),
+        r#"{"chat_template":[
+             {"name":"tool_use","template":"FROM_TOOL_USE"},
+             {"name":"default","template":"FROM_DEFAULT"}
+           ]}"#,
+    )
+    .unwrap();
+    let t = lightbulb::api::chat_template::resolve(&d);
+    assert_eq!(t.resolved_by, Resolution::TokenizerConfig);
+    assert_eq!(
+        t.source, "FROM_DEFAULT",
+        "the list form did not select the entry named \"default\""
+    );
+}
+
+/// A list with no usable `default` entry, and a `chat_template` that is neither
+/// shape, both fall through to the next tier rather than resolving to something
+/// invented. (Both log; the observable part is the fall-through.)
+#[test]
+fn an_unusable_tokenizer_config_chat_template_falls_through() {
+    for body in [
+        r#"{"chat_template":[{"name":"tool_use","template":"T"}]}"#,
+        r#"{"chat_template":[{"name":"default","template":{"nested":"object"}}]}"#,
+        r#"{"chat_template":{"default":"T"}}"#,
+        r#"{"chat_template":null}"#,
+    ] {
+        let d = tmp_model_dir("unusable-tokenizer-config");
+        std::fs::write(d.join("tokenizer_config.json"), body).unwrap();
+        let t = lightbulb::api::chat_template::resolve(&d);
+        assert_eq!(
+            t.resolved_by,
+            Resolution::None,
+            "{body} resolved to something instead of falling through"
+        );
+    }
 }
