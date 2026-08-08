@@ -54,18 +54,38 @@
 - Produces: `ChatTemplate { source: String, resolved_by: Resolution }`, `ChatTemplate::render(&self, messages: &[RawMessage], bos: &str, eos: &str) -> anyhow::Result<String>`, `enum Resolution { Sidecar, TokenizerConfig, VocabSignature, Registry, Probe, None }`
 - Consumes: nothing.
 
-- [ ] **Step 1: Add the dependency**
+- [x] **Step 1: Add the dependency**
 
 In `Cargo.toml` under `[dependencies]`:
 
 ```toml
 # Chat-template rendering. HuggingFace `chat_template` values are Jinja.
 # minijinja is pure Rust with no C dependencies, which keeps the CUDA build
-# unaffected. `loader` is not needed — templates arrive as strings, never paths.
-minijinja = { version = "2", default-features = false, features = ["builtins"] }
+# unaffected.
+#
+# The feature list mirrors what `transformers` gives its own environment
+# (`utils/chat_template_utils.py`), because these templates are authored
+# against THAT dialect. Dropping one does not degrade rendering — it makes real
+# checkpoint templates fail to parse, which falls through to a registry guess
+# and reports success at a lower tier. That is the defect this work removes,
+# wearing a provenance field that says "guess".
+#
+#   macros        {% macro %}
+#   loop_controls {% break %} / {% continue %}  (transformers loads
+#                 jinja2.ext.loopcontrols for exactly this)
+#   json          the `tojson` filter
+#   serde         silences a deprecation warning; `context!` over serde types
+#                 is load-bearing here, not incidental
+#   debug         puts template source context into errors — spec §2 requires
+#                 a failing template log "which template failed and why"
+#
+# `loader` stays out: templates arrive as strings, never paths.
+minijinja = { version = "2", features = ["macros", "loop_controls", "json", "serde", "debug"] }
 ```
 
-- [ ] **Step 2: Write the failing test**
+`strftime_now` is a *global*, not a feature — Llama-3.x templates call it. Register it alongside `raise_exception` in Step 4.
+
+- [x] **Step 2: Write the failing test**
 
 `tests/chat_template_render.rs`:
 
@@ -76,7 +96,7 @@ minijinja = { version = "2", default-features = false, features = ["builtins"] }
 //! defect this work exists to remove.
 
 use lightbulb::api::chat_template::{ChatTemplate, Resolution};
-use lightbulb::contracts::types::RawMessage;
+use lightbulb::contracts::validation::RawMessage;
 
 fn msgs() -> Vec<RawMessage> {
     vec![
@@ -84,10 +104,31 @@ fn msgs() -> Vec<RawMessage> {
     ]
 }
 
-/// TinyLlama-1.1B-Chat uses the Zephyr form. Asserted as an exact string.
+/// TinyLlama-1.1B-Chat's REAL template, verbatim from its Hub
+/// `tokenizer_config.json` — not a flattened paraphrase.
+///
+/// Using the real multi-line form is load-bearing, not fidelity theatre. A
+/// one-liner has no newline after any `%}` and no leading whitespace before any
+/// block tag, so `trim_blocks`/`lstrip_blocks` are **no-ops for it** and the
+/// test passes identically whether or not `render` sets them. The real template
+/// renders `"\n\n<|user|>\n…\n\n\n<|assistant|>\n\n"` when they are unset. That
+/// difference is the only thing standing between this module and silent
+/// mis-rendering, which is the one failure mode that does NOT fall through to
+/// the next tier and does NOT get logged (spec §8 assigns this test that job).
 #[test]
-fn zephyr_template_renders_exactly() {
-    let src = "{% for m in messages %}<|{{ m.role }}|>\n{{ m.content }}{{ eos_token }}\n{% endfor %}<|assistant|>\n";
+fn real_tinyllama_template_renders_exactly() {
+    let src = "{% for message in messages %}\n\
+               {% if message['role'] == 'user' %}\n\
+               {{ '<|user|>\\n' + message['content'] + eos_token }}\n\
+               {% elif message['role'] == 'system' %}\n\
+               {{ '<|system|>\\n' + message['content'] + eos_token }}\n\
+               {% elif message['role'] == 'assistant' %}\n\
+               {{ '<|assistant|>\\n' + message['content'] + eos_token }}\n\
+               {% endif %}\n\
+               {% if loop.last and add_generation_prompt %}\n\
+               {{ '<|assistant|>' }}\n\
+               {% endif %}\n\
+               {% endfor %}";
     let t = ChatTemplate { source: src.to_string(), resolved_by: Resolution::Registry };
     let out = t.render(&msgs(), "<s>", "</s>").expect("render failed");
     assert_eq!(out, "<|user|>\nName the capital of France.</s>\n<|assistant|>\n");
@@ -121,7 +162,7 @@ fn bos_and_eos_are_bound() {
 }
 ```
 
-- [ ] **Step 3: Run it to verify it fails**
+- [x] **Step 3: Run it to verify it fails**
 
 ```bash
 cargo test -j 4 --test chat_template_render 2>&1 | tail -20
@@ -130,7 +171,7 @@ cargo test -j 4 --test chat_template_render 2>&1 | tail -20
 Expected: FAIL to compile — `unresolved import lightbulb::api::chat_template`.
 **Confirm `running N tests` shows 0 and the failure is the import**, not a silent skip.
 
-- [ ] **Step 4: Implement**
+- [x] **Step 4: Implement**
 
 `src/api/chat_template.rs`:
 
@@ -145,7 +186,7 @@ Expected: FAIL to compile — `unresolved import lightbulb::api::chat_template`.
 
 use serde::{Deserialize, Serialize};
 
-use crate::contracts::types::RawMessage;
+use crate::contracts::validation::RawMessage;
 
 pub mod registry;
 
@@ -227,7 +268,7 @@ Create `src/api/chat_template/registry.rs` as an empty placeholder for Task 2:
 //! ship. Filled in by Task 2.
 ```
 
-- [ ] **Step 5: Run the tests**
+- [x] **Step 5: Run the tests**
 
 ```bash
 cargo test -j 4 --test chat_template_render 2>&1 | tail -20
@@ -235,11 +276,11 @@ cargo test -j 4 --test chat_template_render 2>&1 | tail -20
 
 Expected: `running 3 tests` … `3 passed; 0 failed`. **If it says `running 0 tests`, the file did not compile in — stop and fix that before proceeding.**
 
-- [ ] **Step 6: Prove the exact-match test has teeth**
+- [x] **Step 6: Prove the exact-match test has teeth**
 
 Change the expected string in `zephyr_template_renders_exactly` to `"<|user|>\nName the capital of France.</s>\n"` (dropping the trailing `<|assistant|>\n`). Re-run. It **must** fail. Restore, then `touch src/api/chat_template.rs` — a byte-exact restore is not build-exact and cargo will otherwise reuse the mutant binary.
 
-- [ ] **Step 7: Format and commit**
+- [x] **Step 7: Format and commit**
 
 ```bash
 rustfmt --edition 2021 src/api/chat_template.rs tests/chat_template_render.rs
@@ -354,6 +395,41 @@ fn stale_sidecar_is_rejected() {
     );
     let t = lightbulb::api::chat_template::resolve(&d);
     assert_ne!(t.source, "STALE", "resolution used a stale sidecar");
+}
+
+/// Every registry constant must actually render to its generation prompt.
+///
+/// This exists because Task 1 shipped a template whose trailing newline sat in
+/// source position and was silently stripped — and the test written alongside
+/// it could not detect that, because the template had been flattened until the
+/// whitespace settings no longer applied to it. A constant that renders to the
+/// wrong shape still renders, so nothing falls through and nothing is logged.
+/// Parameterised over all three so adding a fourth without a test is not
+/// possible.
+#[test]
+fn every_registry_constant_ends_with_its_generation_prompt() {
+    use lightbulb::api::chat_template::registry;
+    let expected = [
+        ("zephyr", registry::ZEPHYR, "<|assistant|>\n"),
+        ("chatml", registry::CHATML, "<|im_start|>assistant\n"),
+        ("llama2", registry::LLAMA2, "[/INST]"),
+    ];
+    assert_eq!(
+        expected.len(),
+        registry::candidates().len(),
+        "a candidate was added to the registry without a render assertion"
+    );
+    for (name, src, tail) in expected {
+        let t = ChatTemplate { source: src.to_string(), resolved_by: Resolution::Registry };
+        let out = t
+            .render(&msgs(), "<s>", "</s>")
+            .unwrap_or_else(|e| panic!("{name} failed to render: {e}"));
+        assert!(
+            out.ends_with(tail),
+            "{name} rendered {out:?}, which does not end with {tail:?} — a \
+             trailing newline in source position is stripped by Jinja"
+        );
+    }
 }
 
 /// No tier fires: resolution reports None rather than inventing a template.
@@ -485,8 +561,14 @@ Replace `src/api/chat_template/registry.rs`:
 
 use std::path::Path;
 
-pub const ZEPHYR: &str = "{% for m in messages %}<|{{ m.role }}|>\n{{ m.content }}{{ eos_token }}\n{% endfor %}<|assistant|>\n";
-pub const CHATML: &str = "{% for m in messages %}<|im_start|>{{ m.role }}\n{{ m.content }}<|im_end|>\n{% endfor %}<|im_start|>assistant\n";
+// A newline in TRAILING SOURCE POSITION is stripped by both Jinja2 and
+// minijinja (`keep_trailing_newline` defaults false in each, and transformers
+// does not change it). So the generation-prompt newline must sit INSIDE a
+// variable tag — `{{ '<|assistant|>\n' }}` — not after the closing `%}`.
+// Task 1 shipped this bug and it cost a debugging cycle; these three are
+// written in the safe form deliberately.
+pub const ZEPHYR: &str = "{% for m in messages %}{{ '<|' + m.role + '|>\n' + m.content + eos_token + '\n' }}{% endfor %}{{ '<|assistant|>\n' }}";
+pub const CHATML: &str = "{% for m in messages %}{{ '<|im_start|>' + m.role + '\n' + m.content + '<|im_end|>\n' }}{% endfor %}{{ '<|im_start|>assistant\n' }}";
 pub const LLAMA2: &str = "{% for m in messages %}{% if m.role == 'user' %}[INST] {{ m.content }} [/INST]{% else %}{{ m.content }}{{ eos_token }}{% endif %}{% endfor %}";
 
 /// Every candidate the probe tries, named for its report.

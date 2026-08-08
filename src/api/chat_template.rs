@@ -1,10 +1,16 @@
 //! Resolve and render a model's chat template.
 //!
-//! `/v1/chat/completions` previously built its prompt as
-//! `messages.map(|m| format!("{}: {}", m.role, m.content)).join("\n")`, which is
-//! not any model's template. A chat model prompted that way behaves like a base
-//! model: it continues text rather than answering, and does not reliably emit
-//! EOS. Measured on TinyLlama-1.1B-Chat, EOS fired in 1 of 6 trials.
+//! `/v1/chat/completions` builds its prompt as
+//! `messages.map(|m| format!("{}: {}", m.role, m.content)).join("\n")`
+//! (`openai/chat.rs:186` non-streaming, `:409` streaming, and
+//! `contracts/executor.rs:183` per retry attempt), which is not any model's
+//! template. A chat model prompted that way behaves like a base model: it
+//! continues text rather than answering, and does not reliably emit EOS.
+//! Measured on TinyLlama-1.1B-Chat, EOS fired in 1 of 6 trials.
+//!
+//! This module exists to replace that join. Nothing is wired to it yet — the
+//! three sites above are still on the join until Tasks 3 and 4 route them
+//! through `ChatTemplate::render`.
 
 use serde::{Deserialize, Serialize};
 
@@ -72,6 +78,33 @@ impl ChatTemplate {
                 minijinja::ErrorKind::InvalidOperation,
                 msg,
             ))
+        });
+
+        // Llama-3.x templates open with
+        // `{%- set date_string = strftime_now("%d %b %Y") %}` and interpolate it
+        // into the system message. This is a *global*, not a minijinja feature —
+        // no feature list makes it appear, so an unregistered `strftime_now`
+        // turns every Llama-3.x `tokenizer_config.json` into a tier-1 parse
+        // failure that falls through to a registry guess.
+        //
+        // `Local`, not `Utc`: transformers calls
+        // `datetime.now().strftime(fmt)`, which is local time.
+        env.add_function("strftime_now", |fmt: String| {
+            // chrono's formatter panics on an invalid specifier at Display
+            // time, so the format string is validated before it is used.
+            let items: Vec<_> = chrono::format::StrftimeItems::new(&fmt).collect();
+            if items
+                .iter()
+                .any(|i| matches!(i, chrono::format::Item::Error))
+            {
+                return Err(minijinja::Error::new(
+                    minijinja::ErrorKind::InvalidOperation,
+                    format!("strftime_now: unsupported format string {fmt:?}"),
+                ));
+            }
+            Ok(chrono::Local::now()
+                .format_with_items(items.into_iter())
+                .to_string())
         });
 
         env.add_template("chat", &self.source)?;

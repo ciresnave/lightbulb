@@ -83,8 +83,26 @@
     memmap2            = "0.9"
     # Chat-template rendering. HuggingFace `chat_template` values are Jinja.
     # minijinja is pure Rust with no C dependencies, which keeps the CUDA build
-    # unaffected. `loader` is not needed — templates arrive as strings, never paths.
-    minijinja          = { version = "2", default-features = false, features = ["builtins"] }
+    # unaffected.
+    #
+    # The feature list mirrors what `transformers` gives its own environment
+    # (`utils/chat_template_utils.py`), because these templates are authored
+    # against THAT dialect. Dropping one does not degrade rendering — it makes real
+    # checkpoint templates fail to parse, which falls through to a registry guess
+    # and reports success at a lower tier. That is the defect this work removes,
+    # wearing a provenance field that says "guess".
+    #
+    #   macros        {% macro %}
+    #   loop_controls {% break %} / {% continue %}  (transformers loads
+    #                 jinja2.ext.loopcontrols for exactly this)
+    #   json          the `tojson` filter
+    #   serde         silences a deprecation warning; `context!` over serde types
+    #                 is load-bearing here, not incidental
+    #   debug         puts template source context into errors — spec §2 requires
+    #                 a failing template log "which template failed and why"
+    #
+    # `loader` stays out: templates arrive as strings, never paths.
+    minijinja          = { version = "2", features = ["macros", "loop_controls", "json", "serde", "debug"] }
     parking_lot        = "0.12"
     rand               = "0.9"
     rayon              = "1.10"

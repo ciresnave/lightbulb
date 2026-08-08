@@ -13,22 +13,38 @@ fn msgs() -> Vec<RawMessage> {
     }]
 }
 
-/// TinyLlama-1.1B-Chat uses the Zephyr form. Asserted as an exact string.
+fn tmpl(src: &str) -> ChatTemplate {
+    ChatTemplate {
+        source: src.to_string(),
+        resolved_by: Resolution::Registry,
+    }
+}
+
+/// TinyLlama-1.1B-Chat's REAL template, verbatim from its Hub
+/// `tokenizer_config.json` — not a flattened paraphrase.
 ///
-/// The expected value is the verified rendering of TinyLlama-1.1B-Chat-v1.0's
-/// own `chat_template`, traced under `trim_blocks=True`: its generation prompt
-/// is `{{ '<|assistant|>' }}` followed by a newline that survives because it
-/// trails a VARIABLE tag, not a block tag.
-///
-/// That is why the trailing newline below sits inside `{{ '...' }}` rather than
-/// at the end of the source. A newline in trailing source position is stripped
-/// by Jinja2 and minijinja alike (`keep_trailing_newline` defaults to false in
-/// both, and transformers does not override it), so writing this template as
-/// `...{% endfor %}<|assistant|>\n` renders `<|assistant|>` with the newline
-/// silently eaten — a real prompt defect that reads as a typo in the test.
+/// Using the real multi-line form is load-bearing, not fidelity theatre. A
+/// one-liner has no newline after any `%}` and no leading whitespace before any
+/// block tag, so `trim_blocks`/`lstrip_blocks` are **no-ops for it** and the
+/// test passes identically whether or not `render` sets them. The real template
+/// renders `"\n\n<|user|>\n…\n\n\n<|assistant|>\n\n"` when they are unset. That
+/// difference is the only thing standing between this module and silent
+/// mis-rendering, which is the one failure mode that does NOT fall through to
+/// the next tier and does NOT get logged (spec §8 assigns this test that job).
 #[test]
-fn zephyr_template_renders_exactly() {
-    let src = "{% for m in messages %}<|{{ m.role }}|>\n{{ m.content }}{{ eos_token }}\n{% endfor %}{{ '<|assistant|>\n' }}";
+fn real_tinyllama_template_renders_exactly() {
+    let src = "{% for message in messages %}\n\
+               {% if message['role'] == 'user' %}\n\
+               {{ '<|user|>\\n' + message['content'] + eos_token }}\n\
+               {% elif message['role'] == 'system' %}\n\
+               {{ '<|system|>\\n' + message['content'] + eos_token }}\n\
+               {% elif message['role'] == 'assistant' %}\n\
+               {{ '<|assistant|>\\n' + message['content'] + eos_token }}\n\
+               {% endif %}\n\
+               {% if loop.last and add_generation_prompt %}\n\
+               {{ '<|assistant|>' }}\n\
+               {% endif %}\n\
+               {% endfor %}";
     let t = ChatTemplate {
         source: src.to_string(),
         resolved_by: Resolution::Registry,
@@ -37,6 +53,21 @@ fn zephyr_template_renders_exactly() {
     assert_eq!(
         out,
         "<|user|>\nName the capital of France.</s>\n<|assistant|>\n"
+    );
+}
+
+/// `lstrip_blocks` on its own, because TinyLlama's real template happens to
+/// indent nothing — so the test above discriminates `trim_blocks` only, and
+/// deleting `set_lstrip_blocks` would otherwise still be invisible. Real
+/// checkpoint templates (Llama-3.x, Qwen) indent their block tags heavily.
+#[test]
+fn leading_whitespace_before_a_block_tag_is_stripped() {
+    // No newline follows any `%}`, so trim_blocks cannot account for this.
+    assert_eq!(
+        tmpl("  {% if true %}A{% endif %}")
+            .render(&msgs(), "<s>", "</s>")
+            .unwrap(),
+        "A"
     );
 }
 
@@ -71,4 +102,84 @@ fn bos_and_eos_are_bound() {
         resolved_by: Resolution::Registry,
     };
     assert_eq!(t.render(&msgs(), "<s>", "</s>").unwrap(), "<s>|</s>");
+}
+
+// ── Dialect coverage ────────────────────────────────────────────────────────
+//
+// One test per construct that a narrower minijinja feature list rejects at
+// PARSE time. These are positive controls: they fail loudly if the feature list
+// is trimmed, which is what makes it demonstrably sufficient rather than merely
+// longer. Each was measured to fail under `default-features = false,
+// features = ["builtins"]` — `{% break %}`/`{% macro %}` as parse errors,
+// `tojson` as "unknown filter".
+//
+// The failure they guard against is not a broken render. It is tier 1 refusing
+// a checkpoint's own `tokenizer_config.json` and resolution falling through to
+// a registry guess while `resolved_by` reports success at a lower tier.
+
+/// `{% macro %}` — Hermes and Qwen tool-calling templates define one per tool.
+/// Needs the `macros` feature; without it this is a parse error.
+#[test]
+fn macros_are_supported() {
+    let src = "{% macro render(m) %}<{{ m['role'] }}>{{ m['content'] }}{% endmacro %}\
+               {% for m in messages %}{{ render(m) }}{% endfor %}";
+    assert_eq!(
+        tmpl(src).render(&msgs(), "<s>", "</s>").unwrap(),
+        "<user>Name the capital of France."
+    );
+}
+
+/// `{% break %}` / `{% continue %}` — needs `loop_controls`. `transformers`
+/// loads `jinja2.ext.loopcontrols` for exactly this, so templates authored
+/// against it use them freely.
+#[test]
+fn loop_controls_are_supported() {
+    let src = "{% for i in [1, 2, 3, 4] %}{% if i == 3 %}{% break %}{% endif %}\
+               {% if i == 1 %}{% continue %}{% endif %}{{ i }}{% endfor %}";
+    assert_eq!(tmpl(src).render(&msgs(), "<s>", "</s>").unwrap(), "2");
+}
+
+/// `| tojson` — Llama-3.1 serialises each tool definition with it. Needs the
+/// `json` feature; without it minijinja reports "unknown filter".
+#[test]
+fn tojson_filter_is_supported() {
+    let src = "{{ messages[0]['role'] | tojson }}|{{ [1, 2] | tojson }}";
+    assert_eq!(
+        tmpl(src).render(&msgs(), "<s>", "</s>").unwrap(),
+        "\"user\"|[1,2]"
+    );
+}
+
+/// `strftime_now(fmt)` — Llama-3.x opens with
+/// `{%- set date_string = strftime_now("%d %b %Y") %}`. It is a *global*, not a
+/// feature: no feature list makes it appear, so it has to be registered.
+///
+/// Asserted on shape rather than a literal date, because the value is the wall
+/// clock. The shape still discriminates every way this can be wrong: an
+/// unregistered function errors, and a passthrough stub would return the format
+/// string itself.
+#[test]
+fn strftime_now_is_registered() {
+    let out = tmpl("{{ strftime_now('%Y-%m-%d') }}")
+        .render(&msgs(), "<s>", "</s>")
+        .expect("strftime_now failed to render");
+    assert_ne!(out, "%Y-%m-%d", "strftime_now echoed its format string");
+    let parts: Vec<&str> = out.split('-').collect();
+    assert_eq!(parts.len(), 3, "strftime_now rendered {out:?}, not a date");
+    assert_eq!((parts[0].len(), parts[1].len(), parts[2].len()), (4, 2, 2));
+    let year: u32 = parts[0].parse().expect("year is not numeric");
+    assert!(
+        (2026..2100).contains(&year),
+        "strftime_now rendered year {year}"
+    );
+
+    // The exact call form Llama-3.1's template uses.
+    let llama = tmpl("{%- set date_string = strftime_now(\"%d %b %Y\") %}{{ date_string }}")
+        .render(&msgs(), "<s>", "</s>")
+        .expect("the Llama-3.1 date_string preamble failed to render");
+    assert_eq!(
+        llama.split(' ').count(),
+        3,
+        "strftime_now('%d %b %Y') rendered {llama:?}"
+    );
 }
