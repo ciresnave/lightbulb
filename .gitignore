@@ -22,3 +22,6 @@ Thumbs.db
 *.profraw
 build_output.txt
 temp_candle_ext/
+
+# rustc crash dumps (see the -j 4 build race; dumps are evidence, not artifacts to commit)
+rustc-ice-*.txt
