@@ -1133,3 +1133,121 @@ fn rendering_uses_the_checkpoints_own_tokens() {
         "a Llama-2 special token reached a Llama-3 prompt: {out:?}"
     );
 }
+
+/// How much `render` costs per request, since it recompiles the template every
+/// call.
+///
+/// **Not a gate — it asserts nothing about time**, because a wall-clock
+/// threshold on a shared developer box is flaky in the direction that wastes
+/// the most attention. It exists so the decision NOT to cache the compiled
+/// template stays a measured claim rather than a judgement, and so re-checking
+/// it is one command instead of a rewrite:
+///
+/// ```text
+/// cargo test --release --test chat_template_render measure_render -- --ignored --nocapture
+/// ```
+///
+/// Measured 2026-08-12, `--release`, 10 000 calls after a 100-call warmup:
+///
+/// | template | size | per call |
+/// | --- | --- | --- |
+/// | `registry::ZEPHYR` (what TinyLlama resolves to) | 114 B | 40, 62 µs |
+/// | the Llama-3-shaped one below | 972 B | 77, 93, 100, 115, 119, 221 µs |
+///
+/// **Every run of the same code is listed rather than averaged**, because the
+/// spread IS the result: six runs of the 972 B template span 77–221 µs, a
+/// factor of 2.9. A single figure from this harness means little, and the first
+/// number recorded here was 221 — the outlier — which would have overstated the
+/// cost threefold had the run not been repeated. That spread is the reason no
+/// threshold is asserted, and the reason the decision below is argued from
+/// order of magnitude rather than from any one measurement.
+///
+/// **Decision: do not cache.** `render` is called once per request, against a
+/// request whose generation cost is three to five orders of magnitude larger —
+/// 8 tokens at this box's measured ~3.5 s/token on CPU is ~28 s, and even a
+/// 10 ms/token GPU decode is ~80 ms. Taking the *worst* observed 221 µs against
+/// the *fastest* of those is ~0.3 %. Caching would mean holding a compiled
+/// `minijinja::Template`, which borrows from its `Environment`, so
+/// `ResolvedTemplate` would have to own both and carry the lifetime — real
+/// complexity against a rounding error.
+///
+/// **What would change the decision**, stated so it can be checked rather than
+/// re-litigated: a template large enough to push this past ~1 % of decode (call
+/// it >1 ms, roughly a 5 KB template — real Llama-3.1 templates with full tool
+/// handling approach 4 KB, so this is not far off), or `render` moving to a
+/// per-token rather than per-request call site. Neither holds today.
+#[test]
+#[ignore = "measurement, not a gate"]
+fn measure_render_cost() {
+    // Meta-Llama-3.1's template, abridged to its structural shape: a tool/system
+    // preamble, `strftime_now`, and a per-message loop with a branch. A size-
+    // class proxy, deliberately not a verbatim copy — the fidelity claims in
+    // this file belong to the tests that assert output, not to this one.
+    let src = r#"{%- set date_string = strftime_now("%d %b %Y") %}
+{%- if messages[0]['role'] == 'system' %}
+    {%- set system_message = messages[0]['content']|trim %}
+    {%- set messages = messages[1:] %}
+{%- else %}
+    {%- set system_message = "" %}
+{%- endif %}
+{{- bos_token }}
+{{- "<|start_header_id|>system<|end_header_id|>\n\n" }}
+{{- "Cutting Knowledge Date: December 2023\n" }}
+{{- "Today Date: " + date_string + "\n\n" }}
+{{- system_message }}
+{{- "<|eot_id|>" }}
+{%- for message in messages %}
+    {%- if not (message.role == 'ipython' or message.role == 'tool') %}
+        {{- '<|start_header_id|>' + message['role'] + '<|end_header_id|>\n\n' + message['content'] | trim + '<|eot_id|>' }}
+    {%- else %}
+        {{- "<|start_header_id|>ipython<|end_header_id|>\n\n" }}
+        {{- message.content | trim }}
+        {{- "<|eot_id|>" }}
+    {%- endif %}
+{%- endfor %}
+{%- if add_generation_prompt %}
+    {{- '<|start_header_id|>assistant<|end_header_id|>\n\n' }}
+{%- endif %}"#;
+
+    let t = lightbulb::api::chat_template::ResolvedTemplate {
+        template: tmpl(src),
+        tokens: lightbulb::api::chat_template::SpecialTokens {
+            bos: "<|begin_of_text|>".to_string(),
+            eos: "<|eot_id|>".to_string(),
+        },
+    };
+    let msgs = vec![
+        lightbulb::contracts::validation::RawMessage {
+            role: "system".to_string(),
+            content: "You are helpful.".to_string(),
+        },
+        lightbulb::contracts::validation::RawMessage {
+            role: "user".to_string(),
+            content: "Name the capital of France.".to_string(),
+        },
+    ];
+
+    // The render must actually succeed, or the timing below measures an error
+    // path. This is the one thing here that IS asserted.
+    let out = t
+        .render(&msgs)
+        .expect("the measurement template must render");
+    assert!(
+        out.contains("Name the capital of France."),
+        "the measurement template rendered without the message: {out:?}"
+    );
+
+    for _ in 0..100 {
+        let _ = t.render(&msgs).unwrap();
+    }
+    let n = 10_000;
+    let start = std::time::Instant::now();
+    for _ in 0..n {
+        let _ = std::hint::black_box(t.render(&msgs).unwrap());
+    }
+    eprintln!(
+        "MEASURED render(): {:?} per call over {n} calls, source {} bytes",
+        start.elapsed() / n,
+        src.len()
+    );
+}
