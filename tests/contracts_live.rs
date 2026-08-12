@@ -19,6 +19,7 @@
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
+use lightbulb::api::chat_template::{ResolvedTemplate, resolve_for_serving};
 use lightbulb::contracts::{
     ContractOutput, OutputContractSpec,
     executor::{ContractExecutionResult, execute_contract_with_runner},
@@ -31,11 +32,24 @@ type RunnerTx = std::sync::mpsc::Sender<InferenceJob>;
 // ─── Shared runner (loaded once, shared by all tests) ─────────────────────
 
 static RUNNER: OnceLock<RunnerTx> = OnceLock::new();
+static TEMPLATE: OnceLock<Option<std::sync::Arc<ResolvedTemplate>>> = OnceLock::new();
 
 /// Clone the shared sender.  Panics (FAIL) if the runner could not be
 /// initialized — the test should not silently pass when the model is broken.
 fn get_runner() -> RunnerTx {
     RUNNER.get_or_init(init_runner).clone()
+}
+
+/// The chat template for the same checkpoint the runner loaded.
+///
+/// Resolved through `resolve_for_serving`, which is the *same* call the HTTP
+/// server makes at startup — not a private reimplementation of the
+/// `Resolution::None` check. A harness that resolved differently from
+/// production would measure a prompt no client can cause.
+fn get_template() -> Option<std::sync::Arc<ResolvedTemplate>> {
+    TEMPLATE
+        .get_or_init(|| resolve_for_serving(&find_model_dir()))
+        .clone()
 }
 
 /// Start the runner, wait for it to finish loading, and verify with a 1-token
@@ -98,7 +112,11 @@ fn find_model_dir() -> PathBuf {
         );
         return p;
     }
-    for candidate in &["../models/llama-3b", "../../models/llama-3b", "models/llama-3b"] {
+    for candidate in &[
+        "../models/llama-3b",
+        "../../models/llama-3b",
+        "models/llama-3b",
+    ] {
         let p = PathBuf::from(candidate);
         if p.join("config.json").exists() {
             println!(
@@ -115,7 +133,10 @@ fn find_model_dir() -> PathBuf {
 }
 
 fn user_msgs(content: &str) -> Vec<RawMessage> {
-    vec![RawMessage { role: "user".to_string(), content: content.to_string() }]
+    vec![RawMessage {
+        role: "user".to_string(),
+        content: content.to_string(),
+    }]
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────
@@ -165,6 +186,7 @@ async fn live_enum_choice_yes_no() {
 
     let result: ContractExecutionResult = execute_contract_with_runner(
         tx,
+        get_template(),
         &user_msgs("Is water wet? Answer with yes or no."),
         "llama-3b",
         &spec,
@@ -200,13 +222,18 @@ async fn live_enum_choice_three_way() {
     let tx = get_runner();
 
     let spec = OutputContractSpec::EnumChoice {
-        choices: vec!["positive".to_string(), "negative".to_string(), "neutral".to_string()],
+        choices: vec![
+            "positive".to_string(),
+            "negative".to_string(),
+            "neutral".to_string(),
+        ],
         case_sensitive: false,
         allow_index: true,
     };
 
     let result = execute_contract_with_runner(
         tx,
+        get_template(),
         &user_msgs("The movie was absolutely fantastic! What is the sentiment?"),
         "llama-3b",
         &spec,
@@ -245,6 +272,7 @@ async fn live_tagged_fields_error_classification() {
 
     let result = execute_contract_with_runner(
         tx,
+        get_template(),
         &user_msgs("Classify this error: \"NullPointerException at line 42 in UserService.java\""),
         "llama-3b",
         &spec,
@@ -261,7 +289,11 @@ async fn live_tagged_fields_error_classification() {
         result.result.parse_success, result.result.attempts, result.result.output
     );
     if let ContractOutput::TaggedFields { ref tags } = result.result.output {
-        println!("  CATEGORY={:?}  SEVERITY={:?}", tags.get("CATEGORY"), tags.get("SEVERITY"));
+        println!(
+            "  CATEGORY={:?}  SEVERITY={:?}",
+            tags.get("CATEGORY"),
+            tags.get("SEVERITY")
+        );
     }
 
     assert!(!result.final_text.is_empty(), "must return some text");
@@ -289,6 +321,7 @@ async fn live_fallback_chain() {
 
     let result = execute_contract_with_runner(
         tx,
+        get_template(),
         &user_msgs("Is this a test? Pick from: yes, no, alpha, beta, or gamma."),
         "llama-3b",
         &primary,

@@ -106,9 +106,10 @@ pub struct InferenceJob {
     /// applied. See [`crate::engine::RequestContext::add_special_tokens`] for
     /// what goes wrong when a templated prompt gets `true`.
     ///
-    /// `true` for a raw prompt (`/v1/completions`, the legacy `role: content`
-    /// join, the contract executor's rendered attempts); `false` for a prompt
-    /// that came out of `ResolvedTemplate::render`.
+    /// `true` for a raw prompt (`/v1/completions`, and the legacy
+    /// `role: content` join used when no tier resolved a template); `false` for
+    /// a prompt that came out of `ResolvedTemplate::render` — which now
+    /// includes every contract-executor attempt.
     pub add_special_tokens: bool,
     /// Response mode (complete or streaming)
     pub response_mode: ResponseMode,

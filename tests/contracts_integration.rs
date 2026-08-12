@@ -14,9 +14,7 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
 use lightbulb::contracts::{
-    ContractOutput, OutputContractSpec,
-    executor::execute_contract,
-    validation::RawMessage,
+    ContractOutput, OutputContractSpec, executor::execute_contract, validation::RawMessage,
 };
 use lightbulb::engine::model_runner::{CompletionResult, FinishReason};
 
@@ -40,15 +38,17 @@ fn canned(text: impl Into<String>) -> CompletionResult {
 
 /// Create an async inference closure that returns scripted responses in order.
 /// Panics if called more times than there are scripted responses.
-fn mock_infer(responses: Vec<&'static str>) -> (
+fn mock_infer(
+    responses: Vec<&'static str>,
+) -> (
     Arc<Mutex<VecDeque<String>>>,
-    impl Fn(String) -> std::future::Ready<anyhow::Result<CompletionResult>> + Clone,
+    impl Fn(Vec<RawMessage>) -> std::future::Ready<anyhow::Result<CompletionResult>> + Clone,
 ) {
     let queue: Arc<Mutex<VecDeque<String>>> = Arc::new(Mutex::new(
         responses.iter().map(|s| s.to_string()).collect(),
     ));
     let q2 = queue.clone();
-    let f = move |_prompt: String| {
+    let f = move |_msgs: Vec<RawMessage>| {
         let text = q2
             .lock()
             .unwrap()
@@ -256,8 +256,14 @@ async fn tagged_fields_succeeds_first_try() {
     assert!(result.result.parse_success);
     assert_eq!(result.result.attempts, 1);
     if let ContractOutput::TaggedFields { tags } = &result.result.output {
-        assert_eq!(tags.get("MODE").and_then(|v| v.first()).map(String::as_str), Some("typecheck_error"));
-        assert_eq!(tags.get("CONF").and_then(|v| v.first()).map(String::as_str), Some("0.85"));
+        assert_eq!(
+            tags.get("MODE").and_then(|v| v.first()).map(String::as_str),
+            Some("typecheck_error")
+        );
+        assert_eq!(
+            tags.get("CONF").and_then(|v| v.first()).map(String::as_str),
+            Some("0.85")
+        );
     } else {
         panic!("expected TaggedFields output");
     }
@@ -301,8 +307,8 @@ async fn tagged_fields_require_all_retries_until_complete() {
         repeatable_tags: vec![],
     };
     let (_, infer) = mock_infer(vec![
-        "<MODE>lint_error</MODE>",                        // only MODE — fails require_all
-        "<MODE>lint_error</MODE><CONF>0.92</CONF>",      // both fields — passes
+        "<MODE>lint_error</MODE>",                  // only MODE — fails require_all
+        "<MODE>lint_error</MODE><CONF>0.92</CONF>", // both fields — passes
     ]);
 
     let result = execute_contract(
@@ -320,10 +326,24 @@ async fn tagged_fields_require_all_retries_until_complete() {
     assert_eq!(result.result.attempts, 2);
 }
 
-// ─── Prompt injection test ─────────────────────────────────────────────────
+// ─── Prompt injection tests ────────────────────────────────────────────────
 
-/// Verify that the contract instruction is actually present in the prompt
-/// that reaches the inference closure.
+/// Flatten a captured message list for the substring assertions below.
+///
+/// The callback receives `Vec<RawMessage>` rather than a rendered prompt (the
+/// caller owns rendering), so these tests assert on the message list's content.
+/// That is the right level for them: what they are about is *which messages*
+/// the executor assembles, and the executor no longer decides how those become
+/// text.
+fn flatten(msgs: &[RawMessage]) -> String {
+    msgs.iter()
+        .map(|m| format!("{}: {}", m.role, m.content))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Verify that the contract instruction is actually present in the messages
+/// that reach the inference closure.
 #[tokio::test]
 async fn contract_instruction_injected_into_prompt() {
     let choices = vec!["alpha".to_string(), "beta".to_string()];
@@ -336,8 +356,8 @@ async fn contract_instruction_injected_into_prompt() {
     let captured_prompt: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
     let captured = captured_prompt.clone();
 
-    let infer = move |prompt: String| {
-        *captured.lock().unwrap() = Some(prompt);
+    let infer = move |msgs: Vec<RawMessage>| {
+        *captured.lock().unwrap() = Some(flatten(&msgs));
         std::future::ready(Ok::<CompletionResult, anyhow::Error>(canned("alpha")))
     };
 
@@ -381,8 +401,8 @@ async fn retry_appends_context_and_tightening_message() {
     // Second call: return the correct label.
     let call_count = Arc::new(Mutex::new(0usize));
     let cc = call_count.clone();
-    let infer = move |prompt: String| {
-        captured.lock().unwrap().push(prompt);
+    let infer = move |msgs: Vec<RawMessage>| {
+        captured.lock().unwrap().push(flatten(&msgs));
         let idx = {
             let mut c = cc.lock().unwrap();
             let i = *c;
@@ -405,7 +425,11 @@ async fn retry_appends_context_and_tightening_message() {
     .unwrap();
 
     let all_prompts = prompts.lock().unwrap();
-    assert_eq!(all_prompts.len(), 2, "should make exactly 2 inference calls");
+    assert_eq!(
+        all_prompts.len(),
+        2,
+        "should make exactly 2 inference calls"
+    );
 
     // The second prompt must contain the first bad response as assistant context.
     assert!(
@@ -414,7 +438,62 @@ async fn retry_appends_context_and_tightening_message() {
     );
     // And a tightening correction from the user.
     assert!(
-        all_prompts[1].to_lowercase().contains("yes") || all_prompts[1].to_lowercase().contains("no"),
+        all_prompts[1].to_lowercase().contains("yes")
+            || all_prompts[1].to_lowercase().contains("no"),
         "retry prompt should contain the valid labels in the tightening message"
+    );
+}
+
+/// The callback must see the message list as it stands on EACH attempt.
+///
+/// This is the property that makes rendering upstream impossible, and therefore
+/// the reason `execute_contract` takes `Fn(Vec<RawMessage>)` rather than
+/// `Fn(String)`. The list grows between attempts —
+/// `inject_contract_instruction` prepends a system message once, then every
+/// retry pushes the rejected assistant reply and a tightening user message — so
+/// a prompt rendered once by the caller would be stale from attempt 2 onward.
+///
+/// Asserted as exact lengths rather than "grew", derived independently of the
+/// implementation: 1 user + 1 injected system = 2 on attempt 1, then +2 per
+/// retry. A `>` comparison would also pass if the executor handed over the
+/// *same* list object it later mutated, which is the failure this guards.
+#[tokio::test]
+async fn contract_callback_sees_each_mutated_message_list() {
+    let spec = OutputContractSpec::EnumChoice {
+        choices: choices(),
+        case_sensitive: false,
+        allow_index: true,
+    };
+
+    let seen: Arc<Mutex<Vec<usize>>> = Arc::new(Mutex::new(Vec::new()));
+    let seen2 = seen.clone();
+
+    // "garbage" is none of yes/no/maybe and holds no digit for `allow_index`,
+    // so no attempt parses and all three run.
+    let infer = move |msgs: Vec<RawMessage>| {
+        seen2.lock().unwrap().push(msgs.len());
+        std::future::ready(Ok::<CompletionResult, anyhow::Error>(canned("garbage")))
+    };
+
+    let result = execute_contract(
+        &user_messages("Is the service healthy?"),
+        "test-model",
+        &spec,
+        3,
+        &[],
+        infer,
+    )
+    .await
+    .unwrap();
+
+    assert!(
+        !result.result.parse_success,
+        "the stub must never parse, or fewer than three attempts run"
+    );
+    let seen = seen.lock().unwrap();
+    assert_eq!(
+        *seen,
+        vec![2, 4, 6],
+        "each attempt must receive that attempt's own message list"
     );
 }

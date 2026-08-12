@@ -179,7 +179,8 @@ pub async fn chat_completions(
 /// It must have exactly one definition. It previously had three (both sites in
 /// this file plus `contracts::validation::messages_to_prompt`), which is how
 /// the streaming path kept the defect after the non-streaming path was looked
-/// at.
+/// at. `messages_to_prompt` was deleted rather than re-pointed at the template
+/// for the same reason: a second renderer is a second thing to drift.
 fn legacy_join(messages: &[crate::contracts::validation::RawMessage]) -> String {
     messages
         .iter()
@@ -278,6 +279,30 @@ fn build_prompt(state: &AppState, messages: &[ChatMessage]) -> BuiltPrompt {
         })
         .collect();
 
+    build_prompt_from_raw(state.chat_template.as_deref(), &raw)
+}
+
+/// [`build_prompt`] over the contracts module's own message type, taking the
+/// template directly rather than through [`AppState`].
+///
+/// This is the shared body; `build_prompt` is the `ChatMessage`/`AppState`
+/// adapter over it. It exists as a separate function because the contract
+/// executor cannot reuse `build_prompt`: it re-renders per attempt against a
+/// message list it has mutated (`contracts::executor` pushes the failed
+/// assistant reply and a tightening user message between attempts), and it runs
+/// from `execute_contract_with_runner`, which has no `AppState` at all.
+///
+/// Both of those callers go through **this** function rather than rendering
+/// themselves, so `BuiltPrompt::add_special_tokens` is decided in exactly one
+/// place for every prompt the server sends. `contracts::validation::
+/// messages_to_prompt` was the fourth renderer and is deleted; the flag was the
+/// reason a fifth could not be tolerated, since a call site that renders also
+/// has to restate the flag and `true` is both the wrong answer and the one that
+/// matches every other `encode` call in the codebase.
+pub(crate) fn build_prompt_from_raw(
+    template: Option<&crate::api::chat_template::ResolvedTemplate>,
+    raw: &[crate::contracts::validation::RawMessage],
+) -> BuiltPrompt {
     // The one place the polarity is written down. Callers move the pair around
     // together, so there is no `!` at a call site to get backwards.
     let joined = |text: String| BuiltPrompt {
@@ -285,8 +310,8 @@ fn build_prompt(state: &AppState, messages: &[ChatMessage]) -> BuiltPrompt {
         add_special_tokens: true,
     };
 
-    match &state.chat_template {
-        Some(t) => match t.render(&raw) {
+    match template {
+        Some(t) => match t.render(raw) {
             Ok(text) => BuiltPrompt {
                 text,
                 add_special_tokens: false,
@@ -303,7 +328,7 @@ fn build_prompt(state: &AppState, messages: &[ChatMessage]) -> BuiltPrompt {
                     "chat template ({:?}) failed to render: {e}; using the legacy join",
                     t.resolved_by()
                 );
-                joined(legacy_join(&raw))
+                joined(legacy_join(raw))
             }
         },
         // `debug`, not `warn`: `resolve` already warned once at startup with the
@@ -312,7 +337,7 @@ fn build_prompt(state: &AppState, messages: &[ChatMessage]) -> BuiltPrompt {
         // information.
         None => {
             tracing::debug!("no chat template for this model; using the legacy join");
-            joined(legacy_join(&raw))
+            joined(legacy_join(raw))
         }
     }
 }
@@ -481,24 +506,26 @@ async fn create_chat_completion_with_contract(
         })
         .collect();
 
+    // Cloned out of `state` before the closure, because the closure must be
+    // `Fn` and outlives this borrow.
+    let template = state.chat_template.clone();
+
     let exec = execute_contract(
         &msgs,
         &request.model,
         primary_contract,
         max_attempts,
         fallbacks,
-        move |prompt| {
+        // The closure receives the message list, not a prompt, and renders it
+        // **per attempt** — `execute_contract` mutates that list between
+        // attempts, so a prompt rendered once here would be stale from attempt
+        // 2 onward. `build_prompt_from_raw` is the same function the plain and
+        // streaming paths use, so the contract path cannot drift from them and
+        // cannot get `add_special_tokens` wrong independently of them.
+        move |msgs: Vec<RawMessage>| {
             let tx = tx.clone();
-            // `raw`, deliberately: `execute_contract` still builds its per-
-            // attempt prompt with the legacy `role: content` join (it mutates
-            // the message list between attempts, so it cannot render upstream
-            // — that is Task 4). A joined prompt carries no special tokens, so
-            // the tokenizer must add them. When Task 4 renders the template
-            // here, this becomes the templated constructor and NOT `raw`.
-            async move {
-                run_inference_once_owned(tx, BuiltPrompt::raw(prompt), max_new_tokens, temperature)
-                    .await
-            }
+            let prompt = build_prompt_from_raw(template.as_deref(), &msgs);
+            async move { run_inference_once_owned(tx, prompt, max_new_tokens, temperature).await }
         },
     )
     .await?;
@@ -1012,11 +1039,115 @@ mod tests {
         );
     }
 
-    /// `/v1/completions` and the contract executor both build raw prompts
-    /// through this constructor. It is the only thing standing between them and
-    /// a prompt with no BOS.
+    /// `/v1/completions` builds raw prompts through this constructor. It is the
+    /// only thing standing between that endpoint and a prompt with no BOS.
     #[test]
     fn a_raw_prompt_asks_for_special_tokens() {
         assert!(BuiltPrompt::raw("The capital of France is".to_string()).add_special_tokens);
+    }
+
+    /// The contract path renders every attempt through the template, and
+    /// tokenizes the result without a second BOS.
+    ///
+    /// This test lives here rather than in `contracts::executor` because the
+    /// fixture above is what makes it able to fail: TinyLlama resolves to
+    /// `registry::ZEPHYR`, which never emits `bos_token`, so a contract test
+    /// built on the real checkpoint would pass with the flag hardcoded either
+    /// way.
+    ///
+    /// It asserts on the `InferenceJob`s the production entry point actually
+    /// enqueues — not on `build_prompt_from_raw` in isolation — because the
+    /// defect being guarded is a *call site* restating the flag. A unit test of
+    /// the builder alone would stay green if `execute_contract_with_runner`
+    /// went on writing `add_special_tokens: true` next to it, which is exactly
+    /// what that function did before this change.
+    ///
+    /// Both attempts are checked, not just the first: the loop re-renders per
+    /// attempt against a mutated list, so a second render path is where a
+    /// divergence would hide.
+    #[tokio::test]
+    async fn the_contract_path_renders_each_attempt_without_a_second_bos() {
+        use crate::contracts::validation::RawMessage;
+        use crate::engine::model_runner::{CompletionResult, InferenceJob, ResponseMode};
+
+        let dir = bos_doubling_checkpoint("contract");
+        let template = crate::api::chat_template::resolve_for_serving(&dir);
+        assert!(
+            template.is_some(),
+            "the fixture's tokenizer_config.json did not resolve a template, so \
+             this test would be measuring the legacy join"
+        );
+
+        // A stub runner on a real thread: record each job, answer it with text
+        // that no `EnumChoice` can parse, so the loop runs its full budget.
+        let (tx, rx) = std::sync::mpsc::channel::<InferenceJob>();
+        let runner = std::thread::spawn(move || {
+            let mut jobs: Vec<(String, bool)> = Vec::new();
+            while let Ok(job) = rx.recv() {
+                jobs.push((job.prompt.clone(), job.add_special_tokens));
+                if let ResponseMode::Complete(resp) = job.response_mode {
+                    let _ = resp.send(Ok(CompletionResult {
+                        text: "unparseable".to_string(),
+                        prompt_tokens: 1,
+                        completion_tokens: 1,
+                        finish_reason: FinishReason::Stop,
+                    }));
+                }
+            }
+            jobs
+        });
+
+        let spec = crate::contracts::OutputContractSpec::EnumChoice {
+            choices: vec!["yes".to_string(), "no".to_string()],
+            case_sensitive: false,
+            allow_index: true,
+        };
+        let msgs = vec![RawMessage {
+            role: "user".to_string(),
+            content: "Name the capital of France.".to_string(),
+        }];
+        crate::contracts::executor::execute_contract_with_runner(
+            tx,
+            template,
+            &msgs,
+            "fixture",
+            &spec,
+            2,
+            &[],
+            8,
+            0.0,
+        )
+        .await
+        .expect("the contract loop should return its raw fallback, not an error");
+
+        // Every clone of `tx` is dropped now that the call has returned, so the
+        // stub's `recv` ends and it hands back what it saw.
+        let jobs = runner.join().expect("stub runner panicked");
+        assert_eq!(jobs.len(), 2, "expected two attempts, saw {}", jobs.len());
+
+        let tok = tokenizers::Tokenizer::from_file(dir.join("tokenizer.json"))
+            .expect("loading the fixture tokenizer");
+        for (i, (prompt, add_special_tokens)) in jobs.iter().enumerate() {
+            assert!(
+                prompt.starts_with(FIXTURE_BOS),
+                "attempt {i} was not rendered through the chat template — it \
+                 still carries the legacy join: {prompt:?}"
+            );
+            assert!(
+                !add_special_tokens,
+                "attempt {i} asked the tokenizer for special tokens on top of a \
+                 templated prompt, which doubles BOS"
+            );
+            let ids: Vec<u32> = tok
+                .encode(prompt.as_str(), *add_special_tokens)
+                .unwrap()
+                .get_ids()
+                .to_vec();
+            assert_eq!(
+                ids.iter().filter(|&&t| t == FIXTURE_BOS_ID).count(),
+                1,
+                "attempt {i} reached the model with {ids:?}"
+            );
+        }
     }
 }
