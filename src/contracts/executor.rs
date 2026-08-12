@@ -59,6 +59,11 @@ pub async fn execute_contract_with_runner(
                     prompt,
                     max_new_tokens,
                     temperature,
+                    // The contract loop builds its prompt with the legacy
+                    // `role: content` join (Task 4 moves it onto the chat
+                    // template), so the prompt is ordinary text with no special
+                    // tokens in it and the tokenizer must supply them.
+                    add_special_tokens: true,
                     response_mode: ResponseMode::Complete(resp_tx),
                 };
                 tx.send(job)

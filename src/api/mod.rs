@@ -35,16 +35,16 @@ pub mod types;
 
 use anyhow::Result;
 use axum::{
-    routing::{get, post},
     Router,
+    routing::{get, post},
 };
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 
-use crate::engine::model_runner::ModelRunner;
 use crate::engine::MemoryAwareScheduler;
+use crate::engine::model_runner::ModelRunner;
 use std::path::Path;
 
 /// API server configuration
@@ -171,7 +171,9 @@ impl ApiServer {
             println!("Database connected and migrations applied");
             Some(pool)
         } else {
-            println!("No DATABASE_URL set — running without database (auth/audit/rate-limiting disabled)");
+            println!(
+                "No DATABASE_URL set — running without database (auth/audit/rate-limiting disabled)"
+            );
             None
         };
 
@@ -201,13 +203,12 @@ impl ApiServer {
                         // filesystem I/O in the request path for a value that
                         // cannot change while the process runs.
                         //
-                        // `Resolution::None` is stored as `None` rather than as
-                        // an empty template: an empty source renders to an empty
-                        // prompt, which reaches the model as a request to
-                        // continue nothing. The handlers need to know the
-                        // difference so they can fall back to the legacy join.
-                        let t = chat_template::resolve_for_model(&model_path);
-                        if t.resolved_by() != chat_template::Resolution::None {
+                        // `resolve_for_serving` owns the "keep it only if a tier
+                        // produced one" rule; the three integration harnesses
+                        // call the same function so they cannot drift from what
+                        // this line builds.
+                        state.chat_template = chat_template::resolve_for_serving(&model_path);
+                        if let Some(t) = &state.chat_template {
                             println!(
                                 "Chat template for {} resolved via {:?} (bos {:?}, eos {:?})",
                                 model_path.display(),
@@ -215,7 +216,6 @@ impl ApiServer {
                                 t.tokens.bos,
                                 t.tokens.eos
                             );
-                            state.chat_template = Some(Arc::new(t));
                         }
 
                         println!("Started model runner for {}", model_path.display());
@@ -323,8 +323,8 @@ impl ApiServer {
             let https_bind_address = cert_manager.https_bind_address(&http_bind_address);
 
             // Parse TLS certificates and key
-            use rustls::pki_types::{CertificateDer, PrivateKeyDer};
             use rustls::ServerConfig;
+            use rustls::pki_types::{CertificateDer, PrivateKeyDer};
             use std::io::Cursor;
             use tokio_rustls::TlsAcceptor;
 

@@ -1,27 +1,49 @@
 //! Resolve and render a model's chat template.
 //!
-//! `/v1/chat/completions` builds its prompt as
-//! `messages.map(|m| format!("{}: {}", m.role, m.content)).join("\n")`
-//! (`openai/chat.rs:186` non-streaming, `:409` streaming, and
-//! `contracts/executor.rs:183` per retry attempt), which is not any model's
+//! `/v1/chat/completions` used to build its prompt as
+//! `messages.map(|m| format!("{}: {}", m.role, m.content)).join("\n")` — once
+//! in each of `openai/chat.rs`'s two handlers and once more in
+//! `contracts/executor.rs` per retry attempt — which is not any model's
 //! template. A chat model prompted that way behaves like a base model: it
 //! continues text rather than answering, and does not reliably emit EOS.
 //! Measured on TinyLlama-1.1B-Chat, EOS fired in 1 of 6 trials.
 //!
 //! This module exists to replace that join. Both `openai/chat.rs` sites now
-//! render through `ResolvedTemplate::render` — measured on TinyLlama, the same
-//! request that previously ran its whole 64-token budget inventing a Q&A
-//! transcript now answers `"The capital of France is Paris.</s>"` in 8 tokens
-//! and reports `finish_reason: "stop"`. `contracts/executor.rs` is still on
-//! the join; it cannot be fixed by rendering upstream because it MUTATES the
-//! message list between retry attempts, so its callback signature has to
-//! change. That is Task 4.
+//! render through `ResolvedTemplate::render` (see `openai/chat.rs`'s
+//! `build_prompt`, called from `create_chat_completion` and
+//! `create_chat_stream`) — measured on TinyLlama, the same request that
+//! previously ran its whole 64-token budget inventing a Q&A transcript now
+//! answers `"The capital of France is Paris.</s>"` in 8 tokens and reports
+//! `finish_reason: "stop"`. `contracts/executor.rs` is still on the join; it
+//! cannot be fixed by rendering upstream because it MUTATES the message list
+//! between retry attempts, so its callback signature has to change. That is
+//! Task 4.
+//!
+//! Deliberately no line numbers in this doc: the three earlier revisions of it
+//! all cited call sites by line, and all three were stale within two commits.
 //!
 //! A template is always paired with the special tokens it renders with — see
 //! `SpecialTokens` and `ResolvedTemplate`. Handing `render` a literal
 //! `"<s>"`/`"</s>"` is correct for the Llama-2 family and silently wrong
 //! everywhere else, and it fails in the one way this module cannot detect: the
 //! render succeeds, so nothing falls through and nothing is logged.
+//!
+//! # A rendered prompt must be tokenized with `add_special_tokens = false`
+//!
+//! Templates interpolate `bos_token` into the prompt **text** (Llama-3,
+//! Llama-2, Mistral and Gemma all open with `{{ bos_token }}`). Tokenizers
+//! whose `post_processor` is `TemplateProcessing` prepend BOS again when asked
+//! for special tokens, so a templated prompt tokenized with
+//! `add_special_tokens = true` reaches the model as `128000, 128000, 128006, …`
+//! — a pair it never saw in training. HuggingFace tokenizes
+//! `apply_chat_template` output with `add_special_tokens=False` for exactly
+//! this reason.
+//!
+//! The signal therefore travels with the prompt rather than being decided at
+//! the tokenizer: `openai/chat.rs`'s `BuiltPrompt` carries it, `InferenceJob`
+//! and `RequestContext` forward it, and each backend passes it to its single
+//! `encode` call. A legacy-join prompt and `/v1/completions`'s raw text carry
+//! no special tokens of their own and still need `true`.
 
 use std::path::Path;
 
@@ -170,6 +192,11 @@ impl ChatTemplate {
             .map(|m| minijinja::context! { role => m.role, content => m.content })
             .collect();
 
+        // `bos_token` goes into the prompt TEXT. Anything that tokenizes the
+        // result must therefore pass `add_special_tokens = false`, or a
+        // tokenizer with a `TemplateProcessing` post_processor prepends BOS a
+        // second time. See the module docs; the flag is carried by
+        // `openai/chat.rs`'s `BuiltPrompt`.
         let out = tmpl.render(minijinja::context! {
             messages => msgs,
             bos_token => bos_token,
@@ -249,12 +276,41 @@ pub fn fingerprint(model_path: &Path) -> Option<String> {
     Some(digest(&std::fs::read(model_path.join("config.json")).ok()?))
 }
 
+/// Where a checkpoint's companion JSON (`tokenizer_config.json`,
+/// `config.json`, `tokenizer.json`) lives.
+///
+/// A directory checkpoint holds them inside. A single-file `.gguf` checkpoint
+/// holds them **beside** the file, because a file has no inside — the same rule
+/// `sidecar_path` applies, and for the same reason: `ModelRunner::start`
+/// accepts either path.
+///
+/// Without this, `special_tokens` read `foo.gguf/tokenizer_config.json` and
+/// `foo.gguf/config.json`, which cannot exist, so every GGUF checkpoint
+/// resolved to `bos: "", eos: ""` on every request and the warning told the
+/// operator to add a file the code would never have looked for. `fingerprint`
+/// and `sidecar_path` already branched on `is_file`; this is the third.
+///
+/// Falls back to `model_path` itself when the file has no parent — a bare
+/// relative `"foo.gguf"` yields `Some("")`, which is the current directory and
+/// is what we want, so only a genuinely parentless path (a root) lands here.
+fn metadata_dir(model_path: &Path) -> &Path {
+    if model_path.is_file() {
+        model_path.parent().unwrap_or(model_path)
+    } else {
+        model_path
+    }
+}
+
 /// Where the sidecar for `model_path` lives.
 ///
 /// A directory checkpoint holds it inside. A single-file `.gguf` checkpoint
 /// holds it beside the file, because a file has no inside — and both are paths
 /// `ModelRunner::start` accepts, so an operator running the probe against
 /// either has to find the answer where the model is.
+///
+/// Not `metadata_dir` + a fixed name: the sidecar is named AFTER the checkpoint
+/// (`foo.gguf.lightbulb-chat-template.json`), so that two `.gguf` files in one
+/// directory get two sidecars instead of fighting over one.
 pub fn sidecar_path(model_path: &Path) -> std::path::PathBuf {
     if model_path.is_file() {
         let mut name = model_path.as_os_str().to_os_string();
@@ -390,8 +446,15 @@ pub fn resolve(model_dir: &Path) -> ChatTemplate {
         };
     }
 
+    // Tiers 1 and 2 read companion JSON, which for a `.gguf` checkpoint sits
+    // beside the file rather than inside it. Tier 3 deliberately keeps the
+    // ORIGINAL path: `from_family` matches path components leaf-first, and for
+    // a single-file checkpoint the file name is the component carrying the
+    // model's name.
+    let meta = metadata_dir(model_dir);
+
     // Tier 1 — the authoritative source, when the checkpoint ships one.
-    if let Ok(raw) = std::fs::read_to_string(model_dir.join("tokenizer_config.json")) {
+    if let Ok(raw) = std::fs::read_to_string(meta.join("tokenizer_config.json")) {
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) {
             if let Some(t) = chat_template_field(&v) {
                 tracing::info!("chat template: tokenizer_config.json");
@@ -405,7 +468,7 @@ pub fn resolve(model_dir: &Path) -> ChatTemplate {
 
     // Tier 2 — vocabulary signature. Only fires when markers are *added
     // tokens*; TinyLlama's `<|user|>` is ordinary text, so this misses it.
-    if let Some(t) = registry::from_vocab_signature(model_dir) {
+    if let Some(t) = registry::from_vocab_signature(meta) {
         tracing::info!("chat template: vocabulary signature");
         return ChatTemplate {
             source: t,
@@ -539,8 +602,12 @@ fn added_token_text(tokenizer: &serde_json::Value, id: u64) -> Option<String> {
 pub fn special_tokens(model_path: &Path) -> SpecialTokens {
     let mut out = SpecialTokens::default();
 
+    // A `.gguf` checkpoint's companion JSON is beside the file, not inside it.
+    // See `metadata_dir`.
+    let meta = metadata_dir(model_path);
+
     // Tier 1 — the checkpoint's own declaration.
-    if let Ok(raw) = std::fs::read_to_string(model_path.join("tokenizer_config.json")) {
+    if let Ok(raw) = std::fs::read_to_string(meta.join("tokenizer_config.json")) {
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) {
             out.bos = token_field(&v, "bos_token").unwrap_or_default();
             out.eos = token_field(&v, "eos_token").unwrap_or_default();
@@ -551,10 +618,10 @@ pub fn special_tokens(model_path: &Path) -> SpecialTokens {
     // per token, not per file: a checkpoint that declares one and not the other
     // gets the one it declares plus a resolved fallback for the other.
     if out.bos.is_empty() || out.eos.is_empty() {
-        let cfg = std::fs::read_to_string(model_path.join("config.json"))
+        let cfg = std::fs::read_to_string(meta.join("config.json"))
             .ok()
             .and_then(|r| serde_json::from_str::<serde_json::Value>(&r).ok());
-        let tok = std::fs::read_to_string(model_path.join("tokenizer.json"))
+        let tok = std::fs::read_to_string(meta.join("tokenizer.json"))
             .ok()
             .and_then(|r| serde_json::from_str::<serde_json::Value>(&r).ok());
         if let (Some(cfg), Some(tok)) = (cfg, tok) {
@@ -575,12 +642,15 @@ pub fn special_tokens(model_path: &Path) -> SpecialTokens {
 
     // Tier 3 — nothing declared. Say so; do not invent one.
     if out.bos.is_empty() || out.eos.is_empty() {
+        // Names `meta`, not `model_path`: for a `.gguf` checkpoint those differ,
+        // and the operator needs the directory the files are actually read
+        // from, not the path to the weights.
         tracing::warn!(
             "{} declares no {}; rendering its chat template with an empty string there. \
              A chat template that references the missing token will omit it. Add a \
              tokenizer_config.json with bos_token/eos_token, or a config.json with \
              bos_token_id/eos_token_id whose ids appear in tokenizer.json's added_tokens.",
-            model_path.display(),
+            meta.display(),
             match (out.bos.is_empty(), out.eos.is_empty()) {
                 (true, true) => "BOS or EOS token",
                 (true, false) => "BOS token",
@@ -627,4 +697,25 @@ pub fn resolve_for_model(model_path: &Path) -> ResolvedTemplate {
         template: resolve(model_path),
         tokens: special_tokens(model_path),
     }
+}
+
+/// Resolve a template for serving, in exactly the shape `AppState.chat_template`
+/// holds: `None` when no tier produced one.
+///
+/// The `Resolution::None` check is not cosmetic. An empty template source
+/// renders to an empty prompt, which reaches the model as a request to continue
+/// nothing, so the handlers need to tell "no template" from "this template"
+/// in order to fall back to the legacy join.
+///
+/// **This exists so there is exactly one copy of that check.** There were four
+/// — `api/mod.rs`'s startup plus a private `chat_template_for` in each of
+/// `tests/api_result_metadata.rs`, `tests/chat_template_e2e.rs` and
+/// `tests/fuel_engine_http.rs` — and each copy's doc comment explained that a
+/// harness drifting from startup would silently measure a prompt no client ever
+/// causes. Four copies of a rule is the mechanism by which they drift, which is
+/// the same defect as the three copies of the `role: content` join this module
+/// was written to remove.
+pub fn resolve_for_serving(model_path: &Path) -> Option<std::sync::Arc<ResolvedTemplate>> {
+    let t = resolve_for_model(model_path);
+    (t.resolved_by() != Resolution::None).then(|| std::sync::Arc::new(t))
 }

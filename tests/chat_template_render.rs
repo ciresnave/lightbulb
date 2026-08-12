@@ -675,6 +675,46 @@ fn a_gguf_file_is_fingerprinted_and_keeps_its_sidecar_beside_it() {
     );
 }
 
+/// A `.gguf` checkpoint reads its companion JSON from BESIDE the file.
+///
+/// `special_tokens` and `resolve` both did `model_path.join(...)`, producing
+/// `foo.gguf/tokenizer_config.json` — a path that cannot exist, because
+/// `foo.gguf` is a file. Every GGUF checkpoint therefore got `bos: ""`,
+/// `eos: ""` and a registry-guess template on every request, while the warning
+/// told the operator to add a `tokenizer_config.json` the code would never have
+/// looked for. `fingerprint` and `sidecar_path` had already branched on
+/// `is_file`; these two had not.
+///
+/// The assertions are exact strings, not "non-empty": an empty pair is the
+/// value the defect produced, so `!= ""` would be satisfied by any accident.
+#[test]
+fn a_gguf_checkpoint_reads_its_metadata_from_beside_the_file() {
+    let d = tmp_model_dir("gguf-metadata");
+    let f = d.join("qwen3-8b-q4_k_m.gguf");
+    std::fs::write(&f, b"GGUF\x03weights").unwrap();
+
+    // Beside the file, which is where a GGUF download that ships HF metadata
+    // puts it — and where `sidecar_path` already looks for the sidecar.
+    std::fs::write(
+        d.join("tokenizer_config.json"),
+        r#"{"bos_token":"<|endoftext|>",
+            "eos_token":"<|im_end|>",
+            "chat_template":"FROM_GGUF_TOKENIZER_CONFIG"}"#,
+    )
+    .unwrap();
+
+    let t = lightbulb::api::chat_template::special_tokens(&f);
+    assert_eq!(t.bos, "<|endoftext|>");
+    assert_eq!(t.eos, "<|im_end|>");
+
+    // The same path defect sat in `resolve`'s tier 1. Left alone, a GGUF
+    // checkpoint that ships its own authoritative template would still have
+    // been served a family guess, reported as a successful match.
+    let r = lightbulb::api::chat_template::resolve(&f);
+    assert_eq!(r.source, "FROM_GGUF_TOKENIZER_CONFIG");
+    assert_eq!(r.resolved_by, Resolution::TokenizerConfig);
+}
+
 /// A hand-edited sidecar that no longer parses is rejected rather than
 /// panicking, and resolution carries on to the next tier.
 #[test]

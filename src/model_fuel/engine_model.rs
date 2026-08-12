@@ -160,10 +160,15 @@ impl FuelEngineModel {
         match ctx.state {
             RequestState::Completed | RequestState::AwaitingToolResult { .. } => Ok(None),
             RequestState::Pending => {
+                // `ctx.add_special_tokens`, never a literal `true`: a prompt
+                // rendered through a chat template already carries the
+                // checkpoint's BOS, and TinyLlama/Llama's `TemplateProcessing`
+                // post_processor would prepend a second one. See
+                // `RequestContext::add_special_tokens`.
                 let ids: Vec<u32> = self
                     .loaded
                     .tokenizer
-                    .encode(ctx.request.prompt.as_str(), true)
+                    .encode(ctx.request.prompt.as_str(), ctx.add_special_tokens)
                     .map_err(|e| anyhow::anyhow!("tokenizing prompt: {e}"))?
                     .get_ids()
                     .to_vec();

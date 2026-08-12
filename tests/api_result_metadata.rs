@@ -58,18 +58,27 @@ const MISSING_CHECKPOINT: &str = "no TinyLlama checkpoint. Set TINYLLAMA_DIR to 
 /// satisfies `> 0` just as happily as a real token count does, so only an
 /// equality check against the tokenizer has any teeth.
 ///
-/// `add_special_tokens = true` is not a guess, and must never be traded for a
-/// fudge factor. It mirrors the single call the backend makes during
-/// prefill — `model_fuel/engine_model.rs`'s `encode(ctx.request.prompt, true)`,
-/// whose `ids.len()` becomes `ctx.prompt_tokens` verbatim. For TinyLlama that
-/// prepends BOS, which is why `"The capital of France is"` counts 6 (`<s> ▁The
-/// ▁capital ▁of ▁France ▁is`) and not 5. If a count here is ever off by one,
-/// the fix is this flag, never a `+ 1` at the call site.
-fn tokenizer_count(text: &str) -> u64 {
+/// `add_special_tokens` is a PARAMETER, not a constant, and must never be
+/// traded for a fudge factor. It mirrors the single call the backend makes
+/// during prefill — `model_fuel/engine_model.rs`'s
+/// `encode(ctx.request.prompt, ctx.add_special_tokens)`, whose `ids.len()`
+/// becomes `ctx.prompt_tokens` verbatim — and the backend's value now depends
+/// on how the prompt was built:
+///
+/// - `/v1/completions` sends raw text, so `true`. For TinyLlama that prepends
+///   BOS, which is why `"The capital of France is"` counts 6 (`<s> ▁The
+///   ▁capital ▁of ▁France ▁is`) and not 5.
+/// - `/v1/chat/completions` sends a prompt rendered through the chat template,
+///   which already carries the checkpoint's special tokens, so `false`. Passing
+///   `true` there is the BOS-doubling defect; see `chat.rs`'s `build_prompt`.
+///
+/// If a count here is ever off by one, the fix is this flag, never a `+ 1` at
+/// the call site.
+fn tokenizer_count(text: &str, add_special_tokens: bool) -> u64 {
     let dir = tinyllama_dir().expect(MISSING_CHECKPOINT);
     let tok = tokenizers::Tokenizer::from_file(dir.join("tokenizer.json"))
         .expect("loading the checkpoint's tokenizer.json");
-    tok.encode(text, true)
+    tok.encode(text, add_special_tokens)
         .expect("tokenizing the prompt")
         .get_ids()
         .len() as u64
@@ -80,11 +89,15 @@ fn tokenizer_count(text: &str) -> u64 {
 /// Mirroring startup is load-bearing rather than tidy. A harness that leaves
 /// this `None` builds a state the server never builds — the assertions below
 /// would then describe a prompt no client ever causes.
+///
+/// It is `chat_template::resolve_for_serving` itself, not a local re-
+/// implementation of it: this was one of four copies of the same "resolve, keep
+/// only if a tier fired" predicate, and each copy's doc comment explained the
+/// drift hazard while being the mechanism for it.
 fn chat_template_for(
     dir: &std::path::Path,
 ) -> Option<Arc<lightbulb::api::chat_template::ResolvedTemplate>> {
-    let t = lightbulb::api::chat_template::resolve_for_model(dir);
-    (t.resolved_by() != lightbulb::api::chat_template::Resolution::None).then(|| Arc::new(t))
+    lightbulb::api::chat_template::resolve_for_serving(dir)
 }
 
 /// Render `messages` the way the handler will, for tests that must count the
@@ -184,10 +197,17 @@ fn sse_chunks(body: &[u8]) -> Vec<serde_json::Value> {
 /// they no longer describe today's behaviour — see
 /// `eos_terminated_generation_reports_stop`, where the essay prompt now runs
 /// past its cap. Re-observed 2026-08-08 under the template: this request
-/// still truncates, `completion_tokens: 6`, `prompt_tokens: 23`, content
+/// still truncates, `completion_tokens: 6`, `prompt_tokens: 22`, content
 /// `"The capital of France is Paris"` — the answer is 8 tokens long, so a
 /// 6-token cap cuts it off and `"length"` remains the truthful answer, now
 /// for a better reason than before.
+///
+/// `prompt_tokens` was 23 in the first template run and is 22 now. The one
+/// token is the duplicated BOS: the prompt text was unchanged, but it was being
+/// tokenized with `add_special_tokens = true`, so the tokenizer's
+/// `TemplateProcessing` post_processor prepended `<s>` on top of whatever the
+/// template emitted. Nothing else about the generation moved — same content,
+/// same `completion_tokens`.
 #[tokio::test]
 #[ignore = "needs the TinyLlama checkpoint"]
 async fn truncated_generation_reports_length() {
@@ -244,7 +264,11 @@ async fn usage_counts_real_tokens() {
     // Note this one alone does NOT close the "always report the cap" mutation
     // (`completion_tokens: batch[0].request.max_new_tokens`), because here the
     // right answer and the cap are the same number. `eos_terminated_generation_
-    // reports_stop` below is what discriminates them: 1 against a cap of 32.
+    // reports_stop` below is what discriminates them: 8 against a cap of 32.
+    // (This read "1 against a cap of 32", which described that test's PRE-
+    // template prompt — the one that emitted EOS as its first token because it
+    // was a base-model continuation prompt. It has been 8 since the template
+    // landed.)
     assert_eq!(
         completion, 6,
         "completion_tokens should equal the tokens generated"
@@ -257,19 +281,60 @@ async fn usage_counts_real_tokens() {
     // handler uses. Hardcoding a number here would re-break the moment the
     // resolved tier changes; counting the bare content would compare against a
     // prompt nothing ever tokenized.
-    let expected_prompt =
-        tokenizer_count(&rendered_prompt(&[("user", "Name the capital of France.")]));
+    //
+    // `false`, matching the flag the handler sends with a templated prompt. A
+    // `true` here would count a BOS the backend does not add and this test
+    // would then demand the very doubling it is supposed to exclude.
+    let rendered = rendered_prompt(&[("user", "Name the capital of France.")]);
+    let expected_prompt = tokenizer_count(&rendered, false);
+    eprintln!("rendered prompt: {rendered:?}");
     eprintln!("tokenizer says prompt_tokens should be {expected_prompt}");
 
-    // Expectation and behaviour share a derivation here — both go through
-    // `ResolvedTemplate::render` — so on its own the equality below would still
-    // hold if templating stopped reaching the handler and BOTH sides fell back
-    // together. This pins the expectation to a value that is demonstrably not
-    // the pre-template one: observed 9 under the legacy join, 23 under the
-    // template.
+    // A check that IS sensitive to mis-rendering, unlike the `assert_ne!`
+    // below. Proven: corrupting `chat_template.rs`'s `content => m.content`
+    // into `content => format!("{} MUTANT MUTANT MUTANT", m.content)` left this
+    // test GREEN — the expectation moved 23 -> 32 in lockstep with the
+    // corrupted prompt (both figures measured before the tokenizer-flag fix
+    // dropped the duplicated BOS, so today they would read 22 -> 31; the point
+    // is that they moved together), because both sides go through the same
+    // render. This
+    // assertion is not derived through the render: the message content must
+    // appear in the prompt immediately followed by the checkpoint's own EOS,
+    // which is what every chat template promises and what anything injected
+    // into `content` breaks.
+    //
+    // It claims nothing about marker PLACEMENT — that is
+    // `tests/chat_template_render.rs::real_tinyllama_template_renders_exactly`,
+    // which asserts the whole string.
+    let eos = &chat_template_for(&tinyllama_dir().expect(MISSING_CHECKPOINT))
+        .expect("no chat template resolved for the checkpoint")
+        .tokens
+        .eos;
+    assert!(
+        rendered.contains(&format!("Name the capital of France.{eos}")),
+        "the rendered prompt does not carry the message content followed by \
+         {eos:?} — something is being injected into or dropped from the \
+         message: {rendered:?}"
+    );
+
+    // What this assertion actually does, stated honestly: it fails only if a
+    // future template happens to render this message list to a string that
+    // tokenizes to the same length as the legacy join. That is thin, and it is
+    // deliberately not described as more.
+    //
+    // It does NOT detect "templating stopped reaching the handler and both
+    // sides fell back together", which an earlier comment here claimed. That
+    // state is unreachable: `rendered_prompt` calls
+    // `.expect("no chat template resolved for the checkpoint")`, so an
+    // unresolved template panics several lines above this. Nor does it detect
+    // mis-rendering — the mutation above proved that, and the `contains` check
+    // above is what covers it now.
+    //
+    // Kept rather than deleted because the one value it excludes is the
+    // specific number this test used to report: 9, the legacy join's count.
     assert_ne!(
         expected_prompt,
-        tokenizer_count("user: Name the capital of France."),
+        tokenizer_count("user: Name the capital of France.", true),
         "the expected count equals the legacy `role: content` join's — the \
          prompt is no longer being rendered through the chat template"
     );
@@ -326,13 +391,21 @@ async fn usage_counts_real_tokens() {
 /// The replacement is `"Name the capital of France."`, observed 2026-08-08 at
 /// `temperature: 0.0` under the template, twice, at caps of 64 and 32:
 ///
-///   finish_reason "stop", completion_tokens 8, prompt_tokens 23, content
+///   finish_reason "stop", completion_tokens 8, prompt_tokens 22, content
 ///   "The capital of France is Paris.</s>"
 ///
 /// 8 against a cap of 32 means `"stop"` cannot have been reached by running out
 /// of budget, which is what the `completion_tokens < 32` half of the assertion
 /// pins down: `"stop"` alone would also pass if the run went the full 32 and
 /// the reason were hardcoded.
+///
+/// The `prompt_tokens` figures in this doc that predate the tokenizer-flag fix
+/// — this prompt's 23, and the essay prompt's 26 above — were each one higher
+/// because the rendered prompt was tokenized with `add_special_tokens = true`
+/// and picked up a BOS the template had not asked for. Re-measured after the
+/// fix, this prompt is 22 and everything else about the generation is
+/// byte-identical, which is the evidence that the extra token was the only
+/// difference.
 ///
 /// ## The trailing `"</s>"` in the content is a real, pre-existing wart
 ///
@@ -528,8 +601,11 @@ async fn completions_endpoint_returns_model_output() {
         "completion_tokens should equal the tokens generated"
     );
     // NO chat template on this endpoint, so the model sees the prompt exactly
-    // as sent — no `"user: "` prefix, unlike the chat tests above.
-    let expected_prompt = tokenizer_count("The capital of France is");
+    // as sent — no `"user: "` prefix, unlike the chat tests above. `true`,
+    // therefore: raw text carries no special tokens of its own, so the
+    // tokenizer supplies BOS and `chat::BuiltPrompt::raw` asks it to. This is
+    // the one call in this file that keeps the pre-change flag.
+    let expected_prompt = tokenizer_count("The capital of France is", true);
     eprintln!("tokenizer says prompt_tokens should be {expected_prompt}");
     assert_eq!(
         prompt, expected_prompt,

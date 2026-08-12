@@ -57,6 +57,8 @@ fn init_runner() -> RunnerTx {
         prompt: "user: hello\nassistant:".to_string(),
         max_new_tokens: 1,
         temperature: 0.0,
+        // Raw text, no chat template applied, so the tokenizer supplies BOS.
+        add_special_tokens: true,
         response_mode: ResponseMode::Complete(resp_tx),
     })
     .expect("probe send failed — model thread exited before responding");
@@ -130,6 +132,8 @@ async fn live_smoke_plain_generation() {
         prompt: "user: Say the word hello\nassistant:".to_string(),
         max_new_tokens: 20,
         temperature: 0.0,
+        // Raw text, no chat template applied, so the tokenizer supplies BOS.
+        add_special_tokens: true,
         response_mode: ResponseMode::Complete(resp_tx),
     })
     .expect("send failed");

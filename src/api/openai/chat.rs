@@ -4,10 +4,10 @@
 //! and Lightbulb-specific extensions.
 
 use axum::{
+    Json,
     extract::State,
     http::StatusCode,
-    response::{sse::Event, IntoResponse, Sse},
-    Json,
+    response::{IntoResponse, Sse, sse::Event},
 };
 use futures::stream::{self, Stream, StreamExt};
 use serde::{Deserialize, Serialize};
@@ -188,6 +188,36 @@ fn legacy_join(messages: &[crate::contracts::validation::RawMessage]) -> String 
         .join("\n")
 }
 
+/// A prompt, together with how the backend must tokenize it.
+///
+/// The two travel as one value because they are one decision. A `String`
+/// return type forces every caller to answer "does this already contain BOS?"
+/// from context it does not have, and the answer that looks safe — `true`,
+/// matching every other `encode` call in the codebase — is the wrong one for
+/// the only path that renders a template.
+pub(crate) struct BuiltPrompt {
+    pub(crate) text: String,
+    /// Passed straight to the tokenizer at prefill; see
+    /// `engine::RequestContext::add_special_tokens`.
+    pub(crate) add_special_tokens: bool,
+}
+
+impl BuiltPrompt {
+    /// A prompt that is raw text: no chat template was applied, so it contains
+    /// no special tokens of its own and the tokenizer must supply them.
+    ///
+    /// `/v1/completions` is the caller. Its prompt is used exactly as the
+    /// client sent it — OpenAI's raw-text endpoint, spec §6 — so it is in the
+    /// same position as the legacy join: `add_special_tokens = true` is
+    /// correct, and is what the pre-template server did for every request.
+    pub(crate) fn raw(text: String) -> Self {
+        Self {
+            text,
+            add_special_tokens: true,
+        }
+    }
+}
+
 /// Build the prompt for `messages`, preferring the model's own chat template.
 ///
 /// Used by BOTH `create_chat_completion` and `create_chat_stream`. Sharing one
@@ -197,7 +227,49 @@ fn legacy_join(messages: &[crate::contracts::validation::RawMessage]) -> String 
 /// The template carries its own `bos`/`eos` (see
 /// `chat_template::ResolvedTemplate`), so there is no token argument here to
 /// get wrong.
-fn build_prompt(state: &AppState, messages: &[ChatMessage]) -> String {
+///
+/// # Why the tokenizer flag is decided HERE
+///
+/// Real chat templates interpolate `bos_token` into the prompt **text**:
+/// Meta-Llama-3-8B-Instruct's, Mistral-7B-Instruct's and Gemma's all begin
+/// `{{ bos_token }}`, and Llama-2's emits it inside its message loop.
+/// TinyLlama's tokenizer (and every Llama-family one)
+/// has a `TemplateProcessing` post_processor of the form
+/// `single: [SpecialToken "<s>", Sequence A]`, so `encode(text, true)` prepends
+/// BOS a *second* time and the model receives `128000, 128000, 128006, …` — a
+/// pair it never saw in training. The request still returns 200, the render
+/// still succeeds, nothing falls through and nothing is logged. HuggingFace
+/// avoids this by tokenizing `apply_chat_template` output with
+/// `add_special_tokens=False`; this function is where that decision is made,
+/// because it is the only place that knows whether a template was applied.
+///
+/// The legacy-join branch keeps `true`. A joined prompt is ordinary text with
+/// no special tokens in it, so the tokenizer must still supply BOS — the same
+/// as `/v1/completions`, which by spec §6 applies no template at all.
+///
+/// ## Rejected: binding `bos_token` to `""` in the template environment
+///
+/// It is one line in `ChatTemplate::render` and would make every template emit
+/// no BOS, so `add_special_tokens = true` would then be correct everywhere and
+/// none of this plumbing would exist. Rejected on two grounds:
+///
+/// 1. **It is only correct for `bos_token` at position 0.** A template is free
+///    to reference `bos_token` anywhere, and Llama-2's official one does: it
+///    emits `bos_token + '[INST] ' + content + ' [/INST]'` **inside** the
+///    message loop, so a three-turn conversation contains three of them. A
+///    tokenizer's post_processor puts back only the leading one. Blanking
+///    `bos_token` therefore deletes the turn-internal markers outright — the
+///    prompt loses structure instead of gaining a duplicate. Same class of
+///    defect, caught by nothing, just quieter.
+/// 2. **It changes the rendered output rather than fixing the tokenization.**
+///    The bug is in how a correct string is encoded. Editing the string so the
+///    encoder's mistake cancels out leaves `ResolvedTemplate::render` producing
+///    something that is not what `transformers` produces for the same
+///    checkpoint, which breaks the one property that makes this module
+///    checkable against upstream at all — including
+///    `rendering_uses_the_checkpoints_own_tokens`, whose whole assertion is that
+///    the rendered text matches the checkpoint's own.
+fn build_prompt(state: &AppState, messages: &[ChatMessage]) -> BuiltPrompt {
     let raw: Vec<crate::contracts::validation::RawMessage> = messages
         .iter()
         .map(|m| crate::contracts::validation::RawMessage {
@@ -206,18 +278,32 @@ fn build_prompt(state: &AppState, messages: &[ChatMessage]) -> String {
         })
         .collect();
 
+    // The one place the polarity is written down. Callers move the pair around
+    // together, so there is no `!` at a call site to get backwards.
+    let joined = |text: String| BuiltPrompt {
+        text,
+        add_special_tokens: true,
+    };
+
     match &state.chat_template {
         Some(t) => match t.render(&raw) {
-            Ok(p) => p,
+            Ok(text) => BuiltPrompt {
+                text,
+                add_special_tokens: false,
+            },
             // Per-request and rare, so `warn`: a template that resolved at
             // startup and then failed on a particular message list is a real
             // anomaly worth seeing every time it happens.
+            //
+            // The flag follows the prompt that is actually used, not the one
+            // that was attempted: this arm falls back to the join, so the
+            // tokenizer must add BOS after all.
             Err(e) => {
                 tracing::warn!(
                     "chat template ({:?}) failed to render: {e}; using the legacy join",
                     t.resolved_by()
                 );
-                legacy_join(&raw)
+                joined(legacy_join(&raw))
             }
         },
         // `debug`, not `warn`: `resolve` already warned once at startup with the
@@ -226,7 +312,7 @@ fn build_prompt(state: &AppState, messages: &[ChatMessage]) -> String {
         // information.
         None => {
             tracing::debug!("no chat template for this model; using the legacy join");
-            legacy_join(&raw)
+            joined(legacy_join(&raw))
         }
     }
 }
@@ -250,7 +336,7 @@ async fn create_chat_completion(
 
     // If a model runner is available, enqueue the request and wait for generated text.
     if let Some(tx) = &state.inference_tx {
-        let result = run_inference_once(tx, prompt.clone(), max_new_tokens, temperature).await?;
+        let result = run_inference_once(tx, prompt, max_new_tokens, temperature).await?;
 
         let created = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)?
@@ -323,16 +409,17 @@ async fn create_chat_completion(
 /// [`InferenceJob`] to the model runner thread and awaiting the result.
 pub(crate) async fn run_inference_once(
     tx: &std::sync::mpsc::Sender<crate::engine::model_runner::InferenceJob>,
-    prompt: String,
+    prompt: BuiltPrompt,
     max_new_tokens: usize,
     temperature: f64,
 ) -> anyhow::Result<crate::engine::model_runner::CompletionResult> {
     let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
     let job = crate::engine::model_runner::InferenceJob {
         id: uuid::Uuid::new_v4().to_string(),
-        prompt,
+        prompt: prompt.text,
         max_new_tokens,
         temperature,
+        add_special_tokens: prompt.add_special_tokens,
         response_mode: crate::engine::model_runner::ResponseMode::Complete(resp_tx),
     };
     tx.send(job)
@@ -346,7 +433,7 @@ pub(crate) async fn run_inference_once(
 /// be `Fn`, so it clones `tx` on each call rather than borrowing).
 pub(crate) async fn run_inference_once_owned(
     tx: std::sync::mpsc::Sender<crate::engine::model_runner::InferenceJob>,
-    prompt: String,
+    prompt: BuiltPrompt,
     max_new_tokens: usize,
     temperature: f64,
 ) -> anyhow::Result<crate::engine::model_runner::CompletionResult> {
@@ -402,7 +489,16 @@ async fn create_chat_completion_with_contract(
         fallbacks,
         move |prompt| {
             let tx = tx.clone();
-            async move { run_inference_once_owned(tx, prompt, max_new_tokens, temperature).await }
+            // `raw`, deliberately: `execute_contract` still builds its per-
+            // attempt prompt with the legacy `role: content` join (it mutates
+            // the message list between attempts, so it cannot render upstream
+            // — that is Task 4). A joined prompt carries no special tokens, so
+            // the tokenizer must add them. When Task 4 renders the template
+            // here, this becomes the templated constructor and NOT `raw`.
+            async move {
+                run_inference_once_owned(tx, BuiltPrompt::raw(prompt), max_new_tokens, temperature)
+                    .await
+            }
         },
     )
     .await?;
@@ -480,9 +576,14 @@ fn create_chat_stream(
 
         let job = crate::engine::model_runner::InferenceJob {
             id: uuid::Uuid::new_v4().to_string(),
-            prompt: prompt.clone(),
+            prompt: prompt.text,
             max_new_tokens,
             temperature: request.temperature as f64,
+            // Same value the non-streaming path sends, because it comes from
+            // the same `build_prompt` call. The two paths carrying separate
+            // answers to this is the shape of the defect this file already has
+            // history with.
+            add_special_tokens: prompt.add_special_tokens,
             response_mode: crate::engine::model_runner::ResponseMode::Streaming(stream_tx),
         };
 
@@ -676,5 +777,246 @@ mod tests {
     fn contract_response_tolerates_absent_finish_reason() {
         let resp = build_contract_response(&request(), exec_result(None)).unwrap();
         assert_eq!(resp.choices[0].finish_reason, "stop");
+    }
+
+    // ─── The BOS-doubling guard ─────────────────────────────────────────────
+    //
+    // These assert on ENCODED IDS, not on rendered text. Rendered text cannot
+    // discriminate the defect: the render is correct either way, and the whole
+    // failure lives one layer down, in what `encode` does with a string that
+    // already starts with BOS.
+    //
+    // The fixture is a synthetic Llama-3-shaped checkpoint rather than the
+    // TinyLlama snapshot, and that is load-bearing. TinyLlama resolves at tier
+    // 3 to `registry::ZEPHYR`, which never mentions `bos_token`, so its prompt
+    // is *accidentally* correct under either value of the flag — a test built
+    // on it would pass with the flag hardcoded to `true`. The template below
+    // opens with `{{ bos_token }}` the way Meta-Llama-3-8B-Instruct's real one
+    // does, and the tokenizer's `post_processor` is the `TemplateProcessing`
+    // shape that Llama-2, Llama-3 and TinyLlama all actually ship.
+
+    const FIXTURE_BOS: &str = "<|begin_of_text|>";
+    const FIXTURE_BOS_ID: u32 = 1;
+
+    /// A checkpoint directory whose template emits BOS **and** whose tokenizer
+    /// prepends BOS — i.e. one that doubles unless the flag is right.
+    fn bos_doubling_checkpoint(name: &str) -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static N: AtomicUsize = AtomicUsize::new(0);
+        let d = std::env::temp_dir().join(format!(
+            "lb-bos-{name}-{}-{}",
+            std::process::id(),
+            N.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&d).unwrap();
+
+        // Tier 1 resolves the template AND the special tokens from this file.
+        std::fs::write(
+            d.join("tokenizer_config.json"),
+            r#"{"bos_token":"<|begin_of_text|>",
+                "eos_token":"<|eot_id|>",
+                "chat_template":"{{ bos_token }}{% for m in messages %}{{ '<|start_header_id|>' + m.role + '<|end_header_id|>\n\n' + m.content + eos_token }}{% endfor %}{{ '<|start_header_id|>assistant<|end_header_id|>\n\n' }}"}"#,
+        )
+        .unwrap();
+
+        // A real `tokenizers` tokenizer. `WordLevel` keeps the vocab to a dozen
+        // entries; the part that matters is `post_processor`, copied in shape
+        // from TinyLlama's own tokenizer.json: `single` is
+        // `[SpecialToken, Sequence A]`, so `encode(text, true)` prepends BOS.
+        std::fs::write(
+            d.join("tokenizer.json"),
+            r#"{
+              "version": "1.0",
+              "truncation": null,
+              "padding": null,
+              "added_tokens": [
+                {"id":1,"content":"<|begin_of_text|>","single_word":false,"lstrip":false,"rstrip":false,"normalized":false,"special":true},
+                {"id":2,"content":"<|eot_id|>","single_word":false,"lstrip":false,"rstrip":false,"normalized":false,"special":true},
+                {"id":3,"content":"<|start_header_id|>","single_word":false,"lstrip":false,"rstrip":false,"normalized":false,"special":true},
+                {"id":4,"content":"<|end_header_id|>","single_word":false,"lstrip":false,"rstrip":false,"normalized":false,"special":true}
+              ],
+              "normalizer": null,
+              "pre_tokenizer": {"type": "Whitespace"},
+              "post_processor": {
+                "type": "TemplateProcessing",
+                "single": [
+                  {"SpecialToken": {"id": "<|begin_of_text|>", "type_id": 0}},
+                  {"Sequence": {"id": "A", "type_id": 0}}
+                ],
+                "pair": [
+                  {"Sequence": {"id": "A", "type_id": 0}},
+                  {"Sequence": {"id": "B", "type_id": 1}}
+                ],
+                "special_tokens": {
+                  "<|begin_of_text|>": {
+                    "id": "<|begin_of_text|>",
+                    "ids": [1],
+                    "tokens": ["<|begin_of_text|>"]
+                  }
+                }
+              },
+              "decoder": null,
+              "model": {
+                "type": "WordLevel",
+                "vocab": {
+                  "[UNK]": 0,
+                  "<|begin_of_text|>": 1,
+                  "<|eot_id|>": 2,
+                  "<|start_header_id|>": 3,
+                  "<|end_header_id|>": 4,
+                  "user": 5,
+                  "assistant": 6,
+                  "Name": 7,
+                  "the": 8,
+                  "capital": 9,
+                  "of": 10,
+                  "France": 11,
+                  ".": 12
+                },
+                "unk_token": "[UNK]"
+              }
+            }"#,
+        )
+        .unwrap();
+        d
+    }
+
+    fn state_with(
+        chat_template: Option<std::sync::Arc<crate::api::chat_template::ResolvedTemplate>>,
+    ) -> AppState {
+        use crate::engine::{MemoryAwareConfig, MemoryAwareScheduler};
+        AppState {
+            scheduler: std::sync::Arc::new(MemoryAwareScheduler::new(MemoryAwareConfig::default())),
+            config: crate::api::ApiConfig::default(),
+            db_pool: None,
+            inference_tx: None,
+            chat_template,
+        }
+    }
+
+    fn one_user_message() -> Vec<ChatMessage> {
+        vec![ChatMessage {
+            role: "user".to_string(),
+            content: "Name the capital of France.".to_string(),
+            name: None,
+        }]
+    }
+
+    /// A templated prompt must reach the model with ONE BOS, not two.
+    ///
+    /// Fails if `build_prompt` returns `add_special_tokens: true` for a
+    /// templated prompt — the state this branch shipped before, under which
+    /// Meta-Llama-3-8B-Instruct received `128000, 128000, 128006, …`.
+    ///
+    /// Verified by mutation: reverting that one field to `true` makes this test
+    /// fail and leaves every other test in the repo green. The ids on this
+    /// fixture, for the rendered prompt
+    /// `"<|begin_of_text|><|start_header_id|>user<|end_header_id|>\n\nName the
+    /// capital of France.<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n"`:
+    ///
+    ///   flag `true`  (the defect)  `[1, 1, 3, 5, 4, 7, 8, 9, 10, 11, 12, 2, 3, 6, 4]`
+    ///   flag `false` (correct)     `[1, 3, 5, 4, 7, 8, 9, 10, 11, 12, 2, 3, 6, 4]`
+    ///
+    /// One id of difference, at position 0, in a prompt that renders
+    /// byte-identically either way — which is why the rendered-text assertions
+    /// in `tests/chat_template_render.rs` cannot see this and this one can.
+    #[test]
+    fn a_templated_prompt_is_tokenized_without_a_second_bos() {
+        let dir = bos_doubling_checkpoint("templated");
+        let state = state_with(crate::api::chat_template::resolve_for_serving(&dir));
+        assert!(
+            state.chat_template.is_some(),
+            "the fixture's tokenizer_config.json did not resolve a template, so \
+             this test would be measuring the legacy join"
+        );
+
+        let built = build_prompt(&state, &one_user_message());
+        let tok = tokenizers::Tokenizer::from_file(dir.join("tokenizer.json"))
+            .expect("loading the fixture tokenizer");
+
+        // Control, independent of what production decided: the fixture really
+        // does double. Without this, a fixture that quietly stopped prepending
+        // BOS would make every assertion below vacuous.
+        let doubled: Vec<u32> = tok
+            .encode(built.text.as_str(), true)
+            .unwrap()
+            .get_ids()
+            .to_vec();
+        assert_eq!(
+            &doubled[..2],
+            &[FIXTURE_BOS_ID, FIXTURE_BOS_ID],
+            "the fixture no longer reproduces the defect: encoding a templated \
+             prompt with add_special_tokens=true must yield two BOS ids, got {doubled:?}"
+        );
+        assert!(
+            built.text.starts_with(FIXTURE_BOS),
+            "the template stopped emitting bos_token, so the doubling this test \
+             guards can no longer occur through it: {:?}",
+            built.text
+        );
+
+        // The claim.
+        assert!(
+            !built.add_special_tokens,
+            "a prompt rendered through a chat template already carries the \
+             checkpoint's BOS; asking the tokenizer for special tokens as well \
+             sends the model a token pair it never saw in training"
+        );
+        let ids: Vec<u32> = tok
+            .encode(built.text.as_str(), built.add_special_tokens)
+            .unwrap()
+            .get_ids()
+            .to_vec();
+        assert_eq!(
+            ids.iter().filter(|&&i| i == FIXTURE_BOS_ID).count(),
+            1,
+            "the model was sent {} BOS ids: {ids:?}",
+            ids.iter().filter(|&&i| i == FIXTURE_BOS_ID).count()
+        );
+        assert_eq!(ids[0], FIXTURE_BOS_ID, "BOS is not first: {ids:?}");
+    }
+
+    /// The inverse, and the reason the flag cannot simply be hardcoded `false`:
+    /// an unresolvable checkpoint falls back to the legacy join, whose text
+    /// contains no special tokens at all, so the tokenizer must still add them.
+    #[test]
+    fn an_untemplated_prompt_still_asks_the_tokenizer_for_its_special_tokens() {
+        let dir = bos_doubling_checkpoint("untemplated");
+        // `None` is the state `ApiServer::new` builds when no tier resolved a
+        // template — not a contrived value.
+        let state = state_with(None);
+
+        let built = build_prompt(&state, &one_user_message());
+        assert_eq!(built.text, "user: Name the capital of France.");
+        assert!(
+            built.add_special_tokens,
+            "the legacy join carries no BOS of its own, so the tokenizer has to \
+             supply it — hardcoding the flag `false` would send a Llama model a \
+             prompt with no BOS at all"
+        );
+
+        let tok = tokenizers::Tokenizer::from_file(dir.join("tokenizer.json")).unwrap();
+        let ids: Vec<u32> = tok
+            .encode(built.text.as_str(), built.add_special_tokens)
+            .unwrap()
+            .get_ids()
+            .to_vec();
+        assert_eq!(
+            ids[0], FIXTURE_BOS_ID,
+            "the joined prompt lost its BOS: {ids:?}"
+        );
+        assert_eq!(
+            ids.iter().filter(|&&i| i == FIXTURE_BOS_ID).count(),
+            1,
+            "{ids:?}"
+        );
+    }
+
+    /// `/v1/completions` and the contract executor both build raw prompts
+    /// through this constructor. It is the only thing standing between them and
+    /// a prompt with no BOS.
+    #[test]
+    fn a_raw_prompt_asks_for_special_tokens() {
+        assert!(BuiltPrompt::raw("The capital of France is".to_string()).add_special_tokens);
     }
 }

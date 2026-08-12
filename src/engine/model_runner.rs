@@ -97,6 +97,19 @@ pub struct InferenceJob {
     pub prompt: String,
     pub max_new_tokens: usize,
     pub temperature: f64,
+    /// Whether the backend must ask its tokenizer to add special tokens when
+    /// prefilling `prompt`.
+    ///
+    /// Deliberately **not** `#[serde(default)]`-shaped or `Option`: every
+    /// construction site must state it, because the right answer depends on
+    /// something only the prompt's builder knows — whether a chat template was
+    /// applied. See [`crate::engine::RequestContext::add_special_tokens`] for
+    /// what goes wrong when a templated prompt gets `true`.
+    ///
+    /// `true` for a raw prompt (`/v1/completions`, the legacy `role: content`
+    /// join, the contract executor's rendered attempts); `false` for a prompt
+    /// that came out of `ResolvedTemplate::render`.
+    pub add_special_tokens: bool,
     /// Response mode (complete or streaming)
     pub response_mode: ResponseMode,
 }
@@ -333,7 +346,11 @@ impl ModelRunner {
                     run_jobs(model, rx);
                 }
                 Err(e) => {
-                    eprintln!("Failed to load Fuel model at {}: {:#}", model_path.display(), e);
+                    eprintln!(
+                        "Failed to load Fuel model at {}: {:#}",
+                        model_path.display(),
+                        e
+                    );
                     drain_with_error(rx, &format!("model load failed: {e}"));
                 }
             }
@@ -373,6 +390,10 @@ fn run_jobs<M: EngineModel>(mut model: M, rx: Receiver<InferenceJob>) {
 
         let mut ctx = RequestContext::new(req);
         ctx.temperature = job.temperature;
+        // Carried, not re-derived. The runner cannot tell a templated prompt
+        // from a raw one by looking at it — `<s>` is ordinary text — so the
+        // handler that built the prompt is the only place the answer exists.
+        ctx.add_special_tokens = job.add_special_tokens;
         let mut batch = vec![ctx];
 
         // Process based on response mode (move out of job to avoid borrow issues)
@@ -414,9 +435,7 @@ fn run_jobs<M: EngineModel>(mut model: M, rx: Receiver<InferenceJob>) {
                             }
 
                             // Get the most recent token and decode it
-                            if let Some(&last_token) =
-                                batch[0].generated_tokens.last()
-                            {
+                            if let Some(&last_token) = batch[0].generated_tokens.last() {
                                 match model.decode_text(&[last_token], false) {
                                     Ok(token_text) => {
                                         if stream_tx
@@ -567,5 +586,60 @@ mod tests {
     fn completing_before_the_cap_is_stop() {
         let c = ctx_with(8, 3, true);
         assert_eq!(finish_reason_for(&c), FinishReason::Stop);
+    }
+
+    /// Records what `run_jobs` handed the backend, then completes the request
+    /// immediately so the loop terminates without a model.
+    struct SpyModel {
+        seen: std::sync::Arc<std::sync::Mutex<Vec<bool>>>,
+    }
+
+    impl EngineModel for SpyModel {
+        fn step_batch(&mut self, batch: &mut [RequestContext]) -> Result<Vec<Option<u32>>> {
+            // This is the value a real backend passes to `encode`.
+            self.seen.lock().unwrap().push(batch[0].add_special_tokens);
+            batch[0].complete();
+            Ok(vec![None])
+        }
+
+        fn decode_text(&self, _tokens: &[u32], _skip_special: bool) -> Result<String> {
+            Ok(String::new())
+        }
+    }
+
+    /// `InferenceJob::add_special_tokens` must reach `RequestContext`.
+    ///
+    /// The hop is one assignment in `run_jobs`, and dropping it is invisible
+    /// everywhere else: `RequestContext::new` defaults the field to `true`, so
+    /// a runner that never copies the job's value serves every templated prompt
+    /// with a doubled BOS while every other test stays green. Both values are
+    /// asserted because a mutation to a constant passes on one of them.
+    #[test]
+    fn the_jobs_tokenizer_flag_reaches_the_request_context() {
+        for want in [false, true] {
+            let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let (tx, rx) = std::sync::mpsc::channel();
+            let (resp_tx, _resp_rx) = oneshot::channel();
+            tx.send(InferenceJob {
+                id: "spy".to_string(),
+                prompt: "p".to_string(),
+                max_new_tokens: 1,
+                temperature: 0.0,
+                add_special_tokens: want,
+                response_mode: ResponseMode::Complete(resp_tx),
+            })
+            .unwrap();
+            drop(tx); // so `run_jobs` returns rather than blocking forever
+
+            run_jobs(SpyModel { seen: seen.clone() }, rx);
+
+            let seen = seen.lock().unwrap();
+            assert_eq!(
+                seen.as_slice(),
+                &[want],
+                "the backend saw add_special_tokens {:?} for a job that asked for {want}",
+                seen.as_slice()
+            );
+        }
     }
 }

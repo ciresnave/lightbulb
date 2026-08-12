@@ -44,17 +44,25 @@ const MISSING_CHECKPOINT: &str = "no TinyLlama checkpoint. Set TINYLLAMA_DIR to 
 /// this `None` builds a state the server never builds, so the model sees a
 /// different prompt here than in production — and every assertion below is
 /// about what the model does with the prompt.
+///
+/// "Exactly as" is now literal: it calls the same
+/// `chat_template::resolve_for_serving` that `ApiServer::new` assigns from,
+/// rather than re-implementing its `Resolution::None` check. Four copies of
+/// that check existed, each documenting the drift hazard it was an instance of.
 fn chat_template_for(
     dir: &std::path::Path,
 ) -> Option<Arc<lightbulb::api::chat_template::ResolvedTemplate>> {
-    let t = lightbulb::api::chat_template::resolve_for_model(dir);
-    eprintln!(
-        "chat template resolved via {:?}, bos {:?}, eos {:?}",
-        t.resolved_by(),
-        t.tokens.bos,
-        t.tokens.eos
-    );
-    (t.resolved_by() != lightbulb::api::chat_template::Resolution::None).then(|| Arc::new(t))
+    let t = lightbulb::api::chat_template::resolve_for_serving(dir);
+    match &t {
+        Some(t) => eprintln!(
+            "chat template resolved via {:?}, bos {:?}, eos {:?}",
+            t.resolved_by(),
+            t.tokens.bos,
+            t.tokens.eos
+        ),
+        None => eprintln!("no chat template resolved; the handler will use the legacy join"),
+    }
+    t
 }
 
 /// Drive the real router with a real runner and collect the whole response

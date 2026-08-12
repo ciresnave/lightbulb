@@ -19,9 +19,11 @@
 - **Checkpoint tests need the real invocation:** `cargo test --release --features fuel-engine --test <name> -- --ignored --nocapture --test-threads=1`. `--test-threads=1` is load-bearing: each test loads its own ~2.2 GB copy of the checkpoint.
 - **GPU-touching suites go through the lock:** `pwsh -NoProfile -File C:/Projects/fuel/scripts/gpu-run.ps1 -Project lightbulb -- <cmd>`.
 - **When piping cargo through `grep`, print `${PIPESTATUS[0]}`.** The pipeline's status masks cargo's; this has already produced one false green on this project.
-- **`rustfmt --edition 2021 <file>` every file you touch**, before committing.
+- **`rustfmt --edition 2024 <file>` every file you touch**, before committing.
 - **Never assert a property that holds whether or not the code is correct.** `assert!(x > 0)` against a count that was already nonzero proves nothing. Prefer equality against an independently-derived value.
 - **The test model is TinyLlama-1.1B-Chat** at `$TINYLLAMA_DIR`, defaulting to the HF cache path in `tests/api_result_metadata.rs`. Its snapshot contains **only** `config.json`, `model.safetensors`, `tokenizer.json` — no `tokenizer_config.json`, so **tier 1 does not fire for it** and its `<|user|>` markers are ordinary text, so **tier 2 does not either**. It resolves at tier 3. Any test asserting tier 1 or 2 must build a fixture, not use the checkpoint.
+- **TinyLlama is BLIND to any `bos_token` defect, so never use it to test one.** It resolves to `registry::ZEPHYR`, whose source never mentions `bos_token`, so its rendered prompt is *accidentally* correct no matter what the surrounding code does with BOS. Task 3's review found exactly this: a templated prompt was being tokenized with `add_special_tokens = true`, doubling BOS for Llama-3/Llama-2/Mistral/Gemma — and every TinyLlama-based test in the repo stayed green, because ZEPHYR emits no BOS to double. The guard tests in `src/api/openai/chat.rs` build a synthetic Llama-3-shaped checkpoint (a template opening `{{ bos_token }}` plus a `TemplateProcessing` post_processor) for this reason. **The same shape applies beyond BOS:** before testing any behaviour against the checkpoint, check that ZEPHYR actually exercises it — the tier-3 template is a small subset of what real templates do.
+- **Assert on the level the defect lives at.** The BOS doubling above was invisible to *every* rendered-text assertion in the repo, including a live HTTP gate asserting content, because the render is byte-identical either way — the defect is in how a correct string is encoded. A prompt has at least three observable levels (rendered text → token ids → generated output); an assertion one level above the defect is invariant to it.
 
 ---
 
@@ -283,7 +285,7 @@ Change the expected string in `zephyr_template_renders_exactly` to `"<|user|>\nN
 - [x] **Step 7: Format and commit**
 
 ```bash
-rustfmt --edition 2021 src/api/chat_template.rs tests/chat_template_render.rs
+rustfmt --edition 2024 src/api/chat_template.rs tests/chat_template_render.rs
 git add Cargo.toml Cargo.lock src/api/chat_template.rs src/api/chat_template/registry.rs src/api/mod.rs tests/chat_template_render.rs
 git commit -m "feat(api): Render chat templates with minijinja"
 ```
@@ -636,7 +638,7 @@ This is the assertion most likely to be vacuous. In `read_sidecar`, delete the `
 - [ ] **Step 7: Format and commit**
 
 ```bash
-rustfmt --edition 2021 src/api/chat_template.rs src/api/chat_template/registry.rs tests/chat_template_render.rs
+rustfmt --edition 2024 src/api/chat_template.rs src/api/chat_template/registry.rs tests/chat_template_render.rs
 git add -A src/api tests/chat_template_render.rs
 git commit -m "feat(api): Resolve chat templates through four free tiers"
 ```
@@ -652,7 +654,7 @@ git commit -m "feat(api): Resolve chat templates through four free tiers"
 
 **Interfaces:**
 - Consumes: `resolve`, `ChatTemplate`, `Resolution` from Tasks 1–2.
-- Produces: `AppState.chat_template: Option<Arc<ChatTemplate>>`.
+- Produces: `AppState.chat_template: Option<Arc<ResolvedTemplate>>`.
 
 **Read the spec's CORRECTED 2026-08-08 block first.** There are two sites in this file, not one. `:409` is the streaming path and is easy to miss because the non-streaming fix looks complete on its own.
 
@@ -828,7 +830,7 @@ If a test flips, update **its prompt or its expectation with the observed output
 - [ ] **Step 7: Format and commit**
 
 ```bash
-rustfmt --edition 2021 src/api/mod.rs src/api/openai/chat.rs tests/chat_template_e2e.rs
+rustfmt --edition 2024 src/api/mod.rs src/api/openai/chat.rs tests/chat_template_e2e.rs
 git add -A
 git commit -m "feat(api): Prompt chat models with their own template"
 ```
@@ -846,6 +848,40 @@ git commit -m "feat(api): Prompt chat models with their own template"
 **Interfaces:**
 - Consumes: `build_prompt` from Task 3.
 - Produces: `execute_contract` with `F: Fn(Vec<RawMessage>) -> Fut`.
+
+> ### The interface changed in Task 3 — check signatures before copying anything below
+>
+> Task 3 replaced the type this task consumes, for a reason that matters here:
+> the plan originally had `build_prompt` call `render(&raw, "<s>", "</s>")` with
+> **hardcoded** bos/eos. That is correct only for the Llama-2 family. Llama-3
+> uses `<|begin_of_text|>`/`<|eot_id|>`, Qwen uses `<|im_end|>` — and rendering
+> another family's template with those literals *succeeds*, so nothing falls
+> through and nothing is logged.
+>
+> | Was | Now |
+> | --- | --- |
+> | `Option<Arc<ChatTemplate>>` | `Option<Arc<ResolvedTemplate>>` |
+> | `render(&msgs, bos, eos)` | `render(&msgs)` — tokens bound at resolution |
+> | `.resolved_by` field | `.resolved_by()` method |
+>
+> **Do not reintroduce a literal `"<s>"` or `"</s>"` anywhere in this task.**
+> `ResolvedTemplate` binds the checkpoint's own tokens to the template
+> deliberately so that no caller *can* supply them. The contract path is the
+> last remaining prompt site; hardcoding here would put the defect back with a
+> provenance label claiming the template was read from the checkpoint.
+>
+> **And flip `InferenceJob::add_special_tokens` to `false` when you do.**
+> `executor.rs`'s `InferenceJob` currently sets it `true`, which is correct
+> *only while* the contract loop builds its prompt with the legacy join — raw
+> text carries no special tokens, so the tokenizer must add them. The moment
+> this task renders the checkpoint's template there, the prompt carries its own
+> BOS and `true` doubles it: real templates open with `{{ bos_token }}` and
+> Llama-family tokenizers prepend BOS again via their `TemplateProcessing`
+> post_processor. The render still succeeds and nothing is logged, which is why
+> this is called out rather than left to be noticed. Prefer routing the call
+> through `chat.rs`'s `BuiltPrompt` so the flag travels with the text instead of
+> being restated. See `chat.rs::build_prompt` for the full argument, including
+> why binding `bos_token` to `""` was rejected.
 
 The contract path re-renders per attempt against a *mutated* message list (`executor.rs:170`, `:176-179`, `:183`), so it cannot be fixed by rendering upstream. See the spec's CORRECTED block.
 
@@ -967,7 +1003,7 @@ Also check `tests/contracts_live.rs`, which calls `execute_contract` too.
     // ...
         move |msgs: Vec<RawMessage>| {
             let prompt = match &template {
-                Some(t) => t.render(&msgs, "<s>", "</s>").unwrap_or_else(|e| {
+                Some(t) => t.render(&msgs).unwrap_or_else(|e| {
                     tracing::warn!("chat template failed to render: {e}; using the legacy join");
                     legacy_join(&msgs)
                 }),
@@ -979,7 +1015,7 @@ Also check `tests/contracts_live.rs`, which calls `execute_contract` too.
 
 Extract `legacy_join(&[RawMessage]) -> String` from `build_prompt` in Task 3 so both share it.
 
-`execute_contract_with_runner` has no `AppState`; give it a `template: Option<Arc<ChatTemplate>>` parameter and thread it through from the caller.
+`execute_contract_with_runner` has no `AppState`; give it a `template: Option<Arc<ResolvedTemplate>>` parameter and thread it through from the caller.
 
 - [ ] **Step 7: Run the tests**
 
@@ -993,7 +1029,7 @@ Expected: contract tests pass; **`running N tests` with N > 0**.
 - [ ] **Step 8: Format and commit**
 
 ```bash
-rustfmt --edition 2021 src/contracts/executor.rs src/contracts/validation.rs src/api/openai/chat.rs
+rustfmt --edition 2024 src/contracts/executor.rs src/contracts/validation.rs src/api/openai/chat.rs
 git add -A
 git commit -m "fix(contracts): Render each attempt through the chat template"
 ```
@@ -1162,7 +1198,7 @@ Add `pub eos_monitor: std::sync::Arc<crate::engine::eos_monitor::EosMonitor>` to
              only — no template will be changed automatically.",
             state.eos_monitor.stop_rate().unwrap_or(0.0) * 100.0,
             crate::engine::eos_monitor::DEFAULT_WINDOW,
-            state.chat_template.as_ref().map(|t| t.resolved_by),
+            state.chat_template.as_ref().map(|t| t.resolved_by()),
         );
     }
 ```
@@ -1170,7 +1206,7 @@ Add `pub eos_monitor: std::sync::Arc<crate::engine::eos_monitor::EosMonitor>` to
 - [ ] **Step 6: Format and commit**
 
 ```bash
-rustfmt --edition 2021 src/engine/eos_monitor.rs src/engine/mod.rs src/api/mod.rs src/api/openai/chat.rs
+rustfmt --edition 2024 src/engine/eos_monitor.rs src/engine/mod.rs src/api/mod.rs src/api/openai/chat.rs
 git add -A
 git commit -m "feat(engine): Warn when the EOS rate suggests a wrong template"
 ```
@@ -1279,7 +1315,7 @@ fn probe_report_lists_every_candidate_not_a_winner() {
 ```bash
 cargo test -j 4 --test chat_template_render 2>&1 | tail -15
 cargo build -j 4 --bin lightbulb-cli 2>&1 | tail -5
-rustfmt --edition 2021 src/bin/lightbulb-cli.rs
+rustfmt --edition 2024 src/bin/lightbulb-cli.rs
 git add -A
 git commit -m "feat(cli): Add chat-template probe"
 ```
