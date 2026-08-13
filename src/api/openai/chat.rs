@@ -145,11 +145,62 @@ pub struct Usage {
     pub total_tokens: usize,
 }
 
+/// The 400 returned for `stream: true` together with
+/// `lightbulb.output_contract`.
+///
+/// Named both fields, because the client set both and either one is the half it
+/// can drop. A message that says only "unsupported combination" leaves the
+/// reader to guess which of its extensions is the one this server will not do.
+const STREAMING_CONTRACT_REJECTION: &str = "`stream: true` cannot be combined \
+     with `lightbulb.output_contract`. Contract validation parses, and on \
+     failure re-prompts against, the model's complete output, so there is \
+     nothing to validate until generation has finished — a validated response \
+     cannot be streamed. Send the request with `stream: false` to use the \
+     contract, or drop `lightbulb.output_contract` to stream.";
+
 /// Chat completions endpoint handler
 pub async fn chat_completions(
     State(state): State<AppState>,
     Json(request): Json<ChatCompletionRequest>,
 ) -> impl IntoResponse {
+    // BEFORE the `stream` routing below, deliberately, and not inside either
+    // branch of it. Only `create_chat_completion` consults
+    // `lightbulb.output_contract`; `create_chat_stream` has never read
+    // `request.lightbulb` at all. So the same body carrying both fields used to
+    // return a validated, retried answer when `stream` was false and an
+    // unconstrained one — one attempt, no contract instruction in the prompt, no
+    // `lightbulb_result` — when it was true, with no error and no warning. A
+    // check placed in the streaming branch would be one `return` away from being
+    // routed around again by the next path added here.
+    //
+    // ## Why this rejects rather than buffering the contract loop
+    //
+    // Running the contract loop to completion and then emitting the validated
+    // text as SSE chunks is the more capable option and is a deliberate
+    // non-goal. It cannot deliver what `stream: true` is asked for: validation
+    // needs the whole output, so the first chunk cannot leave before the last
+    // token arrives, and after up to `max_attempts` full inferences the client
+    // would receive everything at once at the end. The field would be satisfied
+    // in name while early tokens — the only property it exists to provide —
+    // remain impossible by construction. That trade deserves its own design
+    // decision; turning a silent wrong answer into a loud refusal does not
+    // foreclose it.
+    if request.stream
+        && request
+            .lightbulb
+            .as_ref()
+            .is_some_and(|lb| lb.output_contract.is_some())
+    {
+        // 400, not 500: the server is fine, the request asked for two things
+        // that cannot both hold. A 5xx tells the client to retry the identical
+        // body, which will fail identically forever.
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": STREAMING_CONTRACT_REJECTION})),
+        )
+            .into_response();
+    }
+
     if request.stream {
         // Streaming response
         let stream = create_chat_stream(state, request);
@@ -2241,6 +2292,201 @@ mod tests {
             assert_eq!(
                 body["choices"][0]["message"]["content"], UNPARSEABLE_REPLY,
                 "response {i} did not carry the model's own text"
+            );
+        }
+    }
+
+    // ─── `stream` + `output_contract`: rejected, and ONLY that pair ─────────
+    //
+    // The three tests below are one claim in three parts, and only the first is
+    // about the bug. The other two exist because the two implementations that
+    // do not fix it — reject every streamed request, reject every contract
+    // request — both make the first one pass. Each is therefore written to
+    // assert that the path still *works*, not merely that it is not a 400: a
+    // handler that returns 200 and an empty body would satisfy the weaker form.
+    //
+    // Verified by mutation, five ways; see the commit message for the matrix.
+
+    /// A body carrying a contract, with `stream` as given.
+    fn contract_request(stream: bool) -> ChatCompletionRequest {
+        serde_json::from_value(serde_json::json!({
+            "model": "fixture",
+            "messages": [{"role": "user", "content": CONTRACT_QUESTION}],
+            "max_tokens": 8,
+            "temperature": 0.0,
+            "stream": stream,
+            "lightbulb": {
+                "output_contract": {
+                    "type": "enum_choice",
+                    "choices": ["yes", "no"],
+                    "case_sensitive": false,
+                    "allow_index": true
+                },
+                "max_attempts": 2
+            }
+        }))
+        .expect("the request body must deserialize")
+    }
+
+    /// The fragment `contracts::enum_choice::build_system_instruction` puts in
+    /// the system message. Its presence in a prompt is what distinguishes a
+    /// request the contract loop drove from one that went straight to the model.
+    const CONTRACT_INSTRUCTION_MARKER: &str = "IMPORTANT — OUTPUT FORMAT";
+
+    /// `stream: true` plus `lightbulb.output_contract` is refused, in the open,
+    /// instead of being served unvalidated.
+    ///
+    /// Before this check, that body returned **200** with a normal-looking SSE
+    /// stream: one inference instead of the two the contract asked for, a prompt
+    /// that was the bare `"user: …"` join with no contract instruction in it, and
+    /// no `lightbulb_result` anywhere. A client that set `"stream": true`
+    /// alongside a contract got output that had never been parsed against the
+    /// contract it asked for and no indication of it — the same request body
+    /// answered one way streaming and another way not.
+    ///
+    /// `jobs` is asserted empty as well as the status. That is the substantive
+    /// half: the refusal has to happen *instead of* generating, not alongside
+    /// it. A check placed after the job is enqueued would return this same 400
+    /// while still spending a model pass on an answer nobody validated.
+    #[tokio::test]
+    async fn streaming_with_a_contract_is_refused_instead_of_served_unvalidated() {
+        let (tx, runner) = stub_runner();
+        let state = state_with_runner(None, Some(tx));
+
+        let response = chat_completions(State(state), Json(contract_request(true)))
+            .await
+            .into_response();
+
+        assert_eq!(
+            response.status(),
+            StatusCode::BAD_REQUEST,
+            "a streamed request carrying `lightbulb.output_contract` was not \
+             refused; the client is being served output that no contract ever \
+             validated"
+        );
+
+        // Asserted on content, not just the status. A bare 400 tells a client
+        // that something in a body it believes is valid is not, and nothing
+        // about which half to change.
+        let body = json_body(response).await;
+        let message = body["error"]
+            .as_str()
+            .unwrap_or_else(|| panic!("the error body must carry a string `error`: {body}"));
+        assert!(
+            message.contains("stream"),
+            "the error does not name `stream`, one of the two fields the client \
+             must choose between: {message}"
+        );
+        assert!(
+            message.contains("lightbulb.output_contract"),
+            "the error does not name `lightbulb.output_contract`, the other one: \
+             {message}"
+        );
+        assert!(
+            message.contains("complete output"),
+            "the error does not say why the two cannot hold together — that \
+             validation has nothing to work on until generation finishes — so a \
+             reader is left to assume it is a temporary limitation: {message}"
+        );
+
+        let jobs = runner.join().expect("stub runner panicked");
+        assert!(
+            jobs.is_empty(),
+            "the request was refused but the model ran anyway ({} job(s)): the \
+             check is downstream of the work it exists to prevent",
+            jobs.len()
+        );
+    }
+
+    /// Streaming **without** a contract is untouched.
+    ///
+    /// This is half of what stops "reject every streamed request" from passing
+    /// the test above. It asserts the stream's content, not just that the status
+    /// is not 400: a handler that answered every stream with an empty 200 would
+    /// satisfy the status-only form while breaking every streaming client.
+    #[tokio::test]
+    async fn streaming_without_a_contract_is_unaffected() {
+        let (tx, runner) = stub_runner();
+        let state = state_with_runner(None, Some(tx));
+
+        let response = chat_completions(State(state), Json(plain_request(true)))
+            .await
+            .into_response();
+
+        assert_ne!(
+            response.status(),
+            StatusCode::BAD_REQUEST,
+            "a plain streamed request with no contract in it was refused; the \
+             check is rejecting `stream` rather than the combination"
+        );
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let frames = sse_frames(response).await;
+        assert_eq!(
+            frames.len(),
+            2,
+            "expected one token frame and one done frame, saw {frames:?}"
+        );
+        assert_eq!(
+            frames[0]["choices"][0]["delta"]["content"], UNPARSEABLE_REPLY,
+            "the stream did not carry the model's own text"
+        );
+        assert_eq!(frames[1]["choices"][0]["finish_reason"], "stop");
+
+        let jobs = runner.join().expect("stub runner panicked");
+        assert_eq!(jobs.len(), 1, "the model was not run at all");
+    }
+
+    /// A contract **without** streaming is untouched.
+    ///
+    /// The other half: it stops "reject every request carrying a contract". Like
+    /// its sibling it asserts the path's substance — that the contract loop
+    /// actually ran, spending its whole attempt budget on the stub's unparseable
+    /// reply and injecting its instruction into every prompt — rather than only
+    /// that the status is not 400.
+    #[tokio::test]
+    async fn a_contract_without_streaming_is_unaffected() {
+        let (tx, runner) = stub_runner();
+        let state = state_with_runner(None, Some(tx));
+
+        let response = chat_completions(State(state), Json(contract_request(false)))
+            .await
+            .into_response();
+
+        assert_ne!(
+            response.status(),
+            StatusCode::BAD_REQUEST,
+            "a non-streaming contract request was refused; the check is rejecting \
+             `lightbulb.output_contract` rather than the combination"
+        );
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = json_body(response).await;
+        assert!(
+            body["lightbulb_result"].is_object(),
+            "the response carries no contract result, so the contract path did \
+             not run: {body}"
+        );
+        assert_eq!(
+            body["lightbulb_result"]["parse_success"], false,
+            "control: the stub answers {UNPARSEABLE_REPLY:?}, which this contract \
+             must never accept — otherwise the retry assertion below is vacuous"
+        );
+        assert_eq!(body["choices"][0]["message"]["content"], UNPARSEABLE_REPLY);
+
+        let jobs = runner.join().expect("stub runner panicked");
+        assert_eq!(
+            jobs.len(),
+            2,
+            "the contract's two attempts did not both run, so the retry loop was \
+             skipped: saw {} job(s)",
+            jobs.len()
+        );
+        for (i, (prompt, _)) in jobs.iter().enumerate() {
+            assert!(
+                prompt.contains(CONTRACT_INSTRUCTION_MARKER),
+                "attempt {i} reached the model without the contract's formatting \
+                 instruction: {prompt:?}"
             );
         }
     }
