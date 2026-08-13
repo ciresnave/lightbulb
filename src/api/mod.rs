@@ -138,6 +138,21 @@ pub struct AppState {
     /// `bos`/`eos` itself — which in practice means a literal `"<s>"`/`"</s>"`,
     /// correct for the Llama-2 family and silently wrong for every other.
     pub chat_template: Option<Arc<crate::api::chat_template::ResolvedTemplate>>,
+
+    /// Rolling EOS-fire rate over recent completions, shared by every
+    /// completion path.
+    ///
+    /// **Observation only.** It exists because the tiers below
+    /// `Resolution::TokenizerConfig` are heuristics that can be confidently
+    /// wrong — a registry-matched template renders, returns 200, and prompts
+    /// the model as a base model — and a low EOS rate is the cheapest
+    /// observable that says so. Nothing reads it to decide what to prompt; see
+    /// `engine::eos_monitor` for why auto-switching was rejected.
+    ///
+    /// Not `Option`: a monitor with nothing recorded already reports "no
+    /// reading" (`stop_rate() == None`), so an absent one would be a second
+    /// spelling of the same state.
+    pub eos_monitor: Arc<crate::engine::eos_monitor::EosMonitor>,
 }
 
 /// API server
@@ -183,6 +198,7 @@ impl ApiServer {
             db_pool,
             inference_tx: None,
             chat_template: None,
+            eos_monitor: Arc::new(crate::engine::eos_monitor::EosMonitor::default()),
         };
 
         // Try to start a model runner thread if a model directory and default model exist

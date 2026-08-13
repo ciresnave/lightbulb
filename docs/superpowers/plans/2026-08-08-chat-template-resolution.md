@@ -17,6 +17,12 @@
 - **Build with `-j 4`.** Full-parallelism cargo on this machine races into rustc ICEs and spurious "crate not found in rlib format" errors naming different crates each run. Not your code — do not investigate.
 - **Feature-gated tests are invisible by default.** `tests/api_result_metadata.rs` and `tests/fuel_engine_http.rs` open with `#![cfg(feature = "fuel-engine")]`. Without the feature they compile to **zero tests** and print `ok. 0 passed` — identical in shape to a suite that ran. **Always read the `running N tests` line, never the exit code alone.**
 - **Checkpoint tests need the real invocation:** `cargo test --release --features fuel-engine --test <name> -- --ignored --nocapture --test-threads=1`. `--test-threads=1` is load-bearing: each test loads its own ~2.2 GB copy of the checkpoint.
+- **Two different env vars point at the model, and setting only one fails loudly but misleadingly.** `api_result_metadata.rs`, `chat_template_e2e.rs` and `fuel_engine_http.rs` read **`TINYLLAMA_DIR`**; `contracts_live.rs` reads **`LIGHTBULB_TEST_MODEL_DIR`** and otherwise searches for `../models/llama-3b`. Setting only `TINYLLAMA_DIR` makes all 5 `contracts_live` tests panic in 0.01 s with "no model directory found" — which reads like a regression in whatever you just changed, and is not. Export both:
+  ```bash
+  export TINYLLAMA_DIR="C:/Users/cires/.cache/huggingface/hub/models--TinyLlama--TinyLlama-1.1B-Chat-v1.0/snapshots/fe8a4ea1ffedaf415f4da2f062534de366a451e6"
+  export LIGHTBULB_TEST_MODEL_DIR="$TINYLLAMA_DIR"
+  ```
+- **A failing test binary stops the ones after it.** `cargo test --test a --test b` will not run `b` if `a` fails, so a suite you believe you covered may simply never have executed. Re-read the `running N tests` lines and count the suites, not just the results.
 - **GPU-touching suites go through the lock:** `pwsh -NoProfile -File C:/Projects/fuel/scripts/gpu-run.ps1 -Project lightbulb -- <cmd>`.
 - **When piping cargo through `grep`, print `${PIPESTATUS[0]}`.** The pipeline's status masks cargo's; this has already produced one false green on this project.
 - **`rustfmt --edition 2024 <file>` every file you touch**, before committing.
@@ -1050,7 +1056,32 @@ git commit -m "fix(contracts): Render each attempt through the chat template"
 
 This **monitors and never acts.** A server that changes its prompting mid-flight on a heuristic is harder to debug than one consistently wrong that says so (spec §3).
 
-- [ ] **Step 1: Write the failing tests**
+> **Implementation notes (2026-08-12).** Four departures from the text above,
+> each with its own test:
+>
+> 1. **Three completion sites, not one.** Step 5 wires only
+>    `create_chat_completion`. The streaming path's `Done` frame and the
+>    contract loop's final attempt observe a `FinishReason` too, and a monitor
+>    fed by only the first never fills its window on a server whose clients
+>    stream — which is indistinguishable in the log from a healthy model. All
+>    three record; the contract path records once per request, not once per
+>    attempt.
+> 2. **The warning is edge-triggered.** Step 5's prose says "warn once per
+>    crossing" and its code sample warns on every completion for as long as the
+>    rate stays low. `record` returns `Some(rate)` only on the transition and
+>    resets when a reading recovers.
+> 3. **The message names the monitor's own window**, via `EosMonitor::window()`.
+>    The sample quotes `DEFAULT_WINDOW`, which misreports any monitor built with
+>    another — including every one in the tests.
+> 4. **`parking_lot::Mutex`, not `std`.** `std`'s `.lock().unwrap()` turns a
+>    poisoned lock into a panic on the request path, which would make an
+>    observer able to fail a request.
+>
+> `new()` also clamps the window to `>= 1`: a zero window divides by zero, and
+> `NaN < min` is `false`, so the monitor would go silently quiet rather than
+> fail.
+
+- [x] **Step 1: Write the failing tests**
 
 ```rust
 #[cfg(test)]
@@ -1105,7 +1136,7 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run to verify they fail**
+- [x] **Step 2: Run to verify they fail**
 
 ```bash
 cargo test -j 4 --lib eos_monitor 2>&1 | tail -15
@@ -1113,7 +1144,7 @@ cargo test -j 4 --lib eos_monitor 2>&1 | tail -15
 
 Expected: compile failure. **If it reports `ok. 0 passed`, the filter matched nothing** — check the module is declared in `src/engine/mod.rs`.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 ```rust
 //! Rolling EOS-fire rate, as a signal that a heuristically-chosen chat
@@ -1178,7 +1209,7 @@ impl Default for EosMonitor {
 
 Declare in `src/engine/mod.rs`: `pub mod eos_monitor;`
 
-- [ ] **Step 4: Run the tests**
+- [x] **Step 4: Run the tests**
 
 ```bash
 cargo test -j 4 --lib eos_monitor 2>&1 | tail -15
@@ -1186,7 +1217,7 @@ cargo test -j 4 --lib eos_monitor 2>&1 | tail -15
 
 Expected: `3 passed; 0 failed`.
 
-- [ ] **Step 5: Wire it in**
+- [x] **Step 5: Wire it in**
 
 Add `pub eos_monitor: std::sync::Arc<crate::engine::eos_monitor::EosMonitor>` to `AppState`, default-constructed. In `create_chat_completion`, after the runner returns, `state.eos_monitor.record(result.finish_reason);` and warn once per crossing:
 
@@ -1203,7 +1234,7 @@ Add `pub eos_monitor: std::sync::Arc<crate::engine::eos_monitor::EosMonitor>` to
     }
 ```
 
-- [ ] **Step 6: Format and commit**
+- [x] **Step 6: Format and commit**
 
 ```bash
 rustfmt --edition 2024 src/engine/eos_monitor.rs src/engine/mod.rs src/api/mod.rs src/api/openai/chat.rs

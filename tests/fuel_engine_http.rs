@@ -135,6 +135,10 @@ async fn fuel_runner_serves_a_coherent_completion_over_http() {
         db_pool: None,
         inference_tx: Some(tx),
         chat_template: chat_template_for(&dir),
+        // Default window (20): these harnesses make a handful of requests, so
+        // the monitor never fills it and never logs. It is here because
+        // `AppState` requires it, not as anything under test.
+        eos_monitor: Default::default(),
     };
 
     let app = lightbulb::api::openai::routes().with_state(state);
@@ -269,6 +273,10 @@ async fn fuel_runner_serves_a_default_temperature_completion() {
         db_pool: None,
         inference_tx: Some(tx),
         chat_template: chat_template_for(&dir),
+        // Default window (20): these harnesses make a handful of requests, so
+        // the monitor never fills it and never logs. It is here because
+        // `AppState` requires it, not as anything under test.
+        eos_monitor: Default::default(),
     };
 
     let app = lightbulb::api::openai::routes().with_state(state);

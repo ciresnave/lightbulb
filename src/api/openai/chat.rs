@@ -342,6 +342,50 @@ pub(crate) fn build_prompt_from_raw(
     }
 }
 
+/// Record how one completion ended, and log when this reading is the first to
+/// fall below the threshold since the last healthy one.
+///
+/// **Observes and never acts.** Nothing downstream of this call reads the
+/// monitor to decide what to prompt, render or retry, and nothing may be added
+/// that does: a server that switches template mid-flight on a heuristic cannot
+/// be reasoned about from a request/response pair, while one that is
+/// consistently wrong and says so can be (spec §3).
+///
+/// Takes the monitor and the resolution rather than `&AppState`, because the
+/// streaming path calls it from a `'static` closure that outlives the state —
+/// the field it needs has to be cloned out before `state.inference_tx` is moved.
+///
+/// Called from all three sites that observe a `FinishReason`: the plain
+/// completion, the streaming `Done` frame, and the contract loop's final
+/// attempt. Wiring only the first is the same shape of miss as fixing only one
+/// of this file's two former prompt-construction sites — on a server whose
+/// clients stream, a monitor recording nothing never fills its window and never
+/// reports anything, which is indistinguishable in the log from a healthy model.
+fn record_completion(
+    monitor: &crate::engine::eos_monitor::EosMonitor,
+    resolved_by: Option<crate::api::chat_template::Resolution>,
+    finish_reason: crate::engine::model_runner::FinishReason,
+) {
+    // `record` is edge-triggered: `Some` only on the reading that crosses,
+    // `None` on every completion after it while the rate stays low.
+    let Some(rate) = monitor.record(finish_reason) else {
+        return;
+    };
+    tracing::warn!(
+        "only {:.0}% of the last {} completions stopped on EOS. The chat template \
+         for this model ({}) may be wrong for it: a model prompted with someone \
+         else's template continues text instead of answering, and runs to the \
+         token budget. This is a warning only — no template will be changed \
+         automatically.",
+        rate * 100.0,
+        monitor.window(),
+        match resolved_by {
+            Some(r) => format!("resolved via {r:?}"),
+            None => "none resolved; the legacy role: content join is in use".to_string(),
+        },
+    );
+}
+
 /// Create non-streaming chat completion
 async fn create_chat_completion(
     state: AppState,
@@ -362,6 +406,17 @@ async fn create_chat_completion(
     // If a model runner is available, enqueue the request and wait for generated text.
     if let Some(tx) = &state.inference_tx {
         let result = run_inference_once(tx, prompt, max_new_tokens, temperature).await?;
+
+        record_completion(
+            &state.eos_monitor,
+            state.chat_template.as_ref().map(|t| t.resolved_by()),
+            result.finish_reason,
+        );
+
+        // Only here, inside the branch where a model actually generated. The
+        // no-runner fallback below reports `finish_reason: "stop"` for a
+        // canned string; recording that would report a perfect EOS rate for a
+        // server that has never run the model.
 
         let created = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)?
@@ -541,6 +596,20 @@ async fn create_chat_completion_with_contract(
     )
     .await?;
 
+    // One record per request, not per attempt: `ContractExecutionResult`
+    // reports the finish reason of the final attempt only — the one whose text
+    // the client receives — and the retries in between are prompts this server
+    // constructed, not requests a client made. `None` means the loop ran zero
+    // inferences, so there is nothing to record.
+
+    if let Some(reason) = exec.finish_reason {
+        record_completion(
+            &state.eos_monitor,
+            state.chat_template.as_ref().map(|t| t.resolved_by()),
+            reason,
+        );
+    }
+
     build_contract_response(&request, exec)
 }
 
@@ -608,6 +677,15 @@ fn create_chat_stream(
     let max_new_tokens = request.max_tokens.unwrap_or(100);
     let model = request.model.clone();
 
+    // Cloned out of `state` BEFORE `state.inference_tx` is moved below, and
+    // before the token stream — which is `'static` and outlives this function —
+    // captures them. The streaming path observing its own completions is the
+    // point: it is the path a fix aimed at `create_chat_completion` leaves
+    // behind, and a monitor fed by only one of the two never fills its window
+    // on a server whose clients stream.
+    let eos_monitor = state.eos_monitor.clone();
+    let resolved_by = state.chat_template.as_ref().map(|t| t.resolved_by());
+
     // If a model runner is available, create a streaming job
     if let Some(tx) = state.inference_tx {
         let (stream_tx, stream_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -658,6 +736,7 @@ fn create_chat_stream(
             UnboundedReceiverStream::new(stream_rx).scan(true, move |is_first, result| {
                 let chat_id = chat_id.clone();
                 let model = model.clone();
+                let eos_monitor = eos_monitor.clone();
                 let first = *is_first;
                 *is_first = false;
 
@@ -680,20 +759,27 @@ fn create_chat_stream(
                             })
                             .to_string(),
                         ))),
-                        Ok(StreamItem::Done { finish_reason }) => Some(Ok(Event::default().data(
-                            serde_json::json!({
-                                "id": chat_id,
-                                "object": "chat.completion.chunk",
-                                "created": created,
-                                "model": model,
-                                "choices": [{
-                                    "index": 0,
-                                    "delta": {},
-                                    "finish_reason": finish_reason.as_str()
-                                }]
-                            })
-                            .to_string(),
-                        ))),
+                        Ok(StreamItem::Done { finish_reason }) => {
+                            // The stream's one observation of how generation
+                            // ended. It is the same value the frame below
+                            // reports to the client, read here rather than
+                            // re-derived.
+                            record_completion(&eos_monitor, resolved_by, finish_reason);
+                            Some(Ok(Event::default().data(
+                                serde_json::json!({
+                                    "id": chat_id,
+                                    "object": "chat.completion.chunk",
+                                    "created": created,
+                                    "model": model,
+                                    "choices": [{
+                                        "index": 0,
+                                        "delta": {},
+                                        "finish_reason": finish_reason.as_str()
+                                    }]
+                                })
+                                .to_string(),
+                            )))
+                        }
                         Err(e) => Some(Ok(Event::default().data(
                             serde_json::json!({
                                 "error": {
@@ -759,6 +845,7 @@ mod tests {
     use super::*;
     use crate::contracts::executor::ContractExecutionResult;
     use crate::contracts::{ContractOutput, ContractResult};
+    use crate::engine::eos_monitor::{DEFAULT_MIN_STOP_RATE, EosMonitor};
     use crate::engine::model_runner::FinishReason;
 
     fn request() -> ChatCompletionRequest {
@@ -985,6 +1072,21 @@ mod tests {
         chat_template: Option<std::sync::Arc<crate::api::chat_template::ResolvedTemplate>>,
         inference_tx: Option<std::sync::mpsc::Sender<crate::engine::model_runner::InferenceJob>>,
     ) -> AppState {
+        state_with_monitor(
+            chat_template,
+            inference_tx,
+            // The default window is 20, so no test that does not ask for a
+            // narrower one can fill it — which is what keeps the monitor out of
+            // every assertion in this module that is not about it.
+            std::sync::Arc::new(EosMonitor::default()),
+        )
+    }
+
+    fn state_with_monitor(
+        chat_template: Option<std::sync::Arc<crate::api::chat_template::ResolvedTemplate>>,
+        inference_tx: Option<std::sync::mpsc::Sender<crate::engine::model_runner::InferenceJob>>,
+        eos_monitor: std::sync::Arc<EosMonitor>,
+    ) -> AppState {
         use crate::engine::{MemoryAwareConfig, MemoryAwareScheduler};
         AppState {
             scheduler: std::sync::Arc::new(MemoryAwareScheduler::new(MemoryAwareConfig::default())),
@@ -992,6 +1094,7 @@ mod tests {
             db_pool: None,
             inference_tx,
             chat_template,
+            eos_monitor,
         }
     }
 
@@ -1148,7 +1251,7 @@ mod tests {
 
     /// A stub model runner on a real thread: records `(prompt,
     /// add_special_tokens)` for every job and answers each with
-    /// [`UNPARSEABLE_REPLY`].
+    /// [`UNPARSEABLE_REPLY`], reporting [`FinishReason::Stop`].
     ///
     /// It returns its recording once every `Sender` clone has been dropped,
     /// which is why each caller below lets the value holding the sender go out
@@ -1157,19 +1260,48 @@ mod tests {
         std::sync::mpsc::Sender<crate::engine::model_runner::InferenceJob>,
         std::thread::JoinHandle<Vec<(String, bool)>>,
     ) {
-        use crate::engine::model_runner::{CompletionResult, InferenceJob, ResponseMode};
+        stub_runner_with(FinishReason::Stop)
+    }
+
+    /// [`stub_runner`] answering every job — streaming or not — with a chosen
+    /// finish reason.
+    ///
+    /// The reason is a parameter because a monitor test whose stub always
+    /// reports `Stop` cannot tell a monitor that records the completion from
+    /// one that records a constant. Each such test runs both values and asserts
+    /// a different rate for each.
+    ///
+    /// The `Streaming` arm is served rather than dropped: dropping the sender
+    /// ends the client's stream with no `Done` frame at all, so the streaming
+    /// path would have nothing to observe and a test of it would pass against a
+    /// handler that never records.
+    fn stub_runner_with(
+        finish_reason: FinishReason,
+    ) -> (
+        std::sync::mpsc::Sender<crate::engine::model_runner::InferenceJob>,
+        std::thread::JoinHandle<Vec<(String, bool)>>,
+    ) {
+        use crate::engine::model_runner::{
+            CompletionResult, InferenceJob, ResponseMode, StreamItem,
+        };
         let (tx, rx) = std::sync::mpsc::channel::<InferenceJob>();
         let handle = std::thread::spawn(move || {
             let mut jobs: Vec<(String, bool)> = Vec::new();
             while let Ok(job) = rx.recv() {
                 jobs.push((job.prompt.clone(), job.add_special_tokens));
-                if let ResponseMode::Complete(resp) = job.response_mode {
-                    let _ = resp.send(Ok(CompletionResult {
-                        text: UNPARSEABLE_REPLY.to_string(),
-                        prompt_tokens: 1,
-                        completion_tokens: 1,
-                        finish_reason: FinishReason::Stop,
-                    }));
+                match job.response_mode {
+                    ResponseMode::Complete(resp) => {
+                        let _ = resp.send(Ok(CompletionResult {
+                            text: UNPARSEABLE_REPLY.to_string(),
+                            prompt_tokens: 1,
+                            completion_tokens: 1,
+                            finish_reason,
+                        }));
+                    }
+                    ResponseMode::Streaming(chunks) => {
+                        let _ = chunks.send(Ok(StreamItem::Token(UNPARSEABLE_REPLY.to_string())));
+                        let _ = chunks.send(Ok(StreamItem::Done { finish_reason }));
+                    }
                 }
             }
             jobs
@@ -1484,5 +1616,234 @@ mod tests {
             "the template rendered after all: {:?}",
             jobs[0].0
         );
+    }
+
+    // ─── The EOS monitor, at each of the three completion sites ─────────────
+    //
+    // Every test below runs the stub twice, once reporting `Stop` and once
+    // `Length`, and asserts a DIFFERENT rate for each. That pairing is what
+    // makes them able to fail: a handler that records nothing reports `None`
+    // for both, and one that records a constant reports the same number for
+    // both, so neither can be told from a correct handler by a single run.
+    //
+    // The monitors are built with a window of one or two rather than the
+    // default twenty, so a reading exists after one or two completions and can
+    // be asserted as an exact value instead of a direction.
+
+    /// A request body carrying no contract and no `stream`, so it takes
+    /// `create_chat_completion`'s plain path.
+    fn plain_request(stream: bool) -> ChatCompletionRequest {
+        serde_json::from_value(serde_json::json!({
+            "model": "fixture",
+            "messages": [{"role": "user", "content": CONTRACT_QUESTION}],
+            "max_tokens": 8,
+            "temperature": 0.0,
+            "stream": stream
+        }))
+        .expect("the request body must deserialize")
+    }
+
+    /// The plain path records the reason the runner reported, not a constant.
+    #[tokio::test]
+    async fn a_plain_completion_is_recorded_with_the_reason_the_runner_reported() {
+        for (reason, expected_rate) in [(FinishReason::Stop, 1.0), (FinishReason::Length, 0.0)] {
+            let (tx, runner) = stub_runner_with(reason);
+            // Window of one: a single completion is a full reading, so the rate
+            // is exactly that completion's finish reason.
+            let monitor = std::sync::Arc::new(EosMonitor::new(1, DEFAULT_MIN_STOP_RATE));
+            let state = state_with_monitor(None, Some(tx), monitor.clone());
+
+            assert_eq!(
+                monitor.stop_rate(),
+                None,
+                "control: the monitor already held a reading before the request ran"
+            );
+
+            let response = chat_completions(State(state), Json(plain_request(false)))
+                .await
+                .into_response();
+            assert_eq!(response.status(), StatusCode::OK);
+
+            // `state` was moved into the handler and dropped with it, so the
+            // stub's `recv` has ended.
+            let jobs = runner.join().expect("stub runner panicked");
+            assert_eq!(jobs.len(), 1, "expected one inference, saw {}", jobs.len());
+            assert_eq!(
+                monitor.stop_rate(),
+                Some(expected_rate),
+                "a completion the runner ended with {reason:?} was not what the \
+                 monitor recorded"
+            );
+        }
+    }
+
+    /// The streaming path records too.
+    ///
+    /// This is the site a fix aimed at `create_chat_completion` leaves behind —
+    /// the same miss this file already has history with, when it carried two
+    /// prompt-construction sites and one of them was fixed. A monitor fed only
+    /// by the plain path never fills its window on a server whose clients
+    /// stream, and a monitor that never reports is indistinguishable in the log
+    /// from a model that is answering correctly.
+    #[tokio::test]
+    async fn a_streaming_completion_is_recorded_with_the_reason_the_runner_reported() {
+        for (reason, expected_rate) in [(FinishReason::Stop, 1.0), (FinishReason::Length, 0.0)] {
+            let (tx, runner) = stub_runner_with(reason);
+            let monitor = std::sync::Arc::new(EosMonitor::new(1, DEFAULT_MIN_STOP_RATE));
+            let state = state_with_monitor(None, Some(tx), monitor.clone());
+
+            // Driven to completion: the observation happens on the `Done` frame,
+            // which is the last thing the stream yields.
+            let frames = create_chat_stream(state, plain_request(true))
+                .collect::<Vec<_>>()
+                .await;
+            assert_eq!(
+                frames.len(),
+                2,
+                "expected one token frame and one done frame, saw {}",
+                frames.len()
+            );
+
+            let jobs = runner.join().expect("stub runner panicked");
+            assert_eq!(jobs.len(), 1, "expected one inference, saw {}", jobs.len());
+            assert_eq!(
+                monitor.stop_rate(),
+                Some(expected_rate),
+                "a streamed completion the runner ended with {reason:?} was not \
+                 what the monitor recorded"
+            );
+        }
+    }
+
+    /// The contract path records **once per request**, carrying the finish
+    /// reason of the attempt whose text the client receives.
+    ///
+    /// The window is two and the run makes two requests of two attempts each,
+    /// so the count is pinned rather than only the value: a handler recording
+    /// per attempt fills the window during the first request and the
+    /// mid-run `None` assertion fails. That distinction matters because the
+    /// retries are prompts this server constructed, not completions a client
+    /// asked for — counting them would let a contract-heavy workload dominate
+    /// the rate.
+    #[tokio::test]
+    async fn a_contract_completion_is_recorded_once_with_its_final_finish_reason() {
+        for (reason, expected_rate) in [(FinishReason::Stop, 1.0), (FinishReason::Length, 0.0)] {
+            let (tx, runner) = stub_runner_with(reason);
+            let monitor = std::sync::Arc::new(EosMonitor::new(2, DEFAULT_MIN_STOP_RATE));
+            let state = state_with_monitor(None, Some(tx), monitor.clone());
+
+            let request: ChatCompletionRequest = serde_json::from_value(serde_json::json!({
+                "model": "fixture",
+                "messages": [{"role": "user", "content": CONTRACT_QUESTION}],
+                "max_tokens": 8,
+                "temperature": 0.0,
+                "lightbulb": {
+                    "output_contract": {
+                        "type": "enum_choice",
+                        "choices": ["yes", "no"],
+                        "case_sensitive": false,
+                        "allow_index": true
+                    },
+                    "max_attempts": 2
+                }
+            }))
+            .expect("the request body must deserialize");
+
+            let first = chat_completions(State(state.clone()), Json(request.clone()))
+                .await
+                .into_response();
+            assert_eq!(first.status(), StatusCode::OK);
+            assert_eq!(
+                monitor.stop_rate(),
+                None,
+                "one request of two attempts filled a two-wide window, so every \
+                 retry this server constructed was counted as a completion"
+            );
+
+            let second = chat_completions(State(state), Json(request))
+                .await
+                .into_response();
+            assert_eq!(second.status(), StatusCode::OK);
+
+            let jobs = runner.join().expect("stub runner panicked");
+            assert_eq!(
+                jobs.len(),
+                4,
+                "expected two attempts per request over two requests, saw {}",
+                jobs.len()
+            );
+            assert_eq!(
+                monitor.stop_rate(),
+                Some(expected_rate),
+                "two contract requests the runner ended with {reason:?} were not \
+                 what the monitor recorded"
+            );
+        }
+    }
+
+    /// **The monitor observes and never acts.**
+    ///
+    /// A request made while the monitor is warning must be prompted exactly as
+    /// one made while it is quiet. This is the claim the whole design rests on:
+    /// re-resolving the template, or retrying under another candidate, when the
+    /// rate drops was rejected on debuggability (spec §3) — a server that
+    /// changes its prompting mid-flight cannot be diagnosed from a
+    /// request/response pair.
+    ///
+    /// Verified by mutation: adding
+    /// `if state.eos_monitor.should_warn() { return joined(legacy_join(&raw)); }`
+    /// to `build_prompt` — the smallest plausible way for the monitor to start
+    /// acting — makes the second request arrive as `"user: Name the capital of
+    /// France."` and this test fail, with every other test in the repo green.
+    #[tokio::test]
+    async fn a_warning_monitor_does_not_change_what_is_prompted() {
+        let dir = bos_doubling_checkpoint("monitor-never-acts");
+        let template = crate::api::chat_template::resolve_for_serving(&dir);
+        assert!(
+            template.is_some(),
+            "the fixture's tokenizer_config.json did not resolve a template, so \
+             this test would be measuring the legacy join"
+        );
+
+        // Window of one, and a runner that never emits EOS: the first request
+        // alone puts the monitor below the threshold, so the second is made by a
+        // server that is already warning.
+        let (tx, runner) = stub_runner_with(FinishReason::Length);
+        let monitor = std::sync::Arc::new(EosMonitor::new(1, DEFAULT_MIN_STOP_RATE));
+        let state = state_with_monitor(template, Some(tx), monitor.clone());
+
+        let first = chat_completions(State(state.clone()), Json(plain_request(false)))
+            .await
+            .into_response();
+        assert_eq!(first.status(), StatusCode::OK);
+        assert!(
+            monitor.should_warn(),
+            "the monitor is not in the warning state after a completion that ran \
+             to its token budget, so this test never exercises its claim"
+        );
+
+        let second = chat_completions(State(state), Json(plain_request(false)))
+            .await
+            .into_response();
+        assert_eq!(second.status(), StatusCode::OK);
+
+        let jobs = runner.join().expect("stub runner panicked");
+        assert_eq!(jobs.len(), 2, "expected two inferences, saw {}", jobs.len());
+
+        // Equality against a rendering written out by hand, not against
+        // `jobs[0]`: two requests prompted identically *wrongly* would satisfy
+        // `jobs[1] == jobs[0]`.
+        let expected = expected_llama3_render(&[("user", CONTRACT_QUESTION)]);
+        for (i, (prompt, add_special_tokens)) in jobs.iter().enumerate() {
+            assert_eq!(
+                prompt, &expected,
+                "request {i} was not prompted with this model's template — the \
+                 monitor changed what is sent instead of only reporting on it"
+            );
+            assert!(
+                !add_special_tokens,
+                "request {i} changed how the prompt is tokenized"
+            );
+        }
     }
 }
