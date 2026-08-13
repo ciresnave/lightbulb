@@ -1252,13 +1252,16 @@ fn measure_render_cost() {
     );
 }
 
-// ─── The probe's report ─────────────────────────────────────────────────────
+// ─── The probe's report and its selection rule ──────────────────────────────
 //
-// Generating under a candidate template needs a model, so it has no automated
-// test at all — see `src/bin/lightbulb-probe.rs`. Formatting does not, which is
-// why `ProbeRow` and `format_probe_report` live in the library rather than in
-// the binary: `src/bin/*.rs` is a separate crate and nothing here could reach
-// into one.
+// Generating under a candidate template needs a model, so THAT part has no
+// automated test — see `src/bin/lightbulb-probe.rs`. Formatting and selection
+// do not, which is why `ProbeRow`, `format_probe_report` and
+// `select_probe_winner` live in the library rather than in the binary:
+// `src/bin/*.rs` is a separate crate and nothing here could reach into one.
+// While the selection `match` sat in the binary it was untested, and it is the
+// step that decides what gets persisted at `Resolution::Probe` — the tier
+// `resolve` consults before every other one.
 
 /// The table an operator reads must show every candidate and name no winner.
 ///
@@ -1304,9 +1307,9 @@ fn probe_report_renders_every_candidate_and_picks_no_winner() {
     );
 
     // Separate claim, so it is not folded into the layout equality: the report
-    // must not announce a conclusion. Selection belongs to the binary, and an
-    // operator has to be able to read a two-winner or zero-winner board for
-    // what it is.
+    // must not announce a conclusion. Selection is a separate step
+    // (`select_probe_winner`), and an operator has to be able to read a
+    // two-winner or zero-winner board for what it is.
     let lower = format_probe_report(&rows).to_lowercase();
     for banned in ["winner", "best", "recommend", "selected"] {
         assert!(
@@ -1359,4 +1362,276 @@ fn first_line_of_skips_leading_blank_lines() {
     let out = first_line_of(&long);
     assert_eq!(out.chars().count(), 60);
     assert!(out.ends_with("..."), "{out:?}");
+}
+
+/// Build one probe row. `source` differs per candidate on purpose: it is what
+/// `Sidecar.template` is written from, so a selection that returned the right
+/// NAME carried on the wrong row would still write the wrong template.
+fn probe_row(
+    candidate: &'static str,
+    source: &'static str,
+    stopped_on_eos: bool,
+    tokens_generated: usize,
+) -> lightbulb::api::chat_template::ProbeRow {
+    lightbulb::api::chat_template::ProbeRow {
+        candidate,
+        source,
+        stopped_on_eos,
+        tokens_generated,
+        first_line: format!("{candidate} said something"),
+    }
+}
+
+/// Exactly one candidate fired: that candidate wins — and it is NOT `rows[0]`.
+///
+/// **The row identity is asserted, not `is_ok()`.** The probe writes
+/// `winner.source` into the sidecar at `Resolution::Probe`, so "an Ok" and "the
+/// right Ok" are entirely different claims. `rows[0]` is deliberately a loser
+/// here, which is what makes an implementation returning the first row fail
+/// this test instead of passing it by luck.
+#[test]
+fn probe_selection_returns_the_one_candidate_that_stopped_on_eos() {
+    use lightbulb::api::chat_template::select_probe_winner;
+
+    let rows = vec![
+        probe_row("zephyr", "SRC_Z", false, 48),
+        probe_row("chatml", "SRC_C", true, 10),
+        probe_row("llama2", "SRC_L", false, 48),
+    ];
+    let winner =
+        select_probe_winner(&rows).expect("one candidate fired, so selection must succeed");
+
+    // Pointer identity first: it pins the returned reference to a specific
+    // element, which no field comparison can be fooled about.
+    assert!(
+        std::ptr::eq(winner, &rows[1]),
+        "selection returned {:?}, not the row that fired",
+        winner.candidate
+    );
+    assert_eq!(winner.candidate, "chatml");
+    // The source is the value that reaches disk. Asserted separately so a
+    // regression that decoupled name from source names itself.
+    assert_eq!(winner.source, "SRC_C");
+    assert_eq!(winner.tokens_generated, 10);
+}
+
+/// No candidate fired: refuse, and say *that* rather than something else.
+///
+/// The message is asserted because "an Err" is not the property — an
+/// implementation that folded this board into the tie message would refuse
+/// correctly and then tell the operator "0 candidates stopped on EOS ()",
+/// which reads as a formatting bug rather than the real finding: none of the
+/// three registry templates suits this checkpoint.
+#[test]
+fn probe_selection_refuses_when_no_candidate_stopped_on_eos() {
+    use lightbulb::api::chat_template::select_probe_winner;
+
+    let rows = vec![
+        probe_row("zephyr", "SRC_Z", false, 48),
+        probe_row("chatml", "SRC_C", false, 48),
+        probe_row("llama2", "SRC_L", false, 48),
+    ];
+    let err = match select_probe_winner(&rows) {
+        Ok(w) => panic!(
+            "selection picked {} from a board where nothing fired",
+            w.candidate
+        ),
+        Err(e) => format!("{e:#}"),
+    };
+    assert!(
+        err.contains("no candidate stopped on EOS"),
+        "the zero-winner refusal did not say so: {err}"
+    );
+    // The operator must be told nothing was persisted; the probe's conclusion
+    // outranks every other tier, so silence here reads as "it wrote something".
+    assert!(
+        err.contains("Nothing was written."),
+        "the zero-winner refusal did not say nothing was written: {err}"
+    );
+    // And it must not have degenerated into the tie wording.
+    assert!(
+        !err.contains("cannot choose between them"),
+        "the zero-winner board was reported as a tie: {err}"
+    );
+}
+
+/// Two candidates fired: refuse. Do not tie-break, do not take the first.
+///
+/// This is the board that separates "requires a unique winner" from "finds a
+/// winner": an implementation built on `find`/`first` returns a perfectly
+/// plausible row here and writes it to disk at the highest-authority tier.
+#[test]
+fn probe_selection_refuses_a_two_candidate_tie() {
+    use lightbulb::api::chat_template::select_probe_winner;
+
+    let rows = vec![
+        probe_row("zephyr", "SRC_Z", true, 14),
+        probe_row("chatml", "SRC_C", true, 10),
+        probe_row("llama2", "SRC_L", false, 48),
+    ];
+    let err = match select_probe_winner(&rows) {
+        Ok(w) => panic!("selection guessed {} from a two-way tie", w.candidate),
+        Err(e) => format!("{e:#}"),
+    };
+    assert!(
+        err.contains("2 candidates stopped on EOS"),
+        "the tie refusal did not report the count: {err}"
+    );
+    // Both tied candidates named, so the operator can see WHICH tie it was.
+    assert!(
+        err.contains("zephyr") && err.contains("chatml"),
+        "the tie refusal did not name both candidates: {err}"
+    );
+    // The candidate that did NOT fire must not be named as a tie participant.
+    assert!(
+        !err.contains("llama2"),
+        "the tie refusal named a candidate that never fired: {err}"
+    );
+    assert!(
+        err.contains("will not guess"),
+        "the tie refusal did not say it will not guess: {err}"
+    );
+    assert!(
+        err.contains("Nothing was written."),
+        "the tie refusal did not say nothing was written: {err}"
+    );
+}
+
+/// THREE candidates fired: still refuse, and count them correctly.
+///
+/// **This is the real TinyLlama board, measured 2026-08-13** — zephyr stopped
+/// on EOS in 14 tokens, chatml in 10, llama2 in 3 — not a hypothetical extra
+/// case. An implementation that handles "a tie" as "exactly two" mis-handles
+/// the only board this probe has ever actually produced against a real
+/// checkpoint, which is why the count is asserted rather than just the `Err`.
+#[test]
+fn probe_selection_refuses_a_three_candidate_tie() {
+    use lightbulb::api::chat_template::select_probe_winner;
+
+    let rows = vec![
+        probe_row("zephyr", "SRC_Z", true, 14),
+        probe_row("chatml", "SRC_C", true, 10),
+        probe_row("llama2", "SRC_L", true, 3),
+    ];
+    let err = match select_probe_winner(&rows) {
+        Ok(w) => panic!("selection guessed {} from a three-way tie", w.candidate),
+        Err(e) => format!("{e:#}"),
+    };
+    assert!(
+        err.contains("3 candidates stopped on EOS"),
+        "the three-way tie was not counted as three: {err}"
+    );
+    assert!(
+        err.contains("zephyr") && err.contains("chatml") && err.contains("llama2"),
+        "the three-way tie refusal did not name all three candidates: {err}"
+    );
+    assert!(
+        err.contains("Nothing was written."),
+        "the three-way tie refusal did not say nothing was written: {err}"
+    );
+}
+
+/// Locate the checkpoint, preferring `TINYLLAMA_DIR`. Same shape as
+/// `tests/chat_template_e2e.rs`'s and `tests/api_result_metadata.rs`'s.
+fn tinyllama_dir() -> Option<std::path::PathBuf> {
+    let p = match std::env::var_os("TINYLLAMA_DIR") {
+        Some(v) => std::path::PathBuf::from(v),
+        None => std::path::PathBuf::from(
+            "C:/Users/cires/.cache/huggingface/hub/models--TinyLlama--TinyLlama-1.1B-Chat-v1.0/snapshots/fe8a4ea1ffedaf415f4da2f062534de366a451e6",
+        ),
+    };
+    p.join("model.safetensors").is_file().then_some(p)
+}
+
+/// **A characterization test: it records that the probe's discriminator does
+/// NOT discriminate on TinyLlama.** Read the next paragraph before treating a
+/// green run here as good news.
+///
+/// This test passing does **not** show the probe works. It shows the opposite,
+/// pinned: run against TinyLlama-1.1B-Chat, all THREE registry candidates stop
+/// on EOS (measured 2026-08-13 — zephyr 14 tokens, chatml 10, llama2 3), so the
+/// probe correctly refuses to guess and exits non-zero having written nothing.
+/// The refusal is the only part demonstrated to work; the measurement
+/// underneath it cannot tell these three templates apart on this checkpoint,
+/// even on the multi-turn conversation adopted specifically to try to.
+///
+/// Its value is that the limitation becomes an asserted fact rather than
+/// folklore. If someone later strengthens the discriminator — a sharper prompt,
+/// a stricter stop condition, scoring beyond a bare EOS flag — and it begins
+/// selecting a winner on TinyLlama, this test goes RED. That is the intended
+/// outcome, and whoever made it happen must then come here and rewrite this
+/// test deliberately, recording the new board, instead of the change landing
+/// unremarked against a suite that never looked.
+///
+/// **stdin is closed** (`Stdio::null()`), so `confirm`'s `read_line` returns
+/// `Ok(0)` and can never answer yes. Today that path is unreachable — the tie
+/// aborts first — and it stays closed for exactly the day it becomes reachable:
+/// a strengthened probe must not be able to write a sidecar from inside a test
+/// run. Hence the final assertion, which guards a real hazard rather than
+/// tidiness: `TINYLLAMA_DIR` is the SHARED checkpoint every other checkpoint
+/// test measures against, and a sidecar left there resolves at
+/// `Resolution::Probe` — ahead of every other tier — silently changing what
+/// those later runs measure.
+///
+/// Not run by default: it loads the checkpoint and generates three times, which
+/// takes several minutes.
+///
+/// ```text
+/// cargo test --test chat_template_render probe_binary -- --ignored --nocapture
+/// ```
+#[test]
+#[ignore = "runs the probe binary against a real checkpoint; several minutes"]
+fn probe_binary_refuses_tinyllama_because_all_three_candidates_fire() {
+    let dir = tinyllama_dir().expect(
+        "no TinyLlama checkpoint. Set TINYLLAMA_DIR to a directory containing \
+         model.safetensors and tokenizer.json. This test asserts real probe behaviour \
+         against a real model, so it fails rather than skipping.",
+    );
+    let sidecar = dir.join(lightbulb::api::chat_template::SIDECAR_NAME);
+    // A sidecar already present would make the closing assertion meaningless,
+    // and would already be changing what every other checkpoint test measures.
+    assert!(
+        !sidecar.exists(),
+        "{} exists before this test ran; the shared checkpoint is already carrying a \
+         Resolution::Probe answer. Remove it, then re-run.",
+        sidecar.display()
+    );
+
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_lightbulb-probe"))
+        .arg(&dir)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("running the probe binary");
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+
+    assert!(
+        !out.status.success(),
+        "the probe exited 0 on TinyLlama. If the discriminator now separates the \
+         candidates, that is an improvement and this characterization test is stale — \
+         update it with the new board.\n--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}"
+    );
+    assert!(
+        stderr.contains("candidates stopped on EOS"),
+        "the probe failed for some reason OTHER than the tie this test characterizes.\
+         \n--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}"
+    );
+    assert!(
+        stderr.contains("3 candidates stopped on EOS"),
+        "the tie is no longer three-way. Measured 2026-08-13: zephyr 14 tokens, chatml \
+         10, llama2 3 — all three firing. Record what it is now.\
+         \n--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}"
+    );
+    assert!(
+        stderr.contains("Nothing was written."),
+        "the refusal did not tell the operator nothing was written.\
+         \n--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}"
+    );
+    // The shared checkpoint must come out of this exactly as it went in.
+    assert!(
+        !sidecar.exists(),
+        "the probe wrote {} despite refusing; every later run against this shared \
+         checkpoint would then resolve at Resolution::Probe.",
+        sidecar.display()
+    );
 }

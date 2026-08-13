@@ -775,11 +775,12 @@ pub fn first_line_of(text: &str) -> String {
 
 /// Format probe results as a per-candidate table.
 ///
-/// **Reports every candidate, and never picks the winner.** Selection is the
-/// binary's job and is deliberately separate: an operator reading this table
-/// must be able to see a board where two candidates both fired, or none did,
-/// and draw their own conclusion. Printing only a leader would hide exactly the
-/// cases where the probe should not be trusted.
+/// **Reports every candidate, and never picks the winner.** Selection is
+/// [`select_probe_winner`]'s job and is deliberately a separate step: an
+/// operator reading this table must be able to see a board where two candidates
+/// both fired, or none did, and draw their own conclusion. Printing only a
+/// leader would hide exactly the cases where the probe should not be trusted —
+/// which are precisely the boards selection refuses to act on.
 ///
 /// Decoding is greedy, so each row is ONE deterministic generation, not a
 /// sample. A row is reproducible; re-running the probe on the same checkpoint
@@ -796,4 +797,50 @@ pub fn format_probe_report(rows: &[ProbeRow]) -> String {
         ));
     }
     s
+}
+
+/// Which candidate, if any, a probe run may act on.
+///
+/// **Refuse rather than guess** — the whole design rests on this one rule. The
+/// probe's conclusion is persisted at [`Resolution::Probe`], which [`resolve`]
+/// reads BEFORE every other tier on the next server start, so a wrong answer
+/// here outranks the checkpoint's own `tokenizer_config.json` indefinitely and
+/// silently. Exactly one candidate stopping on EOS is the only board that
+/// carries a signal; zero says none of these templates suits the checkpoint,
+/// and two-or-more says the discriminator failed to discriminate. Neither of
+/// those is a tie to break — they are results the operator has to see.
+///
+/// This lives here, beside [`ProbeRow`] and [`format_probe_report`], rather
+/// than in `src/bin/lightbulb-probe.rs`, for the reason given above them:
+/// `src/bin/*.rs` is a separate crate and no integration test can reach into
+/// one. While this `match` sat in the binary it had no test of any kind, so the
+/// safety property was asserted nowhere. The binary keeps only the parts that
+/// genuinely need a checkpoint.
+pub fn select_probe_winner(rows: &[ProbeRow]) -> anyhow::Result<&ProbeRow> {
+    let fired: Vec<&ProbeRow> = rows.iter().filter(|r| r.stopped_on_eos).collect();
+    match fired.as_slice() {
+        [only] => Ok(only),
+        // Refusal 1. Note what this does NOT claim: a model that failed to LOAD
+        // cannot reach this message, because that aborts the probe at the first
+        // candidate with the runner's own error. By here the model demonstrably
+        // loaded and generated.
+        [] => anyhow::bail!(
+            "no candidate stopped on EOS, so none of these three templates suits this checkpoint. \
+             (A model that failed to LOAD cannot reach this message — that aborts the probe at \
+             the first candidate with the runner's own error.) Nothing was written."
+        ),
+        // Refusal 2. Do not tie-break: two templates that both end the turn
+        // cleanly is a result the operator has to see, not one to guess past.
+        // `many.len()` is printed rather than a literal `2` because three
+        // candidates firing is the measured TinyLlama board, not a hypothetical.
+        many => anyhow::bail!(
+            "{} candidates stopped on EOS ({}). The probe cannot choose between them and will not \
+             guess. Nothing was written.",
+            many.len(),
+            many.iter()
+                .map(|r| r.candidate)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
 }

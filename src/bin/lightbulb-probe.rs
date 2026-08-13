@@ -47,7 +47,7 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use lightbulb::api::chat_template::{
     ChatTemplate, ProbeRow, Resolution, Sidecar, fingerprint, first_line_of, format_probe_report,
-    registry, sidecar_path, special_tokens, write_sidecar,
+    registry, select_probe_winner, sidecar_path, special_tokens, write_sidecar,
 };
 use lightbulb::contracts::validation::RawMessage;
 use lightbulb::engine::ModelRunner;
@@ -208,30 +208,11 @@ async fn probe(model_dir: &Path, assume_yes: bool) -> anyhow::Result<()> {
     print!("\n{}", format_probe_report(&rows));
     std::io::stdout().flush()?;
 
-    let fired: Vec<&ProbeRow> = rows.iter().filter(|r| r.stopped_on_eos).collect();
-    let winner: &ProbeRow = match fired.as_slice() {
-        [only] => only,
-        // Refusal 1. Note what this does NOT claim: a model that failed to LOAD
-        // cannot reach this message, because that aborts the probe at the first
-        // candidate with the runner's own error. By here the model demonstrably
-        // loaded and generated.
-        [] => bail!(
-            "no candidate stopped on EOS, so none of these three templates suits this checkpoint. \
-             (A model that failed to LOAD cannot reach this message — that aborts the probe at \
-             the first candidate with the runner's own error.) Nothing was written."
-        ),
-        // Refusal 2. Do not tie-break: two templates that both end the turn
-        // cleanly is a result the operator has to see, not one to guess past.
-        many => bail!(
-            "{} candidates stopped on EOS ({}). The probe cannot choose between them and will not \
-             guess. Nothing was written.",
-            many.len(),
-            many.iter()
-                .map(|r| r.candidate)
-                .collect::<Vec<_>>()
-                .join(", ")
-        ),
-    };
+    // Refusals 1 and 2 (zero winners, two-or-more winners) live in the library
+    // as `select_probe_winner`, with their messages, because a `match` in
+    // `src/bin/*.rs` is unreachable from any test — see that function and
+    // `tests/chat_template_render.rs`.
+    let winner: &ProbeRow = select_probe_winner(&rows)?;
 
     // Refusal 3. `fingerprint` is `Option`, and it fails closed on purpose —
     // reaching for `unwrap_or_default()` here is the bug that made every
