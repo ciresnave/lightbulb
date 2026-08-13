@@ -844,3 +844,60 @@ pub fn select_probe_winner(rows: &[ProbeRow]) -> anyhow::Result<&ProbeRow> {
         ),
     }
 }
+
+/// The candidate the OPERATOR named, having read the board `--accept` printed.
+///
+/// # Why this exists at all
+///
+/// [`select_probe_winner`]'s inference has been measured to carry no
+/// information, on two checkpoints of deliberately opposite character — see
+/// `src/bin/lightbulb-probe.rs`'s module docs for both boards. Every candidate
+/// stopped on EOS both times, so the automatic rule refused both times; but the
+/// two boards' OUTPUT TEXT separated the candidates immediately to a human. The
+/// signal is in the text, and only a human is reading it, so the human's verdict
+/// is what this function carries.
+///
+/// # `stopped_on_eos` is deliberately not consulted
+///
+/// **A row that did not fire EOS is still acceptable here, and that is the whole
+/// feature.** Filtering by it first would re-impose exactly the discriminator
+/// that was measured to be uninformative, and would reject the operator's
+/// judgement in the one case they most need it: a checkpoint whose EOS never
+/// stops generation (it is emitted as ordinary text, or the budget ran out
+/// mid-answer) but whose correct candidate is obvious from what it wrote.
+///
+/// # The rows, not the registry
+///
+/// The row is located **in `rows`**, and the returned row's own
+/// [`ProbeRow::source`] is what the caller writes to disk. Indexing
+/// `registry::candidates()` by name and then indexing `rows` by that position is
+/// the re-look-up hazard [`ProbeRow::source`] exists to remove: it agrees with
+/// this function only for as long as the probe happens to build its board in
+/// registry order.
+///
+/// The refusal names the valid candidates, because the operator is typing a name
+/// they read off a table and a bare "not found" leaves them guessing at the
+/// spelling of the very thing that was just printed. Those names come from
+/// `registry::candidates()` — the set `--accept` will ever accept — so the
+/// message is right even for a board that is short a row because a render
+/// failed.
+pub fn select_named_candidate<'a>(
+    rows: &'a [ProbeRow],
+    name: &str,
+) -> anyhow::Result<&'a ProbeRow> {
+    // NOT `.filter(|r| r.stopped_on_eos)`. See the docs above; that one line is
+    // the difference between this function and the one it exists beside.
+    match rows.iter().find(|r| r.candidate == name) {
+        Some(row) => Ok(row),
+        None => anyhow::bail!(
+            "`{}` is not a candidate this probe measured. Valid candidates are: {}. Nothing was \
+             written.",
+            name,
+            registry::candidates()
+                .iter()
+                .map(|(n, _)| *n)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
+}

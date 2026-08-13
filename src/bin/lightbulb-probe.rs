@@ -30,6 +30,50 @@
 //! guards was never sampling noise — it is that a probe over-fits its one
 //! prompt, which is just as true at N=1.
 //!
+//! # The automatic rule is inert; `--accept` is the path that works
+//!
+//! `select_probe_winner` acts only on a board where **exactly one** candidate
+//! stopped on EOS. That has now been measured to carry no information, on two
+//! checkpoints picked to be as unalike as the question allows.
+//!
+//! TinyLlama-1.1B-Chat, whose turn markers are ordinary text, on `CONVERSATION`:
+//!
+//! ```text
+//! zephyr      yes   14   Japan. Tokyo is the capital and largest city of Japan.</s>
+//! chatml      yes   10   Tokyo, the capital of Japan.</s>
+//! llama2      yes    3   Tokyo.</s>
+//! ```
+//!
+//! SmolLM2-360M-Instruct, whose `<|im_start|>`/`<|im_end|>` are genuine added
+//! tokens and which ships its own ChatML template — so its ground truth is known
+//! independently of anything measured here:
+//!
+//! ```text
+//! zephyr      yes    8   The capital of Japan is Tokyo.<|im_end|>
+//! chatml      yes    4   Tokyo.<|im_end|>
+//! llama2      yes   27   Nativescriptscript
+//! ```
+//!
+//! All three candidates fired on both, so the probe refused both as ties. The
+//! EOS column is constant across a board whose ground truth is not: the flag
+//! does not discriminate. **The output column does, immediately** — on SmolLM2
+//! the ground-truth-correct `chatml` gave the crispest correct answer and
+//! `llama2` produced obvious garbage.
+//!
+//! Token count is not the missing rule and must not become one: SmolLM2's
+//! shortest answer is the correct candidate and TinyLlama's shortest is the
+//! wrong one, so a length heuristic would be right once and confidently wrong
+//! once — which is worse than refusing, because it persists at
+//! `Resolution::Probe`.
+//!
+//! So `--accept <candidate>` hands the reading of that column to the operator.
+//! The automatic rule stays, unchanged, for when `--accept` is absent: it is
+//! safe-but-inert — its refusals mean it cannot pick wrong — and deleting a
+//! tested safety rule to buy nothing is not a simplification. All the
+//! generations still run under `--accept`, because the `evidence` the sidecar
+//! records has to describe a board this run actually observed, not one the
+//! operator remembers.
+//!
 //! # Every measurement constant is fixed, deliberately
 //!
 //! The prompt, the token budget, the temperature, the `add_special_tokens`
@@ -47,7 +91,8 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use lightbulb::api::chat_template::{
     ChatTemplate, ProbeRow, Resolution, Sidecar, fingerprint, first_line_of, format_probe_report,
-    registry, select_probe_winner, sidecar_path, special_tokens, write_sidecar,
+    registry, select_named_candidate, select_probe_winner, sidecar_path, special_tokens,
+    write_sidecar,
 };
 use lightbulb::contracts::validation::RawMessage;
 use lightbulb::engine::ModelRunner;
@@ -97,6 +142,12 @@ struct Args {
     /// writes a wrong answer unattended.
     #[arg(long)]
     yes: bool,
+    /// Record this candidate, overriding the EOS rule. The operator reads the
+    /// table and names the winner; see the module docs for why that column and
+    /// not the EOS one. Every generation still runs, and every refusal other
+    /// than the EOS rule still applies.
+    #[arg(long, value_name = "CANDIDATE")]
+    accept: Option<String>,
 }
 
 #[tokio::main]
@@ -116,10 +167,10 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let args = Args::parse();
-    probe(&args.model_dir, args.yes).await
+    probe(&args.model_dir, args.yes, args.accept.as_deref()).await
 }
 
-async fn probe(model_dir: &Path, assume_yes: bool) -> anyhow::Result<()> {
+async fn probe(model_dir: &Path, assume_yes: bool, accept: Option<&str>) -> anyhow::Result<()> {
     // Refusal -1, FIRST. Without this the most common operator error — a typo
     // in the path — gets the one diagnosis guaranteed to be wrong.
     // `special_tokens` swallows all three of its file reads, so a nonexistent
@@ -208,11 +259,19 @@ async fn probe(model_dir: &Path, assume_yes: bool) -> anyhow::Result<()> {
     print!("\n{}", format_probe_report(&rows));
     std::io::stdout().flush()?;
 
-    // Refusals 1 and 2 (zero winners, two-or-more winners) live in the library
-    // as `select_probe_winner`, with their messages, because a `match` in
-    // `src/bin/*.rs` is unreachable from any test — see that function and
-    // `tests/chat_template_render.rs`.
-    let winner: &ProbeRow = select_probe_winner(&rows)?;
+    // Both selection rules live in the library, with their refusal messages,
+    // because a `match` in `src/bin/*.rs` is unreachable from any test — see
+    // those functions and `tests/chat_template_render.rs`.
+    //
+    // `--accept` is checked HERE, after every generation, and is deliberately
+    // not pre-validated against `registry::candidates()` up at argument
+    // parsing. A typo would then be caught in two places by two copies of one
+    // rule, which is the mechanism by which the two drift; and the operator
+    // has to see the board anyway before their name means anything.
+    let winner: &ProbeRow = match accept {
+        Some(name) => select_named_candidate(&rows, name)?,
+        None => select_probe_winner(&rows)?,
+    };
 
     // Refusal 3. `fingerprint` is `Option`, and it fails closed on purpose —
     // reaching for `unwrap_or_default()` here is the bug that made every
@@ -243,16 +302,45 @@ async fn probe(model_dir: &Path, assume_yes: bool) -> anyhow::Result<()> {
         // One prose line, matching the shape every existing sidecar fixture
         // uses — not the whole table with its header stuffed into a JSON
         // string.
-        evidence: format!(
-            "probe: {} stopped on EOS in {} tokens; {} did not",
-            winner.candidate,
-            winner.tokens_generated,
-            rows.iter()
-                .filter(|r| !r.stopped_on_eos)
-                .map(|r| r.candidate)
-                .collect::<Vec<_>>()
-                .join(", ")
-        ),
+        //
+        // The two paths say different things on purpose. This file is read at
+        // `Resolution::Probe`, above every other tier, on every later server
+        // start, and "a measurement selected this" and "a human judged this"
+        // are different epistemic claims: the first is reproducible from the
+        // checkpoint, the second is not. The operator line therefore carries
+        // the whole board it was judged from — including each candidate's
+        // output, which is where the information actually was — so the next
+        // reader can audit the call instead of taking it on faith. Still one
+        // line: `first_line_of` already guarantees every cell is.
+        evidence: match accept {
+            // `winner.candidate`, not the raw `--accept` argument, for the same
+            // reason `winner.source` is used above: what is recorded is the row
+            // that was selected, never a string that merely ought to match it.
+            Some(_) => format!(
+                "probe: operator selected `{}` with --accept after reviewing this board: {}",
+                winner.candidate,
+                rows.iter()
+                    .map(|r| format!(
+                        "{} (EOS {}, {} tokens) {:?}",
+                        r.candidate,
+                        if r.stopped_on_eos { "yes" } else { "no" },
+                        r.tokens_generated,
+                        r.first_line
+                    ))
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            ),
+            None => format!(
+                "probe: {} stopped on EOS in {} tokens; {} did not",
+                winner.candidate,
+                winner.tokens_generated,
+                rows.iter()
+                    .filter(|r| !r.stopped_on_eos)
+                    .map(|r| r.candidate)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        },
         resolved_at: chrono::Utc::now().to_rfc3339(),
         model_fingerprint: fp,
     };

@@ -1531,6 +1531,233 @@ fn probe_selection_refuses_a_three_candidate_tie() {
     );
 }
 
+// ─── `--accept`: the operator reads the board and names the winner ──────────
+//
+// `select_probe_winner` above has been measured to be inert: on both
+// checkpoints it has ever run against, every candidate fired EOS and it refused
+// as a tie, while the OUTPUT column separated the candidates immediately to a
+// human. `select_named_candidate` carries that human verdict, so it must NOT
+// re-apply the discriminator that was measured not to discriminate. The four
+// tests below are each killed by a different wrong implementation; the mutation
+// matrix is in the commit message.
+
+/// The named candidate is returned — located in `rows`, never re-derived from
+/// the registry.
+///
+/// **The board is deliberately NOT in `registry::candidates()` order.** The
+/// function is handed a slice and its answer must come from that slice: an
+/// implementation that finds the name's position in `registry::candidates()` and
+/// then indexes `rows` with it agrees with a correct one for exactly as long as
+/// the probe happens to build its board in registry order, and writes a
+/// different template's source to disk the moment that stops holding. That is
+/// the re-look-up hazard `ProbeRow::source` exists to remove, and `zephyr` sits
+/// at registry index 0 and row index 2 here so that implementation fails.
+#[test]
+fn probe_accept_returns_the_named_row_from_the_rows_not_the_registry() {
+    use lightbulb::api::chat_template::select_named_candidate;
+
+    let rows = vec![
+        probe_row("llama2", "SRC_L", false, 48),
+        probe_row("chatml", "SRC_C", false, 48),
+        probe_row("zephyr", "SRC_Z", true, 8),
+    ];
+    let picked = select_named_candidate(&rows, "zephyr")
+        .expect("zephyr is on the board, so --accept zephyr must succeed");
+
+    // Pointer identity first: it pins the returned reference to one element,
+    // which no field comparison can be fooled about.
+    assert!(
+        std::ptr::eq(picked, &rows[2]),
+        "--accept zephyr returned the {:?} row",
+        picked.candidate
+    );
+    assert_eq!(picked.candidate, "zephyr");
+    // The source is the value that reaches disk as `Sidecar.template`. Asserted
+    // separately, because returning the right NAME carried on the wrong row is
+    // precisely how a wrong template gets persisted at `Resolution::Probe`.
+    assert_eq!(picked.source, "SRC_Z");
+    assert_eq!(picked.tokens_generated, 8);
+}
+
+/// **A candidate that did NOT stop on EOS is still accepted.** This is the
+/// feature.
+///
+/// An implementation that filters by `stopped_on_eos` before matching the name
+/// passes every other test in this file and fails only this one. It would also
+/// re-impose the exact rule `--accept` exists to override, and would do it in
+/// the case the operator most needs: a checkpoint that never stops — its EOS
+/// arrives as ordinary text, or the answer ran past the 48-token budget — where
+/// the correct candidate is obvious from what it wrote and invisible in the EOS
+/// column.
+///
+/// The two candidates that DID fire are on the board as wrong answers, so an
+/// implementation that quietly substitutes a firing row returns something
+/// plausible rather than erroring, and is caught by identity rather than by
+/// `is_err()`.
+#[test]
+fn probe_accept_takes_a_candidate_that_never_stopped_on_eos() {
+    use lightbulb::api::chat_template::{ProbeRow, select_named_candidate};
+
+    let rows = vec![
+        ProbeRow {
+            candidate: "zephyr",
+            source: "SRC_Z",
+            stopped_on_eos: true,
+            tokens_generated: 2,
+            first_line: "<|user|>".to_string(),
+        },
+        ProbeRow {
+            candidate: "chatml",
+            source: "SRC_C",
+            stopped_on_eos: true,
+            tokens_generated: 3,
+            first_line: "assistant assistant".to_string(),
+        },
+        ProbeRow {
+            candidate: "llama2",
+            source: "SRC_L",
+            stopped_on_eos: false,
+            tokens_generated: 48,
+            first_line: "Tokyo is the capital of Japan. Japan is an island".to_string(),
+        },
+    ];
+    let picked = select_named_candidate(&rows, "llama2")
+        .expect("--accept must not require the named candidate to have stopped on EOS");
+
+    assert!(
+        std::ptr::eq(picked, &rows[2]),
+        "--accept llama2 returned the {:?} row — the EOS flag was consulted",
+        picked.candidate
+    );
+    assert_eq!(picked.candidate, "llama2");
+    assert_eq!(picked.source, "SRC_L");
+    // Restated as a field, so the failure reads as what it is rather than as a
+    // pointer mismatch: the accepted row is the one that never fired.
+    assert!(
+        !picked.stopped_on_eos,
+        "the row --accept returned had stopped_on_eos set, so this board no \
+         longer tests the override at all"
+    );
+}
+
+/// An unknown name is refused, and the refusal lists the names that would work.
+///
+/// The operator is typing a name they read off a table one screen up, so a bare
+/// "not found" leaves them guessing at the spelling of the thing just printed.
+/// The message content is asserted, not `is_err()`: an implementation that
+/// refused with an empty message would satisfy the weaker check while being the
+/// whole defect.
+///
+/// The valid names are also checked against `registry::candidates()` itself, so
+/// adding a fourth candidate without adding it to the message fails here rather
+/// than in front of an operator.
+#[test]
+fn probe_accept_refuses_an_unknown_candidate_and_names_the_valid_ones() {
+    use lightbulb::api::chat_template::{registry, select_named_candidate};
+
+    let rows = vec![
+        probe_row("zephyr", "SRC_Z", true, 14),
+        probe_row("chatml", "SRC_C", true, 10),
+        probe_row("llama2", "SRC_L", true, 3),
+    ];
+    let err = match select_named_candidate(&rows, "chatlm") {
+        Ok(r) => panic!("--accept chatlm was honoured, returning {}", r.candidate),
+        Err(e) => format!("{e:#}"),
+    };
+
+    // What was rejected, so the operator sees their own typo.
+    assert!(
+        err.contains("chatlm"),
+        "the refusal did not repeat the name that was rejected: {err}"
+    );
+    // Literal, so an empty `candidates()` could not satisfy the loop below
+    // vacuously.
+    for valid in ["zephyr", "chatml", "llama2"] {
+        assert!(
+            err.contains(valid),
+            "the refusal did not name the valid candidate {valid}: {err}"
+        );
+    }
+    // And tied to the source of truth `--accept` is actually checked against.
+    for (name, _) in registry::candidates() {
+        assert!(
+            err.contains(name),
+            "`{name}` is a registry candidate that the refusal does not list: {err}"
+        );
+    }
+    // Same promise every other probe refusal makes; this one runs after three
+    // generations, so silence here reads as "it wrote something".
+    assert!(
+        err.contains("Nothing was written."),
+        "the unknown-candidate refusal did not say nothing was written: {err}"
+    );
+}
+
+/// The real SmolLM2-360M-Instruct board, measured 2026-08-12 — the measurement
+/// `--accept` exists because of.
+///
+/// `<|im_start|>`/`<|im_end|>` are genuine added tokens there and the checkpoint
+/// ships its own ChatML template, so `chatml` is the known-correct answer
+/// independently of anything the probe does. All three candidates stopped on
+/// EOS, so `select_probe_winner` refuses this board as a three-way tie — while
+/// the output column separates it instantly: `chatml` answered, `llama2` emitted
+/// `Nativescriptscript`.
+///
+/// `chatml` is deliberately not row 0, which is what makes an implementation
+/// that returns `rows[0]` — the first row, or the first row after a redundant
+/// EOS filter — fail here instead of passing by luck. Note that `zephyr`, the
+/// row such an implementation returns, also fired and also answered correctly,
+/// so the wrong answer is entirely plausible on this board and only identity
+/// catches it.
+#[test]
+fn probe_accept_returns_the_named_row_when_it_is_not_first() {
+    use lightbulb::api::chat_template::{ProbeRow, select_named_candidate};
+
+    let rows = vec![
+        ProbeRow {
+            candidate: "zephyr",
+            source: "SRC_Z",
+            stopped_on_eos: true,
+            tokens_generated: 8,
+            first_line: "The capital of Japan is Tokyo.<|im_end|>".to_string(),
+        },
+        ProbeRow {
+            candidate: "chatml",
+            source: "SRC_C",
+            stopped_on_eos: true,
+            tokens_generated: 4,
+            first_line: "Tokyo.<|im_end|>".to_string(),
+        },
+        ProbeRow {
+            candidate: "llama2",
+            source: "SRC_L",
+            stopped_on_eos: true,
+            tokens_generated: 27,
+            first_line: "Nativescriptscript".to_string(),
+        },
+    ];
+    let picked = select_named_candidate(&rows, "chatml")
+        .expect("chatml is on the board, so --accept chatml must succeed");
+
+    assert!(
+        std::ptr::eq(picked, &rows[1]),
+        "--accept chatml returned the {:?} row",
+        picked.candidate
+    );
+    assert_eq!(picked.candidate, "chatml");
+    assert_eq!(picked.source, "SRC_C");
+    assert_eq!(picked.tokens_generated, 4);
+
+    // The auto rule is untouched by any of this, and still refuses exactly this
+    // board. Asserted here so the two paths cannot silently converge: if
+    // `--accept` ever became a no-op that fell through to the EOS rule, the
+    // assertion above would still hold on some board but this one would not.
+    assert!(
+        lightbulb::api::chat_template::select_probe_winner(&rows).is_err(),
+        "the auto rule stopped refusing the three-way tie it was measured on"
+    );
+}
+
 /// Locate the checkpoint, preferring `TINYLLAMA_DIR`. Same shape as
 /// `tests/chat_template_e2e.rs`'s and `tests/api_result_metadata.rs`'s.
 fn tinyllama_dir() -> Option<std::path::PathBuf> {
