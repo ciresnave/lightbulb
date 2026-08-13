@@ -981,26 +981,167 @@ fn tokenizer_config_list_form_selects_the_default_entry() {
     );
 }
 
-/// A list with no usable `default` entry, and a `chat_template` that is neither
-/// shape, both fall through to the next tier rather than resolving to something
-/// invented. (Both log; the observable part is the fall-through.)
+/// Every `chat_template` tier 1 cannot use falls through to the next tier,
+/// which then serves a REAL template — rather than tier 1 resolving to
+/// something invented or to nothing at all.
+///
+/// The malformed shapes are the four `chat_template_field` was written against.
+/// The **blank** shapes are the fifth case and were the defect: nothing about a
+/// blank string is malformed, so `chat_template_field` returned it, resolution
+/// stopped at `Resolution::TokenizerConfig`, and every request rendered to an
+/// empty prompt — the model asked to continue nothing. `"   "` and `"\n\t "` are
+/// listed beside `""` because a truncated or hand-edited file leaves whitespace
+/// far more often than it leaves exactly zero bytes, so `is_empty()` would be
+/// the plausible half-fix.
+///
+/// **The fixture resolves at tier 3, and the assertion is on the SOURCE.** An
+/// assertion that `resolved_by != TokenizerConfig` would hold for a fixture
+/// that fell through to nothing, which is a worse outcome than the bug for a
+/// chat model — a registry guess beats the legacy join. The per-iteration
+/// control (a usable template in the same file, in the same directory, asserted
+/// to win first) is what stops this passing against an implementation where
+/// tier 1 never fires at all.
 #[test]
 fn an_unusable_tokenizer_config_chat_template_falls_through() {
+    use lightbulb::api::chat_template::registry;
     for body in [
+        // Malformed: no usable `default` entry, or not either shape at all.
         r#"{"chat_template":[{"name":"tool_use","template":"T"}]}"#,
         r#"{"chat_template":[{"name":"default","template":{"nested":"object"}}]}"#,
         r#"{"chat_template":{"default":"T"}}"#,
         r#"{"chat_template":null}"#,
+        // Blank: well-formed, and renders to an empty prompt.
+        r#"{"chat_template":""}"#,
+        r#"{"chat_template":"   "}"#,
+        r#"{"chat_template":"\n\t "}"#,
+        // Blank in the list form too — the `default` entry is found and is
+        // still unusable.
+        r#"{"chat_template":[{"name":"default","template":"  \n"}]}"#,
     ] {
-        let d = tmp_model_dir("unusable-tokenizer-config");
+        // `tinyllama`+`chat` in the leaf is what `registry::from_family`
+        // matches, so tier 3 has a real answer for this directory.
+        let d = tmp_model_dir("tinyllama-chat-unusable-tokenizer-config");
+
+        // Control: tier 1 demonstrably fires here, for this file, in this
+        // directory. Without it, "fell through" and "was never read" look the
+        // same.
+        std::fs::write(
+            d.join("tokenizer_config.json"),
+            r#"{"chat_template":"FROM_TOKENIZER_CONFIG"}"#,
+        )
+        .unwrap();
+        let control = lightbulb::api::chat_template::resolve(&d);
+        assert_eq!(
+            control.source, "FROM_TOKENIZER_CONFIG",
+            "tier 1 does not fire for this fixture, so the assertions below \
+             would prove nothing about falling THROUGH it"
+        );
+
         std::fs::write(d.join("tokenizer_config.json"), body).unwrap();
         let t = lightbulb::api::chat_template::resolve(&d);
         assert_eq!(
-            t.resolved_by,
-            Resolution::None,
-            "{body} resolved to something instead of falling through"
+            t.source,
+            registry::ZEPHYR,
+            "{body} did not fall through to the tier-3 template; got {:?} at {:?}",
+            t.source,
+            t.resolved_by
+        );
+        assert_eq!(t.resolved_by, Resolution::Registry, "for {body}");
+    }
+}
+
+/// A blank template is unusable at tier 0 as well — a corrupted or hand-edited
+/// sidecar does not get to serve an empty prompt.
+///
+/// Tier 0 matters more than tier 1 here, not less: the sidecar is the
+/// highest-authority tier, read before the checkpoint's own
+/// `tokenizer_config.json`, so a blank one would outrank every real template on
+/// disk on every subsequent server start.
+///
+/// The fingerprint is written correctly, so the sidecar is one this checkpoint
+/// would otherwise accept — `stale_sidecar_is_rejected` covers the other
+/// rejection, and a fixture rejected for two reasons at once would pass this
+/// test with the blank check deleted.
+#[test]
+fn a_blank_sidecar_template_falls_through() {
+    use lightbulb::api::chat_template::{Sidecar, registry};
+    for blank in ["", "   ", "\n\t "] {
+        let d = tmp_model_dir("tinyllama-chat-blank-sidecar");
+        let sc = Sidecar {
+            template: blank.to_string(),
+            resolved_by: Resolution::Probe,
+            evidence: "hand-edited down to whitespace".into(),
+            resolved_at: "2026-08-13T00:00:00Z".into(),
+            model_fingerprint: fp(&d),
+        };
+        lightbulb::api::chat_template::write_sidecar(&d, &sc).unwrap();
+        assert!(
+            lightbulb::api::chat_template::read_sidecar(&d).is_none(),
+            "a sidecar whose template is {blank:?} was accepted"
+        );
+        let t = lightbulb::api::chat_template::resolve(&d);
+        assert_eq!(
+            t.source,
+            registry::ZEPHYR,
+            "a sidecar whose template is {blank:?} was served instead of falling \
+             through to tier 3; got {:?} at {:?}",
+            t.source,
+            t.resolved_by
         );
     }
+}
+
+/// The serving chokepoint refuses a blank template even if one reaches it.
+///
+/// A second layer over the tier-level rule above, guarding the promise
+/// `resolve_for_serving`'s doc makes to every handler: what it hands back
+/// renders to something. The tiers are the real fix — they fall THROUGH, and
+/// the assertions above are that they reach a real template — but a tier added
+/// later that skips `non_blank` would reopen the hole silently, and this is the
+/// one function every handler goes through.
+///
+/// Asserted against `ChatTemplate::is_usable` on hand-built values rather than
+/// through `resolve_for_serving`, because no fixture on disk can produce a
+/// blank template any more. A test driven through the file system would pass
+/// with the backstop deleted, which is the one thing a backstop's test must not
+/// do.
+#[test]
+fn a_blank_template_is_not_usable_whatever_tier_claims_to_have_found_it() {
+    use lightbulb::api::chat_template::ChatTemplate;
+    let usable = |source: &str, resolved_by| {
+        ChatTemplate {
+            source: source.to_string(),
+            resolved_by,
+        }
+        .is_usable()
+    };
+    for blank in ["", "   ", "\n\t "] {
+        // Every tier, not just one: the backstop is about a tier ADDED later,
+        // so a rule that happened to be spelled `resolved_by == Registry` would
+        // be exactly the wrong shape.
+        for tier in [
+            Resolution::Sidecar,
+            Resolution::TokenizerConfig,
+            Resolution::VocabSignature,
+            Resolution::Registry,
+            Resolution::Probe,
+        ] {
+            assert!(
+                !usable(blank, tier),
+                "a blank template ({blank:?}) claiming {tier:?} was treated as usable"
+            );
+            // Control: the same tier with a real source IS usable, so the
+            // refusal above is about the source and not about the tier.
+            assert!(
+                usable("T", tier),
+                "a real template claiming {tier:?} was treated as unusable"
+            );
+        }
+    }
+    assert!(
+        !usable("T", Resolution::None),
+        "`Resolution::None` must stay unusable however non-blank the source is"
+    );
 }
 
 // ─── Special tokens ─────────────────────────────────────────────────────────

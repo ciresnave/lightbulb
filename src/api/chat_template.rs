@@ -8,19 +8,23 @@
 //! continues text rather than answering, and does not reliably emit EOS.
 //! Measured on TinyLlama-1.1B-Chat, EOS fired in 1 of 6 trials.
 //!
-//! This module exists to replace that join. Both `openai/chat.rs` sites now
-//! render through `ResolvedTemplate::render` (see `openai/chat.rs`'s
-//! `build_prompt`, called from `create_chat_completion` and
-//! `create_chat_stream`) — measured on TinyLlama, the same request that
-//! previously ran its whole 64-token budget inventing a Q&A transcript now
-//! answers `"The capital of France is Paris.</s>"` in 8 tokens and reports
-//! `finish_reason: "stop"`. `contracts/executor.rs` is still on the join; it
-//! cannot be fixed by rendering upstream because it MUTATES the message list
-//! between retry attempts, so its callback signature has to change. That is
-//! Task 4.
+//! This module exists to replace that join. Every prompt the server builds from
+//! a message list renders through `ResolvedTemplate::render`, reached by way of
+//! `openai/chat.rs`'s `build_prompt` (the two chat handlers) and its
+//! `build_prompt_from_raw` (the contract loop, which re-renders per attempt
+//! because it mutates the message list between them). Measured on TinyLlama,
+//! the same request that previously ran its whole 64-token budget inventing a
+//! Q&A transcript now answers `"The capital of France is Paris.</s>"` in 8
+//! tokens and reports `finish_reason: "stop"`. The join survives only as the
+//! fallback for a checkpoint no tier could resolve.
 //!
-//! Deliberately no line numbers in this doc: the three earlier revisions of it
-//! all cited call sites by line, and all three were stale within two commits.
+//! Deliberately no line numbers in this doc — and deliberately no claims about
+//! what some other module has not got to yet. The three earliest revisions
+//! cited call sites by line and all three were stale within two commits; the
+//! revision that replaced them instead asserted that `contracts/executor.rs`
+//! "is still on the join", and that went stale two commits later, which is the
+//! same failure wearing a different disguise. Describe what this module does;
+//! another module's state is that module's to describe.
 //!
 //! A template is always paired with the special tokens it renders with — see
 //! `SpecialTokens` and `ResolvedTemplate`. Handing `render` a literal
@@ -77,6 +81,23 @@ pub struct ChatTemplate {
 }
 
 impl ChatTemplate {
+    /// Whether this is a template worth prompting a model with.
+    ///
+    /// Two ways to fail, and both mean "fall back to the legacy join":
+    /// `Resolution::None` is no template at all, and a blank source is a
+    /// template that renders to an empty prompt — which reaches the model as a
+    /// request to continue nothing. See `non_blank`, which is where every tier
+    /// enforces the second rule before it can get this far.
+    ///
+    /// A named predicate rather than an inline `&&` in `resolve_for_serving` so
+    /// that the rule can be asserted against a hand-built `ChatTemplate`. The
+    /// blank half is otherwise unreachable from a test — every tier rejects a
+    /// blank before returning one — and an unreachable guard whose deletion no
+    /// test notices is not a guard.
+    pub fn is_usable(&self) -> bool {
+        self.resolved_by != Resolution::None && !self.source.trim().is_empty()
+    }
+
     /// Render `messages` into a prompt string.
     ///
     /// Errors rather than panicking: a template that fails to render must fall
@@ -329,13 +350,19 @@ pub fn write_sidecar(model_path: &Path, sc: &Sidecar) -> anyhow::Result<()> {
 }
 
 /// Read the sidecar, rejecting one that cannot be shown to belong to this
-/// checkpoint.
+/// checkpoint or that carries no usable template.
 ///
 /// The fingerprint comparison is the whole point of the function. A model
 /// directory that gets re-pointed at another checkpoint — a common enough thing
 /// to do with a symlink or a re-download — would otherwise inherit the previous
 /// model's template at the highest-authority tier, with a `resolved_by: Probe`
 /// on it claiming it was measured.
+///
+/// A blank `template` is rejected for a related reason. It is the "corrupted
+/// sidecar" case — hand-edited or truncated — and this is the tier read BEFORE
+/// the checkpoint's own `tokenizer_config.json`, so accepting one would serve
+/// an empty prompt in preference to a real template sitting on disk. See
+/// `non_blank`.
 ///
 /// Every rejection is logged, because the observable consequence of one is that
 /// the server quietly falls to a registry guess. The single silent path is a
@@ -351,7 +378,7 @@ pub fn read_sidecar(model_path: &Path) -> Option<Sidecar> {
             return None;
         }
     };
-    let sc: Sidecar = match serde_json::from_str(&raw) {
+    let mut sc: Sidecar = match serde_json::from_str(&raw) {
         Ok(sc) => sc,
         Err(e) => {
             tracing::warn!(
@@ -361,6 +388,14 @@ pub fn read_sidecar(model_path: &Path) -> Option<Sidecar> {
             return None;
         }
     };
+    // Before the fingerprint check, because this is a property of the document
+    // rather than of its relationship to the checkpoint: a hand-edited or
+    // truncated sidecar whose `template` is blank is malformed no matter which
+    // model it was written for. See `non_blank` for why blank is unusable, and
+    // note that this is the tier the probe writes to — the highest-authority
+    // one — so a blank here would outrank the checkpoint's own
+    // `tokenizer_config.json` on every subsequent start.
+    sc.template = non_blank(sc.template, &path.display().to_string())?;
     let Some(actual) = fingerprint(model_path) else {
         tracing::warn!(
             "ignoring {}: no fingerprint can be computed for {} (a directory checkpoint needs a \
@@ -382,6 +417,39 @@ pub fn read_sidecar(model_path: &Path) -> Option<Sidecar> {
     Some(sc)
 }
 
+/// Reject a template source that is blank, so the tier that read it falls
+/// through instead of resolving.
+///
+/// **A blank template is unusable, not merely unhelpful.** It parses, it
+/// renders, and it renders to nothing — so the model receives a request to
+/// continue an empty prompt, which is the silent-wrong-output failure this
+/// module exists to remove, in its worst form: no tier falls through, no render
+/// error is raised, and the prompt does not even look wrong, because there is
+/// no prompt. Falling through is strictly better than refusing at serving time,
+/// because the remaining tiers may still find a real template, and a registry
+/// guess for a chat model beats the legacy join.
+///
+/// `trim().is_empty()`, not `is_empty()`: `" "` and `"\n"` reach the model as
+/// the same "continue nothing" request `""` does, and a truncated or
+/// hand-edited file is far more likely to leave whitespace behind than to leave
+/// exactly zero bytes.
+///
+/// Always logs. A checkpoint carrying a blank `chat_template` is malformed and
+/// the operator has to hear about it — the tier below will resolve *something*,
+/// so silence here is precisely how this defect stayed invisible.
+fn non_blank(source: String, origin: &str) -> Option<String> {
+    if source.trim().is_empty() {
+        tracing::warn!(
+            "{origin}: the chat template is blank ({} bytes, no non-whitespace content). A blank \
+             template renders to an empty prompt, which reaches the model as a request to \
+             continue nothing, so it is unusable; falling through to the next tier.",
+            source.len()
+        );
+        return None;
+    }
+    Some(source)
+}
+
 /// Extract `chat_template` from a parsed `tokenizer_config.json`.
 ///
 /// Two shapes are real. Most checkpoints store a string. Some store a **list**
@@ -398,7 +466,7 @@ pub fn read_sidecar(model_path: &Path) -> Option<Sidecar> {
 fn chat_template_field(v: &serde_json::Value) -> Option<String> {
     let ct = v.get("chat_template")?;
     if let Some(s) = ct.as_str() {
-        return Some(s.to_string());
+        return non_blank(s.to_string(), "tokenizer_config.json");
     }
     if let Some(entries) = ct.as_array() {
         for e in entries {
@@ -406,7 +474,13 @@ fn chat_template_field(v: &serde_json::Value) -> Option<String> {
                 continue;
             }
             if let Some(t) = e.get("template").and_then(serde_json::Value::as_str) {
-                return Some(t.to_string());
+                // Returns whatever `non_blank` decides rather than continuing
+                // the loop: the `default` entry was found, so the "none of
+                // these is a default" warning below would be a false report.
+                return non_blank(
+                    t.to_string(),
+                    "tokenizer_config.json's \"default\" chat_template entry",
+                );
             }
         }
         let names: Vec<&str> = entries
@@ -708,6 +782,24 @@ pub fn resolve_for_model(model_path: &Path) -> ResolvedTemplate {
 /// nothing, so the handlers need to tell "no template" from "this template"
 /// in order to fall back to the legacy join.
 ///
+/// The check is [`ChatTemplate::is_usable`], which also refuses a **blank**
+/// source, and that half is deliberately a **second layer**. Every tier that
+/// reads a template already refuses a blank one through `non_blank` and falls
+/// through to the next tier, which is the better fix and the one that closes
+/// the defect: the tiers below may still find a real template, and a registry
+/// guess beats the legacy join for a chat model. By here the tier walk is over,
+/// so this can only refuse.
+///
+/// It is kept anyway because this is the single chokepoint every handler
+/// depends on, and the paragraph above has promised since it was written that a
+/// template reaching a handler renders to something — while guarding only the
+/// `Resolution::None` half of that promise, which is exactly how a blank
+/// `chat_template: ""` in a `tokenizer_config.json` got served. A tier added
+/// later, or a `resolve` arm that builds a `ChatTemplate` without going through
+/// `non_blank`, would reopen the same hole just as silently. Two layers,
+/// because the outer one is a promise and the inner one is a behaviour, and the
+/// promise has already outlived one behaviour that did not keep it.
+///
 /// **This exists so there is exactly one copy of that check.** There were four
 /// — `api/mod.rs`'s startup plus a private `chat_template_for` in each of
 /// `tests/api_result_metadata.rs`, `tests/chat_template_e2e.rs` and
@@ -718,7 +810,25 @@ pub fn resolve_for_model(model_path: &Path) -> ResolvedTemplate {
 /// was written to remove.
 pub fn resolve_for_serving(model_path: &Path) -> Option<std::sync::Arc<ResolvedTemplate>> {
     let t = resolve_for_model(model_path);
-    (t.resolved_by() != Resolution::None).then(|| std::sync::Arc::new(t))
+    if !t.template.is_usable() {
+        // `Resolution::None` is already logged by `resolve`, naming the
+        // directory and the remedy, so repeating it here would only bury it.
+        // The blank case is the one this backstop exists for, and it is a bug
+        // rather than a configuration problem — every tier is supposed to have
+        // dropped a blank template and fallen through to the next one — so it
+        // gets said out loud.
+        if t.resolved_by() != Resolution::None {
+            tracing::warn!(
+                "the template resolved at {:?} for {} is blank; refusing to serve an empty prompt \
+                 and falling back to the legacy join. A tier resolved a blank template instead of \
+                 falling through, which is a bug in `resolve`.",
+                t.resolved_by(),
+                model_path.display()
+            );
+        }
+        return None;
+    }
+    Some(std::sync::Arc::new(t))
 }
 
 // ─── The probe's report ─────────────────────────────────────────────────────
