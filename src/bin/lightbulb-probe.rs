@@ -55,17 +55,35 @@ use lightbulb::engine::model_runner::{
     CompletionResult, FinishReason, InferenceJob, InferenceRequestSender, ResponseMode,
 };
 
-/// The one prompt every candidate is measured on.
+/// The one conversation every candidate is measured on.
 ///
-/// The same prompt `tests/chat_template_e2e.rs` sends, so a probe row and an
-/// e2e result describe the same request.
-const PROMPT: &str = "Name the capital of France.";
+/// **Multi-turn, and that is the whole point.** The first live run used a
+/// single user message ("Name the capital of France.") and all three candidates
+/// fired EOS — zephyr and chatml byte-identically — so the probe refused as a
+/// tie and measured nothing. A well-behaved chat model answers a one-turn
+/// factual question correctly under *any* plausible formatting, so EOS carries
+/// almost no signal there.
+///
+/// A wrong template's characteristic damage is to **turn boundaries**: it drops
+/// a role marker, merges two turns, or attributes the assistant's reply to the
+/// user. A one-message conversation has no boundaries to damage. Three turns
+/// have two, and the model's own prior answer sits inside the prompt where a
+/// mangled template will run it together with the new question.
+///
+/// The first turn is the prompt `tests/chat_template_e2e.rs` sends, so the
+/// opening of a probe row is still comparable with an e2e result.
+const CONVERSATION: [(&str, &str); 3] = [
+    ("user", "Name the capital of France."),
+    ("assistant", "Paris."),
+    ("user", "And of Japan?"),
+];
 
 /// The generation budget, per candidate.
 ///
 /// The EOS rate is a function of the budget: too small and a correct template
 /// looks like a failure because it simply had not finished. 48 is ~6× the
-/// 8-token answer TinyLlama gives to `PROMPT` under its own template.
+/// 8-token answer TinyLlama gives to `CONVERSATION`'s first turn under its own
+/// template.
 const MAX_NEW_TOKENS: usize = 48;
 
 #[derive(Parser, Debug)]
@@ -130,10 +148,13 @@ async fn probe(model_dir: &Path, assume_yes: bool) -> anyhow::Result<()> {
         );
     }
 
-    let messages = vec![RawMessage {
-        role: "user".to_string(),
-        content: PROMPT.to_string(),
-    }];
+    let messages: Vec<RawMessage> = CONVERSATION
+        .iter()
+        .map(|(role, content)| RawMessage {
+            role: role.to_string(),
+            content: content.to_string(),
+        })
+        .collect();
 
     // One runner, reused across candidates: loading the checkpoint three times
     // would triple the wall clock and change nothing about the result. The
