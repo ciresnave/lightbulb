@@ -61,9 +61,22 @@ pub struct EosMonitor {
 }
 
 impl EosMonitor {
-    /// `window` is clamped to at least 1: a zero-length window would divide by
-    /// zero and report `NaN`, and `NaN < min` is `false`, so the monitor would
-    /// go permanently and silently quiet rather than fail visibly.
+    /// `window` is clamped to at least 1.
+    ///
+    /// **Not** to avoid a divide by zero. [`Self::rate`] divides by
+    /// `recent.len()`, never by `window`, so a zero window yields an ordinary
+    /// finite rate: probed with the clamp removed, `EosMonitor::new(0, 0.25)`
+    /// reports `stop_rate() == Some(0.333…)` after three samples and
+    /// `is_nan() == false`. This doc claimed the `NaN` reading for one commit
+    /// and it was never reachable.
+    ///
+    /// The real hazard is the eviction guard in [`Self::record`]:
+    /// `recent.len() == self.window` is true only *before* the first push when
+    /// `window` is 0, so nothing is ever popped. The deque grows without bound
+    /// for the life of the process and the reading silently stops being a
+    /// rolling one — it becomes the server's lifetime EOS rate, which no
+    /// recovery can pull back up and no fresh degradation can pull down.
+    /// `a_zero_window_is_a_one_wide_window_not_an_unbounded_one` is the guard.
     pub fn new(window: usize, min_stop_rate: f64) -> Self {
         let window = window.max(1);
         Self {
@@ -79,6 +92,12 @@ impl EosMonitor {
     /// How many completions a reading covers. Exposed so the warning can name
     /// the window it was actually built with — quoting [`DEFAULT_WINDOW`] in
     /// the message would misreport any monitor constructed with another.
+    ///
+    /// That is this accessor's only production caller, and for one commit the
+    /// difference between it and the constant was invisible: every test asserted
+    /// `stop_rate()` and none read the log. `api::openai::chat::tests::
+    /// the_warning_reports_the_monitors_own_window_not_the_default` now reads it,
+    /// through two monitors of different widths.
     pub fn window(&self) -> usize {
         self.window
     }
@@ -128,7 +147,23 @@ impl EosMonitor {
     /// Level-triggered and side-effect free, unlike [`Self::record`]'s return
     /// value. `false` while the window is filling, for the reason
     /// [`Self::stop_rate`] returns `None` there.
-    pub fn should_warn(&self) -> bool {
+    ///
+    /// **Test-only, and compiled out of the library on purpose.** It shipped
+    /// `pub` with zero production callers, which reads as an oversight; it is
+    /// not one, and `#[cfg(test)]` is how that is said in a way that stays true.
+    /// The server's one decision about the rate is [`Self::record`]'s edge. A
+    /// level-triggered read of the same state is what a caller reaches for when
+    /// it wants to *act* on the rate — re-resolve, retry, downgrade — which is
+    /// the design this module rejects (see the module docs), so a production
+    /// caller appearing here is a change of design and now has to say so by
+    /// deleting this attribute rather than by adding a line.
+    ///
+    /// The tests that need it: the threshold-boundary case below, and
+    /// `api::openai::chat::tests`' two never-acts tests, which must establish
+    /// that the server is in the warning state before asserting that being in it
+    /// changed nothing.
+    #[cfg(test)]
+    pub(crate) fn should_warn(&self) -> bool {
         self.stop_rate().is_some_and(|r| r < self.min_stop_rate)
     }
 
@@ -149,6 +184,253 @@ impl Default for EosMonitor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The shipped constants, pinned as values.
+    ///
+    /// Every other test in this module hands `new` a window of its own, and the
+    /// one that uses twenty writes it as a literal — so for one commit
+    /// `DEFAULT_WINDOW = 1_000_000` (a server that can never produce a reading,
+    /// let alone a warning) and `DEFAULT_MIN_STOP_RATE = 0.9` (a warning on
+    /// every healthy server whose EOS rate is not near-perfect) both left the
+    /// whole suite green. Only `0.0` was caught, and only incidentally.
+    ///
+    /// These are one model's measurement — TinyLlama-1.1B-Chat, 1 EOS in 6 under
+    /// the legacy join — not a calibration. Changing them is allowed; changing
+    /// them *silently*, as a typo or an "obvious" tightening, is what this
+    /// catches. Raise the window before lowering the rate, per the module docs.
+    #[test]
+    fn the_shipped_defaults_are_the_measured_ones() {
+        assert_eq!(
+            DEFAULT_WINDOW, 20,
+            "the default window changed; a wide one delays every warning and a \
+             very wide one silences it outright on a server that never sees that \
+             many completions"
+        );
+        assert_eq!(
+            DEFAULT_MIN_STOP_RATE, 0.25,
+            "the default threshold changed; above it, ordinary servers whose \
+             clients ask for long answers warn about their chat template"
+        );
+    }
+
+    /// The configuration the server actually ships, exercised through
+    /// [`EosMonitor::default`] rather than a hand-built window.
+    ///
+    /// `ApiServer::new` is the sole production construction and builds exactly
+    /// this monitor; its only test coverage is `tests/api_integration_tests.rs`,
+    /// which is `#[ignore]`d wholesale for wanting PostgreSQL. So the shipped
+    /// configuration was, until this test, exercised by nothing at all.
+    ///
+    /// The assertions are behavioural rather than a second reading of the
+    /// constants: a reading appears at the twentieth completion and not the
+    /// nineteenth (pinning the width), 5 in 20 passes and 4 in 20 warns
+    /// (pinning the threshold from both sides — a threshold above 0.25 fails the
+    /// first, one at or below 0.2 fails the second).
+    #[test]
+    fn the_default_monitor_reads_twenty_completions_at_a_quarter() {
+        let m = EosMonitor::default();
+
+        for _ in 0..5 {
+            m.record(FinishReason::Stop);
+        }
+        for i in 0..14 {
+            assert_eq!(
+                m.record(FinishReason::Length),
+                None,
+                "sample {} of the default window produced a crossing",
+                i + 6
+            );
+        }
+        assert_eq!(
+            m.stop_rate(),
+            None,
+            "nineteen completions produced a reading from the default monitor, \
+             so its window is narrower than DEFAULT_WINDOW claims"
+        );
+
+        assert_eq!(
+            m.record(FinishReason::Length),
+            None,
+            "the twentieth completion sits exactly ON the default threshold, \
+             which is not below it"
+        );
+        assert_eq!(
+            m.stop_rate(),
+            Some(0.25),
+            "twenty completions did not produce a reading, so the default \
+             monitor cannot warn on any server that reaches twenty requests"
+        );
+        assert!(
+            !m.should_warn(),
+            "5 EOS in 20 is exactly the default threshold and must pass; a \
+             default above it warns about the chat template on healthy servers"
+        );
+
+        // A twenty-first Length ages the oldest Stop out: 4 in 20, below.
+        assert_eq!(
+            m.record(FinishReason::Length),
+            Some(0.2),
+            "the reading that first falls below the default threshold was not \
+             reported"
+        );
+        assert!(m.should_warn());
+    }
+
+    /// A zero window is a one-wide window, not an unbounded one.
+    ///
+    /// The clamp in [`EosMonitor::new`] was untested, and the rationale written
+    /// above it was false: removing it produces no `NaN` and no divide by zero,
+    /// because [`EosMonitor::rate`] divides by `recent.len()`. What it produces
+    /// is an eviction guard (`recent.len() == self.window`) that is true only
+    /// before the first push, so the deque grows for the life of the process and
+    /// the "rolling" rate becomes the lifetime one. That is the failure this
+    /// asserts: with the clamp the second completion displaces the first and the
+    /// rate is 0.0; without it, both samples are still there and the rate is 0.5
+    /// — which is above the threshold, so the monitor also stays quiet.
+    #[test]
+    fn a_zero_window_is_a_one_wide_window_not_an_unbounded_one() {
+        let m = EosMonitor::new(0, DEFAULT_MIN_STOP_RATE);
+        assert_eq!(m.window(), 1, "the window was not clamped");
+
+        assert_eq!(
+            m.record(FinishReason::Stop),
+            None,
+            "1 of 1 is not below the threshold"
+        );
+        assert_eq!(
+            m.stop_rate(),
+            Some(1.0),
+            "one completion is a full reading of a one-wide window"
+        );
+
+        assert_eq!(
+            m.record(FinishReason::Length),
+            Some(0.0),
+            "the first sample never aged out: the window is growing instead of \
+             sliding, so this reads the server's lifetime rate (0.5 here) and \
+             the monitor is quiet"
+        );
+        assert_eq!(m.stop_rate(), Some(0.0));
+    }
+
+    /// One crossing produces one report, however many requests observe it at
+    /// once.
+    ///
+    /// This is the property the `Samples` doc asserts and nothing defended:
+    /// push, read and the `below` flag are one atomic step *specifically* so
+    /// that concurrent requests cannot both see the same crossing. Splitting the
+    /// check-and-set across two lock acquisitions — the design that doc
+    /// explicitly rejects — left every other test in the repo green.
+    ///
+    /// # Shape
+    ///
+    /// Each trial has its own monitor, **warmed to one sample short of a
+    /// reading** with nothing but `Length`. So the first concurrent completion
+    /// to land completes the window below the threshold, and so does every one
+    /// after it (each pops a `Length` and pushes another). That warm-up is what
+    /// makes the race reachable at all, and the numbers are not close. Against
+    /// the split-lock version, on this box:
+    ///
+    ///   8 threads, 200 trials, window 8, started empty     0 duplicates (green)
+    ///   8 threads, 200 trials, window 4, warmed            2 duplicates
+    ///  24 threads, 300 trials, window 4, warmed            5 duplicates
+    ///  24 threads, 2 000 trials, window 4, warmed         45 duplicates
+    ///
+    /// The first row is the obvious probe — fill the window with the threads
+    /// themselves — and it does not work: only the completion that *lands* on the
+    /// boundary produces a reading, every other thread returns on the `?` before
+    /// touching `below`, and the broken implementation passes. Warmed, all
+    /// THREADS completions reach the decision.
+    ///
+    /// The second row is the reason for the third and fourth: two hits in a run
+    /// is a coin flip dressed as a test.
+    ///
+    /// The threads are spawned once and walk the trials together through a
+    /// reused barrier, rather than being spawned per trial: spawning dominated
+    /// the runtime and capped the trial count, and the barrier releases the
+    /// threads far closer together than 24 `spawn` calls do.
+    ///
+    /// # Why it cannot flake green-when-broken, or red-when-correct
+    ///
+    /// The discrimination is one-sided. A correct monitor reports exactly one
+    /// crossing per trial *deterministically* — the flag is read and set under
+    /// one lock, so whichever completion wins the lock first is the only one
+    /// that can see `below == false` — so a red here is never chance. Broken,
+    /// each trial is an independent chance to duplicate and the test fails if
+    /// **any** trial does, so the false-green probability falls off as
+    /// `e^-(duplicates)`: at the measured 45 in 2 000, roughly `e^-45`. A box
+    /// with fewer cores hits it less often, which is what the trial count buys.
+    ///
+    /// A milder split (push separated from the read, but the flag's
+    /// read-modify-write kept under a single lock) does *not* double-report and
+    /// this test passes it. That is the boundary that matters, and it is why the
+    /// `Samples` doc names the read-and-set rather than the whole body.
+    #[test]
+    fn one_crossing_is_reported_once_however_many_requests_observe_it() {
+        use std::sync::Arc;
+        use std::sync::Barrier;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        const THREADS: usize = 24;
+        const TRIALS: usize = 2_000;
+        const WINDOW: usize = 4;
+
+        let monitors: Arc<Vec<EosMonitor>> = Arc::new(
+            (0..TRIALS)
+                .map(|_| {
+                    let m = EosMonitor::new(WINDOW, DEFAULT_MIN_STOP_RATE);
+                    for _ in 0..WINDOW - 1 {
+                        assert_eq!(
+                            m.record(FinishReason::Length),
+                            None,
+                            "the warm-up produced a reading, so the window is \
+                             not the width this trial assumes"
+                        );
+                    }
+                    m
+                })
+                .collect(),
+        );
+        let reports: Arc<Vec<AtomicUsize>> =
+            Arc::new((0..TRIALS).map(|_| AtomicUsize::new(0)).collect());
+        let gate = Arc::new(Barrier::new(THREADS));
+
+        let threads: Vec<_> = (0..THREADS)
+            .map(|_| {
+                let monitors = Arc::clone(&monitors);
+                let reports = Arc::clone(&reports);
+                let gate = Arc::clone(&gate);
+                std::thread::spawn(move || {
+                    for (monitor, reported) in monitors.iter().zip(reports.iter()) {
+                        // Every thread waits here, so one trial's completions
+                        // land as close to simultaneously as the OS allows.
+                        gate.wait();
+                        if monitor.record(FinishReason::Length).is_some() {
+                            reported.fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
+                })
+            })
+            .collect();
+        for t in threads {
+            t.join().expect("a recording thread panicked");
+        }
+
+        let duplicated: Vec<(usize, usize)> = reports
+            .iter()
+            .map(|n| n.load(Ordering::Relaxed))
+            .enumerate()
+            .filter(|(_, reports)| *reports != 1)
+            .collect();
+        assert!(
+            duplicated.is_empty(),
+            "{} of {TRIALS} trials did not report exactly one crossing \
+             (trial, reports): {duplicated:?}. Concurrent completions saw the \
+             same crossing because the push, the read and the `below` flag are \
+             no longer one atomic step",
+            duplicated.len()
+        );
+    }
 
     /// Below the window there is no reading at all — not a reading drawn from
     /// too few samples.

@@ -355,12 +355,25 @@ pub(crate) fn build_prompt_from_raw(
 /// streaming path calls it from a `'static` closure that outlives the state —
 /// the field it needs has to be cloned out before `state.inference_tx` is moved.
 ///
-/// Called from all three sites that observe a `FinishReason`: the plain
-/// completion, the streaming `Done` frame, and the contract loop's final
+/// Called from three of the **four** sites that observe a `FinishReason`: the
+/// plain completion, the streaming `Done` frame, and the contract loop's final
 /// attempt. Wiring only the first is the same shape of miss as fixing only one
 /// of this file's two former prompt-construction sites — on a server whose
 /// clients stream, a monitor recording nothing never fills its window and never
 /// reports anything, which is indistinguishable in the log from a healthy model.
+///
+/// # The fourth site is excluded on purpose
+///
+/// `api::openai::completions` observes a `FinishReason` too and must keep not
+/// recording it. `/v1/completions` applies no chat template at all — the
+/// client's text is sent verbatim, spec §6, via `BuiltPrompt::raw` — so how
+/// those completions end says nothing about whether a template is wrong for
+/// this model. Worse than uninformative: a raw-text client asking for
+/// continuations gets `length` by design and every one of those samples pushes
+/// the rate toward a warning about a template that request never used, while
+/// diluting the window the chat paths' evidence has to fit in. The sentence
+/// above said "all three sites" for one commit, which invited exactly the
+/// four-call "fix" this paragraph exists to refuse.
 fn record_completion(
     monitor: &crate::engine::eos_monitor::EosMonitor,
     resolved_by: Option<crate::api::chat_template::Resolution>,
@@ -1078,6 +1091,14 @@ mod tests {
             // The default window is 20, so no test that does not ask for a
             // narrower one can fill it — which is what keeps the monitor out of
             // every assertion in this module that is not about it.
+            //
+            // The flip side is a trap, and it caught a test written for this
+            // task: a test that means to assert the monitor changes NOTHING is
+            // vacuous on this state, because a monitor that cannot reach the
+            // warning state cannot influence anything either way. Anything
+            // asserting about the warning state — both `..._does_not_change_...`
+            // tests below — must build its own monitor via `state_with_monitor`
+            // and assert `should_warn()` before making its claim.
             std::sync::Arc::new(EosMonitor::default()),
         )
     }
@@ -1643,14 +1664,284 @@ mod tests {
         .expect("the request body must deserialize")
     }
 
-    /// The plain path records the reason the runner reported, not a constant.
+    /// The JSON body of a non-streaming response.
+    async fn json_body(response: axum::response::Response) -> serde_json::Value {
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("reading the response body");
+        serde_json::from_slice(&bytes).expect("the handler returns JSON")
+    }
+
+    /// The JSON payload of every `data:` frame of an SSE response, in order.
+    ///
+    /// Reading the *body* rather than collecting `Event`s: `Event` has no
+    /// accessors, so a test that collects them can only count them — which is
+    /// how the streaming path's client-visible `finish_reason` went unasserted.
+    /// Driving the body also drives the stream, which is what makes the
+    /// recording in the `Done` arm happen at all.
+    async fn sse_frames(response: axum::response::Response) -> Vec<serde_json::Value> {
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("reading the SSE body");
+        String::from_utf8(bytes.to_vec())
+            .expect("the SSE body is UTF-8")
+            .lines()
+            .filter_map(|line| line.strip_prefix("data: "))
+            .map(|data| serde_json::from_str(data).expect("each SSE frame carries JSON"))
+            .collect()
+    }
+
+    /// Every `warn`-level line emitted while `f` runs.
+    ///
+    /// The log line is the entire product of this feature, and for one commit
+    /// nothing observed one: every test asserted `stop_rate()` bookkeeping, so
+    /// deleting the whole `tracing::warn!` from [`record_completion`] — and,
+    /// separately, making it level-triggered, the behaviour the design
+    /// explicitly rejects — left all 644 tests green.
+    ///
+    /// `with_default` scopes the subscriber to the calling thread, so tests
+    /// running concurrently cannot capture each other's events. `#[tokio::test]`
+    /// drives its future on this same thread (current-thread runtime), so this
+    /// works for handlers too.
+    fn warnings_while(f: impl FnOnce()) -> Vec<String> {
+        use std::io::Write;
+        use std::sync::{Arc, Mutex};
+
+        #[derive(Clone, Default)]
+        struct Sink(Arc<Mutex<Vec<u8>>>);
+
+        impl Write for Sink {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0
+                    .lock()
+                    .expect("the capture buffer is never held across a panic")
+                    .extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Sink {
+            type Writer = Sink;
+            fn make_writer(&'a self) -> Self::Writer {
+                self.clone()
+            }
+        }
+
+        let sink = Sink::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(sink.clone())
+            .with_max_level(tracing::Level::WARN)
+            .with_ansi(false)
+            .without_time()
+            .finish();
+        tracing::subscriber::with_default(subscriber, f);
+
+        let captured = sink
+            .0
+            .lock()
+            .expect("the capture buffer is never held across a panic")
+            .clone();
+        String::from_utf8(captured)
+            .expect("the subscriber writes UTF-8")
+            .lines()
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// Only the EOS warning, out of whatever else warned.
+    fn eos_warnings(lines: &[String]) -> Vec<&String> {
+        lines
+            .iter()
+            .filter(|line| line.contains("stopped on EOS"))
+            .collect()
+    }
+
+    /// The crossing produces one warning, and it says what happened.
+    ///
+    /// The assertion is on the emitted text, not on `stop_rate()`: a
+    /// `record_completion` whose body is `let _ = (rate, monitor.window(),
+    /// resolved_by);` keeps every rate assertion in this module green and ships
+    /// a server that has no output at all.
+    ///
+    /// The percentage is derived by hand (1 EOS in 5 is 20%) rather than
+    /// asserted as "contains a number", so a message reporting the threshold, or
+    /// the raw fraction, or the complement is distinguished from one reporting
+    /// the reading.
+    #[test]
+    fn the_crossing_emits_one_warning_reporting_the_reading() {
+        let monitor = EosMonitor::new(5, DEFAULT_MIN_STOP_RATE);
+
+        let lines = warnings_while(|| {
+            record_completion(&monitor, None, FinishReason::Stop);
+            for _ in 0..3 {
+                record_completion(&monitor, None, FinishReason::Length);
+            }
+            // Control: four samples of a five-wide window are not a reading, so
+            // nothing may have been said yet.
+            assert!(monitor.stop_rate().is_none());
+            record_completion(&monitor, None, FinishReason::Length);
+        });
+
+        let warnings = eos_warnings(&lines);
+        assert_eq!(
+            warnings.len(),
+            1,
+            "the reading that crossed the threshold was not logged. This log \
+             line is the whole product of the monitor — a server that records \
+             perfectly and says nothing is indistinguishable from one whose \
+             template is right. Captured: {lines:?}"
+        );
+        assert!(
+            warnings[0].contains("only 20% of the last 5 completions stopped on EOS"),
+            "the warning does not report the reading that triggered it: {}",
+            warnings[0]
+        );
+        assert!(
+            warnings[0].contains("no template will be changed automatically"),
+            "the warning must say it is a warning only; a reader who assumes the \
+             server self-corrected stops looking: {}",
+            warnings[0]
+        );
+    }
+
+    /// The warning names the window of the monitor that produced it.
+    ///
+    /// Two monitors of different widths in one test, because a message quoting
+    /// any constant — `DEFAULT_WINDOW` included — satisfies a single-width
+    /// assertion. Both readings are 0%, so the width is the only thing that can
+    /// tell the two messages apart.
+    #[test]
+    fn the_warning_reports_the_monitors_own_window_not_the_default() {
+        let narrow = EosMonitor::new(2, DEFAULT_MIN_STOP_RATE);
+        let wide = EosMonitor::new(3, DEFAULT_MIN_STOP_RATE);
+
+        let lines = warnings_while(|| {
+            for _ in 0..2 {
+                record_completion(&narrow, None, FinishReason::Length);
+            }
+            for _ in 0..3 {
+                record_completion(&wide, None, FinishReason::Length);
+            }
+        });
+
+        let warnings = eos_warnings(&lines);
+        assert_eq!(warnings.len(), 2, "expected one warning each: {lines:?}");
+        assert!(
+            warnings[0].contains("the last 2 completions"),
+            "a monitor built with a window of 2 reported someone else's window: {}",
+            warnings[0]
+        );
+        assert!(
+            warnings[1].contains("the last 3 completions"),
+            "a monitor built with a window of 3 reported someone else's window: {}",
+            warnings[1]
+        );
+    }
+
+    /// One warning per crossing, not one per completion.
+    ///
+    /// The rejected level-triggered form — warn whenever the rate is low —
+    /// is one line at this call site and leaves every `stop_rate` assertion
+    /// green, while putting a warning in the log for every request a degraded
+    /// server serves, burying the per-request render failures logged from this
+    /// same module. Ten completions past the crossing here, so the two forms
+    /// differ by eight lines.
+    ///
+    /// The recovery half is asserted too: a server that comes back and degrades
+    /// again must warn again, which is what separates edge-triggering from
+    /// latching.
+    #[test]
+    fn the_warning_does_not_repeat_until_the_rate_recovers_and_falls_again() {
+        let monitor = EosMonitor::new(2, DEFAULT_MIN_STOP_RATE);
+
+        let while_low = warnings_while(|| {
+            for _ in 0..10 {
+                record_completion(&monitor, None, FinishReason::Length);
+            }
+        });
+        assert_eq!(
+            eos_warnings(&while_low).len(),
+            1,
+            "ten completions of a server that is already known to be degraded \
+             produced {} warnings: {while_low:?}",
+            eos_warnings(&while_low).len()
+        );
+
+        let recovering = warnings_while(|| {
+            for _ in 0..2 {
+                record_completion(&monitor, None, FinishReason::Stop);
+            }
+        });
+        assert!(
+            eos_warnings(&recovering).is_empty(),
+            "a recovery warned: {recovering:?}"
+        );
+
+        let again = warnings_while(|| {
+            for _ in 0..2 {
+                record_completion(&monitor, None, FinishReason::Length);
+            }
+        });
+        assert_eq!(
+            eos_warnings(&again).len(),
+            1,
+            "a server that recovered and degraded again said nothing the second \
+             time: {again:?}"
+        );
+    }
+
+    /// The warning names how the template was resolved.
+    ///
+    /// That is the actionable half of the message: "resolved via Registry" tells
+    /// the reader which heuristic to distrust, and the no-template case is a
+    /// different remedy entirely (supply a template, rather than doubt the one
+    /// that was found).
+    #[test]
+    fn the_warning_names_the_tier_the_template_came_from() {
+        use crate::api::chat_template::Resolution;
+
+        let resolved = EosMonitor::new(1, DEFAULT_MIN_STOP_RATE);
+        let lines = warnings_while(|| {
+            record_completion(&resolved, Some(Resolution::Registry), FinishReason::Length);
+        });
+        let warnings = eos_warnings(&lines);
+        assert_eq!(warnings.len(), 1, "{lines:?}");
+        assert!(
+            warnings[0].contains("resolved via Registry"),
+            "the warning does not name the tier that produced the suspect \
+             template: {}",
+            warnings[0]
+        );
+
+        let unresolved = EosMonitor::new(1, DEFAULT_MIN_STOP_RATE);
+        let lines = warnings_while(|| {
+            record_completion(&unresolved, None, FinishReason::Length);
+        });
+        let warnings = eos_warnings(&lines);
+        assert_eq!(warnings.len(), 1, "{lines:?}");
+        assert!(
+            warnings[0].contains("none resolved")
+                && warnings[0].contains("legacy role: content join"),
+            "a server with no template at all was reported as having a suspect \
+             one: {}",
+            warnings[0]
+        );
+    }
+
+    /// The plain path records the reason the runner reported, **once**.
+    ///
+    /// Window of two over two requests, so the count is pinned as well as the
+    /// value: with the window of one this test used to carry, duplicating the
+    /// `record_completion` call was invisible — the second record of a one-wide
+    /// window reports the same rate as the first.
     #[tokio::test]
-    async fn a_plain_completion_is_recorded_with_the_reason_the_runner_reported() {
+    async fn a_plain_completion_is_recorded_once_with_the_reason_the_runner_reported() {
         for (reason, expected_rate) in [(FinishReason::Stop, 1.0), (FinishReason::Length, 0.0)] {
             let (tx, runner) = stub_runner_with(reason);
-            // Window of one: a single completion is a full reading, so the rate
-            // is exactly that completion's finish reason.
-            let monitor = std::sync::Arc::new(EosMonitor::new(1, DEFAULT_MIN_STOP_RATE));
+            let monitor = std::sync::Arc::new(EosMonitor::new(2, DEFAULT_MIN_STOP_RATE));
             let state = state_with_monitor(None, Some(tx), monitor.clone());
 
             assert_eq!(
@@ -1659,25 +1950,35 @@ mod tests {
                 "control: the monitor already held a reading before the request ran"
             );
 
-            let response = chat_completions(State(state), Json(plain_request(false)))
+            let first = chat_completions(State(state.clone()), Json(plain_request(false)))
                 .await
                 .into_response();
-            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(first.status(), StatusCode::OK);
+            assert_eq!(
+                monitor.stop_rate(),
+                None,
+                "one request filled a two-wide window, so the handler recorded \
+                 the same completion more than once"
+            );
 
-            // `state` was moved into the handler and dropped with it, so the
-            // stub's `recv` has ended.
+            let second = chat_completions(State(state), Json(plain_request(false)))
+                .await
+                .into_response();
+            assert_eq!(second.status(), StatusCode::OK);
+
+            // Both `state` clones are gone, so the stub's `recv` has ended.
             let jobs = runner.join().expect("stub runner panicked");
-            assert_eq!(jobs.len(), 1, "expected one inference, saw {}", jobs.len());
+            assert_eq!(jobs.len(), 2, "expected two inferences, saw {}", jobs.len());
             assert_eq!(
                 monitor.stop_rate(),
                 Some(expected_rate),
-                "a completion the runner ended with {reason:?} was not what the \
+                "completions the runner ended with {reason:?} were not what the \
                  monitor recorded"
             );
         }
     }
 
-    /// The streaming path records too.
+    /// The streaming path records too, and also **once**.
     ///
     /// This is the site a fix aimed at `create_chat_completion` leaves behind —
     /// the same miss this file already has history with, when it carried two
@@ -1685,34 +1986,103 @@ mod tests {
     /// by the plain path never fills its window on a server whose clients
     /// stream, and a monitor that never reports is indistinguishable in the log
     /// from a model that is answering correctly.
+    ///
+    /// The count is pinned the same way as the plain path's, and for the same
+    /// reason: a second `record_completion` in the `Done` arm is one line.
     #[tokio::test]
-    async fn a_streaming_completion_is_recorded_with_the_reason_the_runner_reported() {
+    async fn a_streaming_completion_is_recorded_once_with_the_reason_the_runner_reported() {
         for (reason, expected_rate) in [(FinishReason::Stop, 1.0), (FinishReason::Length, 0.0)] {
             let (tx, runner) = stub_runner_with(reason);
-            let monitor = std::sync::Arc::new(EosMonitor::new(1, DEFAULT_MIN_STOP_RATE));
+            let monitor = std::sync::Arc::new(EosMonitor::new(2, DEFAULT_MIN_STOP_RATE));
             let state = state_with_monitor(None, Some(tx), monitor.clone());
 
-            // Driven to completion: the observation happens on the `Done` frame,
-            // which is the last thing the stream yields.
-            let frames = create_chat_stream(state, plain_request(true))
-                .collect::<Vec<_>>()
-                .await;
+            // Reading the body drives the stream, and the observation happens on
+            // the `Done` frame, which is the last thing it yields.
+            let first = chat_completions(State(state.clone()), Json(plain_request(true)))
+                .await
+                .into_response();
+            let frames = sse_frames(first).await;
             assert_eq!(
                 frames.len(),
                 2,
-                "expected one token frame and one done frame, saw {}",
-                frames.len()
+                "expected one token frame and one done frame, saw {frames:?}"
+            );
+            assert_eq!(
+                frames[1]["choices"][0]["finish_reason"],
+                reason.as_str(),
+                "the client was told a different finish reason than the runner \
+                 reported"
+            );
+            assert_eq!(
+                monitor.stop_rate(),
+                None,
+                "one streamed request filled a two-wide window, so the `Done` \
+                 arm recorded the same completion more than once"
             );
 
+            let second = chat_completions(State(state), Json(plain_request(true)))
+                .await
+                .into_response();
+            assert_eq!(sse_frames(second).await.len(), 2);
+
             let jobs = runner.join().expect("stub runner panicked");
-            assert_eq!(jobs.len(), 1, "expected one inference, saw {}", jobs.len());
+            assert_eq!(jobs.len(), 2, "expected two inferences, saw {}", jobs.len());
             assert_eq!(
                 monitor.stop_rate(),
                 Some(expected_rate),
-                "a streamed completion the runner ended with {reason:?} was not \
+                "streamed completions the runner ended with {reason:?} were not \
                  what the monitor recorded"
             );
         }
+    }
+
+    /// Nothing is recorded when there is no model.
+    ///
+    /// Both no-runner fallbacks answer with a canned string and report
+    /// `finish_reason: "stop"`. Recording that would have the monitor report a
+    /// perfect EOS rate for a server that has never run a model — the reading is
+    /// then drawn from the placeholder text rather than from any model's
+    /// behaviour, and a genuinely broken template would be masked by however
+    /// many requests arrived before the model loaded. The comment in
+    /// `create_chat_completion` says exactly this, and adding the call it warns
+    /// against left every test green.
+    #[tokio::test]
+    async fn the_no_model_fallbacks_are_not_recorded() {
+        let monitor = std::sync::Arc::new(EosMonitor::new(1, DEFAULT_MIN_STOP_RATE));
+        // No `inference_tx`: both handlers take their fallback arm.
+        let state = state_with_monitor(None, None, monitor.clone());
+
+        let plain = chat_completions(State(state.clone()), Json(plain_request(false)))
+            .await
+            .into_response();
+        assert_eq!(plain.status(), StatusCode::OK);
+        let body = json_body(plain).await;
+        assert_eq!(
+            body["choices"][0]["finish_reason"], "stop",
+            "control: this arm must still report the canned `stop` that would be \
+             recorded — otherwise this test proves nothing about excluding it"
+        );
+        assert_eq!(
+            monitor.stop_rate(),
+            None,
+            "a canned placeholder was recorded as a completion: a one-wide \
+             window now reads 100% EOS for a server with no model in it"
+        );
+
+        let streamed = chat_completions(State(state), Json(plain_request(true)))
+            .await
+            .into_response();
+        let frames = sse_frames(streamed).await;
+        assert_eq!(
+            frames.last().expect("the mock stream yields frames")["choices"][0]["finish_reason"],
+            "stop",
+            "control: the streaming fallback must still end with the canned `stop`"
+        );
+        assert_eq!(
+            monitor.stop_rate(),
+            None,
+            "the streaming fallback's canned `stop` was recorded as a completion"
+        );
     }
 
     /// The contract path records **once per request**, carrying the finish
@@ -1791,10 +2161,22 @@ mod tests {
     /// request/response pair.
     ///
     /// Verified by mutation: adding
-    /// `if state.eos_monitor.should_warn() { return joined(legacy_join(&raw)); }`
-    /// to `build_prompt` — the smallest plausible way for the monitor to start
+    /// `if low(&state.eos_monitor) { return joined(legacy_join(&raw)); }` to
+    /// `build_prompt` — the smallest plausible way for the monitor to start
     /// acting — makes the second request arrive as `"user: Name the capital of
     /// France."` and this test fail, with every other test in the repo green.
+    /// `low` has to be spelled `stop_rate().is_some_and(|r| r <
+    /// DEFAULT_MIN_STOP_RATE)`, because `should_warn` is `#[cfg(test)]` — the
+    /// tidier spelling of this mutation does not compile, which is the point of
+    /// that attribute.
+    ///
+    /// The response body is asserted as well as the prompt. Prompting is not the
+    /// only thing a monitor could reach into: rewriting the client-visible
+    /// `finish_reason` to `"content_filter"` once the rate drops is a one-line
+    /// edit in this handler, is exactly the kind of "helpful" mid-flight
+    /// behaviour change spec §3 rejects, and passed this test for one commit
+    /// because it reached the warning state and then never looked at what came
+    /// back.
     #[tokio::test]
     async fn a_warning_monitor_does_not_change_what_is_prompted() {
         let dir = bos_doubling_checkpoint("monitor-never-acts");
@@ -1816,6 +2198,7 @@ mod tests {
             .await
             .into_response();
         assert_eq!(first.status(), StatusCode::OK);
+        let first_body = json_body(first).await;
         assert!(
             monitor.should_warn(),
             "the monitor is not in the warning state after a completion that ran \
@@ -1826,6 +2209,7 @@ mod tests {
             .await
             .into_response();
         assert_eq!(second.status(), StatusCode::OK);
+        let second_body = json_body(second).await;
 
         let jobs = runner.join().expect("stub runner panicked");
         assert_eq!(jobs.len(), 2, "expected two inferences, saw {}", jobs.len());
@@ -1843,6 +2227,100 @@ mod tests {
             assert!(
                 !add_special_tokens,
                 "request {i} changed how the prompt is tokenized"
+            );
+        }
+
+        // And what came back is the runner's own answer, unedited — the second
+        // response, served while warning, exactly as the first.
+        for (i, body) in [&first_body, &second_body].into_iter().enumerate() {
+            assert_eq!(
+                body["choices"][0]["finish_reason"], "length",
+                "response {i} reported a finish reason the runner never produced; \
+                 the monitor is editing what the client sees"
+            );
+            assert_eq!(
+                body["choices"][0]["message"]["content"], UNPARSEABLE_REPLY,
+                "response {i} did not carry the model's own text"
+            );
+        }
+    }
+
+    /// **The monitor observes and never acts, on the streaming path too.**
+    ///
+    /// The plain-path twin above cannot cover this: `create_chat_stream` builds
+    /// its prompt from its own call to `build_prompt`, and every other streaming
+    /// test in this module runs on `state_with_runner`'s default 20-wide monitor,
+    /// which no test here makes twenty requests to fill. Their prompt assertions
+    /// therefore hold whether or not the monitor influences prompting — the
+    /// monitor is never in a state where it *could*. This test builds a one-wide
+    /// monitor and checks `should_warn()` before making its claim, so the claim
+    /// is about a warning server rather than a cold one.
+    ///
+    /// Proven by mutation, twice: `create_chat_stream` swapping to
+    /// `BuiltPrompt::raw(legacy_join(&raw))` while the rate is low, and the
+    /// `Done` frame reporting `"content_filter"` instead of the runner's reason
+    /// while it is. Both left all 644 tests green before this existed; both fail
+    /// this one alone now.
+    #[tokio::test]
+    async fn a_warning_monitor_does_not_change_what_a_streamed_request_sends_or_returns() {
+        let dir = bos_doubling_checkpoint("monitor-never-acts-streaming");
+        let template = crate::api::chat_template::resolve_for_serving(&dir);
+        assert!(
+            template.is_some(),
+            "the fixture's tokenizer_config.json did not resolve a template, so \
+             this test would be measuring the legacy join"
+        );
+
+        let (tx, runner) = stub_runner_with(FinishReason::Length);
+        let monitor = std::sync::Arc::new(EosMonitor::new(1, DEFAULT_MIN_STOP_RATE));
+        let state = state_with_monitor(template, Some(tx), monitor.clone());
+
+        let first = chat_completions(State(state.clone()), Json(plain_request(true)))
+            .await
+            .into_response();
+        let first_frames = sse_frames(first).await;
+        assert!(
+            monitor.should_warn(),
+            "the monitor is not in the warning state after a streamed completion \
+             that ran to its token budget, so this test never exercises its claim"
+        );
+
+        let second = chat_completions(State(state), Json(plain_request(true)))
+            .await
+            .into_response();
+        let second_frames = sse_frames(second).await;
+
+        let jobs = runner.join().expect("stub runner panicked");
+        assert_eq!(jobs.len(), 2, "expected two inferences, saw {}", jobs.len());
+
+        let expected = expected_llama3_render(&[("user", CONTRACT_QUESTION)]);
+        for (i, (prompt, add_special_tokens)) in jobs.iter().enumerate() {
+            assert_eq!(
+                prompt, &expected,
+                "streamed request {i} was not prompted with this model's template \
+                 — the monitor changed what is sent instead of only reporting on it"
+            );
+            assert!(
+                !add_special_tokens,
+                "streamed request {i} changed how the prompt is tokenized"
+            );
+        }
+
+        for (i, frames) in [&first_frames, &second_frames].into_iter().enumerate() {
+            assert_eq!(
+                frames.len(),
+                2,
+                "stream {i} did not carry one token frame and one done frame: \
+                 {frames:?}"
+            );
+            assert_eq!(
+                frames[0]["choices"][0]["delta"]["content"], UNPARSEABLE_REPLY,
+                "stream {i} did not carry the model's own text"
+            );
+            assert_eq!(
+                frames[1]["choices"][0]["finish_reason"], "length",
+                "stream {i} reported a finish reason the runner never produced; \
+                 the monitor is editing what the client sees"
             );
         }
     }
