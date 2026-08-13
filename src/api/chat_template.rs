@@ -488,7 +488,8 @@ pub fn resolve(model_dir: &Path) -> ChatTemplate {
 
     tracing::warn!(
         "no chat template resolved for {}; falling back to the legacy role: content join. \
-         Run `lightbulb-cli chat-template probe` to determine one.",
+         Run `lightbulb-probe {}` to determine one.",
+        model_dir.display(),
         model_dir.display()
     );
     ChatTemplate {
@@ -718,4 +719,75 @@ pub fn resolve_for_model(model_path: &Path) -> ResolvedTemplate {
 pub fn resolve_for_serving(model_path: &Path) -> Option<std::sync::Arc<ResolvedTemplate>> {
     let t = resolve_for_model(model_path);
     (t.resolved_by() != Resolution::None).then(|| std::sync::Arc::new(t))
+}
+
+// ─── The probe's report ─────────────────────────────────────────────────────
+//
+// The row type and the formatter live HERE rather than in `src/bin/
+// lightbulb-probe.rs` so they are unit-testable without a model: `src/bin/*.rs`
+// is a separate crate, and an integration test cannot reach into one. The
+// binary keeps only the parts that genuinely need a checkpoint.
+
+/// One candidate's result from a probe run.
+#[derive(Debug, Clone)]
+pub struct ProbeRow {
+    pub candidate: &'static str,
+    /// The template source that produced this row.
+    ///
+    /// Carried, not re-looked-up by name. `Sidecar.template` is the SOURCE, and
+    /// a row that holds only the name forces the selection step to go back to
+    /// `registry::candidates()` and match on a string — which is the same "two
+    /// values that must correspond, related only by convention" hazard the
+    /// named fields below exist to remove, just moved into the one step that
+    /// writes to disk.
+    pub source: &'static str,
+    /// Did generation stop on EOS rather than exhaust its budget?
+    pub stopped_on_eos: bool,
+    pub tokens_generated: usize,
+    /// First line of what the model produced, for the operator to eyeball.
+    ///
+    /// **The caller enforces this shape; the formatter does not.** Build it with
+    /// [`first_line_of`] rather than by hand — error text from `anyhow` and
+    /// `minijinja` is routinely multi-line and long, and a raw newline in this
+    /// field breaks the table into rows that look like extra candidates.
+    pub first_line: String,
+}
+
+/// Reduce arbitrary model or error output to something that fits one table cell.
+///
+/// Split first, THEN truncate: truncating first can leave a newline inside the
+/// 60 chars. Empty input yields an empty cell, which is a legitimate result — a
+/// model that produced nothing.
+pub fn first_line_of(text: &str) -> String {
+    let line = text.lines().next().unwrap_or("");
+    if line.chars().count() <= 60 {
+        line.to_string()
+    } else {
+        line.chars().take(57).collect::<String>() + "..."
+    }
+}
+
+/// Format probe results as a per-candidate table.
+///
+/// **Reports every candidate, and never picks the winner.** Selection is the
+/// binary's job and is deliberately separate: an operator reading this table
+/// must be able to see a board where two candidates both fired, or none did,
+/// and draw their own conclusion. Printing only a leader would hide exactly the
+/// cases where the probe should not be trusted.
+///
+/// Decoding is greedy, so each row is ONE deterministic generation, not a
+/// sample. A row is reproducible; re-running the probe on the same checkpoint
+/// and prompt must produce the same table.
+pub fn format_probe_report(rows: &[ProbeRow]) -> String {
+    let mut s = String::from("candidate   EOS   tokens  output\n");
+    for r in rows {
+        s.push_str(&format!(
+            "{:<11} {:<5} {:<7} {}\n",
+            r.candidate,
+            if r.stopped_on_eos { "yes" } else { "no" },
+            r.tokens_generated,
+            r.first_line,
+        ));
+    }
+    s
 }

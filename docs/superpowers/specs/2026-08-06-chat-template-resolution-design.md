@@ -124,12 +124,37 @@ debug than one that is consistently wrong and says so.
 ## §4 — The probe is an operator action
 
 ```
-lightbulb chat-template probe <model-dir>
+lightbulb-probe <model-dir>
 ```
 
 Renders a fixed prompt under each candidate template, generates with each, and
-reports EOS-fire rate per candidate. Writes the sidecar **on confirmation**, not
-automatically.
+reports per candidate whether generation stopped on EOS. Writes the sidecar
+**on confirmation**, not automatically.
+
+> ### CORRECTED 2026-08-12 — as shipped, not as designed
+>
+> Two details above were wrong when implemented, and both were caught before
+> implementation:
+>
+> - **The command is `lightbulb-probe`, a sibling binary**, not a subcommand of
+>   `lightbulb-cli` (see §6's table row, corrected likewise). `grep -c
+>   "lightbulb::" src/bin/lightbulb-cli.rs` returns **0**: that binary is a pure
+>   HTTP client, and giving it in-process inference would put the engine's link
+>   requirements on a tool whose job is to talk to a server that already has
+>   them.
+> - **There is no "rate".** A rate needs N trials that can differ, and the
+>   default backend decodes greedily (`ParallelModelManager`,
+>   `logits_slice.argmax(0)`) — only the `fuel-engine` path reads `temperature`
+>   at all — so N trials of one prompt are the same generation N times and every
+>   row could only read `0/N` or `N/N`. The probe generates **once** per
+>   candidate, which makes each row deterministic and reproducible rather than a
+>   sample of size one pretending otherwise. The confirmation gate is unchanged:
+>   the risk it guards is a probe over-fitting its single prompt, which N never
+>   addressed.
+>
+> §5's `evidence` example below still shows the old `8/8` shape. It is left as
+> written because it illustrates the *field*, not the format; the shipped probe
+> writes `probe: zephyr stopped on EOS in 8 tokens; chatml, llama2 did not`.
 
 **Why not automatic**, when it would resolve our own test model unattended:
 
@@ -169,7 +194,7 @@ inherit the wrong template.
 | `src/api/chat_template.rs` **new** | Tier resolution, `minijinja` rendering, sidecar read/write |
 | `src/api/mod.rs` *modify* | Resolve once at startup where the model path is known; store on `AppState` |
 | `src/api/openai/chat.rs` *modify* | Render messages through the template instead of the ad-hoc join |
-| `src/bin/lightbulb-cli.rs` *modify* | `chat-template probe` subcommand |
+| `src/bin/lightbulb-probe.rs` **new** | The probe. A sibling binary, **not** a `lightbulb-cli` subcommand — see §4's CORRECTED block |
 
 > ### CORRECTED 2026-08-08 — this table undercounts the work
 >

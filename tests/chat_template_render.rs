@@ -1251,3 +1251,78 @@ fn measure_render_cost() {
         src.len()
     );
 }
+
+// ─── The probe's report ─────────────────────────────────────────────────────
+//
+// Generating under a candidate template needs a model, so it has no automated
+// test at all — see `src/bin/lightbulb-probe.rs`. Formatting does not, which is
+// why `ProbeRow` and `format_probe_report` live in the library rather than in
+// the binary: `src/bin/*.rs` is a separate crate and nothing here could reach
+// into one.
+
+/// The table an operator reads must show every candidate and name no winner.
+///
+/// **Asserted as one whole string, not with `contains`.** This file's header
+/// gives the general rule; here it is load-bearing four separate times. A
+/// `contains`-based version of this test survives ALL of: swapping the yes/no
+/// literals, deleting the tokens column, reversing the row order, and pairing
+/// every row's outcome with the wrong candidate.
+#[test]
+fn probe_report_renders_every_candidate_and_picks_no_winner() {
+    use lightbulb::api::chat_template::{ProbeRow, format_probe_report};
+    let rows = vec![
+        ProbeRow {
+            candidate: "zephyr",
+            source: "SRC_Z",
+            stopped_on_eos: true,
+            tokens_generated: 8,
+            first_line: "The capital of France is Paris.".to_string(),
+        },
+        ProbeRow {
+            candidate: "chatml",
+            source: "SRC_C",
+            stopped_on_eos: false,
+            tokens_generated: 48,
+            first_line: "The capital of France is Paris. The capital of".to_string(),
+        },
+        ProbeRow {
+            candidate: "llama2",
+            source: "SRC_L",
+            stopped_on_eos: false,
+            tokens_generated: 48,
+            first_line: "user The capital of France is Paris, and the".to_string(),
+        },
+    ];
+
+    // Every column, every row, in order.
+    assert_eq!(
+        format_probe_report(&rows),
+        "candidate   EOS   tokens  output\n\
+         zephyr      yes   8       The capital of France is Paris.\n\
+         chatml      no    48      The capital of France is Paris. The capital of\n\
+         llama2      no    48      user The capital of France is Paris, and the\n"
+    );
+
+    // Separate claim, so it is not folded into the layout equality: the report
+    // must not announce a conclusion. Selection belongs to the binary, and an
+    // operator has to be able to read a two-winner or zero-winner board for
+    // what it is.
+    let lower = format_probe_report(&rows).to_lowercase();
+    for banned in ["winner", "best", "recommend", "selected"] {
+        assert!(
+            !lower.contains(banned),
+            "the report named a winner ({banned}):\n{lower}"
+        );
+    }
+
+    // The template SOURCE must never reach the operator's table — it is a
+    // multi-line Jinja blob that would destroy the layout. This is why
+    // `ProbeRow` carries it for the selection step rather than the formatter
+    // printing it.
+    for src in ["SRC_Z", "SRC_C", "SRC_L"] {
+        assert!(
+            !format_probe_report(&rows).contains(src),
+            "{src} leaked into the report"
+        );
+    }
+}

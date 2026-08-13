@@ -25,7 +25,7 @@
 - **A failing test binary stops the ones after it.** `cargo test --test a --test b` will not run `b` if `a` fails, so a suite you believe you covered may simply never have executed. Re-read the `running N tests` lines and count the suites, not just the results.
 - **GPU-touching suites go through the lock:** `pwsh -NoProfile -File C:/Projects/fuel/scripts/gpu-run.ps1 -Project lightbulb -- <cmd>`.
 - **When piping cargo through `grep`, print `${PIPESTATUS[0]}`.** The pipeline's status masks cargo's; this has already produced one false green on this project.
-- **`rustfmt --edition 2024 <file>` every file you touch**, before committing.
+- **`rustfmt --edition 2024 <file>` every file you touch**, before committing. **But never run it on a `mod.rs`** — rustfmt follows `pub mod` declarations and reformats every module the file declares. Running it on `src/engine/mod.rs` rewrote 8 unrelated files that were not already rustfmt-clean. If you must format a `mod.rs`, check `git status` afterwards and revert everything you did not touch.
 - **Never assert a property that holds whether or not the code is correct.** `assert!(x > 0)` against a count that was already nonzero proves nothing. Prefer equality against an independently-derived value.
 - **The test model is TinyLlama-1.1B-Chat** at `$TINYLLAMA_DIR`, defaulting to the HF cache path in `tests/api_result_metadata.rs`. Its snapshot contains **only** `config.json`, `model.safetensors`, `tokenizer.json` — no `tokenizer_config.json`, so **tier 1 does not fire for it** and its `<|user|>` markers are ordinary text, so **tier 2 does not either**. It resolves at tier 3. Any test asserting tier 1 or 2 must build a fixture, not use the checkpoint.
 - **TinyLlama is BLIND to any `bos_token` defect, so never use it to test one.** It resolves to `registry::ZEPHYR`, whose source never mentions `bos_token`, so its rendered prompt is *accidentally* correct no matter what the surrounding code does with BOS. Task 3's review found exactly this: a templated prompt was being tokenized with `add_special_tokens = true`, doubling BOS for Llama-3/Llama-2/Mistral/Gemma — and every TinyLlama-based test in the repo stayed green, because ZEPHYR emits no BOS to double. The guard tests in `src/api/openai/chat.rs` build a synthetic Llama-3-shaped checkpoint (a template opening `{{ bos_token }}` plus a `TemplateProcessing` post_processor) for this reason. **The same shape applies beyond BOS:** before testing any behaviour against the checkpoint, check that ZEPHYR actually exercises it — the tier-3 template is a small subset of what real templates do.
@@ -44,7 +44,7 @@
 | `src/contracts/executor.rs` *modify* | `infer` callback takes `Vec<RawMessage>`, not `String` |
 | `src/contracts/validation.rs` *modify* | **Delete** `messages_to_prompt` |
 | `src/engine/eos_monitor.rs` **new** | Rolling EOS-rate counter |
-| `src/bin/lightbulb-cli.rs` *modify* | `chat-template probe` subcommand |
+| `src/bin/lightbulb-probe.rs` **new** | Probe binary. **Not** a `lightbulb-cli` subcommand: that binary has zero `lightbulb::` references and is a pure HTTP client, so giving it the engine would put CUDA link requirements on a tool that only talks to a server |
 | `tests/chat_template_render.rs` **new** | Rendering and tier-order tests — no checkpoint needed |
 | `tests/chat_template_e2e.rs` **new** | Behavioural, feature-gated, needs the checkpoint |
 
@@ -548,7 +548,8 @@ pub fn resolve(model_dir: &Path) -> ChatTemplate {
 
     tracing::warn!(
         "no chat template resolved for {}; falling back to the legacy role: content join. \
-         Run `lightbulb-cli chat-template probe` to determine one.",
+         Run `lightbulb-probe {}` to determine one.",
+        model_dir.display(),
         model_dir.display()
     );
     ChatTemplate { source: String::new(), resolved_by: Resolution::None }
@@ -1244,112 +1245,410 @@ git commit -m "feat(engine): Warn when the EOS rate suggests a wrong template"
 
 ---
 
-## Task 6: The probe subcommand
+## Task 6: The probe binary
+
+> ### REWRITTEN 2026-08-12 after an audit. Do not implement the previous version.
+>
+> The earlier Task 6 put a `chat-template probe` subcommand on `lightbulb-cli`
+> and generated `--trials 8` times per candidate. Both halves were wrong, and
+> both were caught before implementation rather than during it:
+>
+> 1. **`lightbulb-cli` cannot run a model.** `grep -c "lightbulb::"
+>    src/bin/lightbulb-cli.rs` returns **0** — it imports only `clap`,
+>    `futures_util`, `serde`, `std::io` and talks to a server over HTTP. The
+>    probe needs in-process inference. `src/main.rs` already links the library,
+>    so a **sibling binary has exactly the server's dependency footprint** and
+>    adds no new link risk.
+> 2. **N trials cannot vary on the default build.** The only readers of
+>    temperature are `src/model_fuel/engine_model.rs:231,272` — the
+>    `fuel-engine` path. The default backend is greedy
+>    (`parallel_model_manager.rs`, `logits_slice.argmax(0)`), so eight trials of
+>    one prompt are the same generation eight times, and every row could only
+>    ever read `0/8` or `8/8`. The old `format_probe_report` justified its whole
+>    design with *"A 5/8-vs-4/8 result must be visible as the coin-flip it is"*
+>    — an outcome the shipped default build cannot produce.
+>
+> **Greedy decoding is not a problem to work around here — it is the feature.**
+> One generation per candidate is deterministic and reproducible, so the probe
+> reports a fact rather than a sample. The confirmation gate stays, because the
+> risk it guards was never sampling noise: it is that a probe over-fits its one
+> prompt, and that is just as true at N=1.
 
 **Files:**
-- Modify: `src/bin/lightbulb-cli.rs`
+- Create: `src/bin/lightbulb-probe.rs`
+- Modify: `Cargo.toml` (add the `[[bin]]` target)
+- Modify: `src/api/chat_template.rs` (add `ProbeRow` and `format_probe_report`; fix the stale operator hint in **`resolve`**'s fallthrough — see Step 6)
+- Modify: this plan file (Task 2's sample quotes the same stale command)
 - Test: `tests/chat_template_render.rs`
 
 **Interfaces:**
-- Consumes: `registry::candidates()`, `write_sidecar`, `fingerprint`.
+- Consumes: `registry::candidates()`, `ChatTemplate`, `special_tokens`, `fingerprint`, `Sidecar`, `write_sidecar`, `Resolution::Probe`, `ModelRunner::start`, `InferenceJob`, `ResponseMode`, `FinishReason`.
+- Produces: `format_probe_report(&[ProbeRow]) -> String`, binary `lightbulb-probe`.
 
-**`lightbulb-cli` currently has NO subcommands** — it is a flat `Args` struct (a chat client). The spec writes `lightbulb chat-template probe`, naming a CLI shape that does not exist. Add an **optional** `#[command(subcommand)]` so the existing bare invocation keeps working; `None` means "chat", as today.
+**Verified against the tree at `acd9158` — do not re-derive these from memory:**
 
-- [ ] **Step 1: Restructure Args**
+| Fact | Value |
+| --- | --- |
+| `fingerprint` | `pub fn fingerprint(&Path) -> Option<String>` — **`Option`**, fails closed |
+| `Sidecar` fields | `template`, `resolved_by`, `evidence`, `resolved_at`, `model_fingerprint` — **five**, no `Default` |
+| `write_sidecar` | `pub fn write_sidecar(&Path, &Sidecar) -> anyhow::Result<()>` |
+| `ChatTemplate::render` | `render(&self, &[RawMessage], bos_token: &str, eos_token: &str)` — **needs both tokens** |
+| `candidates()` order | `[("zephyr", ZEPHYR), ("chatml", CHATML), ("llama2", LLAMA2)]` |
+| `ModelRunner::start` | `(impl Into<PathBuf>, max_batch_size, context_length, dtype: Option<String>) -> Result<InferenceRequestSender>` |
+| `InferenceJob` | `id`, `prompt`, `max_new_tokens`, `temperature`, `add_special_tokens`, `response_mode` — all mandatory |
+| `ResponseMode::Complete` | carries `oneshot::Sender<anyhow::Result<CompletionResult>>` — **the awaited value is a `Result`**; see Step 4 |
+| `CompletionResult` | exposes `text: String`, `finish_reason: FinishReason`, `completion_tokens: usize` — `text` is what feeds `first_line_of` |
+| Awaiting the oneshot | yields **two** `Result` layers: `Result<anyhow::Result<CompletionResult>, oneshot::RecvError>`. Handle the outer one as `chat.rs` does — `.await.map_err(\|e\| anyhow!("inference runner dropped: {e}"))?` — then the inner per Step 4 |
+| `InferenceJob.id` | mandatory; any unique string (`uuid::Uuid::new_v4().to_string()` matches the rest of the repo). Immaterial at `temperature: 0.0`, but it is not optional |
+| **Import paths** | `crate::engine` re-exports only `InferenceJob`, `InferenceRequestSender`, `ModelRunner`. `ResponseMode`, `FinishReason`, `CompletionResult` must be reached at `lightbulb::engine::model_runner::{…}`; `RawMessage` at `lightbulb::contracts::validation::RawMessage` |
+| **`src/bin/*.rs` is a separate crate** | so it CANNOT call `chat.rs`'s `pub(crate) run_inference_once`. The oneshot/`InferenceJob` dance must be re-implemented here — the one place this plan knowingly accepts a second copy, because the crate boundary leaves no alternative |
 
-```rust
-#[derive(Subcommand)]
-enum Command {
-    /// Determine a model's chat template empirically by generating under each
-    /// candidate and comparing EOS-fire rates.
-    ChatTemplate {
-        #[command(subcommand)]
-        action: ChatTemplateAction,
-    },
-}
+- [ ] **Step 1: Add the binary target**
 
-#[derive(Subcommand)]
-enum ChatTemplateAction {
-    /// Probe candidates and report per-candidate EOS rates.
-    Probe {
-        model_dir: std::path::PathBuf,
-        /// Generations per candidate.
-        #[arg(long, default_value_t = 8)]
-        trials: usize,
-        /// Write the sidecar without asking. Off by default: a wrong
-        /// conclusion that gets persisted is worse than none, because it stops
-        /// anyone re-examining the question and carries the authority of a
-        /// file on disk.
-        #[arg(long)]
-        yes: bool,
-    },
-}
+In `Cargo.toml`, beside the existing `[[bin]]`:
+
+```toml
+# The probe runs a model in-process, so it links the library the way
+# `src/main.rs` does. It is deliberately NOT a subcommand of `lightbulb-cli`:
+# that binary is a pure HTTP client (zero `lightbulb::` references) and giving
+# it an engine dependency would put CUDA link requirements on a tool whose job
+# is to talk to a server.
+[[bin]]
+name = "lightbulb-probe"
+path = "src/bin/lightbulb-probe.rs"
 ```
 
-Add to `Args`:
+- [ ] **Step 2: The report formatter**
+
+Add to `src/api/chat_template.rs`, not the binary, so it is testable without a model. Note `ProbeRow` is a named struct: the old signature was `&[(&str, usize, usize)]`, and a bare tuple of two `usize`s is exactly the shape where "fired" and "total" get transposed silently.
 
 ```rust
-    #[command(subcommand)]
-    command: Option<Command>,
-```
+/// One candidate's result from a probe run.
+#[derive(Debug, Clone)]
+pub struct ProbeRow {
+    pub candidate: &'static str,
+    /// The template source that produced this row.
+    ///
+    /// Carried, not re-looked-up by name. `Sidecar.template` is the SOURCE, and
+    /// a row that holds only the name forces the selection step to go back to
+    /// `candidates()` and match on a string — which is the same
+    /// "two values that must correspond, related only by convention" hazard the
+    /// named fields below exist to remove, just moved into the one step that
+    /// writes to disk.
+    pub source: &'static str,
+    /// Did generation stop on EOS rather than exhaust its budget?
+    pub stopped_on_eos: bool,
+    pub tokens_generated: usize,
+    /// First line of what the model produced, for the operator to eyeball.
+    ///
+    /// **The caller enforces this shape; the formatter does not.** Build it with
+    /// the helper below rather than by hand — error text from `anyhow` and
+    /// `minijinja` is routinely multi-line and long, and a raw newline in this
+    /// field breaks the table into rows that look like extra candidates.
+    pub first_line: String,
+}
 
-- [ ] **Step 2: Implement the report formatter**
+/// Reduce arbitrary model or error output to something that fits one table cell.
+///
+/// Split first, THEN truncate: truncating first can leave a newline inside the
+/// 60 chars. Empty input yields an empty cell, which is a legitimate result —
+/// a model that produced nothing.
+pub fn first_line_of(text: &str) -> String {
+    let line = text.lines().next().unwrap_or("");
+    if line.chars().count() <= 60 {
+        line.to_string()
+    } else {
+        line.chars().take(57).collect::<String>() + "..."
+    }
+}
 
-Add to `src/api/chat_template.rs` — it lives here, not in the binary, so it is testable without a model:
-
-```rust
 /// Format probe results as a per-candidate table.
 ///
-/// Reports **every candidate's rate, never a winner.** A 5/8-vs-4/8 result must
-/// be visible as the coin-flip it is; printing only the leader would hide that
-/// the probe over-fit its single prompt.
-pub fn format_probe_report(rows: &[(&str, usize, usize)]) -> String {
-    let mut s = String::from("candidate   EOS fired\n");
-    for (name, fired, total) in rows {
-        s.push_str(&format!("{name:<11} {fired}/{total}\n"));
+/// **Reports every candidate, and never picks the winner.** Selection is the
+/// caller's job (Step 4) and is deliberately separate: an operator reading this
+/// table must be able to see a board where two candidates both fired, or none
+/// did, and draw their own conclusion. Printing only a leader would hide
+/// exactly the cases where the probe should not be trusted.
+///
+/// Decoding is greedy, so each row is ONE deterministic generation, not a
+/// sample. A row is reproducible; re-running the probe on the same checkpoint
+/// and prompt must produce the same table.
+pub fn format_probe_report(rows: &[ProbeRow]) -> String {
+    let mut s = String::from("candidate   EOS   tokens  output\n");
+    for r in rows {
+        s.push_str(&format!(
+            "{:<11} {:<5} {:<7} {}\n",
+            r.candidate,
+            if r.stopped_on_eos { "yes" } else { "no" },
+            r.tokens_generated,
+            r.first_line,
+        ));
     }
     s
 }
 ```
 
-Expected output shape:
+Expected output shape — **illustrative, not measured.** The token counts and generated text below are plausible values chosen to show the layout; only the *columns and ordering* are load-bearing, and candidate order is `candidates()`' order: zephyr / chatml / llama2.
 
 ```
-candidate   EOS fired
-zephyr      8/8
-llama2      1/8
-chatml      0/8
+candidate   EOS   tokens  output
+zephyr      yes   8       The capital of France is Paris.
+chatml      no    48      The capital of France is Paris. The capital of
+llama2      no    48      user The capital of France is Paris, and the
 ```
 
-- [ ] **Step 3: Implement the probe command**
+- [ ] **Step 3: Test the report shape**
 
-For each `registry::candidates()` entry, render the fixed prompt, generate `trials` times, count how many finished with `FinishReason::Stop`. Print `format_probe_report(&rows)`. Then, unless `--yes`, read a y/N confirmation from stdin before calling `write_sidecar` with `resolved_by: Resolution::Probe`, `model_fingerprint: fingerprint(&model_dir)`, and `evidence` built from that same table.
+Generation needs a model, so the unit test covers formatting only. Add to `tests/chat_template_render.rs` (35 tests today → 36; the file is **not** feature-gated, so a plain `cargo test --test chat_template_render` really runs it):
 
-- [ ] **Step 4: Test the report shape**
-
-The generation loop needs a model, so keep the unit test on the formatting only:
+**Assert the whole string, not `contains`.** This file's own header says so —
+*"Rendering is asserted against literal expected output, never `contains`. A
+template that emitted the right markers in the wrong order would pass a
+`contains` check while prompting the model incorrectly"* — and the same logic
+applies here. A `contains`-based version of this test survives **all four** of:
+swapping the yes/no literals, deleting the tokens column, reversing row order,
+and pairing every row's outcome with the wrong candidate. The expected table is
+already written out above, so the equality costs nothing.
 
 ```rust
 #[test]
-fn probe_report_lists_every_candidate_not_a_winner() {
-    let rows = vec![("zephyr", 8usize, 8usize), ("llama2", 1, 8), ("chatml", 0, 8)];
-    let report = lightbulb::api::chat_template::format_probe_report(&rows);
-    for c in ["zephyr", "llama2", "chatml"] {
-        assert!(report.contains(c), "{c} missing from the report");
+fn probe_report_renders_every_candidate_and_picks_no_winner() {
+    use lightbulb::api::chat_template::{ProbeRow, format_probe_report};
+    let rows = vec![
+        ProbeRow { candidate: "zephyr", source: "SRC_Z", stopped_on_eos: true, tokens_generated: 8,
+                   first_line: "The capital of France is Paris.".to_string() },
+        ProbeRow { candidate: "chatml", source: "SRC_C", stopped_on_eos: false, tokens_generated: 48,
+                   first_line: "The capital of France is Paris. The capital of".to_string() },
+        ProbeRow { candidate: "llama2", source: "SRC_L", stopped_on_eos: false, tokens_generated: 48,
+                   first_line: "user The capital of France is Paris, and the".to_string() },
+    ];
+
+    // Every column, every row, in order. Kills the yes/no swap, the dropped
+    // column, the reordering, and the mispairing — none of which a `contains`
+    // check can see.
+    assert_eq!(
+        format_probe_report(&rows),
+        "candidate   EOS   tokens  output\n\
+         zephyr      yes   8       The capital of France is Paris.\n\
+         chatml      no    48      The capital of France is Paris. The capital of\n\
+         llama2      no    48      user The capital of France is Paris, and the\n"
+    );
+
+    // Separate claim, so it is not folded into the layout equality: the report
+    // must not announce a conclusion. Selection belongs to the caller (Step 5),
+    // and an operator has to be able to read a two-winner or zero-winner board
+    // for what it is.
+    let lower = format_probe_report(&rows).to_lowercase();
+    for banned in ["winner", "best", "recommend", "selected"] {
+        assert!(!lower.contains(banned), "the report named a winner ({banned}):\n{lower}");
     }
-    assert!(report.contains("8/8") && report.contains("1/8") && report.contains("0/8"));
+
+    // The template SOURCE must never reach the operator's table — it is a
+    // multi-line Jinja blob that would destroy the layout. This is why
+    // `ProbeRow` carries it for Step 5 rather than the formatter printing it.
+    for src in ["SRC_Z", "SRC_C", "SRC_L"] {
+        assert!(!format_probe_report(&rows).contains(src), "{src} leaked into the report");
+    }
 }
 ```
 
-- [ ] **Step 5: Run and commit**
+- [ ] **Step 4: The probe binary**
+
+Create `src/bin/lightbulb-probe.rs`. Model its `main` on `src/main.rs` (env-var-free here; this one uses clap). **Every decision below changes the measured result, so none of them may be left to the implementer's judgement:**
+
+- **Fixed prompt:** one user message, `"Name the capital of France."` — the same prompt the e2e tests use, so a probe result is comparable with them.
+- **`max_new_tokens: 48`.** The EOS rate is a function of the budget: too small and a correct template looks like a failure. 48 is ~6× the 8-token answer TinyLlama gives.
+- **`temperature: 0.0`.** Greedy, and the whole basis of the one-trial design.
+- **`add_special_tokens: false`.** This is what the server passes for every `ResolvedTemplate::render` output, and matching it is the entire reason a probe result is comparable with what the server will then do. **Do not justify it with "the template already emits BOS"** — `grep -n "bos_token" src/api/chat_template/registry.rs` returns nothing, so none of these three candidates interpolates it, and the probe's prompts carry no BOS at all. That is a difference from the general templated case, not a reason to flip the flag: `true` would add a BOS the template did not ask for, which is exactly what `tests/api_result_metadata.rs` records as the defect Task 3's review removed. See `RequestContext::add_special_tokens`.
+- **bos/eos come from `special_tokens(&model_dir)`**, never literals. `ZEPHYR` and `LLAMA2` both interpolate `eos_token`, so a literal changes the very signal being measured.
+- **`ModelRunner::start(&model_dir, 1, 512, Some("f32".to_string()))`**, once, reused across candidates. Every *test* call site passes exactly this; `src/api/mod.rs` passes `Some("f32")` too but takes its context length from config (4096 in `src/main.rs`). `None` is equivalent for dtype (`parse_dtype(None) => F32`) but gratuitously different, and this run is meant to be comparable with the e2e tests.
+- **Initialise `tracing_subscriber` first**, exactly as `src/main.rs:15-21` does. Without a global subscriber every `tracing::warn!` in the library is a **no-op** — including the one in `special_tokens` that says a checkpoint declares no BOS/EOS. `ModelRunner`'s `println!`/`eprintln!` would still appear, so the output would look healthy while the single warning that invalidates the measurement is silently dropped.
+
+**The CLI surface** (the previous version declared this and the rewrite lost it):
+
+```rust
+#[derive(Parser, Debug)]
+#[command(about = "Determine a checkpoint's chat template by generating under each candidate")]
+struct Args {
+    /// Checkpoint directory, or a single .gguf file.
+    model_dir: std::path::PathBuf,
+    /// Write the sidecar without the interactive confirmation. Does NOT
+    /// bypass any refusal in Step 5 — a flag that suppresses a refusal is a
+    /// flag that writes a wrong answer unattended.
+    #[arg(long)]
+    yes: bool,
+}
+```
+
+Confirmation reads a line from stdin and requires an explicit `y`/`yes`. **Treat EOF and an empty line as NO** — run from a script, `read_line` returns `Ok(0)`, and an implementation that defaults empty input to "yes" writes the sidecar unattended, which is the exact thing `--yes` exists to make deliberate.
+
+**Per candidate:** build a `ChatTemplate { source: src.to_string(), resolved_by: Resolution::Probe }`, render, send one `InferenceJob` with `ResponseMode::Complete`, await, and record a `ProbeRow`.
+
+**Both fallible steps need an explicit arm, and this is not a formality:**
+
+- **`render` returns `anyhow::Result<String>`.** A candidate whose render fails is not a candidate that lost — record it as a row with `stopped_on_eos: false`, `tokens_generated: 0`, and the error text in `first_line`, so the operator sees *why* rather than seeing it silently score zero.
+- **The awaited value is `anyhow::Result<CompletionResult>`, and an `Err` here means the RUNNER failed, not the template.** **Abort the whole probe immediately and propagate that error** — do not map it to a losing row. `ModelRunner::start` returns `Ok(tx)` even when the model fails to load and then answers every job with `Err("model load failed: {e}")`, so this arm is exactly where a broken checkpoint announces itself. Mapping it to `stopped_on_eos: false` would burn three model runs to conclude "no template matched" about a model that never loaded, discarding a precise diagnosis the runner already handed you.
+
+Then print `format_probe_report(&rows)`.
+
+- [ ] **Step 5: Selection, and the four ways it must refuse**
+
+This is the step the old plan omitted entirely, and it is the only part that writes to disk. The sidecar it produces outranks **every** other tier on the next server start, so each refusal below is load-bearing:
+
+```rust
+// Refusal -1, FIRST. Without this, the most common operator error — a typo in
+// the path — gets the one diagnosis guaranteed to be wrong. `special_tokens`
+// swallows all three of its file reads, so a nonexistent directory returns
+// `bos: "", eos: ""` and falls into Refusal 0, telling the operator to "add a
+// tokenizer_config.json" to a directory that does not exist. `ModelRunner::start`
+// has no existence check either (`src/api/mod.rs` guards with
+// `model_path.exists()` before calling it; nothing else does).
+if !model_dir.exists() {
+    anyhow::bail!("{} does not exist", model_dir.display());
+}
+
+// Refusal 0: an empty EOS makes the measurement meaningless, so do not spend
+// three model runs discovering it.
+let tokens = special_tokens(&model_dir);
+if tokens.eos.is_empty() {
+    anyhow::bail!(
+        "{} declares no EOS token, so this probe cannot measure anything: ZEPHYR \
+         and LLAMA2 both interpolate `eos_token` and would render with no \
+         end-of-turn marker at all, while CHATML — which references neither — \
+         would be unaffected. The comparison would be rigged, not close. Add a \
+         tokenizer_config.json with eos_token, or a config.json with \
+         eos_token_id WHOSE ID APPEARS IN tokenizer.json's added_tokens. \
+         Nothing was written.",
+        model_dir.display()
+    );
+}
+
+// ... generation happens here, producing `rows: Vec<ProbeRow>` ...
+
+let fired: Vec<&ProbeRow> = rows.iter().filter(|r| r.stopped_on_eos).collect();
+let winner: &ProbeRow = match fired.as_slice() {
+    [only] => only,
+    [] => anyhow::bail!(
+        "no candidate stopped on EOS, so none of these three templates suits \
+         this checkpoint. (A model that failed to LOAD cannot reach this \
+         message — that aborts the probe at the first candidate with the \
+         runner's own error.) Nothing was written."
+    ),
+    many => anyhow::bail!(
+        "{} candidates stopped on EOS ({}). The probe cannot choose between \
+         them and will not guess. Nothing was written.",
+        many.len(),
+        many.iter().map(|r| r.candidate).collect::<Vec<_>>().join(", ")
+    ),
+};
+
+// Refusal 3. `Option<String>`, and the Sidecar field is `String`.
+let Some(fp) = fingerprint(&model_dir) else {
+    anyhow::bail!(
+        "cannot fingerprint {} — a directory checkpoint needs a readable \
+         config.json; a .gguf file needs to be readable itself — so a sidecar \
+         written here could not later be checked against the checkpoint it \
+         describes. Nothing was written.",
+        model_dir.display()
+    );
+};
+```
+
+1. **Empty EOS → refuse, before generating.** 2 of the 3 candidates interpolate `eos_token`; `CHATML` references neither. An empty token therefore does not degrade the comparison evenly — it removes the end-of-turn marker from two candidates and leaves the third intact, which biases the result rather than merely weakening it.
+2. **Zero winners → refuse.** Note what this message does **not** claim. An earlier draft said a load failure and a template mismatch "look identical here" — that was false: `drain_with_error` sends `Err("model load failed: {e}")` and the runner prints to stderr, so the probe holds the discriminating value. Step 4 aborts on that `Err`, so by the time this arm is reached the model demonstrably loaded and generated. Silently picking `candidates()[0]` would still be wrong, but for the ordinary reason.
+3. **Two or more winners → refuse.** Do not tie-break.
+4. **`fingerprint` returning `None` → refuse.** **Do not reach for `.unwrap_or_default()`** — that is precisely the bug Task 2's review found, where every unidentifiable checkpoint hashed to the same constant and a foreign sidecar was served at `Resolution::Sidecar`, the highest-authority tier, carrying evidence claiming it was measured on this model.
+5. **`--yes` does not bypass 1–4.** It skips only the interactive y/N.
+
+Then build the sidecar with **all five fields**. `winner.source` is carried on the row — do **not** re-look-it-up from `candidates()` by name:
+
+```rust
+let sc = Sidecar {
+    template: winner.source.to_string(),
+    resolved_by: Resolution::Probe,
+    evidence: format!(
+        "probe: {} stopped on EOS in {} tokens; {} did not",
+        winner.candidate,
+        winner.tokens_generated,
+        rows.iter().filter(|r| !r.stopped_on_eos)
+            .map(|r| r.candidate).collect::<Vec<_>>().join(", ")
+    ),
+    resolved_at: chrono::Utc::now().to_rfc3339(),
+    model_fingerprint: fp,
+};
+write_sidecar(&model_dir, &sc)?;   // propagate: a failed write must not report success
+```
+
+`evidence` is one prose line, matching the spec's shape and the existing fixtures in `tests/chat_template_render.rs` — **not** the whole table with its header stuffed into a JSON string. `chrono` is already a direct dependency and RFC-3339 is the convention every existing sidecar fixture uses.
+
+- [ ] **Step 6: Fix the operator hint that already ships**
+
+The stale hint is in **`resolve`** (`src/api/chat_template.rs:491`), in the *no tier matched at all* fallthrough — **not** in `special_tokens`, and the binding in scope is **`model_dir`**, not `model_path`. Locate it rather than trusting this line number:
+
+**Search for `chat-template probe`, not `lightbulb-cli chat-template`** — the narrower pattern misses two references in the spec, which plan line 11 makes required reading, including a File-Structure row describing the very design this task refutes:
 
 ```bash
-cargo test -j 4 --test chat_template_render 2>&1 | tail -15
-cargo build -j 4 --bin lightbulb-cli 2>&1 | tail -5
-rustfmt --edition 2024 src/bin/lightbulb-cli.rs
-git add -A
-git commit -m "feat(cli): Add chat-template probe"
+grep -rn "chat-template probe" src/ docs/
 ```
+
+Five hits: `chat_template.rs:491`, two in this plan, and two in `docs/superpowers/specs/2026-08-06-chat-template-resolution-design.md`. Fix all of them.
+
+The existing `format!` already consumes its single `{}` with `model_dir.display()`, so the new path needs a **second** argument:
+
+```rust
+    tracing::warn!(
+        "no chat template resolved for {}; falling back to the legacy role: content join. \
+         Run `lightbulb-probe {}` to determine one.",
+        model_dir.display(),
+        model_dir.display()
+    );
+```
+
+That grep also hits **this plan's own Task 2 sample**, which quotes the old string. Update it too, and add the plan to Step 7's `git add` list — otherwise the plan keeps advertising a command that does not exist.
+
+Do **not** add a probe hint to `special_tokens`'s tier-3 warning. That warning deliberately prints `meta.display()` rather than `model_path.display()`, with an in-code comment explaining that the two differ for a `.gguf` checkpoint; a hint added there would contradict it.
+
+- [ ] **Step 7: Run and commit**
+
+Note: no `| tail`. Piping cargo into `tail` reports **`tail`'s** exit status, which this plan's Global Constraints call out as having already produced a false green here.
+
+```bash
+cargo test -j 4 --test chat_template_render 2>&1 | grep -E "^running|^test result|^error"; echo "EXIT=${PIPESTATUS[0]}"
+# Expect `running 36 tests` / `35 passed; 0 failed; 1 ignored` — libtest counts
+# the ignored measurement harness in `running N`.
+cargo build -j 4 --bin lightbulb-probe 2>&1 | grep -E "^error"; echo "EXIT=${PIPESTATUS[0]}"
+
+# rustfmt on chat_template.rs follows its `pub mod registry;` and may reformat
+# registry.rs too — the same mechanism the Global Constraints flag for mod.rs.
+rustfmt --edition 2024 src/bin/lightbulb-probe.rs src/api/chat_template.rs tests/chat_template_render.rs
+git status --short src/api/chat_template/   # revert registry.rs if you did not touch it
+
+git add Cargo.toml src/bin/lightbulb-probe.rs src/api/chat_template.rs \
+        tests/chat_template_render.rs docs/superpowers/plans/2026-08-08-chat-template-resolution.md
+git commit -m "feat(cli): Add the chat-template probe binary"
+```
+
+`git add` names explicit paths — `git add -A` would sweep the untracked `supertool` and anything another agent has in flight.
+
+**Deliberately not a verification step:** `cargo build --bin lightbulb-cli`. Task 6 does not touch that target's sources, and `[dependencies]` are package-scoped, so adding a second `[[bin]]` cannot change it — the command passes identically whether this task was done right, done wrong, or not at all. The only failure it could catch is a malformed manifest, which building `lightbulb-probe` already catches. A check that cannot fail is the defect this plan's Global Constraints name.
+
+**Manual smoke test** (needs the checkpoint; the probe has no automated end-to-end test because it needs a model):
+
+```bash
+cargo run --release -j 4 --bin lightbulb-probe -- "$TINYLLAMA_DIR"
+```
+
+Expect a three-row table. TinyLlama resolves to ZEPHYR at tier 3, so `zephyr` firing EOS is the result that agrees with what the server already does — and if the table shows zero or two winners, the refusal paths above are what should happen.
+
+**Answer `n`, or delete `$TINYLLAMA_DIR/lightbulb-chat-template.json` afterwards.** A `y` writes a sidecar into the shared HF cache snapshot, and `resolve` reads tier 0 first — so that checkpoint would then resolve at `Resolution::Probe` for every later run on this machine, falsifying this plan's own Global Constraint that it resolves at tier 3. No test asserts the tier against the real checkpoint today, so nothing breaks immediately; that is what makes it easy to leave behind.
+
+**This smoke test does NOT exercise refusal 1.** TinyLlama's `config.json` ids 1/2 resolve to `<s>`/`</s>` through `tokenizer.json`, so its EOS is non-empty and the empty-EOS path is unreachable with this checkpoint. Cover that one with a fixture directory, not the smoke test.
+
+### Known limits of this task, stated rather than discovered
+
+- **`.gguf` under `--features fuel-engine` reports the wrong cause.** That build's `ModelRunner::start` refuses GGUF outright and routes to `drain_with_error`, so Step 4's abort surfaces the runner's message — which is correct behaviour, but an operator who only reads the probe's own output would blame the templates for a backend limitation. The default candlelight build handles `.gguf` normally. Not fixed here; `fingerprint`, `metadata_dir` and `sidecar_path` all branch on `is_file` correctly, so the rest of the GGUF path is sound.
+- **A nonexistent `model_dir` is not pre-checked.** `ModelRunner::start` does no existence check (unlike `src/api/mod.rs`, which guards with `model_path.exists()`); the failure arrives from the loader through `drain_with_error` and Step 4 aborts with it. Acceptable, because the message names the path — but it is a runner error, not a probe error, and reads that way.
+- **Four sidecar fixtures in `tests/chat_template_render.rs` carry `evidence` in the old `EOS 8/8 with zephyr, 1/8 with llama2` N-trials shape**, which this design can no longer produce. They are fixtures for *reading* sidecars, so nothing breaks, and Task 6 deliberately does not rewrite them — but do not copy that shape for the `evidence` this task writes.
 
 ---
 

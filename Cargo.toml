@@ -230,6 +230,15 @@
 name = "lightbulb-cli"
 path = "src/bin/lightbulb-cli.rs"
 
+# The probe runs a model in-process, so it links the library the way
+# `src/main.rs` does. It is deliberately NOT a subcommand of `lightbulb-cli`:
+# that binary is a pure HTTP client (zero `lightbulb::` references) and giving
+# it an engine dependency would put CUDA link requirements on a tool whose job
+# is to talk to a server.
+[[bin]]
+name = "lightbulb-probe"
+path = "src/bin/lightbulb-probe.rs"
+
 [dev-dependencies]
 # kiss-ref: spec-exact reference implementation of the KISS base-op vocabulary,
 # used as the port's INDEPENDENT differential target (tiers 1 and 2 of the
