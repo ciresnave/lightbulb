@@ -901,3 +901,183 @@ pub fn select_named_candidate<'a>(
         ),
     }
 }
+
+// ─── Not overwriting an answer better than the probe can produce ─────────────
+
+/// What a probe run may do to a checkpoint, given what that checkpoint already
+/// resolves to.
+///
+/// Three outcomes rather than a `bool`, because "write it" and "write it, and
+/// say what is being replaced" are different operator experiences and only the
+/// middle one is a judgement call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProbeOverride {
+    /// Nothing resolves today. Write with no ceremony — this is the case the
+    /// probe exists for.
+    Proceed,
+    /// A guess resolves today, or `--force` was given. Write, having first told
+    /// the operator which answer is being replaced by which.
+    Warn(String),
+    /// Something more authoritative than any registry candidate resolves today.
+    /// Refuse. `--force` is the deliberate act that gets past this.
+    Refuse(String),
+}
+
+/// May a probe run persist its answer over what the checkpoint already resolves
+/// to?
+///
+/// # The measured defect
+///
+/// Run 2026-08-13 against `HuggingFaceTB/SmolLM2-360M-Instruct`, which ships its
+/// own `tokenizer_config.json` and therefore already resolved at
+/// [`Resolution::TokenizerConfig`]:
+///
+/// ```text
+/// lightbulb-probe <dir> --accept chatml --yes
+/// → wrote lightbulb-chat-template.json … will now resolve at Resolution::Probe
+/// → exit 0
+/// ```
+///
+/// The probe replaced the checkpoint's own authoritative template with a
+/// strictly worse approximation and reported success. Verified by diffing the
+/// two afterwards: SmolLM2's own template injects a default system message
+/// (`"You are a helpful AI assistant named SmolLM, trained by Hugging Face"`)
+/// when the caller supplies none, and [`registry::CHATML`] does not. Since
+/// [`resolve`] reads the sidecar FIRST, every later server start would have
+/// prompted that model differently — and worse — than before the probe ran.
+/// Nothing warned.
+///
+/// That is a silent downgrade carrying the authority of a measurement, which is
+/// the defect class this module exists to remove.
+///
+/// # The tiers, and why each lands where it does
+///
+/// * [`Resolution::TokenizerConfig`] — refuse. The checkpoint's own
+///   `chat_template` is the model author's declaration; a registry candidate is
+///   this project's approximation of a family. No probe board can outrank that,
+///   because the probe's three candidates are exactly the approximations.
+/// * [`Resolution::Sidecar`] and [`Resolution::Probe`] — refuse. Both mean a
+///   sidecar is already on disk: [`resolve`] returns the sidecar's OWN
+///   `resolved_by`, so `Probe` can only have come from one, and it is precisely
+///   what an earlier probe run leaves behind. Overwriting either silently is how
+///   a considered earlier decision, and the `evidence` recording the board it
+///   was made from, disappear with nothing to compare against.
+/// * [`Resolution::VocabSignature`] and [`Resolution::Registry`] — warn and
+///   proceed. These are guesses, which is what the probe is for; but the
+///   operator is replacing one inference with another and should be told so.
+/// * [`Resolution::None`] — proceed silently. The case the probe exists for.
+///
+/// # It classifies the ANSWER's authority, not the file it arrived in
+///
+/// [`resolve`] reports a sidecar's own `resolved_by`, so a sidecar can announce
+/// itself as any of the six. One recording `Registry` therefore lands in the
+/// warn class rather than the refuse class, even though a file exists on disk.
+/// That is the intended reading — what is being weighed is how good the current
+/// answer is, and a pinned registry guess is still a registry guess — but it is
+/// a real limit: the operator is warned rather than stopped, and the warning
+/// describes the tier rather than the file. Both sidecar-shaped tiers that the
+/// probe or a considered hand-written decision actually produce (`Probe` and
+/// `Sidecar`) refuse.
+///
+/// # `force`
+///
+/// `force` turns the three refusals into warnings — it does not silence them.
+/// What it must NOT do is anything else: the caller's other refusals
+/// (nonexistent path, empty EOS, unfingerprintable checkpoint, and both
+/// selection rules above) are unaffected by it, and it does not imply `--yes`.
+/// On the two warn tiers it is a **no-op**, because there is nothing there to
+/// force; the returned value is identical in both states.
+///
+/// # Pure, and in the library
+///
+/// It takes the resolution rather than a path, and returns the message rather
+/// than printing it, so every row of the table above is testable without a model
+/// or a filesystem. `src/bin/lightbulb-probe.rs` is a separate crate that no
+/// integration test can reach into — which is exactly why the probe's selection
+/// rules had no coverage at all while they lived there.
+pub fn probe_override_check(current: Resolution, force: bool) -> ProbeOverride {
+    // Deliberately no `_` arm. `Resolution` gains a variant whenever a tier is
+    // added, and the answer a catch-all would give is `Proceed` — the silent
+    // overwrite this function exists to prevent. A new tier must be classified
+    // here, or the build fails.
+    match current {
+        Resolution::TokenizerConfig => {
+            if force {
+                ProbeOverride::Warn(
+                    "--force: overriding Resolution::TokenizerConfig — the checkpoint's own \
+                     chat_template, which is the model author's declaration — with a probe \
+                     result. It will be read at Resolution::Probe, ahead of that template, on \
+                     every later start."
+                        .to_string(),
+                )
+            } else {
+                ProbeOverride::Refuse(
+                    "this checkpoint already resolves at Resolution::TokenizerConfig — it ships \
+                     its own chat_template, which is the model author's declaration and \
+                     outranks any candidate this probe can offer. A sidecar written here would \
+                     be read at Resolution::Probe, AHEAD of that template, on every later start, \
+                     so a strictly worse approximation would replace it silently (measured on \
+                     SmolLM2-360M-Instruct, whose own template injects a default system message \
+                     that registry::CHATML does not). Re-run with --force if overriding the \
+                     checkpoint's own template is genuinely what you mean. Nothing was written."
+                        .to_string(),
+                )
+            }
+        }
+        Resolution::Sidecar => {
+            if force {
+                ProbeOverride::Warn(
+                    "--force: overwriting the sidecar this checkpoint already resolves by, \
+                     recorded at Resolution::Sidecar. Its evidence is being discarded."
+                        .to_string(),
+                )
+            } else {
+                ProbeOverride::Refuse(
+                    "this checkpoint already resolves at Resolution::Sidecar — a \
+                     lightbulb-chat-template.json is already beside it, carrying its own evidence \
+                     for a decision somebody already made. Silently overwriting one is how that \
+                     decision disappears with nothing left to compare against. Read it, then \
+                     re-run with --force if it should be replaced. Nothing was written."
+                        .to_string(),
+                )
+            }
+        }
+        Resolution::Probe => {
+            if force {
+                ProbeOverride::Warn(
+                    "--force: overwriting the sidecar this checkpoint already resolves by, \
+                     recorded at Resolution::Probe by an earlier probe run. Its evidence — the \
+                     board that answer was chosen from — is being discarded."
+                        .to_string(),
+                )
+            } else {
+                ProbeOverride::Refuse(
+                    "this checkpoint already resolves at Resolution::Probe — an earlier probe run \
+                     already wrote a sidecar beside it, and its evidence records the board that \
+                     answer was chosen from. `resolve` reports a sidecar's OWN resolved_by, so \
+                     this tier can only have come from one. Re-running silently would discard the \
+                     only record of that measurement. Read it, then re-run with --force if it \
+                     should be replaced. Nothing was written."
+                        .to_string(),
+                )
+            }
+        }
+        // `force` is deliberately not consulted on either warn tier: there is
+        // nothing to force past, and making the warning conditional on it would
+        // hide the one fact the operator needs — that an existing answer, guess
+        // though it is, is being replaced.
+        Resolution::VocabSignature => ProbeOverride::Warn(
+            "this checkpoint currently resolves at Resolution::VocabSignature — a guess from the \
+             special tokens in its vocabulary, not a declaration. Writing a sidecar replaces that \
+             inference with this one, at Resolution::Probe."
+                .to_string(),
+        ),
+        Resolution::Registry => ProbeOverride::Warn(
+            "this checkpoint currently resolves at Resolution::Registry — a heuristic match on \
+             its path, not a declaration. Writing a sidecar replaces that inference with this \
+             one, at Resolution::Probe."
+                .to_string(),
+        ),
+        Resolution::None => ProbeOverride::Proceed,
+    }
+}

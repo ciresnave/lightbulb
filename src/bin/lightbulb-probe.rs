@@ -74,6 +74,32 @@
 //! records has to describe a board this run actually observed, not one the
 //! operator remembers.
 //!
+//! # It must not overwrite an answer better than the one it produces
+//!
+//! Measured 2026-08-13 on SmolLM2-360M-Instruct, which ships its own
+//! `tokenizer_config.json` and therefore already resolved at
+//! `Resolution::TokenizerConfig`:
+//!
+//! ```text
+//! lightbulb-probe <dir> --accept chatml --yes
+//! → wrote lightbulb-chat-template.json … will now resolve at Resolution::Probe
+//! → exit 0
+//! ```
+//!
+//! The probe replaced the checkpoint's own authoritative template with a
+//! strictly worse approximation and reported success. Diffing the two
+//! afterwards: SmolLM2's template injects a default system message ("You are a
+//! helpful AI assistant named SmolLM, trained by Hugging Face") when the caller
+//! supplies none; `registry::CHATML` does not. `resolve` reads the sidecar
+//! FIRST, so the server would have prompted this model differently — and worse —
+//! than before the probe ran, indefinitely. Nothing warned.
+//!
+//! `probe_override_check` is that refusal, and the whole table of what each
+//! current tier earns is on it: refuse over the checkpoint's own template or an
+//! existing sidecar, warn over a guess, proceed over nothing. `--force` turns
+//! the two refusals into warnings and does nothing else — in particular it
+//! bypasses none of the refusals numbered here and does not imply `--yes`.
+//!
 //! # Every measurement constant is fixed, deliberately
 //!
 //! The prompt, the token budget, the temperature, the `add_special_tokens`
@@ -90,9 +116,9 @@ use clap::Parser;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use lightbulb::api::chat_template::{
-    ChatTemplate, ProbeRow, Resolution, Sidecar, fingerprint, first_line_of, format_probe_report,
-    registry, select_named_candidate, select_probe_winner, sidecar_path, special_tokens,
-    write_sidecar,
+    ChatTemplate, ProbeOverride, ProbeRow, Resolution, Sidecar, fingerprint, first_line_of,
+    format_probe_report, probe_override_check, registry, resolve, select_named_candidate,
+    select_probe_winner, sidecar_path, special_tokens, write_sidecar,
 };
 use lightbulb::contracts::validation::RawMessage;
 use lightbulb::engine::ModelRunner;
@@ -148,6 +174,15 @@ struct Args {
     /// than the EOS rule still applies.
     #[arg(long, value_name = "CANDIDATE")]
     accept: Option<String>,
+    /// Probe a checkpoint that ALREADY resolves at a tier the probe cannot
+    /// improve on — `Resolution::TokenizerConfig` (the checkpoint's own
+    /// chat_template) or an existing sidecar. Narrowly that, and nothing else:
+    /// it does not bypass the nonexistent-path, empty-EOS, unfingerprintable or
+    /// selection refusals, it does not imply `--yes`, and it is a no-op on a
+    /// checkpoint whose current answer is a guess (those warn either way). See
+    /// `probe_override_check` for the measurement this exists because of.
+    #[arg(long)]
+    force: bool,
 }
 
 #[tokio::main]
@@ -167,10 +202,21 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let args = Args::parse();
-    probe(&args.model_dir, args.yes, args.accept.as_deref()).await
+    probe(
+        &args.model_dir,
+        args.yes,
+        args.accept.as_deref(),
+        args.force,
+    )
+    .await
 }
 
-async fn probe(model_dir: &Path, assume_yes: bool, accept: Option<&str>) -> anyhow::Result<()> {
+async fn probe(
+    model_dir: &Path,
+    assume_yes: bool,
+    accept: Option<&str>,
+    force: bool,
+) -> anyhow::Result<()> {
     // Refusal -1, FIRST. Without this the most common operator error — a typo
     // in the path — gets the one diagnosis guaranteed to be wrong.
     // `special_tokens` swallows all three of its file reads, so a nonexistent
@@ -197,6 +243,30 @@ async fn probe(model_dir: &Path, assume_yes: bool, accept: Option<&str>) -> anyh
              written.",
             model_dir.display()
         );
+    }
+
+    // Refusal 0.5: do not persist an answer over one that is already better
+    // than anything this probe can produce. Measured on SmolLM2-360M-Instruct,
+    // which ships its own template and got it replaced by `registry::CHATML` —
+    // a strictly worse approximation — with an exit 0 and no warning; the whole
+    // account is on `probe_override_check`.
+    //
+    // Numbered 0.5 rather than renumbering the refusals below it: 1 and 2 are
+    // `select_probe_winner`'s, named as such in its docs and in the tests.
+    //
+    // HERE, before `ModelRunner::start`, for refusal 0's reason — the verdict
+    // reads files and nothing else, so an operator who pointed the probe at the
+    // wrong checkpoint learns it in milliseconds rather than after three
+    // generations. `--force` turns the refusal into a warning and changes
+    // nothing else: every refusal above and below still applies to it, and it
+    // does not imply `--yes`.
+    match probe_override_check(resolve(model_dir).resolved_by, force) {
+        ProbeOverride::Refuse(why) => bail!("{}: {why}", model_dir.display()),
+        // `tracing::warn!`, so it carries the WARN level and the timestamp that
+        // make it legible in a log the operator scrolls back through after the
+        // generations have printed their own noise.
+        ProbeOverride::Warn(why) => tracing::warn!("{}: {why}", model_dir.display()),
+        ProbeOverride::Proceed => {}
     }
 
     let messages: Vec<RawMessage> = CONVERSATION

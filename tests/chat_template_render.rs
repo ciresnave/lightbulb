@@ -1758,6 +1758,476 @@ fn probe_accept_returns_the_named_row_when_it_is_not_first() {
     );
 }
 
+// ─── The probe must not overwrite a better answer than it can produce ───────
+//
+// Measured 2026-08-13 on SmolLM2-360M-Instruct, which ships its own
+// `tokenizer_config.json` and so already resolved at
+// `Resolution::TokenizerConfig`:
+//
+//     lightbulb-probe <dir> --accept chatml --yes
+//     → wrote lightbulb-chat-template.json … will now resolve at Resolution::Probe
+//     → exit 0
+//
+// The probe replaced the model author's template with `registry::CHATML`, a
+// strictly worse approximation — SmolLM2's own injects a default system message
+// when the caller supplies none; CHATML does not — and reported success. Since
+// `resolve` reads the sidecar first, every later start would have prompted that
+// model differently, and worse, than before the probe ran. Nothing warned.
+//
+// `probe_override_check` is the guard. Six `Resolution` variants times two
+// `force` states is twelve cases, and each is asserted below, because a wrong
+// implementation of a table like this characteristically gets one class right
+// and another wrong: the mutation matrix is in the commit message, and every
+// mutant there is killed by a test no other mutant kills.
+
+/// The checkpoint's own `chat_template` is refused, and the refusal says which
+/// tier it is protecting.
+///
+/// **The message is asserted, not `is_err()`.** The operator is being told they
+/// pointed a guessing tool at a checkpoint that already answers the question
+/// authoritatively, and the tier name is the whole content of that: a refusal
+/// that named no tier, or named the wrong one, would satisfy any `matches!`
+/// check while telling them nothing they can act on. The way out has to be named
+/// too, or `--force` is a flag only the source code knows about.
+#[test]
+fn probe_override_refuses_the_checkpoints_own_template() {
+    use lightbulb::api::chat_template::{ProbeOverride, probe_override_check};
+
+    let why = match probe_override_check(Resolution::TokenizerConfig, false) {
+        ProbeOverride::Refuse(why) => why,
+        other => {
+            panic!("the probe was allowed to overwrite the checkpoint's own template: {other:?}")
+        }
+    };
+    assert!(
+        why.contains("Resolution::TokenizerConfig"),
+        "the refusal did not name the tier it is protecting: {why}"
+    );
+    // Not another tier's message, copied. Each refusal names its own.
+    assert!(
+        !why.contains("Resolution::Sidecar"),
+        "the tier-1 refusal is carrying the sidecar refusal's text: {why}"
+    );
+    assert!(
+        why.contains("--force"),
+        "the refusal did not tell the operator how to override it: {why}"
+    );
+    // The same promise every other probe refusal ends on, and the one an
+    // operator checks before going looking for a file: `--yes` was very likely
+    // on the command line, so silence here reads as "it wrote something".
+    assert!(
+        why.ends_with("Nothing was written."),
+        "the refusal did not end by saying nothing was written: {why}"
+    );
+}
+
+/// An existing sidecar is refused. **A separate test from the one above on
+/// purpose.**
+///
+/// The natural half-fix is to guard `TokenizerConfig` alone — it is the tier the
+/// live defect was measured on — and leave a sidecar to be silently replaced.
+/// That implementation passes every other test in this file and fails only here.
+/// It matters because a sidecar is the one answer on disk that a human wrote or
+/// reviewed: its `evidence` is the record of a decision, and an overwrite leaves
+/// nothing to compare the new answer against.
+#[test]
+fn probe_override_refuses_an_existing_sidecar() {
+    use lightbulb::api::chat_template::{ProbeOverride, probe_override_check};
+
+    let why = match probe_override_check(Resolution::Sidecar, false) {
+        ProbeOverride::Refuse(why) => why,
+        other => panic!("an existing sidecar was silently overwritten: {other:?}"),
+    };
+    assert!(
+        why.contains("Resolution::Sidecar"),
+        "the refusal did not name the tier it is protecting: {why}"
+    );
+    assert!(
+        !why.contains("Resolution::TokenizerConfig"),
+        "the sidecar refusal is carrying the tier-1 refusal's text: {why}"
+    );
+    assert!(
+        why.contains("--force"),
+        "the refusal did not tell the operator how to override it: {why}"
+    );
+    assert!(
+        why.ends_with("Nothing was written."),
+        "the refusal did not end by saying nothing was written: {why}"
+    );
+}
+
+/// A sidecar an EARLIER PROBE RUN left is refused — and it arrives as
+/// `Resolution::Probe`, not `Resolution::Sidecar`.
+///
+/// This case is missing from any table that enumerates "tiers a checkpoint can
+/// resolve at" from the resolution order alone, and it is the most likely one to
+/// occur: it is what the second run of the probe against the same checkpoint
+/// sees. `resolve` returns the sidecar's OWN `resolved_by` rather than
+/// flattening it to `Sidecar`, and no other tier ever produces `Probe`, so
+/// `Probe` here means "a sidecar this tool wrote" and carries the same
+/// don't-silently-discard-it claim as any other sidecar — plus the `evidence`
+/// recording the board it was chosen from, which is the only record of a
+/// measurement that costs minutes to reproduce.
+#[test]
+fn probe_override_refuses_a_sidecar_an_earlier_probe_run_left() {
+    use lightbulb::api::chat_template::{ProbeOverride, probe_override_check};
+
+    let why = match probe_override_check(Resolution::Probe, false) {
+        ProbeOverride::Refuse(why) => why,
+        other => panic!("an earlier probe run's sidecar was silently overwritten: {other:?}"),
+    };
+    assert!(
+        why.contains("Resolution::Probe"),
+        "the refusal did not name the tier it is protecting: {why}"
+    );
+    assert!(
+        why.contains("--force"),
+        "the refusal did not tell the operator how to override it: {why}"
+    );
+    assert!(
+        why.ends_with("Nothing was written."),
+        "the refusal did not end by saying nothing was written: {why}"
+    );
+}
+
+/// Nothing resolves: proceed, silently, in both `force` states.
+///
+/// This is the case the probe exists for, and it is asserted as `Proceed`
+/// exactly — not "not a refusal" — because a guard that warned here would put a
+/// warning on every correct use of the tool, which is how operators learn to
+/// read past the warnings that mean something.
+///
+/// `force` is checked here as well, so that "`--force` is narrowly about
+/// overriding a better source" is asserted rather than assumed: on a checkpoint
+/// with nothing to override it changes nothing at all.
+#[test]
+fn probe_override_proceeds_silently_when_nothing_resolves_yet() {
+    use lightbulb::api::chat_template::{ProbeOverride, probe_override_check};
+
+    assert_eq!(
+        probe_override_check(Resolution::None, false),
+        ProbeOverride::Proceed,
+        "the probe refused or warned about the very case it exists for"
+    );
+    assert_eq!(
+        probe_override_check(Resolution::None, true),
+        ProbeOverride::Proceed,
+        "--force changed the verdict on a checkpoint that resolves at no tier at all"
+    );
+}
+
+/// The two guessing tiers warn and proceed — they are neither refused nor
+/// silent.
+///
+/// Both halves are the claim. Refusing here would break the probe's main use
+/// (`Resolution::Registry` is what most un-probed checkpoints resolve at, so a
+/// refusal would make the tool refuse nearly everything), and proceeding
+/// silently would hide that one inference is being replaced by another.
+///
+/// The message must NOT carry the refusals' `Nothing was written.` promise:
+/// something IS about to be written, and a copied refusal message would tell the
+/// operator the exact opposite of what happens next.
+#[test]
+fn probe_override_warns_and_proceeds_when_it_replaces_a_guess() {
+    use lightbulb::api::chat_template::{ProbeOverride, probe_override_check};
+
+    for (tier, name, other) in [
+        (
+            Resolution::VocabSignature,
+            "Resolution::VocabSignature",
+            "Resolution::Registry",
+        ),
+        (
+            Resolution::Registry,
+            "Resolution::Registry",
+            "Resolution::VocabSignature",
+        ),
+    ] {
+        let why = match probe_override_check(tier, false) {
+            ProbeOverride::Warn(why) => why,
+            other => panic!("{name} should warn and proceed, got {other:?}"),
+        };
+        assert!(
+            why.contains(name),
+            "the warning did not name the guess being replaced: {why}"
+        );
+        assert!(
+            !why.contains(other),
+            "the {name} warning is carrying {other}'s text: {why}"
+        );
+        assert!(
+            !why.contains("Nothing was written."),
+            "the warning promises nothing was written, on a path that then writes: {why}"
+        );
+    }
+}
+
+/// `--force` is a **no-op** on the two tiers that only warn.
+///
+/// There is nothing to force past a guess, so the verdict must be identical in
+/// both states — asserted as equality of the whole value, message included,
+/// which is what makes it fail for an implementation that reaches for `force`
+/// here and silences the warning. That implementation is plausible (`if force {
+/// Proceed } else { … }` written once, at the top) and would remove the
+/// operator's only notice that they replaced an existing answer, on the tiers
+/// where the probe does most of its work.
+#[test]
+fn force_is_a_no_op_on_the_tiers_that_only_warn() {
+    use lightbulb::api::chat_template::{ProbeOverride, probe_override_check};
+
+    for tier in [Resolution::VocabSignature, Resolution::Registry] {
+        assert_eq!(
+            probe_override_check(tier, true),
+            probe_override_check(tier, false),
+            "--force changed the verdict on {tier:?}, where there is nothing to force"
+        );
+        // Restated positively, so the equality above cannot be satisfied by both
+        // sides collapsing to `Proceed`.
+        assert!(
+            matches!(probe_override_check(tier, true), ProbeOverride::Warn(_)),
+            "{tier:?} stopped warning under --force"
+        );
+    }
+}
+
+/// `--force` turns each refusal into a warning that still names the tier it
+/// overrode.
+///
+/// Not `Proceed`: the point of the flag is that the operator meant to do this,
+/// not that it did not happen. The record of what was overridden is exactly what
+/// somebody reading the log a month later needs, and it is the difference
+/// between this and the silent downgrade the whole guard exists to prevent.
+///
+/// Deliberately asserts only the `force == true` half; the `false` half has a
+/// test each above, so an implementation that ignores `force` and refuses
+/// regardless fails HERE and nowhere else.
+#[test]
+fn force_downgrades_each_refusal_to_a_warning_that_still_names_the_tier() {
+    use lightbulb::api::chat_template::{ProbeOverride, probe_override_check};
+
+    for (tier, name) in [
+        (Resolution::TokenizerConfig, "Resolution::TokenizerConfig"),
+        (Resolution::Sidecar, "Resolution::Sidecar"),
+        (Resolution::Probe, "Resolution::Probe"),
+    ] {
+        let why = match probe_override_check(tier, true) {
+            ProbeOverride::Warn(why) => why,
+            other => panic!("--force did not get past {name}: {other:?}"),
+        };
+        assert!(
+            why.contains(name),
+            "the --force warning did not name the tier it overrode: {why}"
+        );
+        assert!(
+            why.contains("--force"),
+            "the warning did not say the override was deliberate: {why}"
+        );
+        assert!(
+            !why.contains("Nothing was written."),
+            "the --force warning promises nothing was written, on the path that writes: {why}"
+        );
+    }
+}
+
+// ─── The guard, as the binary actually runs it ──────────────────────────────
+//
+// The three tests below run the real `lightbulb-probe` and take milliseconds,
+// because every one of them is stopped by a refusal that reads files and
+// nothing else — before `ModelRunner::start`, so no checkpoint is needed and no
+// generation happens. They assert the wiring the pure-function tests above
+// cannot: that the guard is CALLED, that it is called before anything is
+// written or loaded, and that `--force` reaches it and reaches nothing else.
+
+/// A fixture that ships its own `chat_template`, so it resolves at
+/// `Resolution::TokenizerConfig` — the SmolLM2 situation, without SmolLM2.
+///
+/// `eos_token` is present because the probe refuses an EOS-less checkpoint one
+/// step earlier; without it these tests would pass for the wrong reason.
+fn tmp_checkpoint_with_own_template(name: &str) -> std::path::PathBuf {
+    let d = tmp_model_dir(name);
+    let mut f = std::fs::File::create(d.join("tokenizer_config.json")).unwrap();
+    f.write_all(
+        br#"{"bos_token":"<|im_start|>","eos_token":"<|im_end|>",
+             "chat_template":"{% for m in messages %}{{ m['role'] }}{% endfor %}"}"#,
+    )
+    .unwrap();
+    d
+}
+
+/// The measured defect, as a test: the exact command line that silently
+/// downgraded SmolLM2 now refuses.
+///
+/// Three separate claims, and the last two are what make this more than a
+/// duplicate of the pure-function test above:
+///
+/// * it refuses, naming the tier — so the guard is actually wired into the
+///   binary, which no test in this file could otherwise show, `src/bin/*.rs`
+///   being a separate crate;
+/// * it wrote no sidecar — the property the operator cares about;
+/// * it never loaded the model — the guard runs before `ModelRunner::start`, so
+///   an operator who pointed the probe at the wrong checkpoint finds out in
+///   milliseconds instead of after three generations. That is also what keeps
+///   this test cheap enough to run by default, unlike the `--ignored` one below.
+///
+/// `--yes` is on the command line deliberately: it must not bypass this, being
+/// the flag for "do not ask me", not "override the checkpoint's own template".
+#[test]
+fn probe_binary_refuses_a_checkpoint_that_ships_its_own_template() {
+    let dir = tmp_checkpoint_with_own_template("ships-its-own-template");
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_lightbulb-probe"))
+        .arg(&dir)
+        .args(["--accept", "chatml", "--yes"])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("running the probe binary");
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    let both = format!("--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}");
+
+    assert!(
+        !out.status.success(),
+        "the probe exited 0 on a checkpoint that already resolves at \
+         Resolution::TokenizerConfig — this is the SmolLM2 downgrade, measured.\n{both}"
+    );
+    assert!(
+        stderr.contains("Resolution::TokenizerConfig"),
+        "the probe refused for some reason OTHER than the tier it was overriding.\n{both}"
+    );
+    assert!(
+        stderr.contains("Nothing was written."),
+        "the refusal did not tell the operator nothing was written.\n{both}"
+    );
+    assert!(
+        !dir.join(lightbulb::api::chat_template::SIDECAR_NAME)
+            .exists(),
+        "the probe wrote a sidecar despite refusing; {} would then resolve at \
+         Resolution::Probe, ahead of its own template.\n{both}",
+        dir.display()
+    );
+    // Nothing was loaded and nothing was generated: the guard runs before
+    // `ModelRunner::start`. Both strings are the runner's own, printed on the
+    // load path before any weights are read.
+    assert!(
+        !stdout.contains("Loading") && !stderr.contains("model load failed"),
+        "the probe loaded the model before refusing; on a real checkpoint that is \
+         minutes spent to reach a verdict already available from the files.\n{both}"
+    );
+}
+
+/// `--force` gets past the guard, says so, and gets past nothing else.
+///
+/// The fixture has a `chat_template` but no weights, so a run that reaches the
+/// loader fails there — and that failure is the evidence that the guard let it
+/// through. Asserted three ways round: the deliberate-override warning naming
+/// the tier is present, the refusal's `Nothing was written.` is absent, and the
+/// run got as far as the model loader.
+///
+/// Without this, a binary that parsed `--force` and never passed it to the guard
+/// would pass every other test here.
+#[test]
+fn probe_binary_force_gets_past_the_guard_and_says_so() {
+    let dir = tmp_checkpoint_with_own_template("force-past-the-guard");
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_lightbulb-probe"))
+        .arg(&dir)
+        .args(["--accept", "chatml", "--yes", "--force"])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("running the probe binary");
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    let both = format!("--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}");
+
+    // The warning is on STDOUT: `tracing_subscriber::fmt::layer()` writes there
+    // by default, while anyhow's final `Error:` — every refusal in this file —
+    // goes to stderr. That is why each assertion below names one stream.
+    assert!(
+        stdout.contains("--force") && stdout.contains("Resolution::TokenizerConfig"),
+        "--force did not record WHAT it overrode; a log a month from now would not \
+         show that the checkpoint's own template was replaced.\n{both}"
+    );
+    assert!(
+        !both.contains("Nothing was written."),
+        "--force did not get past the guard.\n{both}"
+    );
+    // It reached the loader, which is as far as a fixture with no weights can
+    // go. `model load failed` is the runner's verdict on both backends.
+    assert!(
+        stderr.contains("model load failed"),
+        "the run stopped before the model loader, so --force did not actually \
+         resume the probe.\n{both}"
+    );
+    assert!(
+        !dir.join(lightbulb::api::chat_template::SIDECAR_NAME)
+            .exists(),
+        "a sidecar was written for a checkpoint that never generated anything.\n{both}"
+    );
+}
+
+/// `--force` does not bypass the refusals it has nothing to do with.
+///
+/// It means one thing — "yes, I mean to override a better source" — and a flag
+/// that quietly grew into "write the sidecar whatever happens" is the flag the
+/// probe's `--yes` doc comment already refuses to be. The two refusals checked
+/// here are the two that can be reached without a checkpoint, and they are also
+/// the two most likely to be hit by the same hurried operator who reached for
+/// `--force` in the first place: a mistyped path, and a checkpoint that declares
+/// no EOS.
+///
+/// Asserted on the message, not the exit status: an implementation where
+/// `--force` skipped the EOS check would still exit non-zero — later, from the
+/// model loader — and the difference between those two failures is the whole
+/// property.
+#[test]
+fn force_does_not_bypass_the_probes_other_refusals() {
+    // A directory with no `tokenizer_config.json` and no `tokenizer.json`, so
+    // no EOS text can be resolved for it at all.
+    let no_eos = tmp_model_dir("force-no-eos");
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_lightbulb-probe"))
+        .arg(&no_eos)
+        .args(["--accept", "chatml", "--yes", "--force"])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("running the probe binary");
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(
+        !out.status.success(),
+        "--force let the probe measure a checkpoint with no EOS token.\n{stderr}"
+    );
+    assert!(
+        stderr.contains("declares no EOS token"),
+        "--force bypassed the empty-EOS refusal; the run failed for some other \
+         reason instead.\n{stderr}"
+    );
+    assert!(
+        stderr.contains("Nothing was written."),
+        "the empty-EOS refusal stopped promising nothing was written.\n{stderr}"
+    );
+    assert!(
+        !no_eos
+            .join(lightbulb::api::chat_template::SIDECAR_NAME)
+            .exists(),
+        "a sidecar was written for an unmeasurable checkpoint"
+    );
+
+    // And the one before it: a path that does not exist at all.
+    let missing = no_eos.join("no-such-checkpoint");
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_lightbulb-probe"))
+        .arg(&missing)
+        .args(["--yes", "--force"])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("running the probe binary");
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(
+        !out.status.success(),
+        "--force let the probe run against a path that does not exist.\n{stderr}"
+    );
+    assert!(
+        stderr.contains("does not exist"),
+        "--force bypassed the nonexistent-path refusal.\n{stderr}"
+    );
+}
+
 /// Locate the checkpoint, preferring `TINYLLAMA_DIR`. Same shape as
 /// `tests/chat_template_e2e.rs`'s and `tests/api_result_metadata.rs`'s.
 fn tinyllama_dir() -> Option<std::path::PathBuf> {
