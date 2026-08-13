@@ -759,7 +759,13 @@ pub struct ProbeRow {
 /// 60 chars. Empty input yields an empty cell, which is a legitimate result — a
 /// model that produced nothing.
 pub fn first_line_of(text: &str) -> String {
-    let line = text.lines().next().unwrap_or("");
+    // First NON-BLANK line, not first line. Measured 2026-08-13 on the first
+    // live probe run: the `llama2` candidate generated 17 tokens and rendered
+    // as an empty cell, because its template ends `[/INST]` with no trailing
+    // newline and the model opens its reply with one. The operator saw a blank
+    // row for the candidate whose behaviour differed most — the exact row they
+    // most needed to read. `lines().next()` was literally correct and useless.
+    let line = text.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
     if line.chars().count() <= 60 {
         line.to_string()
     } else {

@@ -1326,3 +1326,37 @@ fn probe_report_renders_every_candidate_and_picks_no_winner() {
         );
     }
 }
+
+/// A generation that opens with a newline must still show the operator its text.
+///
+/// Measured on the first live probe run (2026-08-13): the `llama2` candidate
+/// generated 17 tokens and rendered as an EMPTY cell. Its template ends
+/// `[/INST]` with no trailing newline, so the model began its reply with one,
+/// and `lines().next()` returned `""` — literally the first line, and useless.
+/// The blank landed on the row whose behaviour differed most from the others,
+/// which is the row an operator most needs to read.
+///
+/// Asserted against exact strings, not `!is_empty()`: an empty result is what
+/// the defect produced, so any non-empty accident would satisfy a weaker check.
+#[test]
+fn first_line_of_skips_leading_blank_lines() {
+    use lightbulb::api::chat_template::first_line_of;
+
+    // The defect, verbatim.
+    assert_eq!(
+        first_line_of("\nThe capital of France is Paris."),
+        "The capital of France is Paris."
+    );
+    // Several blank lines, and whitespace-only ones, which `is_empty()` misses.
+    assert_eq!(first_line_of("\n   \n\nParis."), "Paris.");
+    // Unchanged when there is no leading blank.
+    assert_eq!(first_line_of("Paris.\nmore"), "Paris.");
+    // Genuinely empty output stays empty — that is a real result, not a bug.
+    assert_eq!(first_line_of(""), "");
+    assert_eq!(first_line_of("\n  \n"), "");
+    // Truncation still applies, and applies to the line that is actually shown.
+    let long = "\n".to_string() + &"x".repeat(80);
+    let out = first_line_of(&long);
+    assert_eq!(out.chars().count(), 60);
+    assert!(out.ends_with("..."), "{out:?}");
+}
