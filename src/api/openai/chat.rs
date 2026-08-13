@@ -519,9 +519,20 @@ async fn create_chat_completion_with_contract(
         // The closure receives the message list, not a prompt, and renders it
         // **per attempt** — `execute_contract` mutates that list between
         // attempts, so a prompt rendered once here would be stale from attempt
-        // 2 onward. `build_prompt_from_raw` is the same function the plain and
-        // streaming paths use, so the contract path cannot drift from them and
-        // cannot get `add_special_tokens` wrong independently of them.
+        // 2 onward.
+        //
+        // `build_prompt_from_raw` is the same function the plain and streaming
+        // paths use. What that guarantees is narrower than it looks: the
+        // *logic* — including the `add_special_tokens` answer — has one
+        // definition, so it cannot be changed here without changing it there.
+        // It does not guarantee this path calls it. The call below can be
+        // replaced wholesale (`BuiltPrompt::raw(legacy_join(&msgs))` is a
+        // one-line revert of this change for every HTTP contract request) with
+        // the shared builder left untouched and every one of its own tests
+        // still green. That is why this site has a test of its own —
+        // `the_http_contract_path_renders_each_attempt_through_the_template`,
+        // asserting on the `InferenceJob`s this handler enqueues — separate
+        // from the one covering `execute_contract_with_runner`'s call.
         move |msgs: Vec<RawMessage>| {
             let tx = tx.clone();
             let prompt = build_prompt_from_raw(template.as_deref(), &msgs);
@@ -825,34 +836,27 @@ mod tests {
     const FIXTURE_BOS: &str = "<|begin_of_text|>";
     const FIXTURE_BOS_ID: u32 = 1;
 
-    /// A checkpoint directory whose template emits BOS **and** whose tokenizer
-    /// prepends BOS — i.e. one that doubles unless the flag is right.
-    fn bos_doubling_checkpoint(name: &str) -> std::path::PathBuf {
-        use std::sync::atomic::{AtomicUsize, Ordering};
-        static N: AtomicUsize = AtomicUsize::new(0);
-        let d = std::env::temp_dir().join(format!(
-            "lb-bos-{name}-{}-{}",
-            std::process::id(),
-            N.fetch_add(1, Ordering::Relaxed)
-        ));
-        std::fs::create_dir_all(&d).unwrap();
+    /// The Llama-3-shaped template: opens with `{{ bos_token }}`, exactly as
+    /// Meta-Llama-3-8B-Instruct's real one does.
+    const LLAMA3_SHAPED_TEMPLATE: &str = r#"{{ bos_token }}{% for m in messages %}{{ '<|start_header_id|>' + m.role + '<|end_header_id|>\n\n' + m.content + eos_token }}{% endfor %}{{ '<|start_header_id|>assistant<|end_header_id|>\n\n' }}"#;
 
-        // Tier 1 resolves the template AND the special tokens from this file.
-        std::fs::write(
-            d.join("tokenizer_config.json"),
-            r#"{"bos_token":"<|begin_of_text|>",
-                "eos_token":"<|eot_id|>",
-                "chat_template":"{{ bos_token }}{% for m in messages %}{{ '<|start_header_id|>' + m.role + '<|end_header_id|>\n\n' + m.content + eos_token }}{% endfor %}{{ '<|start_header_id|>assistant<|end_header_id|>\n\n' }}"}"#,
-        )
-        .unwrap();
+    /// A template that `raise_exception`s on any role other than user or
+    /// assistant — i.e. on the system message
+    /// `validation::inject_contract_instruction` adds to **every** contract
+    /// request.
+    ///
+    /// This is not a contrived fixture. It is the shape of
+    /// Mistral-7B-Instruct-v0.1/v0.2's and Gemma's real templates, which is why
+    /// `build_prompt_from_raw`'s `Err` arm is a live path on the contract route
+    /// rather than a rare one: on such a checkpoint every attempt of every
+    /// contract request takes it.
+    const RAISES_ON_SYSTEM_TEMPLATE: &str = r#"{{ bos_token }}{% for message in messages %}{% if message['role'] == 'user' %}{{ '[INST] ' + message['content'] + ' [/INST]' }}{% elif message['role'] == 'assistant' %}{{ message['content'] + eos_token }}{% else %}{{ raise_exception('Only user and assistant roles are supported!') }}{% endif %}{% endfor %}"#;
 
-        // A real `tokenizers` tokenizer. `WordLevel` keeps the vocab to a dozen
-        // entries; the part that matters is `post_processor`, copied in shape
-        // from TinyLlama's own tokenizer.json: `single` is
-        // `[SpecialToken, Sequence A]`, so `encode(text, true)` prepends BOS.
-        std::fs::write(
-            d.join("tokenizer.json"),
-            r#"{
+    /// A real `tokenizers` tokenizer. `WordLevel` keeps the vocab to a dozen
+    /// entries; the part that matters is `post_processor`, copied in shape
+    /// from TinyLlama's own tokenizer.json: `single` is
+    /// `[SpecialToken, Sequence A]`, so `encode(text, true)` prepends BOS.
+    const FIXTURE_TOKENIZER_JSON: &str = r#"{
               "version": "1.0",
               "truncation": null,
               "padding": null,
@@ -902,21 +906,91 @@ mod tests {
                 },
                 "unk_token": "[UNK]"
               }
-            }"#,
+            }"#;
+
+    /// A checkpoint directory carrying `chat_template` verbatim, whose
+    /// tokenizer prepends BOS — i.e. one that doubles unless the flag is right.
+    ///
+    /// `chat_template` is spliced into `tokenizer_config.json` as a JSON string
+    /// body, so it must already be JSON-escaped (neither template above needs
+    /// escaping: they use single-quoted Jinja literals and no backslashes but
+    /// the `\n` the JSON parser is meant to unescape).
+    fn checkpoint_with_template(name: &str, chat_template: &str) -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static N: AtomicUsize = AtomicUsize::new(0);
+        let d = std::env::temp_dir().join(format!(
+            "lb-bos-{name}-{}-{}",
+            std::process::id(),
+            N.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&d).unwrap();
+
+        // Tier 1 resolves the template AND the special tokens from this file.
+        std::fs::write(
+            d.join("tokenizer_config.json"),
+            format!(
+                r#"{{"bos_token":"<|begin_of_text|>",
+                    "eos_token":"<|eot_id|>",
+                    "chat_template":"{chat_template}"}}"#
+            ),
         )
         .unwrap();
+
+        std::fs::write(d.join("tokenizer.json"), FIXTURE_TOKENIZER_JSON).unwrap();
         d
+    }
+
+    /// A checkpoint directory whose template emits BOS **and** whose tokenizer
+    /// prepends BOS — i.e. one that doubles unless the flag is right.
+    fn bos_doubling_checkpoint(name: &str) -> std::path::PathBuf {
+        checkpoint_with_template(name, LLAMA3_SHAPED_TEMPLATE)
+    }
+
+    /// What [`LLAMA3_SHAPED_TEMPLATE`] must produce for `turns`, written out
+    /// by hand.
+    ///
+    /// Deliberately **not** `template.render(...)`: an expectation computed by
+    /// the renderer under test agrees with it however wrong it is, which is how
+    /// a prompt fully decoupled from the request (rendering only `msgs[..1]`,
+    /// or a hard-coded message list) passes a test that checks only "starts
+    /// with BOS".
+    fn expected_llama3_render(turns: &[(&str, &str)]) -> String {
+        let mut out = String::from(FIXTURE_BOS);
+        for (role, content) in turns {
+            out.push_str(&format!(
+                "<|start_header_id|>{role}<|end_header_id|>\n\n{content}<|eot_id|>"
+            ));
+        }
+        out.push_str("<|start_header_id|>assistant<|end_header_id|>\n\n");
+        out
+    }
+
+    /// What the legacy join must produce for `turns`, written out by hand for
+    /// the same reason as [`expected_llama3_render`].
+    fn expected_legacy_join(turns: &[(&str, &str)]) -> String {
+        turns
+            .iter()
+            .map(|(role, content)| format!("{role}: {content}"))
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     fn state_with(
         chat_template: Option<std::sync::Arc<crate::api::chat_template::ResolvedTemplate>>,
+    ) -> AppState {
+        state_with_runner(chat_template, None)
+    }
+
+    fn state_with_runner(
+        chat_template: Option<std::sync::Arc<crate::api::chat_template::ResolvedTemplate>>,
+        inference_tx: Option<std::sync::mpsc::Sender<crate::engine::model_runner::InferenceJob>>,
     ) -> AppState {
         use crate::engine::{MemoryAwareConfig, MemoryAwareScheduler};
         AppState {
             scheduler: std::sync::Arc::new(MemoryAwareScheduler::new(MemoryAwareConfig::default())),
             config: crate::api::ApiConfig::default(),
             db_pool: None,
-            inference_tx: None,
+            inference_tx,
             chat_template,
         }
     }
@@ -1046,48 +1120,52 @@ mod tests {
         assert!(BuiltPrompt::raw("The capital of France is".to_string()).add_special_tokens);
     }
 
-    /// The contract path renders every attempt through the template, and
-    /// tokenizes the result without a second BOS.
+    // ─── The contract path, at both of its entry points ─────────────────────
+    //
+    // `build_prompt_from_raw` has two contract call sites — `contracts::
+    // executor::execute_contract_with_runner` for direct callers, and
+    // `create_chat_completion_with_contract` for a real
+    // `POST /v1/chat/completions` carrying `lightbulb.output_contract`. Sharing
+    // the builder makes the two agree about *logic*; it does not stop either
+    // `build_prompt_from_raw(...)` call from being replaced wholesale with
+    // `BuiltPrompt::raw(legacy_join(&msgs))`, which is a one-line revert of this
+    // change at whichever site is unguarded. So each site has its own test
+    // below, and both go through the shared assertion.
+
+    const CONTRACT_QUESTION: &str = "Name the capital of France.";
+
+    /// The stub runner's reply. It matches no choice and contains no digit, so
+    /// `EnumChoice` never accepts it and the loop spends its whole budget.
+    const UNPARSEABLE_REPLY: &str = "unparseable";
+
+    fn yes_no_contract() -> crate::contracts::OutputContractSpec {
+        crate::contracts::OutputContractSpec::EnumChoice {
+            choices: vec!["yes".to_string(), "no".to_string()],
+            case_sensitive: false,
+            allow_index: true,
+        }
+    }
+
+    /// A stub model runner on a real thread: records `(prompt,
+    /// add_special_tokens)` for every job and answers each with
+    /// [`UNPARSEABLE_REPLY`].
     ///
-    /// This test lives here rather than in `contracts::executor` because the
-    /// fixture above is what makes it able to fail: TinyLlama resolves to
-    /// `registry::ZEPHYR`, which never emits `bos_token`, so a contract test
-    /// built on the real checkpoint would pass with the flag hardcoded either
-    /// way.
-    ///
-    /// It asserts on the `InferenceJob`s the production entry point actually
-    /// enqueues — not on `build_prompt_from_raw` in isolation — because the
-    /// defect being guarded is a *call site* restating the flag. A unit test of
-    /// the builder alone would stay green if `execute_contract_with_runner`
-    /// went on writing `add_special_tokens: true` next to it, which is exactly
-    /// what that function did before this change.
-    ///
-    /// Both attempts are checked, not just the first: the loop re-renders per
-    /// attempt against a mutated list, so a second render path is where a
-    /// divergence would hide.
-    #[tokio::test]
-    async fn the_contract_path_renders_each_attempt_without_a_second_bos() {
-        use crate::contracts::validation::RawMessage;
+    /// It returns its recording once every `Sender` clone has been dropped,
+    /// which is why each caller below lets the value holding the sender go out
+    /// of scope before `join`ing.
+    fn stub_runner() -> (
+        std::sync::mpsc::Sender<crate::engine::model_runner::InferenceJob>,
+        std::thread::JoinHandle<Vec<(String, bool)>>,
+    ) {
         use crate::engine::model_runner::{CompletionResult, InferenceJob, ResponseMode};
-
-        let dir = bos_doubling_checkpoint("contract");
-        let template = crate::api::chat_template::resolve_for_serving(&dir);
-        assert!(
-            template.is_some(),
-            "the fixture's tokenizer_config.json did not resolve a template, so \
-             this test would be measuring the legacy join"
-        );
-
-        // A stub runner on a real thread: record each job, answer it with text
-        // that no `EnumChoice` can parse, so the loop runs its full budget.
         let (tx, rx) = std::sync::mpsc::channel::<InferenceJob>();
-        let runner = std::thread::spawn(move || {
+        let handle = std::thread::spawn(move || {
             let mut jobs: Vec<(String, bool)> = Vec::new();
             while let Ok(job) = rx.recv() {
                 jobs.push((job.prompt.clone(), job.add_special_tokens));
                 if let ResponseMode::Complete(resp) = job.response_mode {
                     let _ = resp.send(Ok(CompletionResult {
-                        text: "unparseable".to_string(),
+                        text: UNPARSEABLE_REPLY.to_string(),
                         prompt_tokens: 1,
                         completion_tokens: 1,
                         finish_reason: FinishReason::Stop,
@@ -1096,42 +1174,86 @@ mod tests {
             }
             jobs
         });
+        (tx, handle)
+    }
 
-        let spec = crate::contracts::OutputContractSpec::EnumChoice {
-            choices: vec!["yes".to_string(), "no".to_string()],
-            case_sensitive: false,
-            allow_index: true,
-        };
-        let msgs = vec![RawMessage {
-            role: "user".to_string(),
-            content: "Name the capital of France.".to_string(),
-        }];
-        crate::contracts::executor::execute_contract_with_runner(
-            tx,
-            template,
-            &msgs,
-            "fixture",
-            &spec,
-            2,
-            &[],
-            8,
-            0.0,
-        )
-        .await
-        .expect("the contract loop should return its raw fallback, not an error");
+    /// The two message lists a two-attempt `yes`/`no` contract run over
+    /// [`CONTRACT_QUESTION`] must produce.
+    ///
+    /// Derived from the documented behaviour of the executor rather than by
+    /// observing it: `inject_contract_instruction` prepends one system message
+    /// (trimming its leading newline) because the request carries none, and the
+    /// retry appends the rejected reply as `assistant` followed by the
+    /// tightening correction as `user`. The roles are part of the expectation
+    /// on purpose — since this change they select a template branch rather than
+    /// decorating a flat join.
+    fn expected_contract_message_lists() -> (Vec<(String, String)>, Vec<(String, String)>) {
+        let spec = yes_no_contract();
+        let system = crate::contracts::validation::build_system_instruction(&spec)
+            .trim_start_matches('\n')
+            .to_string();
+        let tightening = crate::contracts::validation::tightening_message(1, &spec);
+        let first = vec![
+            ("system".to_string(), system),
+            ("user".to_string(), CONTRACT_QUESTION.to_string()),
+        ];
+        let mut second = first.clone();
+        second.push(("assistant".to_string(), UNPARSEABLE_REPLY.to_string()));
+        second.push(("user".to_string(), tightening));
+        (first, second)
+    }
 
-        // Every clone of `tx` is dropped now that the call has returned, so the
-        // stub's `recv` ends and it hands back what it saw.
-        let jobs = runner.join().expect("stub runner panicked");
+    fn as_turns(msgs: &[(String, String)]) -> Vec<(&str, &str)> {
+        msgs.iter().map(|(r, c)| (r.as_str(), c.as_str())).collect()
+    }
+
+    /// Assert that a two-attempt contract run reached the runner as two
+    /// *different*, fully templated prompts, each tokenized without a second
+    /// BOS.
+    ///
+    /// The content assertions are equalities against a rendering written out by
+    /// hand, not `starts_with(FIXTURE_BOS)`: a prompt built from `msgs[..1]`,
+    /// or from a hard-coded message list ignoring `msgs` entirely, also starts
+    /// with BOS on every attempt while carrying none of the request.
+    fn assert_two_templated_attempts(dir: &std::path::Path, jobs: &[(String, bool)]) {
         assert_eq!(jobs.len(), 2, "expected two attempts, saw {}", jobs.len());
+
+        let (first, second) = expected_contract_message_lists();
+        let expected = [
+            expected_llama3_render(&as_turns(&first)),
+            expected_llama3_render(&as_turns(&second)),
+        ];
+
+        assert_ne!(
+            jobs[1].0, jobs[0].0,
+            "both attempts sent the model byte-identical prompts, so the retry's \
+             added context — the rejected reply and the tightening correction — \
+             never reached it"
+        );
 
         let tok = tokenizers::Tokenizer::from_file(dir.join("tokenizer.json"))
             .expect("loading the fixture tokenizer");
+
+        // Control, independent of what production decided: the fixture really
+        // does double. Without this, a fixture whose post_processor stopped
+        // prepending BOS would make the encode assertions below vacuous.
+        let doubled: Vec<u32> = tok
+            .encode(jobs[0].0.as_str(), true)
+            .unwrap()
+            .get_ids()
+            .to_vec();
+        assert_eq!(
+            &doubled[..2],
+            &[FIXTURE_BOS_ID, FIXTURE_BOS_ID],
+            "the fixture no longer reproduces the defect: encoding a templated \
+             prompt with add_special_tokens=true must yield two BOS ids, got {doubled:?}"
+        );
+
         for (i, (prompt, add_special_tokens)) in jobs.iter().enumerate() {
-            assert!(
-                prompt.starts_with(FIXTURE_BOS),
-                "attempt {i} was not rendered through the chat template — it \
-                 still carries the legacy join: {prompt:?}"
+            assert_eq!(
+                prompt, &expected[i],
+                "attempt {i} did not reach the model as this request rendered \
+                 through the chat template"
             );
             assert!(
                 !add_special_tokens,
@@ -1149,5 +1271,218 @@ mod tests {
                 "attempt {i} reached the model with {ids:?}"
             );
         }
+    }
+
+    /// The contract path renders every attempt through the template, and
+    /// tokenizes the result without a second BOS — at the
+    /// `execute_contract_with_runner` entry point.
+    ///
+    /// This test lives here rather than in `contracts::executor` because the
+    /// fixture above is what makes it able to fail: TinyLlama resolves to
+    /// `registry::ZEPHYR`, which never emits `bos_token`, so a contract test
+    /// built on the real checkpoint would pass with the flag hardcoded either
+    /// way.
+    ///
+    /// It asserts on the `InferenceJob`s the entry point actually enqueues —
+    /// not on `build_prompt_from_raw` in isolation — because the defect being
+    /// guarded is a *call site* restating the flag. A unit test of the builder
+    /// alone would stay green if `execute_contract_with_runner` went on writing
+    /// `add_special_tokens: true` next to it, which is exactly what that
+    /// function did before this change.
+    ///
+    /// Both attempts are checked, not just the first: the loop re-renders per
+    /// attempt against a mutated list, so a second render path is where a
+    /// divergence would hide.
+    #[tokio::test]
+    async fn the_contract_path_renders_each_attempt_without_a_second_bos() {
+        use crate::contracts::validation::RawMessage;
+
+        let dir = bos_doubling_checkpoint("contract");
+        let template = crate::api::chat_template::resolve_for_serving(&dir);
+        assert!(
+            template.is_some(),
+            "the fixture's tokenizer_config.json did not resolve a template, so \
+             this test would be measuring the legacy join"
+        );
+
+        let (tx, runner) = stub_runner();
+        let msgs = vec![RawMessage {
+            role: "user".to_string(),
+            content: CONTRACT_QUESTION.to_string(),
+        }];
+        crate::contracts::executor::execute_contract_with_runner(
+            tx,
+            template,
+            &msgs,
+            "fixture",
+            &yes_no_contract(),
+            2,
+            &[],
+            8,
+            0.0,
+        )
+        .await
+        .expect("the contract loop should return its raw fallback, not an error");
+
+        // Every clone of `tx` is dropped now that the call has returned, so the
+        // stub's `recv` ends and it hands back what it saw.
+        let jobs = runner.join().expect("stub runner panicked");
+        assert_two_templated_attempts(&dir, &jobs);
+    }
+
+    /// The same claim at the entry point a real client reaches: the axum
+    /// handler, given a deserialized request body carrying
+    /// `lightbulb.output_contract`.
+    ///
+    /// The sibling test above covers `execute_contract_with_runner`, a
+    /// convenience wrapper for direct callers. It cannot cover this: the two
+    /// share `build_prompt_from_raw`, but sharing a builder only makes the
+    /// two agree about the *logic* — either call to it can be replaced
+    /// wholesale, and replacing this one is a revert of the entire change at
+    /// the only site an HTTP request touches.
+    #[tokio::test]
+    async fn the_http_contract_path_renders_each_attempt_through_the_template() {
+        let dir = bos_doubling_checkpoint("http-contract");
+        let template = crate::api::chat_template::resolve_for_serving(&dir);
+        assert!(
+            template.is_some(),
+            "the fixture's tokenizer_config.json did not resolve a template, so \
+             this test would be measuring the legacy join"
+        );
+
+        let (tx, runner) = stub_runner();
+        let state = state_with_runner(template, Some(tx));
+
+        // Deserialized from a body, not constructed field-by-field: the shape
+        // below is what a client actually posts.
+        let request: ChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "fixture",
+            "messages": [{"role": "user", "content": CONTRACT_QUESTION}],
+            "max_tokens": 8,
+            "temperature": 0.0,
+            "lightbulb": {
+                "output_contract": {
+                    "type": "enum_choice",
+                    "choices": ["yes", "no"],
+                    "case_sensitive": false,
+                    "allow_index": true
+                },
+                "max_attempts": 2
+            }
+        }))
+        .expect("the request body must deserialize");
+
+        let response = chat_completions(State(state), Json(request))
+            .await
+            .into_response();
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "the contract request did not complete"
+        );
+
+        // `state` was moved into the handler and dropped with it, so the stub's
+        // `recv` has ended.
+        let jobs = runner.join().expect("stub runner panicked");
+        assert_two_templated_attempts(&dir, &jobs);
+    }
+
+    /// A template that rejects the system role falls back to the legacy join —
+    /// with `add_special_tokens: true`, because the join carries no BOS.
+    ///
+    /// `build_prompt_from_raw`'s `Err` arm is not a rare path on the contract
+    /// route. `inject_contract_instruction` puts a system message in *every*
+    /// contract request, and Mistral-7B-Instruct-v0.1/v0.2 and Gemma all ship
+    /// templates that `raise_exception` on one — so on those checkpoints this
+    /// arm runs on every attempt of every contract request, and a wrong flag
+    /// there sends a Llama-family model a prompt with no BOS at all.
+    #[tokio::test]
+    async fn a_template_that_rejects_the_system_role_falls_back_to_the_join() {
+        use crate::contracts::validation::RawMessage;
+
+        let dir = checkpoint_with_template("raises-on-system", RAISES_ON_SYSTEM_TEMPLATE);
+        let template = crate::api::chat_template::resolve_for_serving(&dir)
+            .expect("the fixture's tokenizer_config.json must resolve a template");
+
+        // Controls: the fixture is a working template that fails on exactly the
+        // message the contract path adds. Without the first, a template broken
+        // in some other way would take the same arm and prove nothing about
+        // `raise_exception`; without the second, this test would be measuring
+        // the `Ok` arm.
+        let question = RawMessage {
+            role: "user".to_string(),
+            content: CONTRACT_QUESTION.to_string(),
+        };
+        assert!(
+            template.render(std::slice::from_ref(&question)).is_ok(),
+            "the fixture template must render a plain user turn"
+        );
+        assert!(
+            template
+                .render(&[
+                    RawMessage {
+                        role: "system".to_string(),
+                        content: "Answer with one of: yes, no".to_string(),
+                    },
+                    question.clone(),
+                ])
+                .is_err(),
+            "the fixture template must raise on a system message, or this test \
+             never reaches the fallback arm"
+        );
+
+        let (tx, runner) = stub_runner();
+        let state = state_with_runner(Some(template), Some(tx));
+        let request: ChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "fixture",
+            "messages": [{"role": "user", "content": CONTRACT_QUESTION}],
+            "max_tokens": 8,
+            "temperature": 0.0,
+            "lightbulb": {
+                "output_contract": {
+                    "type": "enum_choice",
+                    "choices": ["yes", "no"],
+                    "case_sensitive": false,
+                    "allow_index": true
+                },
+                "max_attempts": 2
+            }
+        }))
+        .expect("the request body must deserialize");
+
+        let response = chat_completions(State(state), Json(request))
+            .await
+            .into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let jobs = runner.join().expect("stub runner panicked");
+        assert_eq!(jobs.len(), 2, "expected two attempts, saw {}", jobs.len());
+
+        let (first, second) = expected_contract_message_lists();
+        let expected = [
+            expected_legacy_join(&as_turns(&first)),
+            expected_legacy_join(&as_turns(&second)),
+        ];
+        for (i, (prompt, add_special_tokens)) in jobs.iter().enumerate() {
+            assert_eq!(
+                prompt, &expected[i],
+                "attempt {i} did not fall back to the legacy join over this \
+                 request's messages"
+            );
+            assert!(
+                add_special_tokens,
+                "attempt {i} fell back to the join, whose text contains no \
+                 special tokens, and then told the tokenizer not to add any — \
+                 the model receives no BOS at all"
+            );
+        }
+
+        // And the fallback really is the join, not a template render that
+        // happened to succeed.
+        assert!(
+            !jobs[0].0.contains("[INST]"),
+            "the template rendered after all: {:?}",
+            jobs[0].0
+        );
     }
 }

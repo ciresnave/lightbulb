@@ -431,16 +431,37 @@ async fn retry_appends_context_and_tightening_message() {
         "should make exactly 2 inference calls"
     );
 
-    // The second prompt must contain the first bad response as assistant context.
+    // The second prompt must contain the first bad response as assistant
+    // context. The `assistant: ` prefix is part of the claim: since the
+    // executor's message lists are rendered through the model's chat template,
+    // the role selects a template branch (`<|start_header_id|>{role}`) and, on
+    // a template that checks user/assistant alternation, decides whether the
+    // render raises at all. Before that change a wrong role here was a
+    // cosmetic prefix in a flat join.
     assert!(
-        all_prompts[1].contains("I cannot decide."),
-        "retry prompt should include prior bad assistant response"
+        all_prompts[1].contains("assistant: I cannot decide."),
+        "retry prompt should include the prior bad response as an ASSISTANT \
+         turn; got:\n{}",
+        all_prompts[1]
     );
+
     // And a tightening correction from the user.
+    //
+    // Written out in full rather than checked for "yes" or "no": the contract's
+    // own system instruction enumerates both choices and is present in every
+    // attempt, so a label search here holds no matter what the tightening
+    // message says — including when it says nothing. Nor is it compared against
+    // `validation::tightening_message`, because `contains` of a value derived
+    // from the function under test passes trivially when that function returns
+    // `String::new()`.
+    let expected_tightening = "user: Your previous response did not end with exactly one of the \
+                               required choices. Please respond again — the VERY LAST LINE must \
+                               contain ONLY one of: YES (1), NO (2)";
     assert!(
-        all_prompts[1].to_lowercase().contains("yes")
-            || all_prompts[1].to_lowercase().contains("no"),
-        "retry prompt should contain the valid labels in the tightening message"
+        all_prompts[1].ends_with(expected_tightening),
+        "the retry's last message must be the tightening correction, as a USER \
+         turn.\nexpected to end with:\n{expected_tightening}\ngot:\n{}",
+        all_prompts[1]
     );
 }
 

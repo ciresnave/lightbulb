@@ -81,6 +81,13 @@ pub async fn execute_contract_with_runner(
             // this site decide it separately is how the two answers drift. A
             // templated prompt already carries the checkpoint's BOS, so `true`
             // here would send the model two — see `chat::build_prompt_from_raw`.
+            //
+            // Sharing the builder pins the logic, not this call: replacing it
+            // with `BuiltPrompt::raw(legacy_join(&msgs))` reverts the change
+            // here alone. `chat::tests::
+            // the_contract_path_renders_each_attempt_without_a_second_bos`
+            // guards this site specifically; its sibling
+            // `..._http_contract_path_...` guards the handler's call.
             let prompt =
                 crate::api::openai::chat::build_prompt_from_raw(template.as_deref(), &msgs);
             async move {
