@@ -4,24 +4,40 @@
 //! structured-output loop:
 //!
 //! 1. Inject contract instructions into the message list.
-//! 2. Convert messages → prompt and call the inference closure.
+//! 2. Hand the message list to the inference closure, which renders it.
 //! 3. Try to parse the response; if it fails, append model output as context,
 //!    add a tightening message, and retry up to `max_attempts` times.
 //! 4. On primary contract exhaustion, repeat with each fallback contract.
 //! 5. Return a [`ContractExecutionResult`] either way.
 //!
+//! # This module does not know how a prompt is formatted
+//!
+//! Step 2 hands over `Vec<RawMessage>`, not a `String`. It used to call
+//! `validation::messages_to_prompt`, a third copy of the legacy
+//! `role: content` join, which meant every contract request prompted a chat
+//! model as though it were a base model no matter what template the checkpoint
+//! shipped. Rendering upstream instead is not available to this loop: it
+//! *mutates* the message list between attempts (the tightening message and the
+//! rejected assistant reply are both pushed below), so a prompt rendered once
+//! by the caller would be stale from attempt 2 onward. Passing the list and
+//! letting the caller render each attempt is what let `messages_to_prompt` be
+//! deleted rather than re-pointed — and re-pointing it would have left a
+//! second renderer, which is a second place to get
+//! `InferenceJob::add_special_tokens` wrong.
+//!
 //! # Testability
 //!
-//! The inference callable is a generic `Fn(String) -> impl Future<Output =
-//! anyhow::Result<CompletionResult>>`.  Production code passes a closure that
-//! wraps the `mpsc::Sender` to the model runner thread.  Tests pass a closure
-//! that returns scripted results, so every branch of this loop can be
-//! exercised without a real model.
+//! The inference callable is a generic `Fn(Vec<RawMessage>) -> impl
+//! Future<Output = anyhow::Result<CompletionResult>>`.  Production code passes
+//! a closure that renders through the model's chat template and wraps the
+//! `mpsc::Sender` to the model runner thread.  Tests pass a closure that
+//! returns scripted results, so every branch of this loop can be exercised
+//! without a real model.
 
 use std::future::Future;
 
-use super::{ContractOutput, ContractResult, OutputContractSpec};
 use super::validation::{self, RawMessage};
+use super::{ContractOutput, ContractResult, OutputContractSpec};
 use crate::engine::model_runner::{CompletionResult, FinishReason};
 
 // ─── Convenience wrapper for ModelRunner-backed inference ──────────────────
@@ -32,9 +48,18 @@ use crate::engine::model_runner::{CompletionResult, FinishReason};
 /// `mpsc::Sender<InferenceJob>` (e.g. integration tests, CLI tools) and
 /// doesn't want to wire up the closure manually.
 ///
+/// `template` is the checkpoint's resolved chat template, exactly as
+/// `AppState.chat_template` holds it: `None` when no tier produced one, in
+/// which case each attempt falls back to the legacy join. It is a parameter
+/// rather than something this function resolves for itself because resolution
+/// reads files and its answer cannot change while the process runs — the HTTP
+/// server resolves once at startup, and a caller here should pass the same
+/// value rather than re-deriving a possibly different one.
+///
 /// [`ModelRunner`]: crate::engine::model_runner::ModelRunner
 pub async fn execute_contract_with_runner(
     tx: std::sync::mpsc::Sender<crate::engine::model_runner::InferenceJob>,
+    template: Option<std::sync::Arc<crate::api::chat_template::ResolvedTemplate>>,
     messages: &[RawMessage],
     model_id: &str,
     primary: &OutputContractSpec,
@@ -49,16 +74,31 @@ pub async fn execute_contract_with_runner(
         primary,
         max_attempts,
         fallbacks,
-        move |prompt| {
+        move |msgs: Vec<RawMessage>| {
             let tx = tx.clone();
+            // The same builder `/v1/chat/completions` uses, which is the point:
+            // `add_special_tokens` is a property of the prompt, and letting
+            // this site decide it separately is how the two answers drift. A
+            // templated prompt already carries the checkpoint's BOS, so `true`
+            // here would send the model two — see `chat::build_prompt_from_raw`.
+            //
+            // Sharing the builder pins the logic, not this call: replacing it
+            // with `BuiltPrompt::raw(legacy_join(&msgs))` reverts the change
+            // here alone. `chat::tests::
+            // the_contract_path_renders_each_attempt_without_a_second_bos`
+            // guards this site specifically; its sibling
+            // `..._http_contract_path_...` guards the handler's call.
+            let prompt =
+                crate::api::openai::chat::build_prompt_from_raw(template.as_deref(), &msgs);
             async move {
                 use crate::engine::model_runner::{InferenceJob, ResponseMode};
                 let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
                 let job = InferenceJob {
                     id: uuid::Uuid::new_v4().to_string(),
-                    prompt,
+                    prompt: prompt.text,
                     max_new_tokens,
                     temperature,
+                    add_special_tokens: prompt.add_special_tokens,
                     response_mode: ResponseMode::Complete(resp_tx),
                 };
                 tx.send(job)
@@ -129,8 +169,10 @@ pub struct ContractExecutionResult {
 ///                    moving to the next one.
 /// - `fallbacks`    — additional contracts tried (in order) after `primary`
 ///                    exhausts all attempts.
-/// - `infer`        — async callable `(prompt: String) -> Result<CompletionResult>`.
-///                    Called once per attempt.
+/// - `infer`        — async callable `(msgs: Vec<RawMessage>) ->
+///                    Result<CompletionResult>`. Called once per attempt, with
+///                    **that attempt's** message list; the caller renders it.
+///                    See the module docs for why the list, not a prompt.
 ///
 /// Each `infer` result's `text` drives contract validation; its token counts
 /// and finish reason are aggregated into the returned
@@ -144,7 +186,7 @@ pub async fn execute_contract<F, Fut>(
     infer: F,
 ) -> anyhow::Result<ContractExecutionResult>
 where
-    F: Fn(String) -> Fut,
+    F: Fn(Vec<RawMessage>) -> Fut,
     Fut: Future<Output = anyhow::Result<CompletionResult>>,
 {
     let start = std::time::Instant::now();
@@ -157,16 +199,12 @@ where
     let mut completion_tokens: usize = 0;
     let mut finish_reason: Option<FinishReason> = None;
 
-    let contracts: Vec<&OutputContractSpec> = std::iter::once(primary)
-        .chain(fallbacks.iter())
-        .collect();
+    let contracts: Vec<&OutputContractSpec> =
+        std::iter::once(primary).chain(fallbacks.iter()).collect();
 
     for contract in &contracts {
         // Fresh message list for each contract so fallbacks start clean.
-        let mut msgs: Vec<RawMessage> = messages
-            .iter()
-            .map(|m| RawMessage { role: m.role.clone(), content: m.content.clone() })
-            .collect();
+        let mut msgs: Vec<RawMessage> = messages.to_vec();
 
         validation::inject_contract_instruction(&mut msgs, contract);
 
@@ -180,10 +218,12 @@ where
                 });
             }
 
-            let prompt = validation::messages_to_prompt(&msgs);
-
             let attempt_start = std::time::Instant::now();
-            let completion = infer(prompt).await?;
+            // The caller renders — it owns the template. Cloned rather than
+            // borrowed: a borrowing callback returning a `Future` needs an HRTB
+            // that buys nothing here, and this list is already a per-contract
+            // copy of the caller's.
+            let completion = infer(msgs.clone()).await?;
             let attempt_ms = attempt_start.elapsed().as_millis() as u64;
 
             // This attempt's tokens were spent whether or not its text is kept.
@@ -274,9 +314,9 @@ mod tests {
     /// An inference stub that replays canned [`CompletionResult`]s in order.
     fn scripted(
         results: Vec<CompletionResult>,
-    ) -> impl Fn(String) -> std::future::Ready<anyhow::Result<CompletionResult>> {
+    ) -> impl Fn(Vec<RawMessage>) -> std::future::Ready<anyhow::Result<CompletionResult>> {
         let queue = Arc::new(Mutex::new(VecDeque::from(results)));
-        move |_prompt: String| {
+        move |_msgs: Vec<RawMessage>| {
             let next = queue
                 .lock()
                 .unwrap()

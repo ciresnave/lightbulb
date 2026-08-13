@@ -46,13 +46,24 @@
 //! "do not modify `src/api/` to suit the test") — applied here to a routing
 //! assumption instead of a struct signature.
 //!
-//! One consequence: `chat.rs` builds its prompt as `"{role}: {content}"` per
-//! message, so the model actually receives `"user: The capital of France
-//! is"`, not the bare prompt string. That prefixing is `chat.rs`'s existing
-//! behaviour, not something introduced here, which is why the diagnosis
-//! order below cross-checks against `generate_greedy` on the UNPREFIXED
-//! prompt: if that passes and this fails, the Fuel wiring is exonerated and
-//! the defect is `chat.rs`'s prompt formatting, not the engine.
+//! One consequence: `chat.rs` does not send the bare prompt string. It used to
+//! build `"{role}: {content}"` per message, so the model received `"user: The
+//! capital of France is"`; as of the chat-template work it renders the
+//! checkpoint's own template instead, so TinyLlama receives
+//! `"<|user|>\nThe capital of France is</s>\n<|assistant|>\n"` — and that text
+//! is tokenized with `add_special_tokens = false`, because a templated prompt
+//! carries whatever special tokens its template emits (see `chat.rs`'s
+//! `build_prompt`). TinyLlama resolves to `registry::ZEPHYR`, which emits no
+//! `bos_token`, so its prompt now carries no BOS at all — which is exactly what
+//! `transformers` produces for this checkpoint, since `apply_chat_template`
+//! tokenizes with `add_special_tokens=False`. Either way the text is not the
+//! bare prompt, which is why the diagnosis order below cross-checks against
+//! `generate_greedy` on the UNPREFIXED prompt: if that passes and this fails,
+//! the Fuel wiring is exonerated and the defect is `chat.rs`'s prompt
+//! construction, not the engine.
+//!
+//! The state built below resolves the template exactly as `ApiServer::new`
+//! does, so this gate measures the prompt path the server actually ships.
 //!
 //! Diagnose in this order, because it separates plumbing from maths:
 //!   1. Non-200 -> the handler or the channel. Plumbing.
@@ -92,11 +103,28 @@ fn tinyllama_dir() -> Option<PathBuf> {
     p.join("model.safetensors").is_file().then_some(p)
 }
 
+/// Resolve the checkpoint's chat template exactly as `ApiServer::new` does.
+///
+/// An acceptance gate that builds a state the server never builds is not an
+/// acceptance gate for the server. Leaving this `None` would keep these two
+/// tests on the pre-template `"{role}: {content}"` join for ever, so they would
+/// go on passing while the shipped prompt path was never exercised.
+///
+/// The `Resolution::None` check lives in `chat_template::resolve_for_serving`,
+/// which is what `ApiServer::new` assigns from, so this cannot drift from
+/// startup by being edited in one place and not the other.
+fn chat_template_for(
+    dir: &std::path::Path,
+) -> Option<Arc<lightbulb::api::chat_template::ResolvedTemplate>> {
+    lightbulb::api::chat_template::resolve_for_serving(dir)
+}
+
 #[tokio::test]
 #[ignore = "needs the TinyLlama checkpoint; minutes on CPU"]
 async fn fuel_runner_serves_a_coherent_completion_over_http() {
-    let dir = tinyllama_dir()
-        .expect("no TinyLlama snapshot — this is an acceptance gate, so it fails rather than skipping");
+    let dir = tinyllama_dir().expect(
+        "no TinyLlama snapshot — this is an acceptance gate, so it fails rather than skipping",
+    );
 
     let tx = ModelRunner::start(&dir, 1, 512, Some("f32".to_string()))
         .expect("starting the Fuel model runner");
@@ -106,16 +134,39 @@ async fn fuel_runner_serves_a_coherent_completion_over_http() {
         config: ApiConfig::default(),
         db_pool: None,
         inference_tx: Some(tx),
+        chat_template: chat_template_for(&dir),
+        // Default window (20): these harnesses make a handful of requests, so
+        // the monitor never fills it and never logs. It is here because
+        // `AppState` requires it, not as anything under test.
+        eos_monitor: Default::default(),
     };
 
     let app = lightbulb::api::openai::routes().with_state(state);
 
     // temperature 0.0 PINNED, not defaulted: this gate asserts content, so a
     // future default that makes sampling stochastic would make it flaky.
+    //
+    // `max_tokens` is 24, not 8, and the headroom is the point. At 8 the
+    // observed completion was exactly 8 tokens with `"Paris"` at token 6 — the
+    // gate consumed 100% of its budget, so ONE extra leading token (a chat
+    // template gaining a system turn, a BOS moving, a checkpoint swap) pushed
+    // `"Paris"` past the cap and turned the gate red with the message below:
+    // *"the model is producing nonsense, which points at the wiring (projection
+    // layout, RoPE base, norm placement)"*. That message would have sent a
+    // reader to the Fuel decode path for a prompt-length change. A gate whose
+    // failure text names the wrong subsystem is worse than a slow gate; 24 is
+    // three times the observed answer length and still bounded. It costs three
+    // times as many decode steps, which is the price and is accepted — the
+    // default-temperature gate below already runs 24.
+    //
+    // In practice it costs nothing: observed 2026-08-08 at 24, the model
+    // answers `"The capital of France is Paris.</s>"` and stops on EOS after 8
+    // tokens, so the extra 16 are never decoded. The headroom is only spent on
+    // the run where something HAS shifted — which is the run where it matters.
     let body = serde_json::json!({
         "model": "tinyllama",
         "messages": [{"role": "user", "content": "The capital of France is"}],
-        "max_tokens": 8,
+        "max_tokens": 24,
         "temperature": 0.0,
     });
 
@@ -181,11 +232,12 @@ async fn fuel_runner_serves_a_coherent_completion_over_http() {
 /// It cannot and does not assert the completion is the RIGHT text.
 ///
 /// It also does not assert TERMINATION (that generation stopped via EOS
-/// rather than exhausting `max_tokens`) — not because that property isn't
-/// worth checking, but because measurement showed it fails for a reason
-/// outside this test's and this branch's scope. See the comment at the
-/// bottom of the test body, where that assertion used to live, for the
-/// measurements and the reasoning for removing it.
+/// rather than exhausting `max_tokens`), because termination at temperature
+/// 1.0 is itself a property of the draw: re-measured under the chat template
+/// on 2026-08-08, EOS fired in 2 of 6 trials. See the comment at the bottom of
+/// the test body, where that assertion used to live, for the trial data and
+/// for why the deterministic version of this claim lives in
+/// `tests/chat_template_e2e.rs` instead.
 ///
 /// Both tests are needed together, not as alternatives:
 /// - `fuel_runner_serves_a_coherent_completion_over_http` (above) proves the
@@ -208,8 +260,9 @@ async fn fuel_runner_serves_a_coherent_completion_over_http() {
 #[tokio::test]
 #[ignore = "needs the TinyLlama checkpoint; minutes on CPU"]
 async fn fuel_runner_serves_a_default_temperature_completion() {
-    let dir = tinyllama_dir()
-        .expect("no TinyLlama snapshot — this is an acceptance gate, so it fails rather than skipping");
+    let dir = tinyllama_dir().expect(
+        "no TinyLlama snapshot — this is an acceptance gate, so it fails rather than skipping",
+    );
 
     let tx = ModelRunner::start(&dir, 1, 512, Some("f32".to_string()))
         .expect("starting the Fuel model runner");
@@ -219,6 +272,11 @@ async fn fuel_runner_serves_a_default_temperature_completion() {
         config: ApiConfig::default(),
         db_pool: None,
         inference_tx: Some(tx),
+        chat_template: chat_template_for(&dir),
+        // Default window (20): these harnesses make a handful of requests, so
+        // the monitor never fills it and never logs. It is here because
+        // `AppState` requires it, not as anything under test.
+        eos_monitor: Default::default(),
     };
 
     let app = lightbulb::api::openai::routes().with_state(state);
@@ -272,36 +330,61 @@ async fn fuel_runner_serves_a_default_temperature_completion() {
          {text:?} — inference_tx routing is broken, the model never ran"
     );
 
+    // ── Termination: still not asserted, for a NEW reason. Re-decided
+    //    2026-08-08 on this branch, with fresh measurement. ──
+    //
     // This test deliberately does NOT assert termination (that generation
     // stopped via EOS rather than running out `max_tokens`), even though an
     // earlier version of it did, via checking for the literal `"</s>"` EOS
-    // marker that `run_jobs` (`src/engine/model_runner.rs:394`) leaves in the
-    // decoded text (it calls `decode_text(&generated_tokens, false)` —
-    // `skip_special: false`).
+    // marker that `run_jobs` leaves in the decoded text (it calls
+    // `decode_text(&generated_tokens, false)` — `skip_special: false`).
     //
-    // Measured 2026-08-06 across `max_tokens` in {24, 64, 100}: at the
-    // server's default temperature (1.0), TinyLlama-1.1B-**Chat** prompted
-    // with `chat.rs`'s ad-hoc `"user: <content>"` prefix (`chat.rs:186`)
-    // instead of its native `<|user|>`/`<|assistant|>` chat template emits
-    // EOS in only ~1 of 6 trials — it behaves like a base model free-
-    // associating past the original topic (population figures, other
-    // countries, fashion trends, national anthems) rather than concluding.
+    // ## The rationale that used to be here is false and has been deleted
     //
-    // Trial data (6 runs total): max_tokens=24 -> 4 trials, EOS reached in
-    // exactly 1 ("Paris. The capital of the USA is Washington DC.`</s>`");
-    // max_tokens=64 -> 1 trial, EOS not reached; max_tokens=100 -> 1 trial,
-    // EOS not reached. Overall: EOS fired in 1 of 6 trials.
+    // It read: EOS fires in only ~1 of 6 trials because the model is prompted
+    // with `chat.rs`'s ad-hoc `"user: <content>"` prefix instead of its native
+    // template; that is a defect in `chat.rs`'s prompt construction; `src/api/`
+    // is out of scope for this branch (verified zero-diff) and queued for a
+    // later one; a termination gate belongs on the branch that fixes the chat
+    // template, once `chat.rs` is back in scope.
     //
-    // That is a real defect, but it is a defect in `chat.rs`'s prompt
-    // construction — not in the Fuel decode path this branch exists to wire
-    // up, and not in `select_token`'s sampling — and `src/api/` is out of
-    // scope for this branch (verified zero-diff) and queued for a later one.
-    // Asserting termination here would make THIS gate flaky while actually
-    // testing a claim it was never for: this test's job is "does the DEFAULT
-    // path reach the model at all," which the not-the-fallback-string
-    // assertion above already answers. Removing this assertion is not the
-    // same move as weakening an assertion to force a pass — it is dropping
-    // an assertion for a claim this test doesn't own, whose failure has a
-    // known cause elsewhere. A termination gate belongs on the branch that
-    // fixes the chat template, once `chat.rs` is back in scope.
+    // **This IS that branch.** `chat.rs` renders the checkpoint's own template,
+    // `chat_template_for` above resolves it exactly as `ApiServer::new` does,
+    // and the model receives `"<|user|>\nThe capital of France is</s>\n
+    // <|assistant|>\n"`. Every clause about scope and sequencing in that
+    // paragraph is now wrong, so leaving it would have told the next reader to
+    // wait for a branch that has already landed.
+    //
+    // ## Measured again, after the template, and the answer is still no
+    //
+    // 2026-08-08, `--release`, `--features fuel-engine`, this exact request
+    // (no `temperature` field, so the server's 1.0 default applies;
+    // `max_tokens: 24`), six trials against one loaded runner:
+    //
+    //   stop,   8 tokens   "The capital of France is Paris.</s>"        x2
+    //   length, 24 tokens  "…Paris, located in the Île-de-France region…"
+    //   length, 24 tokens  "Yes, absolute facts do exist! The capital…"
+    //   length, 24 tokens  "Yes, the capital city of France is Paris, …"
+    //   length, 24 tokens  "Yes, the capital of France is Paris. Paris…"
+    //
+    // EOS fired in **2 of 6**. The template raised it from 1 of 6 and made
+    // every completion on-topic — a real improvement, visible above — but it
+    // did not make termination deterministic, and it was never going to: at
+    // temperature 1.0 the next token is DRAWN, so whether the draw lands on
+    // EOS is a property of the sample, not of the wiring. Restoring the
+    // assertion would give this gate a ~2-in-3 failure rate.
+    //
+    // ## And the claim already has a home where it IS deterministic
+    //
+    // `tests/chat_template_e2e.rs::templated_chat_stops_on_eos` asserts exactly
+    // "a templated chat model stops on EOS", at `temperature: 0.0`, where the
+    // answer is argmax and reproducible — observed `finish_reason: "stop"`,
+    // `completion_tokens: 8`. So the coverage the old comment was deferring
+    // exists; it just belongs on the greedy path rather than the sampled one.
+    //
+    // What stays true from the original reasoning: this test's contract is to
+    // assert only PROPERTIES THAT HOLD REGARDLESS OF WHICH TOKENS WERE DRAWN.
+    // Termination at temperature 1.0 is not one of those, so asserting it here
+    // would be a category error even if the observed rate were 6 of 6 — six
+    // successes do not make a sampled outcome invariant.
 }

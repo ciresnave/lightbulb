@@ -9,6 +9,7 @@ pub mod context_compression;
 pub mod context_injection;
 pub mod conversation_history;
 pub mod decomposition;
+pub mod eos_monitor;
 pub mod knowledge_base;
 pub mod memory_aware_scheduler;
 pub mod metadata_scheduling;
@@ -176,6 +177,27 @@ pub struct RequestContext {
     /// it is known, rather than reconstructed later from state that has
     /// already merged the two cases.
     pub stopped_on_eos: bool,
+    /// What to pass the tokenizer's `add_special_tokens` when prefilling this
+    /// request's prompt.
+    ///
+    /// **Not a tuning knob — it is a property of the prompt.** A prompt
+    /// rendered through a chat template already contains the checkpoint's BOS,
+    /// because real templates interpolate `bos_token` into the text — Llama-3,
+    /// Mistral and Gemma open with it, Llama-2 emits it once per user turn
+    /// inside its loop; a tokenizer whose `post_processor` is
+    /// `TemplateProcessing` then prepends BOS again, and the model receives
+    /// `128000, 128000, 128006, …`, a pair it never saw in training. The render
+    /// succeeds and nothing is logged, so this is exactly the silent-wrong-
+    /// prompt class `api/chat_template.rs` exists to remove. HuggingFace
+    /// tokenizes `apply_chat_template` output with `add_special_tokens=False`
+    /// for the same reason.
+    ///
+    /// Defaults to `true`, which is right for every prompt that is NOT
+    /// templated — the legacy `role: content` join and `/v1/completions`'s raw
+    /// text both need the tokenizer to supply BOS. `run_jobs` overwrites it
+    /// from the `InferenceJob`, which got it from the handler that built the
+    /// prompt and therefore knows.
+    pub add_special_tokens: bool,
 }
 
 impl RequestContext {
@@ -190,6 +212,7 @@ impl RequestContext {
             temperature: 0.0,
             prompt_tokens: 0,
             stopped_on_eos: false,
+            add_special_tokens: true,
         }
     }
 

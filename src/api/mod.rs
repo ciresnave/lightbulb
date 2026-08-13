@@ -28,6 +28,7 @@
 
 pub mod admin;
 pub mod auth_middleware;
+pub mod chat_template;
 pub mod lightbulb;
 pub mod openai;
 pub mod types;
@@ -123,6 +124,35 @@ pub struct AppState {
 
     /// Sender to enqueue inference jobs to the model runner thread (if started)
     pub inference_tx: Option<std::sync::mpsc::Sender<crate::engine::model_runner::InferenceJob>>,
+
+    /// Chat template for the loaded model, plus the special tokens it renders
+    /// with — resolved once at startup.
+    ///
+    /// `None` when no model runner started, or when no tier produced a
+    /// template. In that case the handlers fall back to the legacy
+    /// `role: content` join and `chat_template::resolve` has already said so at
+    /// `warn` level, naming the model directory.
+    ///
+    /// The template and its tokens are held **together**, in one
+    /// `ResolvedTemplate`, so that no caller is ever in a position to supply
+    /// `bos`/`eos` itself — which in practice means a literal `"<s>"`/`"</s>"`,
+    /// correct for the Llama-2 family and silently wrong for every other.
+    pub chat_template: Option<Arc<crate::api::chat_template::ResolvedTemplate>>,
+
+    /// Rolling EOS-fire rate over recent completions, shared by every
+    /// completion path.
+    ///
+    /// **Observation only.** It exists because the tiers below
+    /// `Resolution::TokenizerConfig` are heuristics that can be confidently
+    /// wrong — a registry-matched template renders, returns 200, and prompts
+    /// the model as a base model — and a low EOS rate is the cheapest
+    /// observable that says so. Nothing reads it to decide what to prompt; see
+    /// `engine::eos_monitor` for why auto-switching was rejected.
+    ///
+    /// Not `Option`: a monitor with nothing recorded already reports "no
+    /// reading" (`stop_rate() == None`), so an absent one would be a second
+    /// spelling of the same state.
+    pub eos_monitor: Arc<crate::engine::eos_monitor::EosMonitor>,
 }
 
 /// API server
@@ -156,7 +186,9 @@ impl ApiServer {
             println!("Database connected and migrations applied");
             Some(pool)
         } else {
-            println!("No DATABASE_URL set — running without database (auth/audit/rate-limiting disabled)");
+            println!(
+                "No DATABASE_URL set — running without database (auth/audit/rate-limiting disabled)"
+            );
             None
         };
 
@@ -165,6 +197,8 @@ impl ApiServer {
             config: config.clone(),
             db_pool,
             inference_tx: None,
+            chat_template: None,
+            eos_monitor: Arc::new(crate::engine::eos_monitor::EosMonitor::default()),
         };
 
         // Try to start a model runner thread if a model directory and default model exist
@@ -179,6 +213,27 @@ impl ApiServer {
                 ) {
                     Ok(sender) => {
                         state.inference_tx = Some(sender);
+
+                        // Resolve the chat template HERE and only here. Both
+                        // halves read files, and a per-request read would put
+                        // filesystem I/O in the request path for a value that
+                        // cannot change while the process runs.
+                        //
+                        // `resolve_for_serving` owns the "keep it only if a tier
+                        // produced one" rule; the three integration harnesses
+                        // call the same function so they cannot drift from what
+                        // this line builds.
+                        state.chat_template = chat_template::resolve_for_serving(&model_path);
+                        if let Some(t) = &state.chat_template {
+                            println!(
+                                "Chat template for {} resolved via {:?} (bos {:?}, eos {:?})",
+                                model_path.display(),
+                                t.resolved_by(),
+                                t.tokens.bos,
+                                t.tokens.eos
+                            );
+                        }
+
                         println!("Started model runner for {}", model_path.display());
                     }
                     Err(e) => {
@@ -284,21 +339,21 @@ impl ApiServer {
             let https_bind_address = cert_manager.https_bind_address(&http_bind_address);
 
             // Parse TLS certificates and key
-            use rustls::pki_types::{CertificateDer, PrivateKeyDer};
             use rustls::ServerConfig;
+            use rustls::pki_types::{CertificateDer, PrivateKeyDer};
             use std::io::Cursor;
             use tokio_rustls::TlsAcceptor;
-            
+
             let certs: Vec<CertificateDer> = rustls_pemfile::certs(&mut Cursor::new(&cert_pem))
                 .collect::<Result<Vec<_>, _>>()?;
-            
+
             let key = rustls_pemfile::private_key(&mut Cursor::new(&key_pem))?
                 .ok_or_else(|| anyhow::anyhow!("No private key found in PEM file"))?;
-            
+
             let mut tls_config = ServerConfig::builder()
                 .with_no_client_auth()
                 .with_single_cert(certs, key)?;
-            
+
             tls_config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
             let tls_acceptor = TlsAcceptor::from(Arc::new(tls_config));
 
@@ -323,7 +378,7 @@ impl ApiServer {
             // HTTPS server task with manual TLS handling
             let https_server = tokio::spawn(async move {
                 let make_service = https_app.into_make_service();
-                
+
                 loop {
                     let (tcp_stream, remote_addr) = match https_listener.accept().await {
                         Ok(conn) => conn,
@@ -355,26 +410,32 @@ impl ApiServer {
                                 return;
                             }
                         };
-                        
+
                         // Create the hyper IO wrapper
                         let io = hyper_util::rt::TokioIo::new(tls_stream);
 
                         // Serve the connection with tower-to-hyper adapter
                         let conn = hyper_util::server::conn::auto::Builder::new(
-                            hyper_util::rt::TokioExecutor::new()
+                            hyper_util::rt::TokioExecutor::new(),
                         );
 
-                        let hyper_service = hyper::service::service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
-                            let mut service = service.clone();
-                            async move {
-                                service.call(req).await.map_err(|err| {
-                                    tracing::error!("Service error: {:?}", err);
-                                    std::io::Error::new(std::io::ErrorKind::Other, "service error")
-                                })
-                            }
-                        });
+                        let hyper_service = hyper::service::service_fn(
+                            move |req: hyper::Request<hyper::body::Incoming>| {
+                                let mut service = service.clone();
+                                async move {
+                                    service.call(req).await.map_err(|err| {
+                                        tracing::error!("Service error: {:?}", err);
+                                        std::io::Error::new(
+                                            std::io::ErrorKind::Other,
+                                            "service error",
+                                        )
+                                    })
+                                }
+                            },
+                        );
 
-                        if let Err(e) = conn.serve_connection_with_upgrades(io, hyper_service).await {
+                        if let Err(e) = conn.serve_connection_with_upgrades(io, hyper_service).await
+                        {
                             tracing::debug!("Error serving HTTPS connection: {}", e);
                         }
                     });

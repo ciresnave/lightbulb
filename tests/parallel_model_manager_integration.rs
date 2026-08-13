@@ -135,6 +135,9 @@ fn test_parallel_multi_request_batching() {
             temperature: 0.0,
             prompt_tokens: 0,
             stopped_on_eos: false,
+            // Matches `RequestContext::new`'s default. These pads are
+            // `Completed`, so nothing ever tokenizes their empty prompt.
+            add_special_tokens: true,
         };
         batch.push(dummy);
     }

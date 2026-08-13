@@ -1241,8 +1241,12 @@ impl ParallelModelManager {
         for (idx, ctx) in batch.iter_mut().enumerate() {
             match ctx.state {
                 RequestState::Pending => {
-                    // Tokenize the prompt
-                    let tokens = self.tokenize(&ctx.request.prompt, true)?;
+                    // Tokenize the prompt. `ctx.add_special_tokens`, never a
+                    // literal `true`: a prompt rendered through a chat template
+                    // already carries the checkpoint's BOS and this tokenizer's
+                    // `TemplateProcessing` post_processor would prepend a
+                    // second one. See `RequestContext::add_special_tokens`.
+                    let tokens = self.tokenize(&ctx.request.prompt, ctx.add_special_tokens)?;
 
                     // Record the real count before any prefix-cache shortcut:
                     // `usage.prompt_tokens` must describe the whole prompt, not
@@ -1528,7 +1532,15 @@ impl ParallelModelManager {
                             // Get the original prompt tokens for cache key
                             // We need to re-tokenize to get the exact tokens
                             // (alternative: store tokens in ctx during prefill)
-                            let tokens = self.tokenize(&ctx.request.prompt, true)?;
+                            //
+                            // The flag MUST match the prefill call above. This
+                            // re-tokenization produces a prefix-cache KEY for KV
+                            // that was computed from the prefill tokens; a
+                            // different `add_special_tokens` here would key the
+                            // entry under a token sequence that was never the
+                            // one prefilled, so a later request with that
+                            // sequence would be handed another prompt's KV.
+                            let tokens = self.tokenize(&ctx.request.prompt, ctx.add_special_tokens)?;
 
                             // IMPORTANT: Use only the tokens we actually processed (prefix_len)
                             // In case of chunked prefill, we may have only processed part of the prompt

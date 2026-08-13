@@ -3,12 +3,7 @@
 //! OpenAI-compatible `/v1/completions` endpoint for raw text completion
 //! (non-chat format).
 
-use axum::{
-    extract::State,
-    http::StatusCode,
-    response::IntoResponse,
-    Json,
-};
+use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
 use serde::{Deserialize, Serialize};
 use std::time::SystemTime;
 
@@ -136,9 +131,13 @@ async fn create_completion(
 
     let max_new_tokens = request.max_tokens.unwrap_or(100);
     let temperature = request.temperature as f64;
+    // `BuiltPrompt::raw`: no template was applied, so the prompt carries no
+    // special tokens and the tokenizer must add them. The chat endpoint's
+    // templated prompts take the opposite answer — see
+    // `chat::build_prompt`'s docs.
     let result = crate::api::openai::chat::run_inference_once(
         tx,
-        prompt_text.clone(),
+        crate::api::openai::chat::BuiltPrompt::raw(prompt_text.clone()),
         max_new_tokens,
         temperature,
     )

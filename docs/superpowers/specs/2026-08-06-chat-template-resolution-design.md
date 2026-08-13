@@ -1,9 +1,14 @@
 # Chat-template resolution — design
 
 **Date:** 2026-08-06
-**Status:** designed and approved; **not yet planned.** The sibling spec
-(`2026-08-06-runner-result-metadata-design.md`) is planned and implemented
-first.
+**Status:** designed, approved, and **planned** —
+`docs/superpowers/plans/2026-08-08-chat-template-resolution.md` (6 tasks).
+The sibling spec (`2026-08-06-runner-result-metadata-design.md`) was planned
+and implemented first; it merged to `main` as PR #5 on 2026-08-08.
+
+**Read the CORRECTED 2026-08-08 block in §6 before implementing.** The body of
+this spec cites one prompt-construction site; there are three, and the third
+lives in a module this spec's file table does not name.
 
 **Dependency, stated precisely:** tiers 0–4 and the probe are fully independent
 of the sibling spec. Only the runtime monitor (§3) needs `FinishReason`, which
@@ -119,12 +124,37 @@ debug than one that is consistently wrong and says so.
 ## §4 — The probe is an operator action
 
 ```
-lightbulb chat-template probe <model-dir>
+lightbulb-probe <model-dir>
 ```
 
 Renders a fixed prompt under each candidate template, generates with each, and
-reports EOS-fire rate per candidate. Writes the sidecar **on confirmation**, not
-automatically.
+reports per candidate whether generation stopped on EOS. Writes the sidecar
+**on confirmation**, not automatically.
+
+> ### CORRECTED 2026-08-12 — as shipped, not as designed
+>
+> Two details above were wrong when implemented, and both were caught before
+> implementation:
+>
+> - **The command is `lightbulb-probe`, a sibling binary**, not a subcommand of
+>   `lightbulb-cli` (see §6's table row, corrected likewise). `grep -c
+>   "lightbulb::" src/bin/lightbulb-cli.rs` returns **0**: that binary is a pure
+>   HTTP client, and giving it in-process inference would put the engine's link
+>   requirements on a tool whose job is to talk to a server that already has
+>   them.
+> - **There is no "rate".** A rate needs N trials that can differ, and the
+>   default backend decodes greedily (`ParallelModelManager`,
+>   `logits_slice.argmax(0)`) — only the `fuel-engine` path reads `temperature`
+>   at all — so N trials of one prompt are the same generation N times and every
+>   row could only read `0/N` or `N/N`. The probe generates **once** per
+>   candidate, which makes each row deterministic and reproducible rather than a
+>   sample of size one pretending otherwise. The confirmation gate is unchanged:
+>   the risk it guards is a probe over-fitting its single prompt, which N never
+>   addressed.
+>
+> §5's `evidence` example below still shows the old `8/8` shape. It is left as
+> written because it illustrates the *field*, not the format; the shipped probe
+> writes `probe: zephyr stopped on EOS in 8 tokens; chatml, llama2 did not`.
 
 **Why not automatic**, when it would resolve our own test model unattended:
 
@@ -164,7 +194,58 @@ inherit the wrong template.
 | `src/api/chat_template.rs` **new** | Tier resolution, `minijinja` rendering, sidecar read/write |
 | `src/api/mod.rs` *modify* | Resolve once at startup where the model path is known; store on `AppState` |
 | `src/api/openai/chat.rs` *modify* | Render messages through the template instead of the ad-hoc join |
-| `src/bin/lightbulb-cli.rs` *modify* | `chat-template probe` subcommand |
+| `src/bin/lightbulb-probe.rs` **new** | The probe. A sibling binary, **not** a `lightbulb-cli` subcommand — see §4's CORRECTED block |
+
+> ### CORRECTED 2026-08-08 — this table undercounts the work
+>
+> The summary cites `chat.rs:184-188` as though the ad-hoc join were one site.
+> **It is three, and the table above omits the module containing the third.**
+> Verified against `main` at `1506d64`:
+>
+> | Site | Reached by | Now |
+> | --- | --- | --- |
+> | `src/api/openai/chat.rs:186` | `create_chat_completion` — non-streaming | in the table |
+> | `src/api/openai/chat.rs:409` | `create_chat_stream` — **streaming** | implied at best |
+> | `src/contracts/validation.rs:146` | `messages_to_prompt`, called from `executor.rs:183` | **absent** |
+>
+> Fixing only the first leaves streaming and every contract request still
+> prompting a chat model like a base model. Each unfixed site would read as
+> correct in isolation, which is the failure shape the sibling branch hit four
+> times.
+>
+> **`messages_to_prompt` is the worst of the three, because its doc comment
+> presents the defect as a deliberate contract:** *"This matches the simple
+> `role: content` format used by the existing `create_chat_completion`
+> implementation."* A future reader has been told the duplication is intentional.
+> It must be **deleted**, not re-pointed — leaving a second renderer behind is
+> how the two drift apart again.
+>
+> ### The contract path cannot be fixed by rendering upstream
+>
+> The obvious fix — render once in `chat.rs` and hand `execute_contract` a
+> string — **does not work**, and this is a design constraint rather than a
+> detail. `execute_contract` *mutates the message list between attempts*:
+> `inject_contract_instruction` (`executor.rs:170`) and `tightening_message`
+> (`:176-179`) both push messages, and `:183` re-renders. The message list at
+> attempt 3 is not the one the caller had.
+>
+> So the renderer must be reachable from inside the retry loop. The change:
+>
+> ```rust
+> // now:  F: Fn(String) -> Fut
+> // ->    F: Fn(Vec<RawMessage>) -> Fut
+> ```
+>
+> The caller owns the template and renders each attempt's list; the contracts
+> module stops owning prompt formatting entirely, which is what lets
+> `messages_to_prompt` be deleted rather than duplicated. `Vec` rather than
+> `&[RawMessage]` deliberately — a borrowing callback returning a `Future`
+> needs an HRTB that buys nothing here, and the list is already cloned per
+> contract at `:167`.
+>
+> **Consequence for `/v1/completions`:** unchanged. §6 already rules it takes no
+> template, and it constructs no message list — the audit above found no fourth
+> site.
 
 Resolution happens **once at startup**, not per request: it reads files, and a
 per-request read would put filesystem I/O in the request path for a value that

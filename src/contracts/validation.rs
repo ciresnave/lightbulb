@@ -7,7 +7,12 @@
 //!
 //! 1. `inject_contract_instruction` patches the caller's message list so the
 //!    model "sees" the contract instructions via the system message.
-//! 2. The caller converts messages → prompt string and calls the model runner.
+//! 2. The caller renders that list through the model's own chat template and
+//!    calls the model runner.  **This module deliberately does not know how a
+//!    prompt is formatted.**  It used to, via a `messages_to_prompt` that
+//!    hard-coded the legacy `role: content` join; that made the contract path
+//!    a third copy of a defect the chat endpoint had already fixed, so it was
+//!    deleted rather than re-pointed at the template.
 //! 3. `try_parse` dispatches to the right contract parser and returns
 //!    `Some(ContractOutput)` when it succeeds, `None` otherwise.
 //! 4. `is_parse_successful` gates whether the result is "good enough" (e.g.
@@ -22,6 +27,10 @@ use super::{ContractOutput, OutputContractSpec};
 /// A minimal representation of a chat message used only within this module
 /// for prompt manipulation.  The real `ChatMessage` type lives in `chat.rs`;
 /// this module takes `(role, content)` pairs to avoid a circular dependency.
+///
+/// `Clone` because `executor` hands each attempt's list to the inference
+/// callback by value — see that module's docs for why it cannot pass a borrow.
+#[derive(Clone, Debug)]
 pub struct RawMessage {
     pub role: String,
     pub content: String,
@@ -53,15 +62,24 @@ pub fn inject_contract_instruction(messages: &mut Vec<RawMessage>, spec: &Output
 /// Build the system-prompt fragment for the given contract.
 pub fn build_system_instruction(spec: &OutputContractSpec) -> String {
     match spec {
-        OutputContractSpec::EnumChoice { choices, case_sensitive, allow_index } => {
-            super::enum_choice::build_system_instruction(choices, *case_sensitive, *allow_index)
-        }
-        OutputContractSpec::TaggedFields { allowed_tags, required_tags, repeatable_tags } => {
-            super::tagged_fields::build_system_instruction(allowed_tags, required_tags, repeatable_tags)
-        }
-        OutputContractSpec::CommitBlock { block_type, must_be_last } => {
-            super::commit_block::build_system_instruction(block_type, *must_be_last)
-        }
+        OutputContractSpec::EnumChoice {
+            choices,
+            case_sensitive,
+            allow_index,
+        } => super::enum_choice::build_system_instruction(choices, *case_sensitive, *allow_index),
+        OutputContractSpec::TaggedFields {
+            allowed_tags,
+            required_tags,
+            repeatable_tags,
+        } => super::tagged_fields::build_system_instruction(
+            allowed_tags,
+            required_tags,
+            repeatable_tags,
+        ),
+        OutputContractSpec::CommitBlock {
+            block_type,
+            must_be_last,
+        } => super::commit_block::build_system_instruction(block_type, *must_be_last),
         OutputContractSpec::Json => {
             "\n\nIMPORTANT — OUTPUT FORMAT: Respond with valid JSON only.".to_string()
         }
@@ -74,12 +92,16 @@ pub fn build_system_instruction(spec: &OutputContractSpec) -> String {
 /// (1-indexed; 1 = second inference call, 2 = third, …).
 pub fn tightening_message(attempt: u32, spec: &OutputContractSpec) -> String {
     match spec {
-        OutputContractSpec::EnumChoice { choices, allow_index, .. } => {
-            super::enum_choice::build_tightening_message(attempt, choices, *allow_index)
-        }
-        OutputContractSpec::TaggedFields { allowed_tags, required_tags, .. } => {
-            super::tagged_fields::build_tightening_message(attempt, allowed_tags, required_tags)
-        }
+        OutputContractSpec::EnumChoice {
+            choices,
+            allow_index,
+            ..
+        } => super::enum_choice::build_tightening_message(attempt, choices, *allow_index),
+        OutputContractSpec::TaggedFields {
+            allowed_tags,
+            required_tags,
+            ..
+        } => super::tagged_fields::build_tightening_message(attempt, allowed_tags, required_tags),
         OutputContractSpec::CommitBlock { block_type, .. } => {
             super::commit_block::build_tightening_message(attempt, block_type)
         }
@@ -98,11 +120,17 @@ pub fn tightening_message(attempt: u32, spec: &OutputContractSpec) -> String {
 /// to enforce `required_tags` for `TaggedFields`.
 pub fn try_parse(text: &str, spec: &OutputContractSpec) -> Option<ContractOutput> {
     match spec {
-        OutputContractSpec::EnumChoice { choices, case_sensitive, allow_index } => {
-            super::enum_choice::parse(text, choices, *case_sensitive, *allow_index)
-                .map(|choice| ContractOutput::EnumChoice { choice })
-        }
-        OutputContractSpec::TaggedFields { allowed_tags, repeatable_tags, .. } => {
+        OutputContractSpec::EnumChoice {
+            choices,
+            case_sensitive,
+            allow_index,
+        } => super::enum_choice::parse(text, choices, *case_sensitive, *allow_index)
+            .map(|choice| ContractOutput::EnumChoice { choice }),
+        OutputContractSpec::TaggedFields {
+            allowed_tags,
+            repeatable_tags,
+            ..
+        } => {
             let map = super::tagged_fields::parse(text, allowed_tags, repeatable_tags);
             if map.is_empty() {
                 None
@@ -110,10 +138,11 @@ pub fn try_parse(text: &str, spec: &OutputContractSpec) -> Option<ContractOutput
                 Some(ContractOutput::TaggedFields { tags: map })
             }
         }
-        OutputContractSpec::CommitBlock { block_type, must_be_last } => {
-            super::commit_block::parse(text, block_type, *must_be_last)
-                .map(|block_text| ContractOutput::CommitBlock { block_text })
-        }
+        OutputContractSpec::CommitBlock {
+            block_type,
+            must_be_last,
+        } => super::commit_block::parse(text, block_type, *must_be_last)
+            .map(|block_text| ContractOutput::CommitBlock { block_text }),
         // Json is not yet implemented; fall through to None.
         OutputContractSpec::Json => None,
     }
@@ -133,19 +162,6 @@ pub fn is_parse_successful(output: &ContractOutput, spec: &OutputContractSpec) -
         (ContractOutput::Raw { .. }, _) => false,
         _ => true,
     }
-}
-
-// ─── Prompt conversion helper ──────────────────────────────────────────────
-
-/// Convert a slice of `RawMessage`s into a flat prompt string suitable for
-/// the model runner.  This matches the simple `role: content` format used
-/// by the existing `create_chat_completion` implementation.
-pub fn messages_to_prompt(messages: &[RawMessage]) -> String {
-    messages
-        .iter()
-        .map(|m| format!("{}: {}", m.role, m.content))
-        .collect::<Vec<_>>()
-        .join("\n")
 }
 
 // ─── Logging helpers ───────────────────────────────────────────────────────
@@ -187,8 +203,14 @@ mod tests {
     #[test]
     fn inject_amends_existing_system_message() {
         let mut msgs = vec![
-            RawMessage { role: "system".to_string(), content: "Be helpful.".to_string() },
-            RawMessage { role: "user".to_string(), content: "Is the sky blue?".to_string() },
+            RawMessage {
+                role: "system".to_string(),
+                content: "Be helpful.".to_string(),
+            },
+            RawMessage {
+                role: "user".to_string(),
+                content: "Is the sky blue?".to_string(),
+            },
         ];
         let spec = OutputContractSpec::EnumChoice {
             choices: vec!["yes".to_string(), "no".to_string()],
@@ -205,9 +227,10 @@ mod tests {
 
     #[test]
     fn inject_prepends_when_no_system_message() {
-        let mut msgs = vec![
-            RawMessage { role: "user".to_string(), content: "Pick a colour.".to_string() },
-        ];
+        let mut msgs = vec![RawMessage {
+            role: "user".to_string(),
+            content: "Pick a colour.".to_string(),
+        }];
         let spec = OutputContractSpec::EnumChoice {
             choices: vec!["red".to_string(), "blue".to_string()],
             case_sensitive: false,

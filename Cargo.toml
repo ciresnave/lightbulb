@@ -81,6 +81,43 @@
     clap               = { version = "4", features = ["derive"] }
     ggml-quants        = "0.1.0"
     memmap2            = "0.9"
+    # Chat-template rendering. HuggingFace `chat_template` values are Jinja.
+    # minijinja is pure Rust with no C dependencies, which keeps the CUDA build
+    # unaffected.
+    #
+    # The feature list mirrors what `transformers` gives its own environment
+    # (`utils/chat_template_utils.py`), because these templates are authored
+    # against THAT dialect. Dropping one does not degrade rendering — it makes real
+    # checkpoint templates fail to parse, which falls through to a registry guess
+    # and reports success at a lower tier. That is the defect this work removes,
+    # wearing a provenance field that says "guess".
+    #
+    #   macros        {% macro %}
+    #   loop_controls {% break %} / {% continue %}  (transformers loads
+    #                 jinja2.ext.loopcontrols for exactly this)
+    #   json          the `tojson` filter
+    #   serde         silences a deprecation warning; `context!` over serde types
+    #                 is load-bearing here, not incidental
+    #   debug         puts template source context into errors — spec §2 requires
+    #                 a failing template log "which template failed and why"
+    #
+    # `loader` stays out: templates arrive as strings, never paths.
+    minijinja          = { version = "2", features = ["macros", "loop_controls", "json", "serde", "debug"] }
+    # Python method compatibility for the same templates. Jinja2's values ARE
+    # Python objects, so `"x".startswith(...)`, `s.strip('\n')`, `s.split(...)`
+    # and `d.items()` come free there; minijinja's do not, and it reports
+    # "string has no method named startswith". Measured: Qwen3-8B's real
+    # template fails at chat:20 without this, and Mistral-7B-Instruct-v0.3's
+    # tools branch fails at `tool.items()`.
+    #
+    # `pycompat` is the module minijinja's own docs point at for this, wired
+    # through `Environment::set_unknown_method_callback` in
+    # `api/chat_template.rs`.
+    #
+    # Pinned to 2.23 rather than "2": `pycompat` did not exist in 2.0, and the
+    # callback signature is tied to the `minijinja` version — both crates
+    # resolve to the same 2.x release, so they must move together.
+    minijinja-contrib  = { version = "2.23", features = ["pycompat"] }
     parking_lot        = "0.12"
     rand               = "0.9"
     rayon              = "1.10"
@@ -192,6 +229,15 @@
 [[bin]]
 name = "lightbulb-cli"
 path = "src/bin/lightbulb-cli.rs"
+
+# The probe runs a model in-process, so it links the library the way
+# `src/main.rs` does. It is deliberately NOT a subcommand of `lightbulb-cli`:
+# that binary is a pure HTTP client (zero `lightbulb::` references) and giving
+# it an engine dependency would put CUDA link requirements on a tool whose job
+# is to talk to a server.
+[[bin]]
+name = "lightbulb-probe"
+path = "src/bin/lightbulb-probe.rs"
 
 [dev-dependencies]
 # kiss-ref: spec-exact reference implementation of the KISS base-op vocabulary,
