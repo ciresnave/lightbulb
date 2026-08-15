@@ -24,20 +24,39 @@
 
 ### Revision provenance — read this before trusting any section equally
 
-This plan has been revised three times since it was first written. **On this
-project, revisions are where defects concentrate**: the first audit found that
-four of its eight non-blocking findings came from two rework commits, and one of
-those commits fixed a false claim in a warning message while introducing a false
-count claim *in the same sentence*. Spend your scepticism accordingly.
+**On this project, revisions are where defects concentrate.** Measured across
+three audit rounds of this document: four of the first audit's eight non-blocking
+findings came from two rework commits; the second audit's four blocking findings
+included two in text written by the first round of fixes. Spend your scepticism
+on what changed most recently, not on what looks least finished.
 
-| Section | State |
+**Do not trust a hand-written list of what changed. Generate it:**
+
+```bash
+git log --oneline -- docs/superpowers/plans/2026-08-14-gguf-metadata-chat-template.md
+git diff <the-commit-before-the-last-review> HEAD -- \
+  docs/superpowers/plans/2026-08-14-gguf-metadata-chat-template.md \
+  docs/superpowers/specs/2026-08-14-gguf-metadata-chat-template-design.md
+```
+
+> **Why this is a command and not a table.** The previous version of this section
+> *was* a table listing which sections were revised. An audit found it wrong in
+> two ways that both pointed scepticism away from the newest text: it marked
+> Task 1 Step 1 "original" when that step contained the `gguf_bytes` signature
+> change every later task consumes, and it omitted Task 2 Step 0 — ninety lines
+> of brand-new helper functions — entirely. It was written from the author's
+> recollection rather than from a diff, which is exactly the failure it existed
+> to prevent, in the artifact built to prevent it. A snapshot of a diff rots; the
+> command that produces one cannot.
+
+Revision history, for orientation only — **the diff is authoritative**:
+
+| commit | what it was responding to |
 | --- | --- |
-| Task 1 Steps 3–4, 6 | **REVISED** (audit B1, B2, S2, S3, S6, S7) — task ordering and library behaviour both changed |
-| Task 2 Step 1 | **REVISED** (audit B4, S1, S2) — one test renamed, two added |
-| Task 3 | **REVISED** (audit B1, B3, S9) — no longer repairs a compile error; now owns the message work |
-| Task 4 | **REVISED** (audit S10, and the orphan delete lost its rationale — see Step 1) |
-| Global Constraints, Final verification | **REVISED** (audit S8) |
-| Task 1 Steps 1–2, 5, 7–8; Task 2 Steps 2–4 | original |
+| `9507f06` | first draft |
+| `1740582`, `c409c7e` | the MLMF relay: GGUF failure-table row split, warn text |
+| `af0cda9` | audit round 1 — 4 blocking, 10 should-fix |
+| this commit | audit round 2 — 4 blocking, 10 should-fix |
 
 ### Verified against the tree — do not re-derive these from memory
 
@@ -440,15 +459,25 @@ In `src/api/chat_template.rs`, immediately **before** the existing `// Tier 1 �
 
 - [ ] **Step 6: Consult it in `special_tokens` — AND guard the tier below it**
 
-> **⚠ SCOPE EXPANSION, deliberate and approved.** This step changes the
-> behaviour of `special_tokens`' existing tier 1, which **predates this epic**
-> and **also affects directory checkpoints** that have a `tokenizer_config.json`
-> without `bos_token`/`eos_token` keys. It is folded in here rather than split
-> into its own change because without it this epic ships a feature that is
-> silently defeated in a common configuration — and a feature that is silently
-> defeated is worse than an absent one, because it reads as working. Recorded
-> here rather than left implicit so the blast radius is a decision and not a
-> discovery.
+> **⚠ SCOPE EXPANSION, deliberate and approved — with its blast radius stated
+> accurately.** This step edits `special_tokens`' existing tier 1, which
+> **predates this epic**.
+>
+> **It changes no existing behaviour.** An earlier draft of this box claimed it
+> "also affects directory checkpoints that have a `tokenizer_config.json`
+> without `bos_token`/`eos_token` keys". That set is empty, and this step's own
+> closing paragraph says why: nothing writes `out.bos`/`out.eos` before tier 1
+> except block (a) below, which returns early for anything that is not an
+> existing `.gguf` file. So for every directory checkpoint `out.bos.is_empty()`
+> is unconditionally true and the guarded assignment is identical to the
+> unguarded one. The claim was a false justification bolted onto a correct
+> instruction — the same defect shape this epic is about, and the reason it is
+> corrected here rather than quietly dropped.
+>
+> The real reason for the expansion stands: without it, this epic ships a
+> feature that is silently defeated whenever a `.gguf` sits beside a
+> `tokenizer_config.json` lacking those keys — and a feature that is silently
+> defeated is worse than an absent one, because it reads as working.
 
 **Insert-before is not sufficient on its own. Read this before writing code.**
 
@@ -551,7 +580,7 @@ git commit -m "feat(api): Read the chat template from a GGUF's own metadata"
 - Consumes: `gguf_fixture`, `Kv`, `gguf_bytes` from Task 1; `resolve`, `special_tokens`, `Resolution::GgufMetadata`.
 - Produces: `gguf_fixture_with_tensor`, `capture_logs` (test-local helpers, Step 0).
 
-Spec §7 lists **seven** conditions — `1740582` added the "valid GGUF that Fuel
+Spec §7 lists **eight** conditions — `1740582` added the "valid GGUF that Fuel
 refuses to open" row and this plan's count was not updated with it. Task 1
 covered the happy path only. **Each test below must fail against a different
 wrong implementation** — check that as you write them.
@@ -571,7 +600,7 @@ passed `0`, and a zero-tensor file never reaches `GgmlDType::from_u32` at all.
 /// and stops; it does not read the data region. That is what makes a
 /// one-tensor fixture a few hundred bytes rather than a real weight.
 ///
-/// Layout after the KV block, per `fuel-formats/src/gguf.rs:425-441`:
+/// Layout after the KV block, per `fuel-formats/src/gguf.rs:415-434`:
 /// u64 name-len + name bytes, u32 n_dims, n_dims × u64 dims, u32 dtype code,
 /// u64 offset.
 fn gguf_fixture_with_tensor(
@@ -594,10 +623,12 @@ fn gguf_fixture_with_tensor(
 }
 ```
 
-**(b) In-process log capture.** The suite has none — the only existing
-assertion on a log (`:2284`) shells out to the probe binary and reads its
+**(b) In-process log capture.** The suite has none. Both existing log
+assertions (`:2252`, `:2284`) shell out to the probe binary and read its
 stdout, which is far too heavy for a unit test and cannot reach `resolve`
-directly.
+directly. Verified there is no helper to reuse and no name collision:
+`grep -n "tracing\|subscriber\|capture_logs" tests/chat_template_render.rs`
+returns only those stdout lines.
 
 ```rust
 /// Run `f` with a tracing subscriber that writes into a buffer, and return
@@ -706,11 +737,29 @@ fn a_gguf_with_an_unsupported_tensor_dtype_falls_through_and_says_why() {
         &[("tokenizer.chat_template", Kv::Str("{{ eos_token }}"))],
         ("blk.0.attn_q.weight", 20u32),
     );
-    let t = lightbulb::api::chat_template::resolve(&p);
-    assert_ne!(
-        t.resolved_by,
-        Resolution::GgufMetadata,
-        "Fuel cannot open this file, so its template must not be reported as read"
+    let logs = capture_logs(|| {
+        let t = lightbulb::api::chat_template::resolve(&p);
+        assert_eq!(
+            t.resolved_by,
+            Resolution::None,
+            "Fuel cannot open this file, so its template must not be reported as \
+             read; and this fixture's directory matches no family rule, so \
+             resolution runs off the end"
+        );
+    });
+    // The whole point of spec §7 row 2. A bare fall-through here is satisfied by
+    // an implementation that logs nothing, or that says "not a valid GGUF" —
+    // which is FALSE about this file and sends an operator hunting corruption
+    // that does not exist.
+    assert!(
+        logs.contains("quantization") && logs.contains("ggml type table"),
+        "the warn must name the real cause — a tensor quantization outside Fuel's \
+         type table — not merely fall through; got: {logs}"
+    );
+    assert!(
+        !logs.contains("not a valid GGUF"),
+        "this file IS a valid GGUF with readable metadata; saying otherwise is a \
+         false statement about the operator's file: {logs}"
     );
 }
 
@@ -843,8 +892,8 @@ fn gguf_metadata_outranks_a_companion_tokenizer_config() {
 cargo test -j 4 --test chat_template_render 2>&1 | grep -E "^error|^running|^test result"; echo "EXIT=${PIPESTATUS[0]}"
 ```
 
-Expected: `running 68 tests` / `66 passed; 0 failed; 2 ignored`. (58 baseline
-+ 1 from Task 1 + 9 here.)
+Expected: `running 69 tests` / `67 passed; 0 failed; 2 ignored`. (58 baseline
++ 1 from Task 1 + 10 here.)
 
 - [ ] **Step 3: Verify each test discriminates**
 
@@ -853,11 +902,56 @@ For each mutation below, apply it, run, note which test fails, restore, **and `t
 | mutation | must fail |
 | --- | --- |
 | `non_blank(...)` → `Some(s)` in `read_gguf_declaration` | `a_blank_gguf_template_is_unusable_and_falls_through` |
-| drop the `is_file()`/extension check | `a_directory_checkpoint_still_resolves_from_tokenizer_config` |
+| drop the `is_file()`/extension check | `a_directory_checkpoint_is_not_run_through_the_gguf_reader` |
 | move the GGUF branch *after* the `tokenizer_config.json` block in `resolve` | `gguf_metadata_outranks_a_companion_tokenizer_config` |
 | `toks.get(id)` → `toks.get(id.min(toks.len()-1))` | `an_out_of_range_token_id_leaves_the_token_empty` |
+| `.to_string()` → `.and_then(\|v\| v.to_string().ok())` (drop the wrong-type warn) | `a_non_string_gguf_template_warns_rather_than_reading_as_absent` |
+| the `Err` warn loses its "quantization" wording | `a_gguf_with_an_unsupported_tensor_dtype_falls_through_and_says_why` |
 
 Report any mutation that does **not** kill a test — that is a coverage hole, not a formality.
+
+> **Row 2 needs a test that does not exist yet — write it.** An earlier draft
+> named `a_directory_checkpoint_still_resolves_from_tokenizer_config` here, and
+> that mutation does **not** kill it. Measured: dropping the guard sends a
+> directory into `MmapedContent::from_path`, whose first act is `File::open`,
+> which on Windows fails on a directory with `Access is denied. (os error 5)`
+> (on Linux the open succeeds and `Mmap::map` fails). Either way
+> `read_gguf_declaration` returns `None`, `resolve` falls to tier 1, and every
+> assertion in that test still holds. The guard would have shipped with zero
+> coverage while this table recorded it as covered.
+>
+> **The observable difference is the WARN, not the resolution.** Without the
+> guard, every directory-checkpoint start emits "Fuel could not open this GGUF …
+> the likely cause is a tensor quantization outside Fuel's ggml type table" —
+> about a directory. Add to Step 1:
+
+```rust
+/// A directory checkpoint must never reach the GGUF reader at all.
+///
+/// Asserts the absence of the warn, not the resolution: dropping the
+/// `is_file()`/extension guard still resolves correctly (the mmap open just
+/// fails), so resolution cannot discriminate. What changes is that every
+/// ordinary directory checkpoint starts logging a false and alarming claim
+/// about tensor quantizations.
+#[test]
+fn a_directory_checkpoint_is_not_run_through_the_gguf_reader() {
+    let d = tmp_checkpoint_with_own_template("dir-not-gguf");
+    let logs = capture_logs(|| {
+        let t = lightbulb::api::chat_template::resolve(&d);
+        assert_eq!(t.resolved_by, Resolution::TokenizerConfig);
+    });
+    assert!(
+        !logs.contains("could not open this GGUF") && !logs.contains("ggml type table"),
+        "a directory checkpoint was run through the GGUF reader; every start would \
+         now warn about tensor quantizations for a path that is not a file: {logs}"
+    );
+}
+```
+
+> `tmp_checkpoint_with_own_template(name: &str) -> PathBuf` already exists at
+> `tests/chat_template_render.rs:2187`. It builds a directory containing a
+> `tokenizer_config.json` with `bos_token`, `eos_token` and a `chat_template`,
+> which is exactly the tier-1 fixture this test needs. Verified, not assumed.
 
 - [ ] **Step 4: Format and commit**
 
@@ -954,16 +1048,44 @@ The arm hardcodes the **string** `Resolution::TokenizerConfig` — twice, once i
 its `Warn` body and once in its `Refuse` body. There is no `"tokenizer_config.json"`
 literal in this function; do not go looking for one.
 
-In both bodies, replace the literal `Resolution::TokenizerConfig` with an
-interpolation. **Write `Resolution::{current:?}`, not bare `{current:?}`** — the
-`Debug` for the enum prints `TokenizerConfig`, and dropping the prefix would
-break the two existing tests at `:1943` and `:2158` that assert on the qualified
-name.
+**Both bodies are plain string literals ending in `.to_string()`** — they are not
+format strings, so you cannot simply insert `{current:?}`. Each looks like:
+
+```rust
+                ProbeOverride::Warn(
+                    "--force: overriding Resolution::TokenizerConfig — the checkpoint's own \
+                     chat_template, …"
+                        .to_string(),
+                )
+```
+
+Convert each to a `format!`, dropping the trailing `.to_string()`:
+
+```rust
+                ProbeOverride::Warn(format!(
+                    "--force: overriding Resolution::{current:?} — the checkpoint's own \
+                     chat template, …"
+                ))
+```
+
+**Write `Resolution::{current:?}`, not bare `{current:?}`** — the `Debug` for the
+enum prints `TokenizerConfig`, and dropping the prefix would break the two
+existing tests at `:1943` and `:2158` that assert on the qualified name.
+
+**Watch for literal braces.** Once a body is a format string, any `{` or `}` in
+its text must be doubled. Check both bodies before running.
 
 The `Refuse` body also contains the phrase "it ships its own chat_template",
 which is `tokenizer_config.json`-shaped wording. Reword to something true of
 both sources — e.g. "it carries its own chat template" — since a GGUF ships one
 inside the file rather than beside it.
+
+That body ends with "(measured on SmolLM2-360M-Instruct, whose own template
+injects a default system message that `registry::CHATML` does not)". Once the
+tier is interpolated, that measurement — taken on a **directory** checkpoint —
+gets cited inside a **GGUF** refusal. Scope it ("measured on a directory
+checkpoint, SmolLM2-360M-Instruct: …") or move it to the `TokenizerConfig`-only
+path. Do not leave a measurement attached to a case it was not measured on.
 
 - [ ] **Step 3a: Add the variant to the two enumerations that will skip it silently**
 
@@ -972,8 +1094,11 @@ Neither is a compile error; both just quietly cover one fewer case.
 - `tests/chat_template_render.rs:1122-1128` — `a_blank_template_is_not_usable_whatever_tier_claims_to_have_found_it` iterates a **hardcoded five-tier array**, and its own comment says *"Every tier, not just one: the backstop is about a tier ADDED later."* `GgufMetadata` is that tier. Add it.
 - `tests/chat_template_render.rs:2149-2153` — `force_downgrades_each_refusal_to_a_warning_that_still_names_the_tier` iterates the refusal tiers. Add `GgufMetadata`.
 
-Then fix two now-wrong comments:
+Then fix the now-wrong comments. There are at least **three**, not two — that
+count was itself wrong in the previous revision:
 
+- `src/api/chat_template.rs:1094` — "`force` turns the **three** refusals into warnings" → **four**. Step 3a is what makes it four, by adding `GgufMetadata` beside `TokenizerConfig`, `Sidecar` and `Probe`.
+- `src/api/chat_template.rs:1063` — the bullet beginning `* [`Resolution::TokenizerConfig`] — refuse.` now describes two variants; name both.
 - `src/api/chat_template.rs:1083` — "a sidecar can announce itself as any of the **six**" → seven.
 - `tests/chat_template_render.rs:1918` — "**Six** `Resolution` variants times two `force` states is **twelve** cases" → seven and fourteen. **Check that the test below it actually asserts all fourteen**; if it enumerates cases explicitly, add the missing pair rather than only editing the prose.
 
@@ -984,8 +1109,8 @@ cargo test -j 4 --test chat_template_render 2>&1 | grep -E "^error|^running|^tes
 cargo build -j 4 --bin lightbulb-probe 2>&1 | grep -E "^error"; echo "EXIT=${PIPESTATUS[0]}"
 ```
 
-Expected: `running 69 tests` / `67 passed; 0 failed; 2 ignored`, and the probe
-binary builds. (58 baseline + 1 from Task 1 + 9 from Task 2 + 1 here. If your
+Expected: `running 70 tests` / `68 passed; 0 failed; 2 ignored`, and the probe
+binary builds. (58 baseline + 1 from Task 1 + 10 from Task 2 + 1 here. If your
 count differs, find out why before continuing — do not adjust the number to
 match what you got.)
 
@@ -1044,12 +1169,15 @@ If the grep prints anything, **stop** — it is referenced and this plan is wron
 > `tests/chat_template_e2e.rs:9` opens with `#![cfg(feature = "fuel-engine")]`.
 > That is correct *for it* — it exercises the Fuel runner specifically. Yours
 > exercises chat-template resolution, which is backend-independent because
-> `fuel-core` is an unconditional dependency. Copy the `AppState` construction
-> and the `post_raw` helper; **leave the `#![cfg]` line behind.**
+> `fuel-core` is an unconditional dependency. Copy the `AppState` construction, which in
+> that file lives *inside* its `post_raw` helper (`:71-85`), and **leave the
+> `#![cfg]` line behind.** The sample below inlines `app.oneshot(…)` rather than
+> reproducing `post_raw`, so take the `AppState` literal from `post_raw`'s body
+> and ignore its wrapper.
 >
 > `ModelRunner::start` exists in both configurations
-> (`src/engine/model_runner.rs:224` under `#[cfg(not(feature = "fuel-engine"))]`
-> and `:294` under `#[cfg(feature = "fuel-engine")]`), so the copy compiles
+> (`src/engine/model_runner.rs:225` under the `#[cfg(not(feature = "fuel-engine"))]`
+> at `:224`, and `:295` under the `#[cfg(feature = "fuel-engine")]` at `:294`), so the copy compiles
 > either way.
 
 ```rust
@@ -1070,8 +1198,8 @@ If the grep prints anything, **stop** — it is referenced and this plan is wron
 //! this gate a gate rather than a description.
 ```
 
-The harness below is `chat_template_e2e.rs`'s `post_raw` with the checkpoint
-source swapped; **`AppState` needs all six fields** (`eos_monitor` included) or it
+The harness below is `chat_template_e2e.rs`'s `post_raw` **with the request call
+inlined** rather than kept as a helper, and the checkpoint source swapped; **`AppState` needs all six fields** (`eos_monitor` included) or it
 will not compile.
 
 ```rust
@@ -1199,7 +1327,7 @@ cargo test -j 4 --lib 2>&1 | grep -E "^running|^test result"; echo "cargo=${PIPE
 # expect: running 661 tests / 647 passed; 0 failed; 14 ignored   cargo=0
 
 cargo test -j 4 --test chat_template_render 2>&1 | grep -E "^running|^test result"; echo "cargo=${PIPESTATUS[0]}"
-# expect: running 69 tests / 67 passed; 0 failed; 2 ignored      cargo=0
+# expect: running 70 tests / 68 passed; 0 failed; 2 ignored      cargo=0
 
 cargo test -j 4 --tests 2>&1 | grep -E "^running|^test result|^error"; echo "cargo=${PIPESTATUS[0]}"
 # expect: cargo=0, and a `running N` line for EVERY test binary.

@@ -119,8 +119,15 @@ Rationale, and the alternatives rejected:
   `mlmf-meta` exists, swapping the reader behind this module's interface is a
   contained change. That is the point of putting the read behind one function.
 
-`MmapedContent::from_path` mmaps the file. Mapping is virtual, we touch only the
-header, and this runs **once at startup** — not per request.
+`MmapedContent::from_path` mmaps the file. Mapping is virtual and this runs at
+startup rather than per request — but two details of the earlier wording here
+were wrong. `Content::read` does **not** touch only the header: it materialises
+the entire metadata block eagerly, which on the real Q4_0 means
+`tokenizer.ggml.tokens` as 32,000 heap `String`s. And it runs **twice per
+start**, not once, because `resolve_for_model` (`chat_template.rs:770-775`)
+calls both `resolve` and `special_tokens` and each reads the header. Neither is
+a correctness problem; both are recorded so nobody re-derives the cost from an
+optimistic sentence.
 
 ## 6. What is extracted, and one hard rule
 
@@ -241,7 +248,7 @@ type table) are deliberately separate crates for this reason.
 
 ## 9. Testing
 
-**A synthetic GGUF builder in the test module**, not the 640 MB fixture. A valid
+**A synthetic GGUF builder in the test module**, not the 637,699,456-byte fixture. A valid
 GGUF v3 header with metadata KV pairs and **zero tensors** is a few hundred
 bytes and can be written by the test itself. This is the only way to exercise the
 failure table in §7 — a real file has one metadata set, and the cases that matter
@@ -258,7 +265,10 @@ polarities of every branch.
 **One behavioural gate**, `#[ignore]`d and checkpoint-gated, against the real
 Q4_0 file: serve the §1 request over HTTP at `temperature: 0.0` and assert
 **content**, not "coherence" — which is not assertable. Concretely, mirroring
-`tests/fuel_engine_http.rs`'s existing shape:
+`tests/chat_template_e2e.rs`'s existing shape — its `post_raw` helper and the
+`AppState` construction inside it, but **not** its
+`#![cfg(feature = "fuel-engine")]` line, which is right for that file and wrong
+for a backend-independent test:
 
 - the completion **contains `"Paris"`**, and
 - the resolved tier is `Resolution::GgufMetadata`, not `Registry`, and
