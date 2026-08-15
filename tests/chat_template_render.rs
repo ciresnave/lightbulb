@@ -2536,6 +2536,70 @@ fn gguf_fixture(name: &str, kvs: &[(&str, Kv)]) -> std::path::PathBuf {
     p
 }
 
+/// Like `gguf_fixture`, plus exactly one tensor-info record.
+///
+/// The tensor's DATA is never written — `Content::read` parses the info table
+/// and stops; it does not read the data region. That is what makes a
+/// one-tensor fixture a few hundred bytes rather than a real weight.
+///
+/// Layout after the KV block, per `fuel-formats/src/gguf.rs:415-434`:
+/// u64 name-len + name bytes, u32 n_dims, n_dims × u64 dims, u32 dtype code,
+/// u64 offset.
+fn gguf_fixture_with_tensor(
+    tag: &str,
+    kvs: &[(&str, Kv)],
+    tensor: (&str, u32),
+) -> std::path::PathBuf {
+    let (name, dtype) = tensor;
+    let mut body = gguf_bytes(kvs, 1 /* tensor_count */);
+    body.extend_from_slice(&(name.len() as u64).to_le_bytes());
+    body.extend_from_slice(name.as_bytes());
+    body.extend_from_slice(&1u32.to_le_bytes()); // n_dims
+    body.extend_from_slice(&1u64.to_le_bytes()); // dims[0]
+    body.extend_from_slice(&dtype.to_le_bytes());
+    body.extend_from_slice(&0u64.to_le_bytes()); // offset
+    let dir = tmp_model_dir(tag);
+    let p = dir.join("model.gguf");
+    std::fs::write(&p, body).expect("writing synthetic gguf");
+    p
+}
+
+/// Run `f` with a tracing subscriber that writes into a buffer, and return
+/// what was logged.
+///
+/// `with_default` is thread-local, so this is safe under the default parallel
+/// test harness — each test sees only its own subscriber.
+fn capture_logs(f: impl FnOnce()) -> String {
+    use std::sync::{Arc, Mutex};
+    #[derive(Clone)]
+    struct Buf(Arc<Mutex<Vec<u8>>>);
+    impl std::io::Write for Buf {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(b);
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Buf {
+        type Writer = Buf;
+        fn make_writer(&'a self) -> Buf {
+            self.clone()
+        }
+    }
+
+    let buf = Buf(Arc::new(Mutex::new(Vec::new())));
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(buf.clone())
+        .with_max_level(tracing::Level::TRACE)
+        .with_ansi(false)
+        .finish();
+    tracing::subscriber::with_default(subscriber, f);
+    let bytes = buf.0.lock().unwrap().clone();
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
 /// A GGUF's own metadata is the model author's declaration and must be used.
 ///
 /// Measured before this change: the real Q4_0 TinyLlama served
@@ -2565,4 +2629,241 @@ fn a_gguf_declares_its_own_chat_template_and_tokens() {
     let tk = lightbulb::api::chat_template::special_tokens(&p);
     assert_eq!(tk.bos, "<s>");
     assert_eq!(tk.eos, "</s>");
+}
+
+/// A GGUF that declares no template falls through — it is a normal checkpoint,
+/// not an error.
+///
+/// Asserts `Resolution::None`, NOT `Registry`. `gguf_fixture` builds under
+/// `<CARGO_TARGET_TMPDIR>/lb-chat-tmpl-gguf-no-template-<pid>-<n>/`, and
+/// `registry::from_family` (`src/api/chat_template/registry.rs:73-101`) matches
+/// lowercased path *components* against a fixed set — `tinyllama`+`chat`,
+/// `qwen`/`chatml`, `llama-2`/`llama2`/`mistral`. No component of that temp path
+/// satisfies any rule (`lb-chat-tmpl-…` contains `chat` but not `tinyllama`),
+/// and tier 2 misses too because no `tokenizer.json` is written. So resolution
+/// runs off the end and returns `None`.
+///
+/// The earlier version of this test was named `…falls_through_to_the_registry`
+/// and asserted `assert_ne!(resolved_by, GgufMetadata)` — which passes for six
+/// of the seven variants and is therefore invariant to the thing it claims to
+/// check (Global Constraint 5). An implementer obeying that constraint would
+/// have written `assert_eq!(…, Registry)` and been sent hunting a phantom.
+#[test]
+fn a_gguf_without_a_template_falls_through_to_no_template() {
+    let p = gguf_fixture(
+        "gguf-no-template",
+        &[(
+            "tokenizer.ggml.tokens",
+            Kv::StrArray(vec!["<unk>", "<s>", "</s>"]),
+        )],
+    );
+    let t = lightbulb::api::chat_template::resolve(&p);
+    assert_eq!(
+        t.resolved_by,
+        Resolution::None,
+        "a GGUF declaring no template, in a directory no family rule matches, \
+         must run off the end of resolution"
+    );
+    // Tokens still come from the file even when the template does not.
+    let tk = lightbulb::api::chat_template::special_tokens(&p);
+    assert_eq!(tk.bos, "");
+    assert_eq!(tk.eos, "");
+}
+
+/// Spec §7 row 2: a VALID GGUF with READABLE metadata that Fuel refuses to open
+/// over a tensor quantization it does not implement.
+///
+/// This is the row `1740582` added and the only one with no coverage before
+/// this test. It is reachable from the synthetic builder: give the file one
+/// tensor whose dtype code is `20` (`IQ4_NL`), which
+/// `GgmlDType::from_u32` (`fuel-ir/src/quantized.rs:35`, accepts only
+/// `{0,1,2,3,6..=15,30}`) rejects at `fuel-formats/src/gguf.rs:432-433` —
+/// AFTER the metadata block has already been parsed in full.
+///
+/// Asserts the fall-through AND that the operator is told the real cause. A
+/// bare fall-through here would reproduce the §1 defect on every IQ-quantized
+/// model: a family guess with no end-of-turn marker, and a log line pointing
+/// at corruption that does not exist.
+#[test]
+fn a_gguf_with_an_unsupported_tensor_dtype_falls_through_and_says_why() {
+    // `gguf_tensor_bytes` extends the builder with a tensor-info record:
+    // name, u32 n_dims = 1, u64 dim = 1, u32 dtype code, u64 offset = 0.
+    let p = gguf_fixture_with_tensor(
+        "gguf-iq4nl",
+        &[("tokenizer.chat_template", Kv::Str("{{ eos_token }}"))],
+        ("blk.0.attn_q.weight", 20u32),
+    );
+    let logs = capture_logs(|| {
+        let t = lightbulb::api::chat_template::resolve(&p);
+        assert_eq!(
+            t.resolved_by,
+            Resolution::None,
+            "Fuel cannot open this file, so its template must not be reported as \
+             read; and this fixture's directory matches no family rule, so \
+             resolution runs off the end"
+        );
+    });
+    // The whole point of spec §7 row 2. A bare fall-through here is satisfied by
+    // an implementation that logs nothing, or that says "not a valid GGUF" —
+    // which is FALSE about this file and sends an operator hunting corruption
+    // that does not exist.
+    assert!(
+        logs.contains("quantization") && logs.contains("ggml type table"),
+        "the warn must name the real cause — a tensor quantization outside Fuel's \
+         type table — not merely fall through; got: {logs}"
+    );
+    assert!(
+        !logs.contains("not a valid GGUF"),
+        "this file IS a valid GGUF with readable metadata; saying otherwise is a \
+         false statement about the operator's file: {logs}"
+    );
+}
+
+/// Spec §7 row 5: `tokenizer.chat_template` present but not a string.
+///
+/// The state MLMF's architect named as "absent is not empty". Before this test
+/// it was indistinguishable from key-absent in BOTH the return type and the
+/// log: `md.get(..).and_then(|v| v.to_string().ok())` yields `None` either way,
+/// and only the one `debug!` in `resolve` fires. A file declaring its template
+/// as an array or an integer would emit "no usable tokenizer.chat_template" and
+/// drop to a family guess with no end-of-turn marker — the epic's own failure
+/// mode, inside the epic's fix.
+///
+/// Asserts the WARN, not just the fall-through. The fall-through alone is
+/// satisfied by the buggy implementation.
+#[test]
+fn a_non_string_gguf_template_warns_rather_than_reading_as_absent() {
+    let p = gguf_fixture(
+        "gguf-wrong-type",
+        &[("tokenizer.chat_template", Kv::U32(7))],
+    );
+    let logs = capture_logs(|| {
+        let t = lightbulb::api::chat_template::resolve(&p);
+        assert_ne!(t.resolved_by, Resolution::GgufMetadata);
+    });
+    assert!(
+        logs.contains("tokenizer.chat_template") && logs.contains("not a string"),
+        "a present-but-undecodable template must warn naming the key and the \
+         reason, not fall through as though the key were absent; got: {logs}"
+    );
+}
+
+/// A blank template is UNDECLARED, not declared-empty. An empty source renders
+/// to an empty prompt — a request to continue nothing.
+#[test]
+fn a_blank_gguf_template_is_unusable_and_falls_through() {
+    // These literals are already `&'static str`, which is what `Kv::Str` takes.
+    for blank in ["", "   ", "\n\t "] {
+        let p = gguf_fixture("gguf-blank", &[("tokenizer.chat_template", Kv::Str(blank))]);
+        let t = lightbulb::api::chat_template::resolve(&p);
+        assert_ne!(
+            t.resolved_by,
+            Resolution::GgufMetadata,
+            "blank template {blank:?} was accepted as a declaration"
+        );
+    }
+}
+
+/// A token id past the end of the vocab leaves that token empty rather than
+/// panicking or silently picking a neighbour.
+#[test]
+fn an_out_of_range_token_id_leaves_the_token_empty() {
+    let p = gguf_fixture(
+        "gguf-oob-id",
+        &[
+            ("tokenizer.ggml.tokens", Kv::StrArray(vec!["<unk>", "<s>"])),
+            ("tokenizer.ggml.bos_token_id", Kv::U32(1)),
+            ("tokenizer.ggml.eos_token_id", Kv::U32(99)),
+        ],
+    );
+    let tk = lightbulb::api::chat_template::special_tokens(&p);
+    assert_eq!(tk.bos, "<s>", "the in-range token should still resolve");
+    assert_eq!(
+        tk.eos, "",
+        "the out-of-range id must not resolve to anything"
+    );
+}
+
+/// Ids with no token list at all are unresolvable — must not panic.
+#[test]
+fn token_ids_without_a_token_list_resolve_to_nothing() {
+    let p = gguf_fixture(
+        "gguf-no-tokens",
+        &[
+            ("tokenizer.ggml.bos_token_id", Kv::U32(1)),
+            ("tokenizer.ggml.eos_token_id", Kv::U32(2)),
+        ],
+    );
+    let tk = lightbulb::api::chat_template::special_tokens(&p);
+    assert_eq!(tk.bos, "");
+    assert_eq!(tk.eos, "");
+}
+
+/// A file with a `.gguf` name that is not a GGUF falls through quietly rather
+/// than aborting resolution.
+#[test]
+fn a_corrupt_gguf_falls_through_instead_of_failing() {
+    let d = tmp_model_dir("gguf-corrupt");
+    let p = d.join("model.gguf");
+    std::fs::write(&p, b"this is not a GGUF file at all").unwrap();
+    let t = lightbulb::api::chat_template::resolve(&p);
+    assert_ne!(t.resolved_by, Resolution::GgufMetadata);
+    let tk = lightbulb::api::chat_template::special_tokens(&p);
+    assert_eq!(tk.bos, "");
+}
+
+/// A DIRECTORY checkpoint is unaffected — the GGUF branch must not fire, and
+/// `tokenizer_config.json` must still win. Without this, an implementation that
+/// ran the GGUF reader on every path would pass everything above.
+#[test]
+fn a_directory_checkpoint_still_resolves_from_tokenizer_config() {
+    let d = tmp_model_dir("gguf-dir-unaffected");
+    std::fs::write(
+        d.join("tokenizer_config.json"),
+        r#"{"bos_token":"<s>","eos_token":"</s>","chat_template":"FROM_TOKENIZER_CONFIG"}"#,
+    )
+    .unwrap();
+    let t = lightbulb::api::chat_template::resolve(&d);
+    assert_eq!(t.source, "FROM_TOKENIZER_CONFIG");
+    assert_eq!(t.resolved_by, Resolution::TokenizerConfig);
+}
+
+/// In-file metadata outranks a companion JSON sitting beside the `.gguf`.
+/// This is the precedence decision in spec §3 and the one a reviewer could
+/// reasonably take the other way — so it is pinned, not left implicit.
+#[test]
+fn gguf_metadata_outranks_a_companion_tokenizer_config() {
+    let p = gguf_fixture(
+        "gguf-outranks",
+        &[("tokenizer.chat_template", Kv::Str("FROM_GGUF_METADATA"))],
+    );
+    std::fs::write(
+        p.parent().unwrap().join("tokenizer_config.json"),
+        r#"{"chat_template":"FROM_TOKENIZER_CONFIG"}"#,
+    )
+    .unwrap();
+    let t = lightbulb::api::chat_template::resolve(&p);
+    assert_eq!(t.source, "FROM_GGUF_METADATA");
+    assert_eq!(t.resolved_by, Resolution::GgufMetadata);
+}
+
+/// A directory checkpoint must never reach the GGUF reader at all.
+///
+/// Asserts the absence of the warn, not the resolution: dropping the
+/// `is_file()`/extension guard still resolves correctly (the mmap open just
+/// fails), so resolution cannot discriminate. What changes is that every
+/// ordinary directory checkpoint starts logging a false and alarming claim
+/// about tensor quantizations.
+#[test]
+fn a_directory_checkpoint_is_not_run_through_the_gguf_reader() {
+    let d = tmp_checkpoint_with_own_template("dir-not-gguf");
+    let logs = capture_logs(|| {
+        let t = lightbulb::api::chat_template::resolve(&d);
+        assert_eq!(t.resolved_by, Resolution::TokenizerConfig);
+    });
+    assert!(
+        !logs.contains("could not open this GGUF") && !logs.contains("ggml type table"),
+        "a directory checkpoint was run through the GGUF reader; every start would \
+         now warn about tensor quantizations for a path that is not a file: {logs}"
+    );
 }
