@@ -243,12 +243,19 @@ fn read_gguf_declaration(model_path: &Path) -> Option<GgufDeclaration> {
             // fall-through to a family guess with no end-of-turn marker. So the
             // message must point at the real cause, or an operator will go
             // looking for corruption that isn't there.
+            // "does not YET decode" would be false for codes 4 and 5 (Q4_2,
+            // Q4_3), which Fuel's table also rejects but which are *retired*,
+            // not future — ggml has eight such codes. Saying "not yet" about an
+            // old file sends the operator looking forward when they should look
+            // back, which is the same wrong-cause failure this whole branch
+            // exists to stop. Name the symptom, not a guess at the era.
             tracing::warn!(
                 "{}: Fuel could not open this GGUF ({e}); falling through to the \
                  file-based tiers. If the file is otherwise sound, the likely cause \
-                 is a tensor quantization Fuel does not yet decode (the IQ* and TQ* \
-                 families) — the chat template may be present and readable but is \
-                 unreachable until Fuel's ggml type table covers it.",
+                 is a tensor quantization outside Fuel's ggml type table — which \
+                 covers 15 codes and omits 20, both newer families (IQ*, TQ*) and \
+                 retired ones (Q4_2, Q4_3). The chat template may be present and \
+                 readable but is unreachable until that table covers this file.",
                 model_path.display()
             );
             return None;
