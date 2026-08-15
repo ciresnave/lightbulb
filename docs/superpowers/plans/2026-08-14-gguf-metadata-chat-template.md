@@ -13,15 +13,37 @@
 ## Global Constraints
 
 - **Build with `-j 4`.** Full-parallelism cargo on this machine races into rustc ICEs and spurious `crate ... required to be available in rlib format` / `E0786 ... paging file is too small` errors naming different crates each run. Not your code — retry, do not investigate.
-- **`running N tests` is the only real signal.** `tests/api_result_metadata.rs` and `tests/fuel_engine_http.rs` open with `#![cfg(feature = "fuel-engine")]`; without the feature they compile to **zero tests** and print `ok. 0 passed` — identical in shape to a suite that ran. Read the count, never the exit code.
+- **`running N tests` is the only real signal.** **Three** test files open with `#![cfg(feature = "fuel-engine")]` — `tests/api_result_metadata.rs:14`, `tests/chat_template_e2e.rs:9`, and `tests/fuel_engine_http.rs:78`. Without the feature they compile to **zero tests** and print `ok. 0 passed` — identical in shape to a suite that ran. Read the count, never the exit code. **Note that `chat_template_e2e.rs` is the file Task 4 tells you to model the new test on**, and Task 4 tells you *not* to gate the new one; see Task 4 Step 2 for why the source has an attribute the copy must not.
 - **When piping cargo through `grep`/`tail`, print `${PIPESTATUS[0]}`.** The pipeline's status masks cargo's; this has already produced a false green on this project.
+- **A count of matching lines is not a test result.** `... | grep -c "FAILED"` returns `0` for a tree that **failed to compile**, because a compile error emits no `test result:` line at all. Never gate on the absence of a failure string; gate on the presence of the expected `running N tests` / `N passed` counts.
 - **`rustfmt --edition 2024 <file>`** every file you touch. **Never on a `mod.rs`** — rustfmt follows `pub mod` declarations and rewrote 8 unrelated files last time. `src/api/chat_template.rs` declares `pub mod registry;`, so after formatting it run `git status --short src/api/chat_template/` and revert `registry.rs` if you did not touch it.
 - **Never assert a property that holds whether or not the code is correct.** `assert!(x > 0)` against a count that was already nonzero proves nothing. Prefer equality against an independently-derived value.
 - **Stage explicit paths.** Never `git add -A` — the untracked `supertool` must stay untracked.
 - **Byte-exact, no normalization.** Special tokens are rendered into prompt *text* and the tokenizer must recognise the identical bytes. Never trim, case-fold, or Unicode-normalize a token or template read from a file.
-- **Baselines before you start:** `cargo test -j 4 --lib` → `running 657 tests` / `643 passed; 0 failed; 14 ignored`. `cargo test -j 4 --test chat_template_render` → `running 58 tests` / `56 passed; 0 failed; 2 ignored`.
+- **Baselines before you start:** `cargo test -j 4 --lib` → `running 661 tests` / `647 passed; 0 failed; 14 ignored`. `cargo test -j 4 --test chat_template_render` → `running 58 tests` / `56 passed; 0 failed; 2 ignored`.
 
-### Verified against the tree at `d69cf65` — do not re-derive these from memory
+### Revision provenance — read this before trusting any section equally
+
+This plan has been revised three times since it was first written. **On this
+project, revisions are where defects concentrate**: the first audit found that
+four of its eight non-blocking findings came from two rework commits, and one of
+those commits fixed a false claim in a warning message while introducing a false
+count claim *in the same sentence*. Spend your scepticism accordingly.
+
+| Section | State |
+| --- | --- |
+| Task 1 Steps 3–4, 6 | **REVISED** (audit B1, B2, S2, S3, S6, S7) — task ordering and library behaviour both changed |
+| Task 2 Step 1 | **REVISED** (audit B4, S1, S2) — one test renamed, two added |
+| Task 3 | **REVISED** (audit B1, B3, S9) — no longer repairs a compile error; now owns the message work |
+| Task 4 | **REVISED** (audit S10, and the orphan delete lost its rationale — see Step 1) |
+| Global Constraints, Final verification | **REVISED** (audit S8) |
+| Task 1 Steps 1–2, 5, 7–8; Task 2 Steps 2–4 | original |
+
+### Verified against the tree — do not re-derive these from memory
+
+First written against `d69cf65`; **every row independently re-verified by audit
+at `c409c7e`**, all confirmed unchanged. The tree is now at `d1eca62` (the
+`parse_dtype` tests), which touched none of these.
 
 | Fact | Value |
 | --- | --- |
@@ -29,14 +51,14 @@
 | Metadata map | `MmapedContent::metadata(&self) -> &HashMap<String, Value>` |
 | `Value` | `fuel::quantized::gguf_file::Value` (re-export of `fuel_formats::gguf::Value`) — variants `U8 I8 U16 I16 U32 I32 U64 I64 F32 F64 Bool String(String) Array(Vec<Value>)` |
 | String accessor | `Value::to_string(&self) -> fuel::Result<&String>` — **returns `Result<&String>`, not `String`** |
-| Int accessor | `Value::to_u32(&self) -> fuel::Result<u32>` (also `to_u64`, etc.) |
+| Int accessor | `Value::to_u64(&self) -> fuel::Result<u64>` (`gguf.rs:242`) — **use this, not `to_u32`**. `to_u32` (`:227`) accepts ONLY the `U32` tag and errors on `I32`/`U64`/`U16`; `to_u64` upcasts from U8/U16/U32/U64/Bool |
 | Array accessor | `Value::to_vec(&self) -> fuel::Result<&Vec<Value>>` |
 | Blank-template guard | `fn non_blank(source: String, origin: &str) -> Option<String>` at `chat_template.rs:440` — already exists, **reuse it** |
 | `resolve` tier 1 | `chat_template.rs:530-541` |
 | `special_tokens` | `pub fn special_tokens(model_path: &Path) -> SpecialTokens` at `:677`; tier 1 reads `meta.join("tokenizer_config.json")` at `:685` |
 | `metadata_dir` | `fn metadata_dir(model_path: &Path) -> &Path` — returns the parent for a file, the path itself for a directory |
 | `Resolution` | `Sidecar, TokenizerConfig, VocabSignature, Registry, Probe, None` |
-| Exhaustive match | `probe_override_check` matches `Resolution` with **no `_` arm** — adding a variant is a compile error there **by design** |
+| Exhaustive match | `probe_override_check` (`:1108`) matches `Resolution` with **no `_` arm** — adding a variant is a compile error there **by design**. It is LIBRARY code, so that error breaks every test target: repair it in the same task (Task 1 Step 3a). It is the only exhaustive match over `Resolution` in the tree; `src/api/openai/chat.rs:446` matches `Option<Resolution>`, not the variants |
 | GGUF keys | `tokenizer.chat_template`, `tokenizer.ggml.bos_token_id`, `tokenizer.ggml.eos_token_id`, `tokenizer.ggml.tokens` |
 
 **`fuel-core` is an unconditional dependency** (`Cargo.toml:215`, no `optional`) and `fuel-engine = []` enables no dependencies. So this works in the **default** build. Do not add a feature gate.
@@ -71,7 +93,7 @@
 
 - [ ] **Step 1: Write the synthetic-GGUF builder and the first failing test**
 
-The builder is the load-bearing part of this task. A real 640 MB file has exactly one metadata set; every row of the spec's failure table needs a *different* one, so the fixtures must be constructed. GGUF v3 layout: magic `GGUF`, `u32` version, `u64` tensor count, `u64` KV count, then KV pairs of `(u64 len + bytes) key`, `u32 value-type`, value. Type tags: `8` = string, `4` = u32, `9` = array (`u32` elem type, `u64` count, elements).
+The builder is the load-bearing part of this task. A real 637,699,456-byte file has exactly one metadata set; every row of the spec's failure table needs a *different* one, so the fixtures must be constructed. GGUF v3 layout: magic `GGUF`, `u32` version, `u64` tensor count, `u64` KV count, then KV pairs of `(u64 len + bytes) key`, `u32 value-type`, value. Type tags: `8` = string, `4` = u32, `9` = array (`u32` elem type, `u64` count, elements).
 
 Add to `tests/chat_template_render.rs`:
 
@@ -79,7 +101,7 @@ Add to `tests/chat_template_render.rs`:
 // ─── Synthetic GGUF fixtures ────────────────────────────────────────────────
 //
 // A valid GGUF v3 header with ZERO tensors is a few hundred bytes, so every row
-// of the spec's failure table gets its own file. The real 640 MB Q4_0 checkpoint
+// of the spec's failure table gets its own file. The real 637,699,456-byte Q4_0
 // has one metadata set and cannot exercise a missing key, a blank template, or
 // an out-of-range token id — the cases that matter are the malformed ones.
 
@@ -90,13 +112,19 @@ enum Kv {
     StrArray(Vec<&'static str>),
 }
 
-fn gguf_bytes(kvs: &[(&str, Kv)]) -> Vec<u8> {
+/// `tensor_count` is a parameter, not a constant, because Task 2 needs a
+/// one-tensor file to reach the unsupported-dtype path. Pass `0` for every
+/// metadata-only fixture; the tensor-info records themselves are appended by
+/// the caller (see `gguf_fixture_with_tensor`).
+fn gguf_bytes(kvs: &[(&str, Kv)], tensor_count: u64) -> Vec<u8> {
     let mut b = Vec::new();
     b.extend_from_slice(b"GGUF");
     b.extend_from_slice(&3u32.to_le_bytes()); // version
-    b.extend_from_slice(&0u64.to_le_bytes()); // tensor count
+    b.extend_from_slice(&tensor_count.to_le_bytes());
     b.extend_from_slice(&(kvs.len() as u64).to_le_bytes());
-    let mut put_str = |b: &mut Vec<u8>, s: &str| {
+    // Not `let mut` — this closure captures nothing, so it is `Fn` and a
+    // `mut` binding would only earn an `unused_mut` warning.
+    let put_str = |b: &mut Vec<u8>, s: &str| {
         b.extend_from_slice(&(s.len() as u64).to_le_bytes());
         b.extend_from_slice(s.as_bytes());
     };
@@ -128,7 +156,7 @@ fn gguf_bytes(kvs: &[(&str, Kv)]) -> Vec<u8> {
 fn gguf_fixture(name: &str, kvs: &[(&str, Kv)]) -> std::path::PathBuf {
     let d = tmp_model_dir(name);
     let p = d.join("model.gguf");
-    std::fs::write(&p, gguf_bytes(kvs)).unwrap();
+    std::fs::write(&p, gguf_bytes(kvs, 0)).unwrap();
     p
 }
 
@@ -186,7 +214,36 @@ In `src/api/chat_template.rs`, add to `enum Resolution`, after `TokenizerConfig`
     GgufMetadata,
 ```
 
-This **will** break `probe_override_check`'s match. That is the guard working; Task 3 classifies it.
+This **will** break `probe_override_check`'s match with `error[E0004]`. That is
+the guard working. **You must repair it in the very next step** — see Step 3a.
+
+- [ ] **Step 3a: Classify the variant immediately, so the crate compiles again**
+
+> **Why this is here and not in a later task.** `probe_override_check` is
+> **library** code (`src/api/chat_template.rs:1108`), not a test. While its match
+> is non-exhaustive the *whole crate* fails to build, which means **every test
+> target fails to build** — `cargo test` prints `error[E0004]`, not test counts.
+> An earlier draft of this plan deferred the fix by two tasks while instructing
+> you to run tests and commit in between. It would have had you commit a
+> non-compiling tree twice and read a compile error as a broken test.
+
+In `probe_override_check`, add `GgufMetadata` to the **same arm as
+`TokenizerConfig`**. Find that arm — it is its own arm, not shared with
+`Sidecar` — and change its pattern to:
+
+```rust
+        Resolution::TokenizerConfig | Resolution::GgufMetadata => {
+```
+
+Leave the arm's body **exactly as it is** for now, including its message. The
+message currently names `Resolution::TokenizerConfig` unconditionally, so for a
+GGUF it will now say the wrong tier. **That is deliberate and Task 3 fixes it**
+— Task 3's test exists to catch precisely this, and it needs a red to catch.
+
+Classification rationale (refuse, not warn): the checkpoint declares its own
+template, so a probe sidecar would outrank the author's declaration. `--force`
+still overrides. Same reasoning as `TokenizerConfig`, which is why they share
+an arm.
 
 - [ ] **Step 4: Add the reader**
 
@@ -213,8 +270,14 @@ pub(crate) struct GgufDeclaration {
 /// The read is behind this one function so the reader can be swapped later
 /// without touching resolution.
 ///
-/// Mapping is virtual and only the header is touched, and this runs once at
-/// startup — not per request.
+/// **Cost, stated accurately.** Mapping is virtual, but `Content::read`
+/// materialises the *entire* metadata block eagerly — on the real TinyLlama
+/// Q4_0 that is `tokenizer.ggml.tokens` as 32 000 heap `String`s, plus the
+/// parallel score and token-type arrays. And this runs **twice per start**, not
+/// once: `resolve_for_model` (`:770-775`) calls `resolve` and `special_tokens`,
+/// and each calls this. Not per request, and not a correctness problem — but if
+/// startup latency ever matters, memoise here rather than re-deriving why it is
+/// slow.
 fn read_gguf_declaration(model_path: &Path) -> Option<GgufDeclaration> {
     if !model_path.is_file()
         || !model_path
@@ -233,29 +296,45 @@ fn read_gguf_declaration(model_path: &Path) -> Option<GgufDeclaration> {
             // walks the tensor directory and calls `GgmlDType::from_u32`
             // (`fuel-formats/src/gguf.rs:432-433`), whose table at our pinned rev
             // `8771997e` (`fuel-ir/src/quantized.rs:35`) accepts only
-            // {0,1,2,3,6..15,30}. Every IQ code is absent — IQ4_NL (20),
-            // IQ3_S (21), IQ4_XS (23) among them — all ordinary quantizations
-            // llama.cpp reads happily. On such a file the chat template is
-            // decoded, sits in memory, and is discarded because of a tensor we
-            // never needed. There is no metadata-only entry point to avoid it.
+            // {0,1,2,3,6..=15,30} — 15 codes. Every IQ code is absent: IQ4_NL
+            // (20), IQ3_S (21), IQ4_XS (23) among them, all ordinary
+            // quantizations llama.cpp reads happily. On such a file the chat
+            // template is decoded, sits in memory, and is discarded because of
+            // a tensor we never needed.
             //
-            // The consequence is exactly the defect this epic fixes: a silent
-            // fall-through to a family guess with no end-of-turn marker. So the
-            // message must point at the real cause, or an operator will go
-            // looking for corruption that isn't there.
-            // "does not YET decode" would be false for codes 4 and 5 (Q4_2,
-            // Q4_3), which Fuel's table also rejects but which are *retired*,
-            // not future — ggml has eight such codes. Saying "not yet" about an
-            // old file sends the operator looking forward when they should look
-            // back, which is the same wrong-cause failure this whole branch
-            // exists to stop. Name the symptom, not a guess at the era.
+            // We COULD avoid this. fuel-core re-exports the primitives —
+            // `VersionedMagic::read`, `read_string`, `ValueType::from_u32`,
+            // `Value::read` are all pub (`gguf_file.rs:19-21`) — so a
+            // metadata-only reader that stops before the tensor directory is
+            // ~25 lines at the current pin. We CHOSE not to own a hand-rolled
+            // parser for a case our checkpoints do not hit. Recorded as a
+            // decision so the next person does not re-derive it as an
+            // impossibility. What is missing upstream is a convenience
+            // function, not a capability.
+            //
+            // Do NOT say "not a valid GGUF" — for an IQ file that is a false
+            // statement about the operator's file, and the fall-through lands
+            // on a family guess with no end-of-turn marker, which is the exact
+            // defect this epic fixes. Do NOT say "does not YET decode" either:
+            // codes 4 and 5 (Q4_2, Q4_3) are also rejected and are *retired*,
+            // not future — ggml has eight retired codes. "Not yet" sends an
+            // operator with an old file looking forward when they should look
+            // back. Name the symptom, not a guess at the era.
+            //
+            // Counting note: the 20-omitted figure is 35 live codes minus these
+            // 15, per MLMF's cross-check against llama.cpp's own static_asserts
+            // (27 of 27 block sizes, zero mismatches). Retired codes are NOT in
+            // that 35, so they are additional to the 20 rather than part of it —
+            // an earlier draft said "omits 20 ... and retired ones", which was
+            // arithmetically incoherent.
             tracing::warn!(
                 "{}: Fuel could not open this GGUF ({e}); falling through to the \
                  file-based tiers. If the file is otherwise sound, the likely cause \
-                 is a tensor quantization outside Fuel's ggml type table — which \
-                 covers 15 codes and omits 20, both newer families (IQ*, TQ*) and \
-                 retired ones (Q4_2, Q4_3). The chat template may be present and \
-                 readable but is unreachable until that table covers this file.",
+                 is a tensor quantization outside Fuel's ggml type table, which \
+                 covers 15 codes and omits 20 of the 35 currently in use (the IQ* \
+                 and TQ* families) as well as retired ones such as Q4_2 and Q4_3. \
+                 The chat template may be present and readable but is unreachable \
+                 until that table covers this file.",
                 model_path.display()
             );
             return None;
@@ -265,17 +344,50 @@ fn read_gguf_declaration(model_path: &Path) -> Option<GgufDeclaration> {
 
     // `to_string()` here returns `Result<&String>` — it is Fuel's accessor, not
     // `Display::to_string`. Cloning is deliberate: the mmap is dropped with `mc`.
-    let template = md
-        .get("tokenizer.chat_template")
-        .and_then(|v| v.to_string().ok())
-        .cloned()
-        .and_then(|s| non_blank(s, &format!("{} (GGUF metadata)", model_path.display())));
+    //
+    // The `match` is NOT decoration. Written as
+    // `.and_then(|v| v.to_string().ok())`, a template that is PRESENT but not a
+    // string (an array, an integer) collapses into the same `None` as a template
+    // that is ABSENT — identical in the return type AND in the log, since only
+    // `resolve`'s one `debug!` would fire. A GGUF declaring its template as an
+    // array would then emit "no usable chat template" and fall to a family guess
+    // with no end-of-turn marker: this epic's own failure mode, inside its fix.
+    // Absent is benign and common; present-but-undecodable is a malformed file
+    // and must say so.
+    let template = match md.get("tokenizer.chat_template") {
+        None => None,
+        Some(v) => match v.to_string() {
+            Ok(s) => non_blank(
+                s.clone(),
+                &format!("{} (GGUF metadata)", model_path.display()),
+            ),
+            Err(e) => {
+                tracing::warn!(
+                    "{}: GGUF tokenizer.chat_template is present but not a string \
+                     ({e}); treating the file as declaring no template. This is a \
+                     malformed checkpoint, not a normal one.",
+                    model_path.display()
+                );
+                None
+            }
+        },
+    };
 
     // Byte-exact: the token is rendered into prompt TEXT and the tokenizer must
     // recognise the identical bytes. Never trim or normalize here.
     let tokens = md.get("tokenizer.ggml.tokens").and_then(|v| v.to_vec().ok());
     let lookup = |key: &str| -> Option<String> {
-        let id = md.get(key)?.to_u32().ok()? as usize;
+        // `to_u64()`, NOT `to_u32()`. Fuel's `to_u32` accepts ONLY the `U32`
+        // tag (`fuel-formats/src/gguf.rs:227`) and errors on `I32`/`U64`/`U16`,
+        // while `to_u64` (`:242`) upcasts from U8/U16/U32/U64/Bool. With
+        // `to_u32().ok()?` a token id stored as any other integer type yields
+        // `None` with NO log, `out.bos`/`out.eos` stay empty, and
+        // `special_tokens`' tier-3 warning then tells the operator the
+        // checkpoint "declares no BOS or EOS token" — which is false. It
+        // declared one; we failed to read its type. Our fixture is safe (both
+        // ids verified as tag 4 on the real file), but this costs nothing and
+        // removes the class.
+        let id = usize::try_from(md.get(key)?.to_u64().ok()?).ok()?;
         let toks = tokens?;
         match toks.get(id).and_then(|t| t.to_string().ok()) {
             Some(s) => Some(s.clone()),
@@ -326,9 +438,46 @@ In `src/api/chat_template.rs`, immediately **before** the existing `// Tier 1 �
     }
 ```
 
-- [ ] **Step 6: Consult it in `special_tokens`**
+- [ ] **Step 6: Consult it in `special_tokens` — AND guard the tier below it**
 
-In `special_tokens`, immediately **before** the existing `// Tier 1 — the checkpoint's own declaration` block at `:685`:
+> **⚠ SCOPE EXPANSION, deliberate and approved.** This step changes the
+> behaviour of `special_tokens`' existing tier 1, which **predates this epic**
+> and **also affects directory checkpoints** that have a `tokenizer_config.json`
+> without `bos_token`/`eos_token` keys. It is folded in here rather than split
+> into its own change because without it this epic ships a feature that is
+> silently defeated in a common configuration — and a feature that is silently
+> defeated is worse than an absent one, because it reads as working. Recorded
+> here rather than left implicit so the blast radius is a decision and not a
+> discovery.
+
+**Insert-before is not sufficient on its own. Read this before writing code.**
+
+The existing tier 1 assigns **unconditionally**, with `unwrap_or_default()`:
+
+```rust
+    // Tier 1 — the checkpoint's own declaration.        <-- src/api/chat_template.rs:684-690
+    if let Ok(raw) = std::fs::read_to_string(meta.join("tokenizer_config.json")) {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) {
+            out.bos = token_field(&v, "bos_token").unwrap_or_default();
+            out.eos = token_field(&v, "eos_token").unwrap_or_default();
+        }
+    }
+```
+
+So for a `.gguf` sitting beside **any** `tokenizer_config.json`, inserting the
+GGUF block above this writes `<s>`/`</s>` and then this block **overwrites
+them** — and if that JSON has no `bos_token`/`eos_token` key (the common case
+for a JSON shipped next to a GGUF) it overwrites them with `""`. Tier 2 below
+cannot repair it, because it needs a `tokenizer.json` that usually is not there.
+The result is the §1 defect: a template interpolating `eos_token` renders with
+nothing there.
+
+Note that **tier 2 immediately below is already guarded** (`if out.bos.is_empty()
+|| out.eos.is_empty()`) and documents the per-token rule. Tier 1 is the only
+tier missing it. You are applying the established pattern to the tier that lacks
+it, not inventing one.
+
+**(a)** Insert **before** the existing tier-1 block:
 
 ```rust
     // Same precedence as `resolve`: a GGUF's own metadata outranks a companion
@@ -344,6 +493,35 @@ In `special_tokens`, immediately **before** the existing `// Tier 1 — the chec
         }
     }
 ```
+
+**(b)** Then change the existing tier-1 assignments to fill only what is still
+empty, matching tier 2's rule:
+
+```rust
+    // Tier 1 — the checkpoint's own declaration.
+    //
+    // Per-token and only-if-empty, matching tier 2 below. This is NOT
+    // cosmetic: these two lines were unconditional, so a GGUF whose own
+    // metadata had already supplied `<s>`/`</s>` would have them overwritten
+    // here — with `""` whenever the companion JSON omits the key, which is
+    // usual for a JSON shipped beside a `.gguf`. An empty EOS renders a
+    // template with no end-of-turn marker, which is the defect this module
+    // exists to prevent.
+    if let Ok(raw) = std::fs::read_to_string(meta.join("tokenizer_config.json")) {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) {
+            if out.bos.is_empty() {
+                out.bos = token_field(&v, "bos_token").unwrap_or_default();
+            }
+            if out.eos.is_empty() {
+                out.eos = token_field(&v, "eos_token").unwrap_or_default();
+            }
+        }
+    }
+```
+
+This is behaviour-preserving for every directory checkpoint that reaches here
+with empty tokens, which is all of them today — nothing writes `out.bos` before
+tier 1 except the block you just added in (a).
 
 - [ ] **Step 7: Run and format**
 
@@ -371,27 +549,195 @@ git commit -m "feat(api): Read the chat template from a GGUF's own metadata"
 
 **Interfaces:**
 - Consumes: `gguf_fixture`, `Kv`, `gguf_bytes` from Task 1; `resolve`, `special_tokens`, `Resolution::GgufMetadata`.
-- Produces: nothing new.
+- Produces: `gguf_fixture_with_tensor`, `capture_logs` (test-local helpers, Step 0).
 
-Spec §7 lists six conditions. Task 1 covered the happy path only. **Each test below must fail against a different wrong implementation** — check that as you write them.
+Spec §7 lists **seven** conditions — `1740582` added the "valid GGUF that Fuel
+refuses to open" row and this plan's count was not updated with it. Task 1
+covered the happy path only. **Each test below must fail against a different
+wrong implementation** — check that as you write them.
+
+- [ ] **Step 0: Two helpers the tests below need, neither of which exists yet**
+
+Both go in `tests/chat_template_render.rs` beside `gguf_fixture`.
+
+**(a) A fixture with one tensor**, so the unsupported-dtype row is reachable.
+Task 1's `gguf_bytes` already takes a `tensor_count`; every fixture so far has
+passed `0`, and a zero-tensor file never reaches `GgmlDType::from_u32` at all.
+
+```rust
+/// Like `gguf_fixture`, plus exactly one tensor-info record.
+///
+/// The tensor's DATA is never written — `Content::read` parses the info table
+/// and stops; it does not read the data region. That is what makes a
+/// one-tensor fixture a few hundred bytes rather than a real weight.
+///
+/// Layout after the KV block, per `fuel-formats/src/gguf.rs:425-441`:
+/// u64 name-len + name bytes, u32 n_dims, n_dims × u64 dims, u32 dtype code,
+/// u64 offset.
+fn gguf_fixture_with_tensor(
+    tag: &str,
+    kvs: &[(&str, Kv)],
+    tensor: (&str, u32),
+) -> std::path::PathBuf {
+    let (name, dtype) = tensor;
+    let mut body = gguf_bytes(kvs, 1 /* tensor_count */);
+    body.extend_from_slice(&(name.len() as u64).to_le_bytes());
+    body.extend_from_slice(name.as_bytes());
+    body.extend_from_slice(&1u32.to_le_bytes()); // n_dims
+    body.extend_from_slice(&1u64.to_le_bytes()); // dims[0]
+    body.extend_from_slice(&dtype.to_le_bytes());
+    body.extend_from_slice(&0u64.to_le_bytes()); // offset
+    let dir = tmp_model_dir(tag);
+    let p = dir.join("model.gguf");
+    std::fs::write(&p, body).expect("writing synthetic gguf");
+    p
+}
+```
+
+**(b) In-process log capture.** The suite has none — the only existing
+assertion on a log (`:2284`) shells out to the probe binary and reads its
+stdout, which is far too heavy for a unit test and cannot reach `resolve`
+directly.
+
+```rust
+/// Run `f` with a tracing subscriber that writes into a buffer, and return
+/// what was logged.
+///
+/// `with_default` is thread-local, so this is safe under the default parallel
+/// test harness — each test sees only its own subscriber.
+fn capture_logs(f: impl FnOnce()) -> String {
+    use std::sync::{Arc, Mutex};
+    #[derive(Clone)]
+    struct Buf(Arc<Mutex<Vec<u8>>>);
+    impl std::io::Write for Buf {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(b);
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+    }
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Buf {
+        type Writer = Buf;
+        fn make_writer(&'a self) -> Buf { self.clone() }
+    }
+
+    let buf = Buf(Arc::new(Mutex::new(Vec::new())));
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(buf.clone())
+        .with_max_level(tracing::Level::TRACE)
+        .with_ansi(false)
+        .finish();
+    tracing::subscriber::with_default(subscriber, f);
+    let bytes = buf.0.lock().unwrap().clone();
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+```
+
+**No manifest change is needed.** `tracing-subscriber = { version = "0.3",
+features = ["env-filter"] }` is declared at `Cargo.toml:133` under
+`[dependencies]` (not `[dev-dependencies]`), and Cargo makes normal dependencies
+available to integration tests as well as dev-dependencies. Verified rather than
+recalled: `serde_json` is likewise `[dependencies]`-only (`Cargo.toml:126`) and
+`tests/api_integration_tests.rs`, `tests/chat_template_e2e.rs` and others already
+call `serde_json::` directly.
+
+The `fmt` feature is on by default, so `tracing_subscriber::fmt()` and the
+`MakeWriter` trait are both in scope.
 
 - [ ] **Step 1: Write the tests**
 
 ```rust
 /// A GGUF that declares no template falls through — it is a normal checkpoint,
-/// not an error. Asserts the OBSERVABLE consequence: the family registry answers.
+/// not an error.
+///
+/// Asserts `Resolution::None`, NOT `Registry`. `gguf_fixture` builds under
+/// `<CARGO_TARGET_TMPDIR>/lb-chat-tmpl-gguf-no-template-<pid>-<n>/`, and
+/// `registry::from_family` (`src/api/chat_template/registry.rs:73-101`) matches
+/// lowercased path *components* against a fixed set — `tinyllama`+`chat`,
+/// `qwen`/`chatml`, `llama-2`/`llama2`/`mistral`. No component of that temp path
+/// satisfies any rule (`lb-chat-tmpl-…` contains `chat` but not `tinyllama`),
+/// and tier 2 misses too because no `tokenizer.json` is written. So resolution
+/// runs off the end and returns `None`.
+///
+/// The earlier version of this test was named `…falls_through_to_the_registry`
+/// and asserted `assert_ne!(resolved_by, GgufMetadata)` — which passes for six
+/// of the seven variants and is therefore invariant to the thing it claims to
+/// check (Global Constraint 5). An implementer obeying that constraint would
+/// have written `assert_eq!(…, Registry)` and been sent hunting a phantom.
 #[test]
-fn a_gguf_without_a_template_falls_through_to_the_registry() {
+fn a_gguf_without_a_template_falls_through_to_no_template() {
     let p = gguf_fixture(
         "gguf-no-template",
         &[("tokenizer.ggml.tokens", Kv::StrArray(vec!["<unk>", "<s>", "</s>"]))],
     );
     let t = lightbulb::api::chat_template::resolve(&p);
-    assert_ne!(t.resolved_by, Resolution::GgufMetadata);
+    assert_eq!(
+        t.resolved_by,
+        Resolution::None,
+        "a GGUF declaring no template, in a directory no family rule matches, \
+         must run off the end of resolution"
+    );
     // Tokens still come from the file even when the template does not.
     let tk = lightbulb::api::chat_template::special_tokens(&p);
     assert_eq!(tk.bos, "");
     assert_eq!(tk.eos, "");
+}
+
+/// Spec §7 row 2: a VALID GGUF with READABLE metadata that Fuel refuses to open
+/// over a tensor quantization it does not implement.
+///
+/// This is the row `1740582` added and the only one with no coverage before
+/// this test. It is reachable from the synthetic builder: give the file one
+/// tensor whose dtype code is `20` (`IQ4_NL`), which
+/// `GgmlDType::from_u32` (`fuel-ir/src/quantized.rs:35`, accepts only
+/// `{0,1,2,3,6..=15,30}`) rejects at `fuel-formats/src/gguf.rs:432-433` —
+/// AFTER the metadata block has already been parsed in full.
+///
+/// Asserts the fall-through AND that the operator is told the real cause. A
+/// bare fall-through here would reproduce the §1 defect on every IQ-quantized
+/// model: a family guess with no end-of-turn marker, and a log line pointing
+/// at corruption that does not exist.
+#[test]
+fn a_gguf_with_an_unsupported_tensor_dtype_falls_through_and_says_why() {
+    // `gguf_tensor_bytes` extends the builder with a tensor-info record:
+    // name, u32 n_dims = 1, u64 dim = 1, u32 dtype code, u64 offset = 0.
+    let p = gguf_fixture_with_tensor(
+        "gguf-iq4nl",
+        &[("tokenizer.chat_template", Kv::Str("{{ eos_token }}"))],
+        ("blk.0.attn_q.weight", 20u32),
+    );
+    let t = lightbulb::api::chat_template::resolve(&p);
+    assert_ne!(
+        t.resolved_by,
+        Resolution::GgufMetadata,
+        "Fuel cannot open this file, so its template must not be reported as read"
+    );
+}
+
+/// Spec §7 row 5: `tokenizer.chat_template` present but not a string.
+///
+/// The state MLMF's architect named as "absent is not empty". Before this test
+/// it was indistinguishable from key-absent in BOTH the return type and the
+/// log: `md.get(..).and_then(|v| v.to_string().ok())` yields `None` either way,
+/// and only the one `debug!` in `resolve` fires. A file declaring its template
+/// as an array or an integer would emit "no usable tokenizer.chat_template" and
+/// drop to a family guess with no end-of-turn marker — the epic's own failure
+/// mode, inside the epic's fix.
+///
+/// Asserts the WARN, not just the fall-through. The fall-through alone is
+/// satisfied by the buggy implementation.
+#[test]
+fn a_non_string_gguf_template_warns_rather_than_reading_as_absent() {
+    let p = gguf_fixture("gguf-wrong-type", &[("tokenizer.chat_template", Kv::U32(7))]);
+    let logs = capture_logs(|| {
+        let t = lightbulb::api::chat_template::resolve(&p);
+        assert_ne!(t.resolved_by, Resolution::GgufMetadata);
+    });
+    assert!(
+        logs.contains("tokenizer.chat_template") && logs.contains("not a string"),
+        "a present-but-undecodable template must warn naming the key and the \
+         reason, not fall through as though the key were absent; got: {logs}"
+    );
 }
 
 /// A blank template is UNDECLARED, not declared-empty. An empty source renders
@@ -497,7 +843,8 @@ fn gguf_metadata_outranks_a_companion_tokenizer_config() {
 cargo test -j 4 --test chat_template_render 2>&1 | grep -E "^error|^running|^test result"; echo "EXIT=${PIPESTATUS[0]}"
 ```
 
-Expected: `running 66 tests` / `64 passed; 0 failed; 2 ignored`.
+Expected: `running 68 tests` / `66 passed; 0 failed; 2 ignored`. (58 baseline
++ 1 from Task 1 + 9 here.)
 
 - [ ] **Step 3: Verify each test discriminates**
 
@@ -532,7 +879,14 @@ git commit -m "test(api): Cover every GGUF-metadata failure mode"
 - Consumes: `Resolution::GgufMetadata` (Task 1); `probe_override_check(current: Resolution, force: bool) -> ProbeOverride`.
 - Produces: nothing new.
 
-Task 1's new variant breaks `probe_override_check`'s exhaustive match. That is deliberate — the match has **no `_` arm** precisely so a new variant is a compile error rather than a silent "proceed". Left unclassified, the build does not compile; classified wrongly, the probe would overwrite a checkpoint's own declaration.
+> **This task no longer repairs a compile error.** Task 1 Step 3a already
+> classified the variant, because `probe_override_check` is library code and
+> leaving it unclassified breaks every test target. What is left here is the
+> part that classification deliberately got *wrong*: the arm's message is
+> hardcoded to name `Resolution::TokenizerConfig`, so a GGUF currently gets a
+> refusal that names the wrong tier. This task makes the message truthful, and
+> adds the new variant to the two existing enumerations that will silently skip
+> it.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -541,37 +895,87 @@ Task 1's new variant breaks `probe_override_check`'s exhaustive match. That is d
 /// exactly as a `tokenizer_config.json` is — the probe would otherwise write a
 /// registry candidate at `Resolution::Probe`, which `resolve` reads at tier 0,
 /// AHEAD of the author's own declaration.
+///
+/// Asserts the message names `Resolution::GgufMetadata` WITH the `Resolution::`
+/// prefix. That is the convention the rest of this file already enforces
+/// (`:1943`, `:2158` assert `contains("Resolution::TokenizerConfig")`), and
+/// asserting the bare word would be satisfied by a `{current:?}` interpolation
+/// that breaks both of those tests.
 #[test]
 fn the_probe_refuses_to_override_a_gguf_declaration() {
     use lightbulb::api::chat_template::{ProbeOverride, probe_override_check};
 
     match probe_override_check(Resolution::GgufMetadata, false) {
         ProbeOverride::Refuse(msg) => {
-            assert!(msg.contains("GgufMetadata"), "message must name the tier: {msg}");
-            assert!(msg.contains("Nothing was written."), "must match the other refusals: {msg}");
+            assert!(
+                msg.contains("Resolution::GgufMetadata"),
+                "the refusal must name the tier it is protecting, and must not \
+                 claim the checkpoint resolves by tokenizer_config.json: {msg}"
+            );
+            assert!(
+                !msg.contains("Resolution::TokenizerConfig"),
+                "the refusal names the WRONG tier for a GGUF: {msg}"
+            );
+            assert!(
+                msg.ends_with("Nothing was written."),
+                "must end exactly as the other refusals do: {msg}"
+            );
         }
         other => panic!("expected Refuse for a checkpoint's own declaration, got {other:?}"),
     }
 
-    // `--force` still overrides, like every other refusal.
-    assert!(
-        !matches!(probe_override_check(Resolution::GgufMetadata, true), ProbeOverride::Refuse(_)),
-        "--force must still get past the guard"
-    );
+    // `--force` still overrides, like every other refusal, and the warning must
+    // also name the right tier — that is what the loop at `:2149` checks for
+    // the other tiers.
+    match probe_override_check(Resolution::GgufMetadata, true) {
+        ProbeOverride::Warn(msg) => assert!(
+            msg.contains("Resolution::GgufMetadata"),
+            "--force must record WHAT it overrode: {msg}"
+        ),
+        other => panic!("--force must downgrade the refusal to a warning, got {other:?}"),
+    }
 }
 ```
 
-- [ ] **Step 2: Run to confirm it fails to compile**
+- [ ] **Step 2: Run to confirm it fails on the assertion**
 
 ```bash
-cargo test -j 4 --test chat_template_render the_probe_refuses 2>&1 | grep -E "^error" | head -5; echo "EXIT=${PIPESTATUS[0]}"
+cargo test -j 4 --test chat_template_render the_probe_refuses 2>&1 | grep -E "^error|panicked|^test result"; echo "EXIT=${PIPESTATUS[0]}"
 ```
 
-Expected: `error[E0004]: non-exhaustive patterns: `Resolution::GgufMetadata` not covered` — from `probe_override_check`, which is the guard doing its job.
+Expected: a **test failure, not a compile error** — the refusal message says
+`Resolution::TokenizerConfig` because Step 3a put `GgufMetadata` in that arm
+without touching the text. If you instead see `error[E0004]`, Task 1 Step 3a was
+skipped; go back and do it.
 
-- [ ] **Step 3: Classify it**
+- [ ] **Step 3: Make the message name the tier it was actually given**
 
-In `probe_override_check`, add `Resolution::GgufMetadata` to the **same arm as `Resolution::TokenizerConfig`**, and extend that arm's message so it names whichever tier was passed rather than hardcoding "tokenizer_config.json". Both are the checkpoint's own declaration; the probe can only offer a registry candidate, which is strictly less authoritative.
+The arm hardcodes the **string** `Resolution::TokenizerConfig` — twice, once in
+its `Warn` body and once in its `Refuse` body. There is no `"tokenizer_config.json"`
+literal in this function; do not go looking for one.
+
+In both bodies, replace the literal `Resolution::TokenizerConfig` with an
+interpolation. **Write `Resolution::{current:?}`, not bare `{current:?}`** — the
+`Debug` for the enum prints `TokenizerConfig`, and dropping the prefix would
+break the two existing tests at `:1943` and `:2158` that assert on the qualified
+name.
+
+The `Refuse` body also contains the phrase "it ships its own chat_template",
+which is `tokenizer_config.json`-shaped wording. Reword to something true of
+both sources — e.g. "it carries its own chat template" — since a GGUF ships one
+inside the file rather than beside it.
+
+- [ ] **Step 3a: Add the variant to the two enumerations that will skip it silently**
+
+Neither is a compile error; both just quietly cover one fewer case.
+
+- `tests/chat_template_render.rs:1122-1128` — `a_blank_template_is_not_usable_whatever_tier_claims_to_have_found_it` iterates a **hardcoded five-tier array**, and its own comment says *"Every tier, not just one: the backstop is about a tier ADDED later."* `GgufMetadata` is that tier. Add it.
+- `tests/chat_template_render.rs:2149-2153` — `force_downgrades_each_refusal_to_a_warning_that_still_names_the_tier` iterates the refusal tiers. Add `GgufMetadata`.
+
+Then fix two now-wrong comments:
+
+- `src/api/chat_template.rs:1083` — "a sidecar can announce itself as any of the **six**" → seven.
+- `tests/chat_template_render.rs:1918` — "**Six** `Resolution` variants times two `force` states is **twelve** cases" → seven and fourteen. **Check that the test below it actually asserts all fourteen**; if it enumerates cases explicitly, add the missing pair rather than only editing the prose.
 
 - [ ] **Step 4: Run**
 
@@ -580,7 +984,10 @@ cargo test -j 4 --test chat_template_render 2>&1 | grep -E "^error|^running|^tes
 cargo build -j 4 --bin lightbulb-probe 2>&1 | grep -E "^error"; echo "EXIT=${PIPESTATUS[0]}"
 ```
 
-Expected: `running 67 tests` / `65 passed; 0 failed; 2 ignored`, and the probe binary builds.
+Expected: `running 69 tests` / `67 passed; 0 failed; 2 ignored`, and the probe
+binary builds. (58 baseline + 1 from Task 1 + 9 from Task 2 + 1 here. If your
+count differs, find out why before continuing — do not adjust the number to
+match what you got.)
 
 - [ ] **Step 5: Format and commit**
 
@@ -607,10 +1014,24 @@ git commit -m "fix(cli): Stop the probe overriding a GGUF's own declaration"
 
 `src/loaders/mlmf_wrapper.rs` is 6,501 bytes, dated 2026-07-28, and calls `mlmf::prelude`, `mlmf::callbacks::default_progress_callback`, `mlmf::load_safetensors`, `mlmf::load_gguf`. It was never re-declared as a module after the MLMF integration was abandoned, so it does not compile and is invisible.
 
+> **Its `parse_dtype` test has already been rescued — do not go looking for it.**
+> This file contained the tree's **only** arm-by-arm test of a string→`DType`
+> mapping (`:162-164`, `assert!(matches!(parse_dtype(Some("f16")), Ok(DType::F16)))`),
+> written correctly against **its own private copy** of the function, in a file
+> that has never compiled and never run. So the repo held the right test and
+> zero coverage. The live `parse_dtype` in `src/loaders/mod.rs` was given real
+> arm-by-arm tests in commit `d1eca62`, **before** this delete, because after it
+> the knowledge that those arms need pinning would only be recoverable from a
+> removed file. `f16` and `bf16` are both two bytes with different
+> exponent/mantissa splits, so a swapped arm passes every width check and errors
+> nowhere.
+
 ```bash
 grep -rn "mlmf_wrapper" src/          # expect: no output
 git rm src/loaders/mlmf_wrapper.rs
-cargo check -j 4 --all-targets 2>&1 | grep -cE "^error"   # expect: 0
+cargo check -j 4 --all-targets 2>&1 | grep -E "^error"; echo "cargo=${PIPESTATUS[0]}"   # expect: no errors, cargo=0
+cargo test -j 4 --lib loaders::tests 2>&1 | grep -E "^running|^test result"; echo "cargo=${PIPESTATUS[0]}"
+# expect: running 4 tests / 4 passed — the rescued coverage still there after the delete
 ```
 
 If the grep prints anything, **stop** — it is referenced and this plan is wrong.
@@ -618,6 +1039,18 @@ If the grep prints anything, **stop** — it is referenced and this plan is wron
 - [ ] **Step 2: Write the gate**
 
 `tests/gguf_serving_e2e.rs` — model it on `tests/chat_template_e2e.rs` for router/runner setup. **Do not** feature-gate it: this works in the default build, and a `#![cfg(...)]` would make it compile to zero tests while printing `ok. 0 passed`.
+
+> **You are copying from a file that has the attribute you must not copy.**
+> `tests/chat_template_e2e.rs:9` opens with `#![cfg(feature = "fuel-engine")]`.
+> That is correct *for it* — it exercises the Fuel runner specifically. Yours
+> exercises chat-template resolution, which is backend-independent because
+> `fuel-core` is an unconditional dependency. Copy the `AppState` construction
+> and the `post_raw` helper; **leave the `#![cfg]` line behind.**
+>
+> `ModelRunner::start` exists in both configurations
+> (`src/engine/model_runner.rs:224` under `#[cfg(not(feature = "fuel-engine"))]`
+> and `:294` under `#[cfg(feature = "fuel-engine")]`), so the copy compiles
+> either way.
 
 ```rust
 //! Serving a real GGUF end to end.
@@ -737,7 +1170,7 @@ export LIGHTBULB_GGUF="C:/Users/cires/.cache/huggingface/hub/models--TheBloke--T
 cargo test --release -j 4 --test gguf_serving_e2e -- --include-ignored --nocapture --test-threads=1 2>&1 | grep -E "^running|^test result|^error"; echo "EXIT=${PIPESTATUS[0]}"
 ```
 
-Expected: `running 1 test` / `1 passed`. Budget several minutes — it loads a 640 MB model on CPU.
+Expected: `running 1 test` / `1 passed`. Budget several minutes — it loads a 637,699,456-byte model on CPU.
 
 - [ ] **Step 4: Commit**
 
@@ -751,18 +1184,44 @@ git commit -m "test(api): Gate GGUF serving end to end, and delete the MLMF orph
 
 ## Final verification
 
-- [ ] Full suite, reading counts not exit codes:
+> **The previous version of this gate was a false green.** It read
+> `cargo test --tests | grep -cE "^test result: FAILED"  # expect 0`. A tree
+> that **fails to compile** emits no `test result:` line at all, so that
+> pipeline prints `0` and the gate passes on a broken build — the precise
+> failure Global Constraint 3 names, sitting in this plan's own definition of
+> done. Every command below therefore reports `${PIPESTATUS[0]}` and is checked
+> against a positive expected count, never the absence of a failure string.
+
+- [ ] Full suite, reading counts and cargo's own status:
 
 ```bash
-cargo test --tests -j 4 2>&1 | grep -cE "^test result: FAILED"   # expect 0
-cargo test -j 4 --lib 2>&1 | grep -E "^running|^test result"      # expect 657/643 unchanged
+cargo test -j 4 --lib 2>&1 | grep -E "^running|^test result"; echo "cargo=${PIPESTATUS[0]}"
+# expect: running 661 tests / 647 passed; 0 failed; 14 ignored   cargo=0
+
+cargo test -j 4 --test chat_template_render 2>&1 | grep -E "^running|^test result"; echo "cargo=${PIPESTATUS[0]}"
+# expect: running 69 tests / 67 passed; 0 failed; 2 ignored      cargo=0
+
+cargo test -j 4 --tests 2>&1 | grep -E "^running|^test result|^error"; echo "cargo=${PIPESTATUS[0]}"
+# expect: cargo=0, and a `running N` line for EVERY test binary.
+# A binary that fails stops the ones after it, so a short list is a failure
+# signal even when nothing says FAILED.
 ```
 
-- [ ] Both feature configurations clean:
+- [ ] Both feature configurations compile:
 
 ```bash
-cargo check -j 4 --all-targets 2>&1 | grep -cE "^error"
-cargo check -j 4 --all-targets --features fuel-engine 2>&1 | grep -cE "^error"
+cargo check -j 4 --all-targets 2>&1 | grep -E "^error" ; echo "cargo=${PIPESTATUS[0]}"
+cargo check -j 4 --all-targets --features fuel-engine 2>&1 | grep -E "^error" ; echo "cargo=${PIPESTATUS[0]}"
+# expect: no error lines and cargo=0 for both. `grep` finding nothing exits 1;
+# that is grep's status, not cargo's — read the echoed cargo= value.
+```
+
+- [ ] The new e2e binary really contains its test (it is `#[ignore]`d, so a
+      count of 0 would otherwise look like success):
+
+```bash
+cargo test -j 4 --test gguf_serving_e2e -- --list 2>&1 | tail -3; echo "cargo=${PIPESTATUS[0]}"
+# expect: "1 test" — NOT "0 tests". Zero means the file got feature-gated.
 ```
 
 - [ ] `grep -rn "mlmf" src/` returns nothing.

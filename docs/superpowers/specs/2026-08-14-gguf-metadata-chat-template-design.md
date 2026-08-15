@@ -155,6 +155,7 @@ that declares nothing is a normal checkpoint, not an error.
 | **valid GGUF, readable metadata, but Fuel refuses to open it** | fall through, `warn` naming the path **and the likely cause** — see below |
 | no `tokenizer.chat_template` key | fall through, `debug` (common and benign) |
 | template present but blank/whitespace | fall through, `warn` (malformed file) |
+| **template present but not a string** (array, integer, …) | fall through, `warn` naming the key and the reason — **must not look like "absent"** |
 | `bos/eos_token_id` absent | leave that token empty, existing `warn` applies |
 | id out of range for `tokenizer.ggml.tokens` | leave empty, `warn` naming the id |
 | `tokenizer.ggml.tokens` absent entirely | ids unresolvable, leave empty, `warn` |
@@ -185,19 +186,40 @@ agree on the arithmetic: **Fuel accepts 15 and rejects 20.** The 15 is our
 measurement of Fuel; the 35 is theirs of `llama.cpp`.
 
 So on such a file **the chat template is decoded, held in memory, and then
-discarded** because a later loop hit a tensor dtype we never needed. There is no
-metadata-only entry point — `Content::read` is the only `pub fn read` and it does
-both — so `MmapedContent::from_path` inherits the whole tensor type table as a
-liveness condition for reading a string.
+discarded** because a later loop hit a tensor dtype we never needed.
+
+**We could avoid this, and are choosing not to.** An earlier draft of this
+section said *"there is no metadata-only entry point — `Content::read` is the
+only `pub fn read`"*. That is false, and the falsehood was relayed to two other
+projects before being caught. `fuel-core` re-exports the primitives
+(`fuel-core/src/quantized/gguf_file.rs:19-21`): `VersionedMagic::read`
+(`fuel-formats/src/gguf.rs:45`), `read_string` (`:68`), `ValueType::from_u32`
+(`:124`) and `Value::read` (`:296`) are all `pub`. A metadata-only reader that
+stops before the tensor directory is roughly 25 lines, constructible today at
+pin `8771997e` with no upstream change.
+
+We are not writing it, because our checkpoints do not hit the case and a
+hand-rolled partial parser is a second implementation of the header layout —
+the one nobody reviews. **What is missing upstream is a convenience function,
+not a capability.** Recorded as a decision so the next person does not
+re-derive it as an impossibility.
 
 **Why this earns its own row rather than folding into the first.** The two
-conditions are indistinguishable to the code (both are an `Err` from
-`from_path`) but they are opposite facts about the operator's file: one is
-corrupt, one is fine and we are the limitation. Logging both as "not a valid
-GGUF" sends an operator hunting for corruption that does not exist. Worse, the
-fall-through lands on a family-registry guess with no end-of-turn marker — **the
-exact defect §1 measured**, reintroduced through a branch this spec had
-classified as benign. A silent fall-through is what this epic exists to
+conditions arrive as the same `Err` *variant* from `from_path`, though not with
+the same content — `fuel-formats/src/gguf.rs:31` and `:53` bail on magic and
+version, `fuel-ir/src/quantized.rs:52` on `unknown dtype for tensor {u}` — and
+the warn interpolates `{e}`, so the discriminating text does reach the operator.
+Separating them structurally would be cheap too: read four bytes and compare
+them to `GGUF` before calling `from_path`. We emit one message covering both
+rows, hedged with "if the file is otherwise sound", rather than pay for that
+split.
+
+They stay separate rows because they are **opposite facts about the operator's
+file**: one is corrupt, one is fine and we are the limitation. Logging both as
+"not a valid GGUF" sends an operator hunting for corruption that does not exist.
+Worse, the fall-through lands on a family-registry guess with no end-of-turn
+marker — **the exact defect §1 measured**, reintroduced through a branch this
+spec had classified as benign. A silent fall-through is what this epic exists to
 eliminate; it must not be reintroduced by the error path of the fix.
 
 **This does not block the epic.** Our checkpoint is Q4_0 (code 2, supported).
@@ -261,22 +283,42 @@ expose raw JSON plus accessors rather than a normalized struct.
 
 ## 11. Open questions for review
 
-**Should `template: Option<String>` distinguish absent from unparseable?** Raised
-by MLMF's architect 2026-08-15 as "absent is not empty", and it is the same bug
-class as §1: a model with no chat template and a model whose template failed to
-parse must not look alike to the caller. Today `GgufDeclaration.template` is one
-`Option`, collapsing three states — key absent, key present but wrong type or
-unreadable, key present and blank. The *outer* `Option<GgufDeclaration>` does
-separate "not a GGUF / unreadable" from "valid GGUF declaring nothing", so the
-distinction exists at one level and not the other.
+**RULED 2026-08-15: keep `Option<String>` — but the justification given for
+keeping it was wrong, and the thing it got wrong was a real defect.**
 
-Behaviour is identical in all three cases — every one falls through to the next
-tier — so this is not a defect today, and §7 already gives them different log
-levels (`debug` for benign-absent, `warn` for malformed-present). The question is
-whether the *type* should carry what the logging already asserts, so a future
-caller cannot accidentally treat "you have no template" and "your template is
-broken" as the same fact. Flagged rather than decided, because collapsing states
-that log differently is precisely how a silent fall-through gets built.
+Raised by MLMF's architect as "absent is not empty". `GgufDeclaration.template`
+is one `Option` collapsing three states: key absent, key present but wrong type,
+key present but blank. The *outer* `Option<GgufDeclaration>` already separates
+"not a GGUF / unreadable" from "valid GGUF declaring nothing".
+
+The original answer here was: *behaviour is identical in all three cases, and §7
+already gives them different log levels, so the collapse is harmless.* Tracing
+the actual code paths shows that is true for only two of the three:
+
+| state | path | log |
+| --- | --- | --- |
+| key absent | `md.get(..)` → `None` | `resolve`'s `debug!` only |
+| **key present, wrong type** | `.and_then(\|v\| v.to_string().ok())` → `None` | **`resolve`'s `debug!` only — identical to absent** |
+| key present, blank | `non_blank` → `None` | `non_blank`'s `warn!` **plus** the `debug!` |
+
+So absent-vs-blank really are distinguished, and for those two the collapse is
+fine: behaviour is identical, `non_blank` is the shared guard, and `resolve` is
+the only consumer of `.template`. **The type stays as it is.**
+
+But *present-but-undecodable* — the state actually raised — was indistinguishable
+from absent in **both** the type and the log, and §7 had no row for it. A GGUF
+declaring its template as an array or an integer would emit one `debug!` reading
+"no usable tokenizer.chat_template" and fall to a family guess with no
+end-of-turn marker. That is this epic's own failure mode, reproduced inside the
+epic's fix.
+
+**The remedy is not a type change**: it is a `warn!` on the `Err` branch of
+`to_string()`, the §7 row added above, and a test. All three are in the plan.
+
+The lesson worth keeping is not about `Option`. It is that *"these cases are
+distinguished by logging"* is a claim about code, and it was accepted here
+without tracing all three paths. Two were checked and the third was assumed to
+behave like them.
 
 **Should a companion `tokenizer_config.json` beside a `.gguf` ever win?** §3 says
 no, on the file-scoped-versus-directory-scoped argument. The counter-case is an
