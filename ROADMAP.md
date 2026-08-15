@@ -1,6 +1,13 @@
 # Lightbulb Roadmap
 
-Purpose: a clear, Candle-first plan to reach a robust, fast, and memory-efficient inference engine with room for research. This roadmap consolidates our existing plans and literature insights into pragmatic milestones.
+Purpose: a clear plan to reach a robust, fast, and memory-efficient inference engine with room for research. This roadmap consolidates our existing plans and literature insights into pragmatic milestones.
+
+> **Note on "Candle-first".** This document originally described the plan as
+> Candle-first. Lightbulb runs on **candlelight** (a Candle fork) by default and
+> is being ported to **Fuel** behind the `fuel-engine` feature; candlelight is
+> still the shipping path and Fuel is not yet at parity. Milestone status claims
+> below predate that port and have not been re-validated — treat them as
+> unverified rather than as findings. See `README.md` for the current picture.
 
 ## Status Legend
 

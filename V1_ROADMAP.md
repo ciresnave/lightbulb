@@ -2,100 +2,60 @@
 
 **Goal**: Production-ready inference server with streaming, authentication, and memory-aware scheduling
 
-**Current Status**: Core features implemented but server has compilation errors. MemoryAwareScheduler exists but not integrated.
+> ⚠️ **This document is stale and is kept for provenance.** Its phases were
+> written against a state the project left long ago, and Phase 1 — which every
+> later phase lists as a dependency — is complete. Do not plan from the
+> timeline below. Current work is in `docs/superpowers/specs/` and
+> `docs/superpowers/plans/`.
+
+**Status as written**: "Core features implemented but server has compilation
+errors. MemoryAwareScheduler exists but not integrated."
+
+**Status verified 2026-08-15**: the server compiles (`cargo check -j 4 --bins`
+→ exit 0), 643 library tests pass, and `MemoryAwareScheduler` is exported from
+`src/engine/mod.rs:56`. Phases 2–5 have not been re-validated and may be stale
+in the same direction.
 
 ---
 
-## Phase 1: Fix Compilation Errors (Priority: CRITICAL)
-**Estimated Time**: 1-2 days  
-**Blocking**: Everything
+## Phase 1: Fix Compilation Errors (Priority: CRITICAL) — ✅ COMPLETE
 
-### 1.1 Module Import Conflicts (E0255, E0432)
-**Files**: `src/api/mod.rs`
+> **This phase is done. It was completed long before this note was added, and
+> the document was never updated — so for months it declared the project
+> blocked on work that had already shipped.** Anyone planning off the schedule
+> below should read this section first.
 
-**Issues**:
-- `error[E0255]`: Module name `middleware` defined multiple times (line 37)
-  - Conflict between `pub mod middleware;` and `use axum::middleware;`
-  - **Fix**: Rename local module to `api_middleware` or `auth_middleware`
+**Verified complete 2026-08-15:**
 
-- `error[E0432]`: Cannot import `crate::engine::Scheduler`
-  - Scheduler trait doesn't exist or isn't exported
-  - **Fix**: Either create Scheduler trait or remove unused import
+```
+$ cargo check -j 4 --bins
+Finished `dev` profile [unoptimized + debuginfo] target(s) in 44.34s
+EXIT=0
+```
 
-**Action Items**:
-- [ ] Rename `pub mod middleware;` to `pub mod auth_middleware;` in `src/api/mod.rs`
-- [ ] Update all references to `crate::api::middleware` → `crate::api::auth_middleware`
-- [ ] Check if `Scheduler` trait is needed; if not, remove import
-- [ ] If needed, create and export `Scheduler` trait in `src/engine/mod.rs`
+Warnings only (four unread struct fields in `lightbulb-cli`). Corroborating:
+`cargo test -j 4 --lib` → `643 passed; 0 failed; 14 ignored`, and the server
+serves real completions over HTTP in the integration suites.
 
----
+Each sub-item below was resolved, in several cases by exactly the fix this
+document prescribed:
 
-### 1.2 Middleware Function Resolution (E0425)
-**Files**: `src/api/mod.rs` (lines 206, 211, 216)
+| item | prescribed fix | state |
+| --- | --- | --- |
+| 1.1 E0255 module conflict | rename local `middleware` module | done — `src/api/mod.rs:30` reads `pub mod auth_middleware;` |
+| 1.1 E0432 `engine::Scheduler` | create or drop the import | done — `src/engine/mod.rs:56` exports `MemoryAwareScheduler` and friends |
+| 1.2 E0425 `from_fn_with_state` | qualify or alias the axum import | done — compiles |
+| 1.3 E0282 type annotations | annotate `admin.rs:294` | done — compiles |
+| 1.4 E0382/E0373 borrow errors | clone before move in `chat.rs` | done — compiles |
+| 1.5 E0308 type mismatches | align `inference_tx` channel types | done — compiles |
 
-**Issues**:
-- `error[E0425]`: Cannot find function `from_fn_with_state` in module `middleware`
-  - Using `middleware::from_fn_with_state` but `middleware` refers to local module, not axum
-  
-**Action Items**:
-- [ ] After renaming local middleware module, use explicit `axum::middleware::from_fn_with_state`
-- [ ] Or import with alias: `use axum::middleware as axum_middleware;`
-- [ ] Update all three occurrences (lines 206, 211, 216)
+**The timeline in "Summary" below is therefore measured from a state that no
+longer exists**, since every later phase lists Phase 1 as a dependency. The
+remaining phases have not been re-validated against the current tree and may be
+stale in the same direction — treat their status claims as unverified rather
+than as findings.
 
----
-
-### 1.3 Type Inference Issues (E0282)
-**Files**: `src/api/admin.rs` (line 294)
-
-**Issues**:
-- `error[E0282]`: Type annotations needed at line 294
-  - Likely related to generic types or closures
-  
-**Action Items**:
-- [ ] Examine line 294 in `admin.rs` and surrounding context
-- [ ] Add explicit type annotations where compiler cannot infer
-- [ ] May be related to async/await or database query result types
-
----
-
-### 1.4 Borrow Checker Errors (E0382, E0373)
-**Files**: `src/api/openai/chat.rs` (lines 360, 361, 395)
-
-**Issues**:
-- `error[E0382]`: Moved values `chat_id` (line 360) and `model` (line 361)
-  - Values moved into closure/async block but used again
-- `error[E0373]`: Closure may outlive function, borrows `request.model` (line 395)
-  - Lifetime issue with closure capturing owned data
-
-**Action Items**:
-- [ ] Line 360-361: Clone `chat_id` and `model` before moving into closure
-  - Or restructure to avoid multiple uses after move
-- [ ] Line 395: Clone `request.model` when passing to closure
-  - Or refactor to use references with appropriate lifetimes
-- [ ] Review entire `create_chat_stream` function for ownership flow
-
----
-
-### 1.5 Type Mismatches (E0308)
-**Files**: `src/api/mod.rs` (lines 160, 230)
-
-**Issues**:
-- `error[E0308]`: Mismatched types at lines 160 and 230
-  - Likely related to ModelRunner initialization or inference channel types
-  
-**Action Items**:
-- [ ] Examine lines 160 and 230 for expected vs actual types
-- [ ] May be related to `Option<Sender<InferenceJob>>` type changes
-- [ ] Ensure `inference_tx` channel type matches what ModelRunner expects
-
----
-
-### Phase 1 Validation
-**Tests**:
-- [ ] `cargo build --release` completes without errors
-- [ ] `cargo build --release --bin lightbulb` succeeds
-- [ ] `cargo build --release --bin lightbulb-cli` succeeds
-- [ ] All warnings reviewed (24 library + 4 CLI warnings acceptable for now)
+For current work, see `docs/superpowers/specs/` and `docs/superpowers/plans/`.
 
 ---
 
