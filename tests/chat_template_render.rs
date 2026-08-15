@@ -2473,3 +2473,96 @@ fn probe_binary_refuses_tinyllama_because_all_three_candidates_fire() {
         sidecar.display()
     );
 }
+
+// ─── Synthetic GGUF fixtures ────────────────────────────────────────────────
+//
+// A valid GGUF v3 header with ZERO tensors is a few hundred bytes, so every row
+// of the spec's failure table gets its own file. The real 637,699,456-byte Q4_0
+// has one metadata set and cannot exercise a missing key, a blank template, or
+// an out-of-range token id — the cases that matter are the malformed ones.
+
+/// One metadata value to write into a synthetic header.
+enum Kv {
+    Str(&'static str),
+    U32(u32),
+    StrArray(Vec<&'static str>),
+}
+
+/// `tensor_count` is a parameter, not a constant, because Task 2 needs a
+/// one-tensor file to reach the unsupported-dtype path. Pass `0` for every
+/// metadata-only fixture; the tensor-info records themselves are appended by
+/// the caller (see `gguf_fixture_with_tensor`).
+fn gguf_bytes(kvs: &[(&str, Kv)], tensor_count: u64) -> Vec<u8> {
+    let mut b = Vec::new();
+    b.extend_from_slice(b"GGUF");
+    b.extend_from_slice(&3u32.to_le_bytes()); // version
+    b.extend_from_slice(&tensor_count.to_le_bytes());
+    b.extend_from_slice(&(kvs.len() as u64).to_le_bytes());
+    // Not `let mut` — this closure captures nothing, so it is `Fn` and a
+    // `mut` binding would only earn an `unused_mut` warning.
+    let put_str = |b: &mut Vec<u8>, s: &str| {
+        b.extend_from_slice(&(s.len() as u64).to_le_bytes());
+        b.extend_from_slice(s.as_bytes());
+    };
+    for (k, v) in kvs {
+        put_str(&mut b, k);
+        match v {
+            Kv::Str(s) => {
+                b.extend_from_slice(&8u32.to_le_bytes());
+                put_str(&mut b, s);
+            }
+            Kv::U32(n) => {
+                b.extend_from_slice(&4u32.to_le_bytes());
+                b.extend_from_slice(&n.to_le_bytes());
+            }
+            Kv::StrArray(items) => {
+                b.extend_from_slice(&9u32.to_le_bytes());
+                b.extend_from_slice(&8u32.to_le_bytes()); // element type: string
+                b.extend_from_slice(&(items.len() as u64).to_le_bytes());
+                for it in items {
+                    put_str(&mut b, it);
+                }
+            }
+        }
+    }
+    b
+}
+
+/// Write a synthetic `.gguf` into a fresh temp dir and return its path.
+fn gguf_fixture(name: &str, kvs: &[(&str, Kv)]) -> std::path::PathBuf {
+    let d = tmp_model_dir(name);
+    let p = d.join("model.gguf");
+    std::fs::write(&p, gguf_bytes(kvs, 0)).unwrap();
+    p
+}
+
+/// A GGUF's own metadata is the model author's declaration and must be used.
+///
+/// Measured before this change: the real Q4_0 TinyLlama served
+/// `"| ass istant | ass istant |"` because resolution never looked inside the
+/// file, fell to a family guess, and rendered with an empty `eos_token`.
+#[test]
+fn a_gguf_declares_its_own_chat_template_and_tokens() {
+    let p = gguf_fixture(
+        "gguf-declares",
+        &[
+            ("tokenizer.chat_template", Kv::Str("FROM_GGUF_METADATA")),
+            (
+                "tokenizer.ggml.tokens",
+                Kv::StrArray(vec!["<unk>", "<s>", "</s>"]),
+            ),
+            ("tokenizer.ggml.bos_token_id", Kv::U32(1)),
+            ("tokenizer.ggml.eos_token_id", Kv::U32(2)),
+        ],
+    );
+
+    let t = lightbulb::api::chat_template::resolve(&p);
+    assert_eq!(t.source, "FROM_GGUF_METADATA");
+    assert_eq!(t.resolved_by, Resolution::GgufMetadata);
+
+    // Exact strings, not `!is_empty()`: empty is what the defect produced, so a
+    // weaker check would be satisfied by any accident.
+    let tk = lightbulb::api::chat_template::special_tokens(&p);
+    assert_eq!(tk.bos, "<s>");
+    assert_eq!(tk.eos, "</s>");
+}
