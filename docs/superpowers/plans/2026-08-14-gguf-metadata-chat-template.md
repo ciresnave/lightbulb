@@ -227,8 +227,28 @@ fn read_gguf_declaration(model_path: &Path) -> Option<GgufDeclaration> {
     let mc = match fuel::quantized::gguf_mmap::MmapedContent::from_path(model_path) {
         Ok(mc) => mc,
         Err(e) => {
+            // Do NOT say "this is not a valid GGUF" — measured 2026-08-15, that
+            // is often a false statement about the operator's file. Fuel's
+            // `Content::read` parses the metadata block FIRST and in full, then
+            // walks the tensor directory and calls `GgmlDType::from_u32`
+            // (`fuel-formats/src/gguf.rs:432-433`), whose table at our pinned rev
+            // `8771997e` (`fuel-ir/src/quantized.rs:35`) accepts only
+            // {0,1,2,3,6..15,30}. Every IQ code is absent — IQ4_NL (20),
+            // IQ3_S (21), IQ4_XS (23) among them — all ordinary quantizations
+            // llama.cpp reads happily. On such a file the chat template is
+            // decoded, sits in memory, and is discarded because of a tensor we
+            // never needed. There is no metadata-only entry point to avoid it.
+            //
+            // The consequence is exactly the defect this epic fixes: a silent
+            // fall-through to a family guess with no end-of-turn marker. So the
+            // message must point at the real cause, or an operator will go
+            // looking for corruption that isn't there.
             tracing::warn!(
-                "{}: could not be read as GGUF ({e}); falling through to the file-based tiers.",
+                "{}: Fuel could not open this GGUF ({e}); falling through to the \
+                 file-based tiers. If the file is otherwise sound, the likely cause \
+                 is a tensor quantization Fuel does not yet decode (the IQ* and TQ* \
+                 families) — the chat template may be present and readable but is \
+                 unreachable until Fuel's ggml type table covers it.",
                 model_path.display()
             );
             return None;

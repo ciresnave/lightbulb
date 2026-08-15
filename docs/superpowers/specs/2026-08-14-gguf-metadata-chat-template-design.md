@@ -152,11 +152,59 @@ that declares nothing is a normal checkpoint, not an error.
 | condition | behaviour |
 | --- | --- |
 | not a valid GGUF / header unreadable | fall through, `warn` naming the path |
+| **valid GGUF, readable metadata, but Fuel refuses to open it** | fall through, `warn` naming the path **and the likely cause** — see below |
 | no `tokenizer.chat_template` key | fall through, `debug` (common and benign) |
 | template present but blank/whitespace | fall through, `warn` (malformed file) |
 | `bos/eos_token_id` absent | leave that token empty, existing `warn` applies |
 | id out of range for `tokenizer.ggml.tokens` | leave empty, `warn` naming the id |
 | `tokenizer.ggml.tokens` absent entirely | ids unresolvable, leave empty, `warn` |
+
+### 7.1 The second row is not a malformed file, and the log must not say it is
+
+**Measured 2026-08-15**, at our pinned Fuel rev `8771997e`:
+
+```
+fuel-formats/src/gguf.rs:389   Content::read
+  ~405-412   metadata KV loop        <- tokenizer.chat_template parsed successfully HERE
+   432-433   per-tensor GgmlDType::from_u32(..)?   <- aborts the entire read
+```
+
+`GgmlDType::from_u32` (`fuel-ir/src/quantized.rs:35`) accepts exactly
+`{0,1,2,3,6,7,8,9,10,11,12,13,14,15,30}`. **Every IQ code is missing** — IQ4_NL
+(20), IQ3_S (21), IQ4_XS (23), IQ2_XXS (16), IQ2_XS (17), IQ3_XXS (18),
+IQ1_S (19), IQ2_S (22), IQ1_M, and the TQ family. These are ordinary
+quantizations `llama.cpp` reads without complaint; MLMF's 29-file Hub corpus
+carries 540 `IQ4_NL`, 30 `IQ3_S` and 30 `IQ4_XS` tensors.
+
+MLMF's architect independently enumerated the live type space against
+`llama.cpp` at its pinned commit — 27 quantized block structs cross-checked
+against llama.cpp's own `static_assert`s, zero mismatches — and puts it at **35
+codes**, adding `TQ1_0` (34), `TQ2_0` (35), `MXFP4` (39), `NVFP4` (40) and the
+recent `Q1_0` (41) / `Q2_0` (42) to the list above. Their count and our reading
+agree on the arithmetic: **Fuel accepts 15 and rejects 20.** The 15 is our
+measurement of Fuel; the 35 is theirs of `llama.cpp`.
+
+So on such a file **the chat template is decoded, held in memory, and then
+discarded** because a later loop hit a tensor dtype we never needed. There is no
+metadata-only entry point — `Content::read` is the only `pub fn read` and it does
+both — so `MmapedContent::from_path` inherits the whole tensor type table as a
+liveness condition for reading a string.
+
+**Why this earns its own row rather than folding into the first.** The two
+conditions are indistinguishable to the code (both are an `Err` from
+`from_path`) but they are opposite facts about the operator's file: one is
+corrupt, one is fine and we are the limitation. Logging both as "not a valid
+GGUF" sends an operator hunting for corruption that does not exist. Worse, the
+fall-through lands on a family-registry guess with no end-of-turn marker — **the
+exact defect §1 measured**, reintroduced through a branch this spec had
+classified as benign. A silent fall-through is what this epic exists to
+eliminate; it must not be reintroduced by the error path of the fix.
+
+**This does not block the epic.** Our checkpoint is Q4_0 (code 2, supported).
+The remedy here is an honest log, not a workaround. Extending the type table is
+Fuel's (filed with their architect); making metadata reads structurally immune
+to it is MLMF's design — `mlmf-gguf` (container) and `mlmf-ggml` (block-quant
+type table) are deliberately separate crates for this reason.
 
 ## 8. Out of scope
 
@@ -211,7 +259,24 @@ reading our tree. It is in `src/loaders/`, which this change touches, and its
 `convert_mlmf_config_to_lightbulb()` is the artifact that argued MLMF should
 expose raw JSON plus accessors rather than a normalized struct.
 
-## 11. Open question for review
+## 11. Open questions for review
+
+**Should `template: Option<String>` distinguish absent from unparseable?** Raised
+by MLMF's architect 2026-08-15 as "absent is not empty", and it is the same bug
+class as §1: a model with no chat template and a model whose template failed to
+parse must not look alike to the caller. Today `GgufDeclaration.template` is one
+`Option`, collapsing three states — key absent, key present but wrong type or
+unreadable, key present and blank. The *outer* `Option<GgufDeclaration>` does
+separate "not a GGUF / unreadable" from "valid GGUF declaring nothing", so the
+distinction exists at one level and not the other.
+
+Behaviour is identical in all three cases — every one falls through to the next
+tier — so this is not a defect today, and §7 already gives them different log
+levels (`debug` for benign-absent, `warn` for malformed-present). The question is
+whether the *type* should carry what the logging already asserts, so a future
+caller cannot accidentally treat "you have no template" and "your template is
+broken" as the same fact. Flagged rather than decided, because collapsing states
+that log differently is precisely how a silent fall-through gets built.
 
 **Should a companion `tokenizer_config.json` beside a `.gguf` ever win?** §3 says
 no, on the file-scoped-versus-directory-scoped argument. The counter-case is an
