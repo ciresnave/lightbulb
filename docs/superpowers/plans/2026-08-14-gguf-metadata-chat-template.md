@@ -910,6 +910,20 @@ For each mutation below, apply it, run, note which test fails, restore, **and `t
 
 Report any mutation that does **not** kill a test — that is a coverage hole, not a formality.
 
+> **Every row of this table is a HYPOTHESIS, not a fact. Run it.** An audit
+> proved one row wrong by compiling a scratch binary rather than reasoning about
+> it: the row claiming that dropping the `is_file()` guard kills a named test was
+> false, because `File::open` on a directory fails and the fall-through still
+> produces the asserted result. That guard would have shipped with **zero
+> coverage while this table recorded it as covered** — a table asserting kills
+> that do not happen is worse than no table, because it converts an untested
+> branch into a documented one.
+>
+> The standard, applied elsewhere in this repo (`d1eca62`): apply the mutation,
+> watch the named test go **red**, note which other tests stayed green **and
+> why**, restore, `touch` the file, confirm green again. A row you did not run is
+> a row you have not verified, whoever wrote it.
+
 > **Row 2 needs a test that does not exist yet — write it.** An earlier draft
 > named `a_directory_checkpoint_still_resolves_from_tokenizer_config` here, and
 > that mutation does **not** kill it. Measured: dropping the guard sends a
