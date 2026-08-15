@@ -1,5 +1,5 @@
 [package]
-    description = "Lightbulb: modern ML inference/training runner on Candle"
+    description = "Lightbulb: an ML inference and training runner with an OpenAI-compatible API"
     edition     = "2024"
     license     = "MIT OR Apache-2.0"
     name        = "lightbulb"
