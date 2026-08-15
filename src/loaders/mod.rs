@@ -31,6 +31,15 @@ pub fn find_safetensors_files(dir: &Path) -> Result<Vec<PathBuf>> {
 }
 
 /// Map string dtype to Candle DType
+///
+/// **Every arm is pinned individually by the tests at the bottom of this file,
+/// and must stay that way.** `f16` and `bf16` are both two bytes wide with
+/// different exponent/mantissa splits, so swapping those two arms parses
+/// cleanly, allocates every buffer at the correct size, computes identical
+/// tensor offsets, and errors nowhere — the model simply emits garbage that
+/// reads as a *quality* problem. The loader is never a suspect because the
+/// loader never complained. Width, byte-size and "it parsed" are all invariant
+/// to that swap; only the identity of the returned variant discriminates it.
 fn parse_dtype(dtype: Option<&str>) -> Result<DType> {
     match dtype {
         None => Ok(DType::F32),
@@ -372,4 +381,62 @@ pub fn load_awq_llama(
     );
 
     Ok((model, config, device, name_mapper))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every `parse_dtype` arm, pinned to its exact variant.
+    ///
+    /// Asserts the IDENTITY of the returned `DType`, never its width. The
+    /// defect this guards against is a swap between two equal-width variants,
+    /// which every size-based, allocation-based or "it returned Ok" assertion
+    /// is invariant to. Cases are listed one per line rather than looped so a
+    /// failure names the offending string.
+    #[test]
+    fn parse_dtype_pins_every_arm_to_its_exact_variant() {
+        assert_eq!(parse_dtype(Some("f32")).unwrap(), DType::F32);
+        assert_eq!(parse_dtype(Some("f16")).unwrap(), DType::F16);
+        assert_eq!(parse_dtype(Some("bf16")).unwrap(), DType::BF16);
+    }
+
+    /// `f16` and `bf16` are the equal-width pair, so they get their own guard.
+    ///
+    /// Kept separate from the arm sweep above because this is the assertion
+    /// with a known failure mode rather than a completeness check: these two
+    /// are mutually substitutable everywhere except in the bits they mean.
+    #[test]
+    fn f16_and_bf16_are_not_interchangeable() {
+        let f16 = parse_dtype(Some("f16")).unwrap();
+        let bf16 = parse_dtype(Some("bf16")).unwrap();
+        assert_ne!(f16, bf16, "f16 and bf16 must not map to the same DType");
+        assert_eq!(f16, DType::F16, "f16 must map to F16, not merely to some 2-byte type");
+        assert_eq!(bf16, DType::BF16, "bf16 must map to BF16, not merely to some 2-byte type");
+    }
+
+    /// An absent dtype defaults to F32.
+    ///
+    /// Separate from the arm sweep because `None` is a different input class,
+    /// not another string: it is the path taken by every caller that does not
+    /// specify one, so a change here silently re-types every default load.
+    #[test]
+    fn an_absent_dtype_defaults_to_f32() {
+        assert_eq!(parse_dtype(None).unwrap(), DType::F32);
+    }
+
+    /// An unrecognised dtype is an error naming the offending string, not a
+    /// silent fallback to F32.
+    ///
+    /// A fallback here would be the same shape as the defect above: a typo
+    /// (`"fp16"`, `"float16"`) would load at the wrong precision with no
+    /// complaint.
+    #[test]
+    fn an_unrecognised_dtype_is_an_error_naming_the_string() {
+        let err = parse_dtype(Some("fp16")).expect_err("fp16 is not a supported dtype");
+        assert!(
+            err.to_string().contains("fp16"),
+            "error must name the rejected string, got: {err}"
+        );
+    }
 }
