@@ -2567,36 +2567,87 @@ fn gguf_fixture_with_tensor(
 /// Run `f` with a tracing subscriber that writes into a buffer, and return
 /// what was logged.
 ///
-/// `with_default` is thread-local, so this is safe under the default parallel
-/// test harness — each test sees only its own subscriber.
+/// **Not `with_default` per call.** An earlier version of this helper
+/// installed a fresh thread-local-default subscriber on every call, reasoning
+/// that `with_default` is thread-local and therefore safe under the parallel
+/// test harness. That reasoning is false: `with_default` scopes which
+/// subscriber a thread's own *event calls* use, but `tracing-core`'s
+/// per-callsite `Interest` cache is **process-global**. Under the parallel
+/// harness, many threads install different subscribers concurrently, and the
+/// cache can settle with a callsite marked uninteresting while a
+/// genuinely-listening subscriber is active on another thread — the event is
+/// then dropped silently. Measured: ~6-10% spurious failures across a
+/// multi-run sample of the full suite, all on the one test whose assertion
+/// depends on a specific warn line, 0 failures with `--test-threads=1` (which
+/// isolates the cause to concurrency), and ~27% (4/15) of the row-2 mutation
+/// (dropping the GGUF-reader's `is_file` guard) going UNDETECTED — the exact
+/// regression this test exists to catch.
+///
+/// **The fix: one subscriber, installed once, for the whole process.** With
+/// exactly one subscriber ever registered via `set_global_default`,
+/// `Interest` is computed once (and rebuilt once, when that call succeeds)
+/// and never changes for the rest of the run — the race is gone by
+/// construction rather than by timing. Per-test isolation comes from a
+/// thread-local buffer instead of a thread-local subscriber: the one global
+/// subscriber's `MakeWriter` looks up the *calling thread's* buffer and
+/// writes there, or discards silently when the calling thread has not
+/// installed one (every thread outside an active `capture_logs` call).
 fn capture_logs(f: impl FnOnce()) -> String {
-    use std::sync::{Arc, Mutex};
+    use std::cell::RefCell;
+    use std::sync::{Arc, Mutex, OnceLock};
+
+    thread_local! {
+        static LOG_BUF: RefCell<Option<Arc<Mutex<Vec<u8>>>>> = const { RefCell::new(None) };
+    }
+
     #[derive(Clone)]
-    struct Buf(Arc<Mutex<Vec<u8>>>);
-    impl std::io::Write for Buf {
+    struct ThreadLocalWriter;
+    impl std::io::Write for ThreadLocalWriter {
         fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
-            self.0.lock().unwrap().extend_from_slice(b);
+            LOG_BUF.with(|cell| {
+                if let Some(buf) = cell.borrow().as_ref() {
+                    buf.lock().unwrap().extend_from_slice(b);
+                }
+            });
+            // Always report success, including the discard case: a thread
+            // with no buffer installed is simply not being captured, which
+            // is not a write failure.
             Ok(b.len())
         }
         fn flush(&mut self) -> std::io::Result<()> {
             Ok(())
         }
     }
-    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Buf {
-        type Writer = Buf;
-        fn make_writer(&'a self) -> Buf {
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for ThreadLocalWriter {
+        type Writer = ThreadLocalWriter;
+        fn make_writer(&'a self) -> ThreadLocalWriter {
             self.clone()
         }
     }
 
-    let buf = Buf(Arc::new(Mutex::new(Vec::new())));
-    let subscriber = tracing_subscriber::fmt()
-        .with_writer(buf.clone())
-        .with_max_level(tracing::Level::TRACE)
-        .with_ansi(false)
-        .finish();
-    tracing::subscriber::with_default(subscriber, f);
-    let bytes = buf.0.lock().unwrap().clone();
+    static INIT: OnceLock<()> = OnceLock::new();
+    INIT.get_or_init(|| {
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(ThreadLocalWriter)
+            .with_max_level(tracing::Level::TRACE)
+            .with_ansi(false)
+            .finish();
+        // `Err` means some other global default already exists (this crate
+        // installs none, so in practice this does not happen — but a false
+        // "already set" must not panic the test suite over a logging helper).
+        // If it ever does happen, that other subscriber's writer is used
+        // instead of `ThreadLocalWriter`, and every `capture_logs` call
+        // returns an empty string; the two `capture_logs` tests below that
+        // assert on log CONTENT (not just absence) would go red immediately,
+        // rather than silently passing, and surface it.
+        let _ = tracing::subscriber::set_global_default(subscriber);
+    });
+
+    let buf = Arc::new(Mutex::new(Vec::new()));
+    LOG_BUF.with(|cell| *cell.borrow_mut() = Some(buf.clone()));
+    f();
+    LOG_BUF.with(|cell| *cell.borrow_mut() = None);
+    let bytes = buf.lock().unwrap().clone();
     String::from_utf8_lossy(&bytes).into_owned()
 }
 
@@ -2861,6 +2912,18 @@ fn a_directory_checkpoint_is_not_run_through_the_gguf_reader() {
         let t = lightbulb::api::chat_template::resolve(&d);
         assert_eq!(t.resolved_by, Resolution::TokenizerConfig);
     });
+    // A positive check first, and load-bearing: this test's real claims are
+    // both absences (`!contains`), and `capture_logs` returning an empty
+    // string — from a broken subscriber wiring, not from this test's logic —
+    // would satisfy both trivially. Asserting the ONE line `resolve` is known
+    // to emit on this path makes an empty or wrongly-routed capture fail
+    // loudly here instead of passing for the wrong reason.
+    assert!(
+        logs.contains("chat template: tokenizer_config.json"),
+        "expected the ordinary tier-1 log line for a successful \
+         tokenizer_config.json resolution; capture returned nothing useful, \
+         so the absence checks below would have passed vacuously: {logs}"
+    );
     assert!(
         !logs.contains("could not open this GGUF") && !logs.contains("ggml type table"),
         "a directory checkpoint was run through the GGUF reader; every start would \
