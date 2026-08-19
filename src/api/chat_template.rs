@@ -431,24 +431,90 @@ fn read_gguf_declaration(model_path: &Path) -> Option<GgufDeclaration> {
 
     // Byte-exact: the token is rendered into prompt TEXT and the tokenizer must
     // recognise the identical bytes. Never trim or normalize here.
-    let tokens = md
-        .get("tokenizer.ggml.tokens")
-        .and_then(|v| v.to_vec().ok());
+    //
+    // Present-but-wrong-type must not collapse into the same `None` as
+    // absent, and must not pass silently — same rule as
+    // `tokenizer.chat_template` above, applied to the vocabulary array. A
+    // checkpoint whose `tokenizer.ggml.tokens` is present but not an array is
+    // malformed, not merely lacking a vocabulary, and the operator needs to
+    // know which. `tokens_wrong_type` records that this warn already fired,
+    // so `lookup` below does not also claim the key is "absent" for a key
+    // that is present but broken.
+    let mut tokens_wrong_type = false;
+    let tokens = match md.get("tokenizer.ggml.tokens") {
+        None => None,
+        Some(v) => match v.to_vec() {
+            Ok(arr) => Some(arr),
+            Err(e) => {
+                tracing::warn!(
+                    "{}: GGUF tokenizer.ggml.tokens is present but not an array ({e}); \
+                     BOS/EOS token ids cannot be resolved to text.",
+                    model_path.display()
+                );
+                tokens_wrong_type = true;
+                None
+            }
+        },
+    };
     let lookup = |key: &str| -> Option<String> {
         // `to_u64()`, NOT `to_u32()`. Fuel's `to_u32` accepts ONLY the `U32`
         // tag (`fuel-formats/src/gguf.rs:227`) and errors on `I32`/`U64`/`U16`,
-        // while `to_u64` (`:242`) upcasts from U8/U16/U32/U64/Bool. With
-        // `to_u32().ok()?` a token id stored as any other integer type yields
-        // `None` with NO log, `out.bos`/`out.eos` stay empty, and
-        // `special_tokens`' tier-3 warning then tells the operator the
-        // checkpoint "declares no BOS or EOS token" — which is false. It
-        // declared one; we failed to read its type. Our fixture is safe (both
-        // ids verified as tag 4 on the real file), but this costs nothing and
-        // removes the class.
-        let id = usize::try_from(md.get(key)?.to_u64().ok()?).ok()?;
-        let toks = tokens?;
-        match toks.get(id).and_then(|t| t.to_string().ok()) {
-            Some(s) => Some(s.clone()),
+        // while `to_u64` (`:242`) upcasts from U8/U16/U32/U64/Bool. That
+        // NARROWS the class of unreadable integer types rather than removing
+        // it — measured against the pinned rev, `to_u64` still bails on
+        // `I8`/`I16`/`I32`/`I64` (and on `F32`/`F64`/`String`/`Array`), so an
+        // `INT32`-typed id still fails to read. The `Err` arm below is that
+        // residue: with `to_u32().ok()?` OR `to_u64().ok()?` alone, a token id
+        // stored as an unreadable type yields `None` with NO log,
+        // `out.bos`/`out.eos` stay empty, and `special_tokens`' tier-3 warning
+        // then tells the operator the checkpoint "declares no BOS or EOS
+        // token" — which is false. It declared one; we failed to read its
+        // type. Our fixture is safe (both ids verified as tag 4 on the real
+        // file), but the residue must warn rather than disappear.
+        let raw = md.get(key)?;
+        let id = match raw.to_u64() {
+            Ok(n) => usize::try_from(n).ok()?,
+            Err(e) => {
+                tracing::warn!(
+                    "{}: GGUF {key} is present but not an integer type `to_u64` can read \
+                     ({e}); leaving that token empty.",
+                    model_path.display()
+                );
+                return None;
+            }
+        };
+        let toks = match tokens {
+            Some(t) => t,
+            None => {
+                // Do not also claim "absent" for a key that is present but
+                // the wrong type — that warn already fired above.
+                if !tokens_wrong_type {
+                    tracing::warn!(
+                        "{}: GGUF {key} is {id}, but tokenizer.ggml.tokens is absent, so it \
+                         cannot be resolved to text; leaving that token empty.",
+                        model_path.display()
+                    );
+                }
+                return None;
+            }
+        };
+        // Out of range and present-but-not-a-string are different facts about
+        // the file and must not collapse into one `None`: a `toks.get(id)`
+        // miss is a bad id, a `to_string()` error is a bad vocabulary entry.
+        // Asserting one unconditionally when either could have happened would
+        // be self-contradictory on the other's fixture.
+        match toks.get(id) {
+            Some(t) => match t.to_string() {
+                Ok(s) => Some(s.clone()),
+                Err(e) => {
+                    tracing::warn!(
+                        "{}: GGUF {key} is {id}, but tokenizer.ggml.tokens[{id}] is not a \
+                         string ({e}); leaving that token empty.",
+                        model_path.display()
+                    );
+                    None
+                }
+            },
             None => {
                 tracing::warn!(
                     "{}: GGUF {key} is {id}, which is out of range for tokenizer.ggml.tokens \
@@ -932,22 +998,32 @@ pub fn special_tokens(model_path: &Path) -> SpecialTokens {
         }
     }
 
-    // Tier 3 — nothing declared. Say so; do not invent one.
+    // Tier 3 — nothing resolved. Say so; do not invent one.
     if out.bos.is_empty() || out.eos.is_empty() {
         // Names `meta`, not `model_path`: for a `.gguf` checkpoint those differ,
         // and the operator needs the directory the files are actually read
         // from, not the path to the weights.
+        //
+        // "No X could be resolved," NOT "X declares no Y." A GGUF whose own
+        // metadata DOES declare `bos_token_id`/`eos_token_id`, but in a type
+        // or against a token list `read_gguf_declaration`'s `lookup` cannot
+        // read, reaches this same empty `out.bos`/`out.eos` as a checkpoint
+        // that never declared anything — and an earlier warn from that read
+        // already named the real reason. "Declares no X" would be false for
+        // that checkpoint: it declared one; reading it is what failed.
         tracing::warn!(
-            "{} declares no {}; rendering its chat template with an empty string there. \
-             A chat template that references the missing token will omit it. Add a \
-             tokenizer_config.json with bos_token/eos_token, or a config.json with \
-             bos_token_id/eos_token_id whose ids appear in tokenizer.json's added_tokens.",
-            meta.display(),
+            "no {} could be resolved for {}; rendering its chat template with an empty \
+             string there. A chat template that references the missing token will omit \
+             it. If the checkpoint's own metadata declares one, an earlier warning names \
+             why it could not be read. Otherwise, add a tokenizer_config.json with \
+             bos_token/eos_token, or a config.json with bos_token_id/eos_token_id whose \
+             ids appear in tokenizer.json's added_tokens.",
             match (out.bos.is_empty(), out.eos.is_empty()) {
                 (true, true) => "BOS or EOS token",
                 (true, false) => "BOS token",
                 _ => "EOS token",
-            }
+            },
+            meta.display(),
         );
     }
 

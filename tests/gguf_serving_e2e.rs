@@ -181,8 +181,9 @@ async fn a_gguf_is_served_with_its_own_template() {
 /// served completion is still garbage. This test is EXPECTED TO FAIL today.
 ///
 /// Measured completion, byte-identical across four independent runs at
-/// `temperature: 0.0` (two in this investigation, one reproduced
-/// independently by the fix's reviewer, 82s, exit 101):
+/// `temperature: 0.0` (two by an implementer in this investigation, one
+/// reproduced independently by the fix's reviewer, and one by the
+/// re-review, 82s, exit 101):
 ///
 /// ```text
 /// "| ass istant | i | user | user | ass istant | | | | | ass istant | < | user |"
@@ -213,7 +214,7 @@ async fn a_gguf_is_served_with_its_own_template() {
 /// GGUF path and comparing them against llama.cpp's for the same string —
 /// not re-reading the rendered text, which is already proven correct.
 #[tokio::test]
-#[ignore = "needs the GGUF checkpoint"]
+#[ignore = "recorded downstream defect — EXPECTED TO FAIL; also needs the GGUF checkpoint"]
 async fn a_gguf_completion_is_still_garbage_after_correct_templating() {
     let path = gguf_path().expect(MISSING);
 

@@ -2535,7 +2535,18 @@ fn probe_binary_refuses_tinyllama_because_all_three_candidates_fire() {
 enum Kv {
     Str(&'static str),
     U32(u32),
+    /// GGUF value-type 10 (`ValueType::U64`) — distinct from `U32` at the
+    /// wire level. Exists because every other variant here emits `U32`
+    /// (type 4), so `Value::to_u32()` and `Value::to_u64()` were
+    /// indistinguishable on any fixture built without this — this is the
+    /// one that discriminates them (`fuel-formats/src/gguf.rs:227,242` at
+    /// pin `8771997e`: `to_u32` accepts ONLY `U32`, `to_u64` upcasts
+    /// U8/U16/U32/U64/Bool).
+    U64(u64),
     StrArray(Vec<&'static str>),
+    /// A homogeneous array of `u32`s — used to put a present-but-not-a-string
+    /// entry into `tokenizer.ggml.tokens` without going through `StrArray`.
+    U32Array(Vec<u32>),
 }
 
 /// `tensor_count` is a parameter, not a constant, because Task 2 needs a
@@ -2565,12 +2576,24 @@ fn gguf_bytes(kvs: &[(&str, Kv)], tensor_count: u64) -> Vec<u8> {
                 b.extend_from_slice(&4u32.to_le_bytes());
                 b.extend_from_slice(&n.to_le_bytes());
             }
+            Kv::U64(n) => {
+                b.extend_from_slice(&10u32.to_le_bytes());
+                b.extend_from_slice(&n.to_le_bytes());
+            }
             Kv::StrArray(items) => {
                 b.extend_from_slice(&9u32.to_le_bytes());
                 b.extend_from_slice(&8u32.to_le_bytes()); // element type: string
                 b.extend_from_slice(&(items.len() as u64).to_le_bytes());
                 for it in items {
                     put_str(&mut b, it);
+                }
+            }
+            Kv::U32Array(items) => {
+                b.extend_from_slice(&9u32.to_le_bytes());
+                b.extend_from_slice(&4u32.to_le_bytes()); // element type: u32
+                b.extend_from_slice(&(items.len() as u64).to_le_bytes());
+                for it in items {
+                    b.extend_from_slice(&it.to_le_bytes());
                 }
             }
         }
@@ -2892,7 +2915,145 @@ fn an_out_of_range_token_id_leaves_the_token_empty() {
     );
 }
 
+/// Out-of-range and present-but-not-a-string are DIFFERENT facts about the
+/// file and must not collapse into one `None` with one unconditional message.
+///
+/// Before this test: `toks.get(id).and_then(|t| t.to_string().ok())` yields
+/// `None` for both a missing index AND a present index whose element is not a
+/// string, and the `None` arm asserted "out of range" regardless — so a
+/// vocabulary of non-strings with an in-range id logged a self-contradictory,
+/// false claim ("id N is out of range for a table with >N entries").
+#[test]
+fn a_non_string_vocabulary_entry_warns_distinctly_from_out_of_range() {
+    let p = gguf_fixture(
+        "gguf-token-not-string",
+        &[
+            ("tokenizer.ggml.tokens", Kv::U32Array(vec![10, 20, 30])),
+            ("tokenizer.ggml.bos_token_id", Kv::U32(1)),
+        ],
+    );
+    let logs = capture_logs(|| {
+        let tk = lightbulb::api::chat_template::special_tokens(&p);
+        assert_eq!(
+            tk.bos, "",
+            "a non-string vocabulary entry must not resolve to text"
+        );
+    });
+    assert!(
+        logs.contains("tokenizer.ggml.tokens[1] is not a string"),
+        "an in-range, non-string vocabulary entry must warn that it is not a \
+         string; got: {logs}"
+    );
+    assert!(
+        !logs.contains("out of range"),
+        "id 1 IS in range for a 3-entry table; claiming otherwise is false: {logs}"
+    );
+}
+
+/// `tokenizer.ggml.tokens` present but not an array must warn naming the key
+/// and the reason, not fall through as though the key were absent — same
+/// rule as `tokenizer.chat_template`, applied to the vocabulary array.
+///
+/// Also asserts the "absent" warn does NOT also fire: the key IS present
+/// (just the wrong type), so claiming it is absent would itself be false.
+#[test]
+fn a_non_array_token_list_warns_rather_than_reading_as_absent() {
+    let p = gguf_fixture(
+        "gguf-tokens-wrong-type",
+        &[
+            ("tokenizer.ggml.tokens", Kv::U32(7)),
+            ("tokenizer.ggml.bos_token_id", Kv::U32(1)),
+        ],
+    );
+    let logs = capture_logs(|| {
+        let tk = lightbulb::api::chat_template::special_tokens(&p);
+        assert_eq!(tk.bos, "");
+    });
+    assert!(
+        logs.contains("tokenizer.ggml.tokens") && logs.contains("not an array"),
+        "a present-but-undecodable token list must warn naming the key and the \
+         reason; got: {logs}"
+    );
+    assert!(
+        !logs.contains("tokenizer.ggml.tokens is absent"),
+        "the key IS present (just the wrong type); the per-id 'absent' warn must \
+         not also claim it is missing: {logs}"
+    );
+}
+
+/// `bos_token_id`/`eos_token_id` present but not an integer type `to_u64` can
+/// read must warn naming the key and the reason, not fall through silently.
+///
+/// Also pins that the tier-3 warning does not then claim the checkpoint
+/// "declares no" BOS — it declared one; reading it is what failed.
+#[test]
+fn a_non_integer_token_id_warns_rather_than_reading_as_absent() {
+    let p = gguf_fixture(
+        "gguf-id-wrong-type",
+        &[
+            (
+                "tokenizer.ggml.tokens",
+                Kv::StrArray(vec!["<unk>", "<s>", "</s>"]),
+            ),
+            ("tokenizer.ggml.bos_token_id", Kv::Str("not-an-integer")),
+            ("tokenizer.ggml.eos_token_id", Kv::U32(2)),
+        ],
+    );
+    let logs = capture_logs(|| {
+        let tk = lightbulb::api::chat_template::special_tokens(&p);
+        assert_eq!(tk.bos, "", "an unreadable id must not resolve to anything");
+        assert_eq!(tk.eos, "</s>", "the readable id is unaffected");
+    });
+    assert!(
+        logs.contains("tokenizer.ggml.bos_token_id")
+            && logs.contains("not an integer type `to_u64` can read"),
+        "a present-but-unreadable token id must warn naming the key and the \
+         reason; got: {logs}"
+    );
+    assert!(
+        logs.contains("no BOS token could be resolved"),
+        "tier-3 must report resolution failure, not declaration absence; got: {logs}"
+    );
+    assert!(
+        !logs.contains("declares no"),
+        "the checkpoint DID declare a bos_token_id — a broken type, not an \
+         absent key — so the tier-3 warning must not claim it declares none: {logs}"
+    );
+}
+
+/// A `bos_token_id` stored as GGUF value-type `U64` (tag 10) still resolves.
+///
+/// `to_u64`, not `to_u32`, is what makes this work — `Value::to_u32` accepts
+/// ONLY the `U32` tag and errors on `U64` (`fuel-formats/src/gguf.rs:227` at
+/// pin `8771997e`). Every other fixture in this file emits `U32`, so this is
+/// the one that discriminates `to_u32()` from `to_u64()`.
+#[test]
+fn a_u64_typed_bos_token_id_still_resolves() {
+    let p = gguf_fixture(
+        "gguf-bos-u64",
+        &[
+            (
+                "tokenizer.ggml.tokens",
+                Kv::StrArray(vec!["<unk>", "<s>", "</s>"]),
+            ),
+            ("tokenizer.ggml.bos_token_id", Kv::U64(1)),
+            ("tokenizer.ggml.eos_token_id", Kv::U32(2)),
+        ],
+    );
+    let tk = lightbulb::api::chat_template::special_tokens(&p);
+    assert_eq!(
+        tk.bos, "<s>",
+        "a bos_token_id stored as GGUF value-type U64 must still resolve"
+    );
+}
+
 /// Ids with no token list at all are unresolvable — must not panic.
+///
+/// Discriminates from an implementation with no GGUF token path at all, which
+/// produces the identical `bos == "" && eos == ""` with nothing logged: spec
+/// §7 row 8 requires a warn naming that the ids exist but
+/// `tokenizer.ggml.tokens` does not, and that warn is what the assertion
+/// below actually pins.
 #[test]
 fn token_ids_without_a_token_list_resolve_to_nothing() {
     let p = gguf_fixture(
@@ -2902,9 +3063,19 @@ fn token_ids_without_a_token_list_resolve_to_nothing() {
             ("tokenizer.ggml.eos_token_id", Kv::U32(2)),
         ],
     );
-    let tk = lightbulb::api::chat_template::special_tokens(&p);
-    assert_eq!(tk.bos, "");
-    assert_eq!(tk.eos, "");
+    let logs = capture_logs(|| {
+        let tk = lightbulb::api::chat_template::special_tokens(&p);
+        assert_eq!(tk.bos, "");
+        assert_eq!(tk.eos, "");
+    });
+    assert!(
+        logs.contains("tokenizer.ggml.bos_token_id is 1, but tokenizer.ggml.tokens is absent")
+            && logs
+                .contains("tokenizer.ggml.eos_token_id is 2, but tokenizer.ggml.tokens is absent"),
+        "declared bos_token_id/eos_token_id with no tokenizer.ggml.tokens at all \
+         must warn, per key, that the ids are unresolvable — not fail silently \
+         as though the GGUF path were never reached; got: {logs}"
+    );
 }
 
 /// A file with a `.gguf` name that is not a GGUF falls through quietly rather
@@ -2953,6 +3124,54 @@ fn gguf_metadata_outranks_a_companion_tokenizer_config() {
     let t = lightbulb::api::chat_template::resolve(&p);
     assert_eq!(t.source, "FROM_GGUF_METADATA");
     assert_eq!(t.resolved_by, Resolution::GgufMetadata);
+}
+
+/// A companion `tokenizer_config.json` that supplies a `chat_template` but no
+/// `bos_token`/`eos_token` must NOT erase a GGUF's own BOS/EOS.
+///
+/// This is the approved scope expansion (the `is_empty()` guards on tier 1 of
+/// `special_tokens`) and it had zero coverage before this test: reverting both
+/// guards to the pre-branch `out.bos = token_field(&v,
+/// "bos_token").unwrap_or_default();` (and the `eos` equivalent) leaves the
+/// rest of the suite green. A GGUF repo shipping a `tokenizer_config.json`
+/// that copies only part of an HF config — `chat_template` but not the token
+/// fields — is common, and without the guards the GGUF's own `<s>`/`</s>` are
+/// silently overwritten with `""`: the end-of-turn marker vanishes and this
+/// epic's headline defect (§1) returns, invisibly, through the tier the
+/// GGUF-metadata work itself added.
+///
+/// Deliberately a separate test from `gguf_metadata_outranks_a_companion_tokenizer_config`
+/// above, which only calls `resolve` (the template) and so cannot observe
+/// this — `special_tokens` is a different function with its own precedence
+/// logic.
+#[test]
+fn a_companion_tokenizer_config_without_bos_eos_does_not_erase_gguf_tokens() {
+    let p = gguf_fixture(
+        "gguf-companion-no-bos-eos",
+        &[
+            (
+                "tokenizer.ggml.tokens",
+                Kv::StrArray(vec!["<unk>", "<s>", "</s>"]),
+            ),
+            ("tokenizer.ggml.bos_token_id", Kv::U32(1)),
+            ("tokenizer.ggml.eos_token_id", Kv::U32(2)),
+        ],
+    );
+    std::fs::write(
+        p.parent().unwrap().join("tokenizer_config.json"),
+        r#"{"chat_template":"FROM_TOKENIZER_CONFIG"}"#,
+    )
+    .unwrap();
+
+    let tk = lightbulb::api::chat_template::special_tokens(&p);
+    assert_eq!(
+        tk.bos, "<s>",
+        "the GGUF's own BOS must survive a companion JSON that declares no bos_token"
+    );
+    assert_eq!(
+        tk.eos, "</s>",
+        "the GGUF's own EOS must survive a companion JSON that declares no eos_token"
+    );
 }
 
 /// A directory checkpoint must never reach the GGUF reader at all.

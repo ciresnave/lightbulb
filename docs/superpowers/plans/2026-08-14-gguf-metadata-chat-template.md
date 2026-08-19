@@ -93,6 +93,24 @@ at `c409c7e`**, all confirmed unchanged. The tree is now at `d1eca62` (the
 | `tests/gguf_serving_e2e.rs` **new** | One `#[ignore]`d behavioural gate against the real Q4_0 file |
 | `src/loaders/mlmf_wrapper.rs` **delete** | Orphaned, never compiled (Task 4) |
 
+> ### ⚠️ Correction: this row describes the single-gate design, which was falsified.
+>
+> "One `#[ignore]`d behavioural gate" was the plan as designed. The spec's §1
+> and §9 correction boxes record why it was built as **two** tests instead —
+> the root-cause claim the single gate rested on was falsified during
+> implementation, so the one gate would have asserted three things that turn
+> out not to pass or fail together. `tests/gguf_serving_e2e.rs` (`7b2d25d`)
+> actually contains:
+>
+> - `a_gguf_is_served_with_its_own_template` — passes, `#[ignore]`d only for
+>   needing the real checkpoint.
+> - `a_gguf_completion_is_still_garbage_after_correct_templating` — `#[ignore]`d
+>   as a recorded, expected-to-fail downstream defect, not a regression.
+>
+> Task 4 Step 2 below still describes the single-gate version; read it for the
+> harness-construction mechanics (`AppState`, the `#![cfg]` line to leave
+> behind) and the spec's §9 table for what was actually built.
+
 ---
 
 ## Task 1: Read the declaration out of a GGUF header
@@ -1176,6 +1194,20 @@ cargo test -j 4 --lib loaders::tests 2>&1 | grep -E "^running|^test result"; ech
 If the grep prints anything, **stop** — it is referenced and this plan is wrong.
 
 - [ ] **Step 2: Write the gate**
+
+> ### ⚠️ Correction: what follows specifies ONE gate; TWO were built.
+>
+> This step and its code sample below describe a single `#[ignore]`d test
+> asserting the completion, the resolved tier, and BOS/EOS together. That
+> design's premise — that those three assertions pass or fail together — was
+> falsified during implementation; see spec §1's and §9's correction boxes.
+> What Task 4 actually produced (`7b2d25d`) is **two** tests in
+> `tests/gguf_serving_e2e.rs`: `a_gguf_is_served_with_its_own_template`
+> (passes; `#[ignore]`d only for needing the real checkpoint) and
+> `a_gguf_completion_is_still_garbage_after_correct_templating` (`#[ignore]`d
+> as a recorded, expected-to-fail downstream defect). The harness mechanics
+> below — router/runner setup, `AppState`, and the `#![cfg]` line to leave
+> behind — are still accurate; only the "one gate" framing is not.
 
 `tests/gguf_serving_e2e.rs` — model it on `tests/chat_template_e2e.rs` for router/runner setup. **Do not** feature-gate it: this works in the default build, and a `#![cfg(...)]` would make it compile to zero tests while printing `ok. 0 passed`.
 

@@ -1750,10 +1750,18 @@ mod tests {
     /// separately, making it level-triggered, the behaviour the design
     /// explicitly rejects — left all 644 tests green.
     ///
-    /// `with_default` scopes the subscriber to the calling thread, so tests
-    /// running concurrently cannot capture each other's events. `#[tokio::test]`
-    /// drives its future on this same thread (current-thread runtime), so this
-    /// works for handlers too.
+    /// **The reasoning below is known-insufficient — not fixed here.**
+    /// `with_default` scopes which subscriber the calling thread's own event
+    /// calls use, but `tracing-core`'s per-callsite `Interest` cache is
+    /// process-global, so a `with_default` subscriber installed on one thread
+    /// can still miss events under the parallel test harness. `capture_logs`
+    /// in `tests/chat_template_render.rs` measured this directly (~6-10%
+    /// spurious failures across a multi-run sample) and documents both the
+    /// mechanism and the fix — one subscriber, installed once, for the whole
+    /// process, with per-test isolation via a thread-local buffer instead of
+    /// a thread-local subscriber. Porting that fix here is deliberately
+    /// deferred: it is transcription, not design, and this helper's 7
+    /// call sites are untouched by this branch.
     fn warnings_while(f: impl FnOnce()) -> Vec<String> {
         use std::io::Write;
         use std::sync::{Arc, Mutex};

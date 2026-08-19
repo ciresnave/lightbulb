@@ -55,7 +55,7 @@ end-of-turn marker at all**.
 > "| ass istant | i | user | user | ass istant | | | | | ass istant | < | user |"
 > ```
 >
-> Byte-identical across three independent runs at `temperature: 0.0` against
+> Byte-identical across four independent runs at `temperature: 0.0` against
 > `tinyllama-1.1b-chat-v1.0.Q4_0.gguf`, with `bos "<s>"`, `eos "</s>"` and
 > `Resolution::GgufMetadata` all asserted correct. So the missing end-of-turn
 > marker was **a** defect, not **the** defect.
