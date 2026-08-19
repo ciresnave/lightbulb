@@ -1262,12 +1262,11 @@ use tower::ServiceExt;
 const MISSING: &str = "no GGUF checkpoint. Set LIGHTBULB_GGUF to a .gguf file.";
 
 fn gguf_path() -> Option<PathBuf> {
-    let p = match std::env::var_os("LIGHTBULB_GGUF") {
-        Some(v) => PathBuf::from(v),
-        None => PathBuf::from(
-            "C:/Users/cires/.cache/huggingface/hub/models--TheBloke--TinyLlama-1.1B-Chat-v1.0-GGUF/snapshots/52e7645ba7c309695bec7ac98f4f005b139cf465/tinyllama-1.1b-chat-v1.0.Q4_0.gguf",
-        ),
-    };
+    // NO fallback path. An earlier draft fell back to a hard-coded absolute
+    // path containing a developer's username, which put a local filesystem
+    // detail into a public repository. Both tests are `#[ignore]`d, so
+    // requiring the variable costs a reader nothing.
+    let p = PathBuf::from(std::env::var_os("LIGHTBULB_GGUF")?);
     p.is_file().then_some(p)
 }
 
@@ -1340,7 +1339,7 @@ The two resolution assertions are what make `contains("Paris")` non-accidental â
 - [ ] **Step 3: Run it**
 
 ```bash
-export LIGHTBULB_GGUF="C:/Users/cires/.cache/huggingface/hub/models--TheBloke--TinyLlama-1.1B-Chat-v1.0-GGUF/snapshots/52e7645ba7c309695bec7ac98f4f005b139cf465/tinyllama-1.1b-chat-v1.0.Q4_0.gguf"
+export LIGHTBULB_GGUF="$HOME/.cache/huggingface/hub/models--TheBloke--TinyLlama-1.1B-Chat-v1.0-GGUF/snapshots/52e7645ba7c309695bec7ac98f4f005b139cf465/tinyllama-1.1b-chat-v1.0.Q4_0.gguf"
 cargo test --release -j 4 --test gguf_serving_e2e -- --include-ignored --nocapture --test-threads=1 2>&1 | grep -E "^running|^test result|^error"; echo "EXIT=${PIPESTATUS[0]}"
 ```
 

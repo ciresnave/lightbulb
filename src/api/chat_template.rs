@@ -473,7 +473,22 @@ fn read_gguf_declaration(model_path: &Path) -> Option<GgufDeclaration> {
         // file), but the residue must warn rather than disappear.
         let raw = md.get(key)?;
         let id = match raw.to_u64() {
-            Ok(n) => usize::try_from(n).ok()?,
+            Ok(n) => match usize::try_from(n) {
+                Ok(i) => i,
+                Err(_) => {
+                    // The ONLY remaining silent path in this function, and it
+                    // was the wrong one to leave silent: an id too large to
+                    // index is a checkpoint that is actively WRONG, not one
+                    // that is merely missing something. Falling through with
+                    // `?` made it indistinguishable from an absent key — in
+                    // the function whose entire job is telling those apart.
+                    tracing::warn!(
+                        "{}: GGUF {key} is {n}, which is too large to index                          tokenizer.ggml.tokens on this platform; leaving that                          token empty. The checkpoint is malformed, not silent.",
+                        model_path.display()
+                    );
+                    return None;
+                }
+            },
             Err(e) => {
                 tracing::warn!(
                     "{}: GGUF {key} is present but not an integer type `to_u64` can read \

@@ -55,13 +55,16 @@ use tower::ServiceExt;
 
 const MISSING: &str = "no GGUF checkpoint. Set LIGHTBULB_GGUF to a .gguf file.";
 
+/// The checkpoint, from `LIGHTBULB_GGUF` only.
+///
+/// **Deliberately no fallback path.** An earlier version fell back to a
+/// hard-coded absolute path containing a developer's username, which put a
+/// local filesystem detail — and that username — in a public repository. Both
+/// tests here are already `#[ignore]`d, so requiring the variable costs a
+/// reader nothing and removes the leak. Fixed by deletion rather than by
+/// parameterising: there is no correct default for a 637 MB file.
 fn gguf_path() -> Option<PathBuf> {
-    let p = match std::env::var_os("LIGHTBULB_GGUF") {
-        Some(v) => PathBuf::from(v),
-        None => PathBuf::from(
-            "C:/Users/cires/.cache/huggingface/hub/models--TheBloke--TinyLlama-1.1B-Chat-v1.0-GGUF/snapshots/52e7645ba7c309695bec7ac98f4f005b139cf465/tinyllama-1.1b-chat-v1.0.Q4_0.gguf",
-        ),
-    };
+    let p = PathBuf::from(std::env::var_os("LIGHTBULB_GGUF")?);
     p.is_file().then_some(p)
 }
 
