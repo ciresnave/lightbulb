@@ -331,10 +331,9 @@ pub(crate) struct GgufDeclaration {
 /// materialises the *entire* metadata block eagerly — on the real TinyLlama
 /// Q4_0 that is `tokenizer.ggml.tokens` as 32 000 heap `String`s, plus the
 /// parallel score and token-type arrays. And this runs **twice per start**, not
-/// once: `resolve_for_model` (`:770-775`) calls `resolve` and `special_tokens`,
-/// and each calls this. Not per request, and not a correctness problem — but if
-/// startup latency ever matters, memoise here rather than re-deriving why it is
-/// slow.
+/// once: `resolve_for_model` calls `resolve` and `special_tokens`, and each
+/// calls this. Not per request, and not a correctness problem — but if startup
+/// latency ever matters, memoise here rather than re-deriving why it is slow.
 fn read_gguf_declaration(model_path: &Path) -> Option<GgufDeclaration> {
     if !model_path.is_file()
         || !model_path
@@ -1280,10 +1279,13 @@ pub enum ProbeOverride {
 ///
 /// # The tiers, and why each lands where it does
 ///
-/// * [`Resolution::TokenizerConfig`] — refuse. The checkpoint's own
-///   `chat_template` is the model author's declaration; a registry candidate is
-///   this project's approximation of a family. No probe board can outrank that,
-///   because the probe's three candidates are exactly the approximations.
+/// * [`Resolution::TokenizerConfig`] and [`Resolution::GgufMetadata`] —
+///   refuse. The checkpoint's own chat template — `chat_template` in
+///   `tokenizer_config.json` for a directory checkpoint, or the `.gguf`
+///   file's own embedded metadata for a single-file one — is the model
+///   author's declaration; a registry candidate is this project's
+///   approximation of a family. No probe board can outrank that, because the
+///   probe's three candidates are exactly the approximations.
 /// * [`Resolution::Sidecar`] and [`Resolution::Probe`] — refuse. Both mean a
 ///   sidecar is already on disk: [`resolve`] returns the sidecar's OWN
 ///   `resolved_by`, so `Probe` can only have come from one, and it is precisely
@@ -1298,7 +1300,7 @@ pub enum ProbeOverride {
 /// # It classifies the ANSWER's authority, not the file it arrived in
 ///
 /// [`resolve`] reports a sidecar's own `resolved_by`, so a sidecar can announce
-/// itself as any of the six. One recording `Registry` therefore lands in the
+/// itself as any of the seven. One recording `Registry` therefore lands in the
 /// warn class rather than the refuse class, even though a file exists on disk.
 /// That is the intended reading — what is being weighed is how good the current
 /// answer is, and a pinned registry guess is still a registry guess — but it is
@@ -1309,7 +1311,7 @@ pub enum ProbeOverride {
 ///
 /// # `force`
 ///
-/// `force` turns the three refusals into warnings — it does not silence them.
+/// `force` turns the four refusals into warnings — it does not silence them.
 /// What it must NOT do is anything else: the caller's other refusals
 /// (nonexistent path, empty EOS, unfingerprintable checkpoint, and both
 /// selection rules above) are unaffected by it, and it does not imply `--yes`.
@@ -1331,25 +1333,24 @@ pub fn probe_override_check(current: Resolution, force: bool) -> ProbeOverride {
     match current {
         Resolution::TokenizerConfig | Resolution::GgufMetadata => {
             if force {
-                ProbeOverride::Warn(
-                    "--force: overriding Resolution::TokenizerConfig — the checkpoint's own \
-                     chat_template, which is the model author's declaration — with a probe \
-                     result. It will be read at Resolution::Probe, ahead of that template, on \
-                     every later start."
-                        .to_string(),
-                )
+                ProbeOverride::Warn(format!(
+                    "--force: overriding Resolution::{current:?} — the checkpoint's own chat \
+                     template, which is the model author's declaration — with a probe result. \
+                     It will be read at Resolution::Probe, ahead of that template, on every \
+                     later start."
+                ))
             } else {
-                ProbeOverride::Refuse(
-                    "this checkpoint already resolves at Resolution::TokenizerConfig — it ships \
-                     its own chat_template, which is the model author's declaration and \
+                ProbeOverride::Refuse(format!(
+                    "this checkpoint already resolves at Resolution::{current:?} — it carries \
+                     its own chat template, which is the model author's declaration and \
                      outranks any candidate this probe can offer. A sidecar written here would \
                      be read at Resolution::Probe, AHEAD of that template, on every later start, \
-                     so a strictly worse approximation would replace it silently (measured on \
-                     SmolLM2-360M-Instruct, whose own template injects a default system message \
-                     that registry::CHATML does not). Re-run with --force if overriding the \
-                     checkpoint's own template is genuinely what you mean. Nothing was written."
-                        .to_string(),
-                )
+                     so a strictly worse approximation would replace it silently (measured on a \
+                     directory checkpoint, SmolLM2-360M-Instruct, whose own template injects a \
+                     default system message that registry::CHATML does not). Re-run with \
+                     --force if overriding the checkpoint's own template is genuinely what you \
+                     mean. Nothing was written."
+                ))
             }
         }
         Resolution::Sidecar => {

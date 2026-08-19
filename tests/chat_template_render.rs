@@ -1122,6 +1122,7 @@ fn a_blank_template_is_not_usable_whatever_tier_claims_to_have_found_it() {
         for tier in [
             Resolution::Sidecar,
             Resolution::TokenizerConfig,
+            Resolution::GgufMetadata,
             Resolution::VocabSignature,
             Resolution::Registry,
             Resolution::Probe,
@@ -1915,8 +1916,8 @@ fn probe_accept_returns_the_named_row_when_it_is_not_first() {
 // `resolve` reads the sidecar first, every later start would have prompted that
 // model differently, and worse, than before the probe ran. Nothing warned.
 //
-// `probe_override_check` is the guard. Six `Resolution` variants times two
-// `force` states is twelve cases, and each is asserted below, because a wrong
+// `probe_override_check` is the guard. Seven `Resolution` variants times two
+// `force` states is fourteen cases, and each is asserted below, because a wrong
 // implementation of a table like this characteristically gets one class right
 // and another wrong: the mutation matrix is in the commit message, and every
 // mutant there is killed by a test no other mutant kills.
@@ -2148,6 +2149,7 @@ fn force_downgrades_each_refusal_to_a_warning_that_still_names_the_tier() {
 
     for (tier, name) in [
         (Resolution::TokenizerConfig, "Resolution::TokenizerConfig"),
+        (Resolution::GgufMetadata, "Resolution::GgufMetadata"),
         (Resolution::Sidecar, "Resolution::Sidecar"),
         (Resolution::Probe, "Resolution::Probe"),
     ] {
@@ -2167,6 +2169,54 @@ fn force_downgrades_each_refusal_to_a_warning_that_still_names_the_tier() {
             !why.contains("Nothing was written."),
             "the --force warning promises nothing was written, on the path that writes: {why}"
         );
+    }
+}
+
+/// A GGUF that declares its own template must be protected from the probe
+/// exactly as a `tokenizer_config.json` is — the probe would otherwise write a
+/// registry candidate at `Resolution::Probe`, which `resolve` reads at tier 0,
+/// AHEAD of the author's own declaration.
+///
+/// Asserts the message names `Resolution::GgufMetadata` WITH the `Resolution::`
+/// prefix. That is the convention the rest of this file already enforces
+/// (`probe_override_refuses_the_checkpoints_own_template`,
+/// `force_downgrades_each_refusal_to_a_warning_that_still_names_the_tier`
+/// assert `contains("Resolution::TokenizerConfig")`), and asserting the bare
+/// word would be satisfied by a `{current:?}` interpolation that breaks both
+/// of those tests.
+#[test]
+fn the_probe_refuses_to_override_a_gguf_declaration() {
+    use lightbulb::api::chat_template::{ProbeOverride, probe_override_check};
+
+    match probe_override_check(Resolution::GgufMetadata, false) {
+        ProbeOverride::Refuse(msg) => {
+            assert!(
+                msg.contains("Resolution::GgufMetadata"),
+                "the refusal must name the tier it is protecting, and must not \
+                 claim the checkpoint resolves by tokenizer_config.json: {msg}"
+            );
+            assert!(
+                !msg.contains("Resolution::TokenizerConfig"),
+                "the refusal names the WRONG tier for a GGUF: {msg}"
+            );
+            assert!(
+                msg.ends_with("Nothing was written."),
+                "must end exactly as the other refusals do: {msg}"
+            );
+        }
+        other => panic!("expected Refuse for a checkpoint's own declaration, got {other:?}"),
+    }
+
+    // `--force` still overrides, like every other refusal, and the warning must
+    // also name the right tier — that is what the loop in
+    // `force_downgrades_each_refusal_to_a_warning_that_still_names_the_tier`
+    // checks for the other tiers.
+    match probe_override_check(Resolution::GgufMetadata, true) {
+        ProbeOverride::Warn(msg) => assert!(
+            msg.contains("Resolution::GgufMetadata"),
+            "--force must record WHAT it overrode: {msg}"
+        ),
+        other => panic!("--force must downgrade the refusal to a warning, got {other:?}"),
     }
 }
 
@@ -2781,7 +2831,14 @@ fn a_gguf_with_an_unsupported_tensor_dtype_falls_through_and_says_why() {
 /// mode, inside the epic's fix.
 ///
 /// Asserts the WARN, not just the fall-through. The fall-through alone is
-/// satisfied by the buggy implementation.
+/// satisfied by the buggy implementation — and so, on its own, is
+/// `logs.contains("tokenizer.chat_template")`: the buggy path's own fallback
+/// `debug!` ("no usable tokenizer.chat_template") contains that exact
+/// substring too. What actually discriminates is `"not a string"` — it
+/// appears only in the one warn line this test exists to catch, so the `&&`
+/// below rescues nothing; it stays because a message naming both the key and
+/// the reason is the better message for an operator, not because either half
+/// keeps the other honest.
 #[test]
 fn a_non_string_gguf_template_warns_rather_than_reading_as_absent() {
     let p = gguf_fixture(
