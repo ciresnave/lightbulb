@@ -20,7 +20,6 @@ pub mod sampling;
 pub mod server;
 pub mod tls; // TLS certificate management
 pub mod tools; // Tool registry with capability detection (M5.6)
-pub mod utils; // Utility functions (M4.2: tensor ops)
 
 pub async fn hello_generate(prompt: &str) -> anyhow::Result<()> {
     // Trivial Candle call to verify dependency linkage; replace with real text-gen soon
