@@ -180,7 +180,7 @@ async fn a_gguf_is_served_with_its_own_template() {
 /// prompt this file's sibling test now proves resolution produces, the
 /// served completion is still garbage. This test is EXPECTED TO FAIL today.
 ///
-/// Measured completion, byte-identical across three independent runs at
+/// Measured completion, byte-identical across four independent runs at
 /// `temperature: 0.0` (two in this investigation, one reproduced
 /// independently by the fix's reviewer, 82s, exit 101):
 ///
