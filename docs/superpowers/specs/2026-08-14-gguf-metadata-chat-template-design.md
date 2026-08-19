@@ -25,13 +25,58 @@ WARN  …declares no BOS or EOS token; rendering its chat template with an empty
       Chat template … resolved via Registry (bos "", eos "")
 ```
 
-**Loading and inference are fine.** The model loaded, prefilled 27 tokens and
-decoded 24. What is broken is the prompt we hand it.
+**Loading is fine.** The model loaded, prefilled 27 tokens and decoded 24.
 
-**Root cause.** A single-file `.gguf` has no companion JSON, so `special_tokens`
-returns empty BOS/EOS and `resolve` falls through to a tier-3 family guess.
+~~What is broken is the prompt we hand it.~~ **Also falsified 2026-08-19** — see
+the box below. The prompt was broken and is now fixed; the output is still
+garbage, so "inference is fine" was an assumption carried by the same
+correlation, not a measurement.
+
+**Contributing defect — and NOT the root cause, measured 2026-08-19.** A
+single-file `.gguf` has no companion JSON, so `special_tokens` returns empty
+BOS/EOS and `resolve` falls through to a tier-3 family guess.
 `registry::ZEPHYR` interpolates `eos_token`, so the rendered prompt carries **no
-end-of-turn marker at all** and the model free-associates.
+end-of-turn marker at all**.
+
+> ### ⚠️ This section originally called that the root cause. That is falsified.
+>
+> This epic fixed the template. The prompt now renders correctly from the GGUF's
+> own metadata:
+>
+> ```
+> "<|user|>\nName the capital of France.</s>\n<|assistant|>\n"
+> ```
+>
+> **and the model still emits garbage:**
+>
+> ```
+> "| ass istant | i | user | user | ass istant | | | | | ass istant | < | user |"
+> ```
+>
+> Byte-identical across three independent runs at `temperature: 0.0` against
+> `tinyllama-1.1b-chat-v1.0.Q4_0.gguf`, with `bos "<s>"`, `eos "</s>"` and
+> `Resolution::GgufMetadata` all asserted correct. So the missing end-of-turn
+> marker was **a** defect, not **the** defect.
+>
+> **Why the original diagnosis looked solid and was not.** It rested on evidence
+> **invariant to its own truth**: "broken template + garbage output" is equally
+> consistent with *the template causes the garbage* and *the template is broken
+> and something else is broken too*. Those two are indistinguishable until the
+> template is fixed — which is what this epic did. Recorded rather than quietly
+> amended, because the failure mode is the interesting part: a correlation with
+> a plausible mechanism read as a cause.
+>
+> **What is now known, and it is more than before.** Chat-template resolution and
+> rendering are correct, verified two independent ways (the served response's
+> BOS/EOS/tier, and the rendered prompt string itself). The garbage is
+> **downstream** of templating, in GGUF quantized generation.
+>
+> **Next diagnostic, deliberately not taken here:** a correct prompt *string* is
+> not correct *token ids*. The previous epic shipped a BOS-doubling defect of
+> exactly this shape — a template interpolating `bos_token` into prompt text
+> while a `TemplateProcessing` post-processor prepended BOS again — which is why
+> `BuiltPrompt` carries `add_special_tokens`. Dump the ids actually fed for this
+> prompt and compare against llama.cpp's for the same string.
 
 **The file already contains what we need.** Reading its header directly:
 
