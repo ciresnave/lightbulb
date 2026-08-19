@@ -1,6 +1,8 @@
 # GGUF metadata as a chat-template source — design
 
-**Status:** proposed
+**Status:** IMPLEMENTED — with its own root-cause claim falsified by the
+implementation. §1 and §9 carry correction boxes; read those before trusting any
+causal statement in this document.
 **Supersedes nothing.** Extends `2026-08-06-chat-template-resolution-design.md`,
 whose tier model this slots into.
 
@@ -25,13 +27,58 @@ WARN  …declares no BOS or EOS token; rendering its chat template with an empty
       Chat template … resolved via Registry (bos "", eos "")
 ```
 
-**Loading and inference are fine.** The model loaded, prefilled 27 tokens and
-decoded 24. What is broken is the prompt we hand it.
+**Loading is fine.** The model loaded, prefilled 27 tokens and decoded 24.
 
-**Root cause.** A single-file `.gguf` has no companion JSON, so `special_tokens`
-returns empty BOS/EOS and `resolve` falls through to a tier-3 family guess.
+~~What is broken is the prompt we hand it.~~ **Also falsified 2026-08-19** — see
+the box below. The prompt was broken and is now fixed; the output is still
+garbage, so "inference is fine" was an assumption carried by the same
+correlation, not a measurement.
+
+**Contributing defect — and NOT the root cause, measured 2026-08-19.** A
+single-file `.gguf` has no companion JSON, so `special_tokens` returns empty
+BOS/EOS and `resolve` falls through to a tier-3 family guess.
 `registry::ZEPHYR` interpolates `eos_token`, so the rendered prompt carries **no
-end-of-turn marker at all** and the model free-associates.
+end-of-turn marker at all**.
+
+> ### ⚠️ This section originally called that the root cause. That is falsified.
+>
+> This epic fixed the template. The prompt now renders correctly from the GGUF's
+> own metadata:
+>
+> ```
+> "<|user|>\nName the capital of France.</s>\n<|assistant|>\n"
+> ```
+>
+> **and the model still emits garbage:**
+>
+> ```
+> "| ass istant | i | user | user | ass istant | | | | | ass istant | < | user |"
+> ```
+>
+> Byte-identical across four independent runs at `temperature: 0.0` against
+> `tinyllama-1.1b-chat-v1.0.Q4_0.gguf`, with `bos "<s>"`, `eos "</s>"` and
+> `Resolution::GgufMetadata` all asserted correct. So the missing end-of-turn
+> marker was **a** defect, not **the** defect.
+>
+> **Why the original diagnosis looked solid and was not.** It rested on evidence
+> **invariant to its own truth**: "broken template + garbage output" is equally
+> consistent with *the template causes the garbage* and *the template is broken
+> and something else is broken too*. Those two are indistinguishable until the
+> template is fixed — which is what this epic did. Recorded rather than quietly
+> amended, because the failure mode is the interesting part: a correlation with
+> a plausible mechanism read as a cause.
+>
+> **What is now known, and it is more than before.** Chat-template resolution and
+> rendering are correct, verified two independent ways (the served response's
+> BOS/EOS/tier, and the rendered prompt string itself). The garbage is
+> **downstream** of templating, in GGUF quantized generation.
+>
+> **Next diagnostic, deliberately not taken here:** a correct prompt *string* is
+> not correct *token ids*. The previous epic shipped a BOS-doubling defect of
+> exactly this shape — a template interpolating `bos_token` into prompt text
+> while a `TemplateProcessing` post-processor prepended BOS again — which is why
+> `BuiltPrompt` carries `add_special_tokens`. Dump the ids actually fed for this
+> prompt and compare against llama.cpp's for the same string.
 
 **The file already contains what we need.** Reading its header directly:
 
@@ -262,23 +309,47 @@ applies here: assert the **observable consequence** (which template source
 resolves, what BOS/EOS come back) rather than an internal flag, and cover both
 polarities of every branch.
 
-**One behavioural gate**, `#[ignore]`d and checkpoint-gated, against the real
-Q4_0 file: serve the §1 request over HTTP at `temperature: 0.0` and assert
-**content**, not "coherence" — which is not assertable. Concretely, mirroring
-`tests/chat_template_e2e.rs`'s existing shape — its `post_raw` helper and the
-`AppState` construction inside it, but **not** its
-`#![cfg(feature = "fuel-engine")]` line, which is right for that file and wrong
-for a backend-independent test:
+### ⚠️ The single-gate design below was falsified along with §1. Read that box first.
+
+**As designed, this section specified ONE behavioural gate** — `#[ignore]`d and
+checkpoint-gated against the real Q4_0 file — asserting all of:
 
 - the completion **contains `"Paris"`**, and
 - the resolved tier is `Resolution::GgufMetadata`, not `Registry`, and
 - BOS/EOS come back as `"<s>"` / `"</s>"` rather than empty.
 
-The last two are what make the first non-accidental: a completion could contain
-"Paris" for reasons unrelated to the template, and asserting the resolved source
-plus the recovered tokens pins *why* it did. The §1 measurement is the known-red
-state, so this gate has a demonstrated failing baseline rather than an assumed
-one — re-running it against `HEAD~` must produce the recorded garbage.
+The reasoning was that the last two make the first non-accidental: a completion
+could contain "Paris" for reasons unrelated to the template, and asserting the
+resolved source plus the recovered tokens pins *why* it did.
+
+**That reasoning was sound and its premise was wrong.** It assumed the three
+assertions would pass or fail together, because it assumed the template was the
+cause. Measured 2026-08-19: the last two pass, the first fails, and the rendered
+prompt is correct. See §1's falsification box.
+
+**What was actually built (`7b2d25d`), and why it is two tests:**
+
+| test | state | asserts |
+| --- | --- | --- |
+| `a_gguf_is_served_with_its_own_template` | **passes** | BOS `"<s>"`, EOS `"</s>"`, `Resolution::GgufMetadata`, HTTP 200, **and the byte-exact rendered prompt** |
+| `a_gguf_completion_is_still_garbage_after_correct_templating` | **`#[ignore]`d, expected to fail** | the completion contains `"Paris"` — a recorded downstream defect, not a regression from this epic |
+
+Splitting rather than deleting is deliberate: the failing assertion is a
+**measurement**, and deleting it would erase the evidence that isolates the
+remaining bug. Splitting rather than leaving one red test is also deliberate:
+the epic's deliverable is verified correct and should not be gated on a defect
+one layer below it.
+
+**The rendered-prompt assertion is the part worth keeping.** Nothing in the
+suite asserted the string that actually reaches the model — the synthetic tests
+assert *resolution*. That gap is why the false root-cause survived two audit
+rounds. It is now asserted through `ResolvedTemplate::render`, the same call
+`build_prompt_from_raw` makes internally.
+
+Both tests mirror `tests/chat_template_e2e.rs`'s shape — its `post_raw` helper
+and the `AppState` construction inside it, but **not** its
+`#![cfg(feature = "fuel-engine")]` line, which is right for that file and wrong
+for a backend-independent test.
 
 ## 10. Also in this change
 

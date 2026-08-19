@@ -67,6 +67,16 @@ pub mod registry;
 pub enum Resolution {
     Sidecar,
     TokenizerConfig,
+    /// Read from the `.gguf` file's own embedded metadata
+    /// (`tokenizer.chat_template`). For a single-file checkpoint this is the
+    /// model author's declaration, shipped with these weights — the same
+    /// authority `TokenizerConfig` carries for a directory checkpoint.
+    ///
+    /// A distinct variant rather than reuse of `TokenizerConfig`: this module
+    /// exists to record HOW a template was chosen, and labelling a template read
+    /// from file metadata as having come from a JSON file is the quiet kind of
+    /// wrong the sidecar's `evidence` field was introduced to prevent.
+    GgufMetadata,
     VocabSignature,
     Registry,
     Probe,
@@ -295,6 +305,248 @@ pub fn fingerprint(model_path: &Path) -> Option<String> {
         ));
     }
     Some(digest(&std::fs::read(model_path.join("config.json")).ok()?))
+}
+
+/// What a `.gguf` file declares about its own chat template and special tokens.
+///
+/// `None` from [`read_gguf_declaration`] means "not a GGUF, or unreadable as
+/// one". A `Some` whose fields are all `None` means "a valid GGUF that declares
+/// nothing" — a different fact, and the callers need to tell them apart.
+pub(crate) struct GgufDeclaration {
+    pub template: Option<String>,
+    pub bos: Option<String>,
+    pub eos: Option<String>,
+}
+
+/// Read the declaration out of a `.gguf` header.
+///
+/// Uses Fuel's `MmapedContent`, not our `src/gguf/` and not MLMF. `fuel-core` is
+/// an unconditional dependency and `fuel-engine` enables none, so this works in
+/// the default build; `src/gguf/` is candlelight-era and slated for retirement
+/// with the three `src/model/custom_*` files that take `crate::gguf::Content`.
+/// The read is behind this one function so the reader can be swapped later
+/// without touching resolution.
+///
+/// **Cost, stated accurately.** Mapping is virtual, but `Content::read`
+/// materialises the *entire* metadata block eagerly — on the real TinyLlama
+/// Q4_0 that is `tokenizer.ggml.tokens` as 32 000 heap `String`s, plus the
+/// parallel score and token-type arrays. And this runs **twice per start**, not
+/// once: `resolve_for_model` calls `resolve` and `special_tokens`, and each
+/// calls this. Not per request, and not a correctness problem — but if startup
+/// latency ever matters, memoise here rather than re-deriving why it is slow.
+fn read_gguf_declaration(model_path: &Path) -> Option<GgufDeclaration> {
+    if !model_path.is_file()
+        || !model_path
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("gguf"))
+    {
+        return None;
+    }
+
+    let mc = match fuel::quantized::gguf_mmap::MmapedContent::from_path(model_path) {
+        Ok(mc) => mc,
+        Err(e) => {
+            // Do NOT say "this is not a valid GGUF" — measured 2026-08-15, that
+            // is often a false statement about the operator's file. Fuel's
+            // `Content::read` parses the metadata block FIRST and in full, then
+            // walks the tensor directory and calls `GgmlDType::from_u32`
+            // (`fuel-formats/src/gguf.rs:432-433`), whose table at our pinned rev
+            // `8771997e` (`fuel-ir/src/quantized.rs:35`) accepts only
+            // {0,1,2,3,6..=15,30} — 15 codes. Every IQ code is absent: IQ4_NL
+            // (20), IQ3_S (21), IQ4_XS (23) among them, all ordinary
+            // quantizations llama.cpp reads happily. On such a file the chat
+            // template is decoded, sits in memory, and is discarded because of
+            // a tensor we never needed.
+            //
+            // We COULD avoid this. fuel-core re-exports the primitives —
+            // `VersionedMagic::read`, `read_string`, `ValueType::from_u32`,
+            // `Value::read` are all pub (`gguf_file.rs:19-21`) — so a
+            // metadata-only reader that stops before the tensor directory is
+            // ~25 lines at the current pin. We CHOSE not to own a hand-rolled
+            // parser for a case our checkpoints do not hit. Recorded as a
+            // decision so the next person does not re-derive it as an
+            // impossibility. What is missing upstream is a convenience
+            // function, not a capability.
+            //
+            // Do NOT say "not a valid GGUF" — for an IQ file that is a false
+            // statement about the operator's file, and the fall-through lands
+            // on a family guess with no end-of-turn marker, which is the exact
+            // defect this epic fixes. Do NOT say "does not YET decode" either:
+            // codes 4 and 5 (Q4_2, Q4_3) are also rejected and are *retired*,
+            // not future — ggml has eight retired codes. "Not yet" sends an
+            // operator with an old file looking forward when they should look
+            // back. Name the symptom, not a guess at the era.
+            //
+            // Counting note: the 20-omitted figure is 35 live codes minus these
+            // 15, per MLMF's cross-check against llama.cpp's own static_asserts
+            // (27 of 27 block sizes, zero mismatches). Retired codes are NOT in
+            // that 35, so they are additional to the 20 rather than part of it —
+            // an earlier draft said "omits 20 ... and retired ones", which was
+            // arithmetically incoherent.
+            tracing::warn!(
+                "{}: Fuel could not open this GGUF ({e}); falling through to the \
+                 file-based tiers. If the file is otherwise sound, the likely cause \
+                 is a tensor quantization outside Fuel's ggml type table, which \
+                 covers 15 codes and omits 20 of the 35 currently in use (the IQ* \
+                 and TQ* families) as well as retired ones such as Q4_2 and Q4_3. \
+                 The chat template may be present and readable but is unreachable \
+                 until that table covers this file.",
+                model_path.display()
+            );
+            return None;
+        }
+    };
+    let md = mc.metadata();
+
+    // `to_string()` here returns `Result<&String>` — it is Fuel's accessor, not
+    // `Display::to_string`. Cloning is deliberate: the mmap is dropped with `mc`.
+    //
+    // The `match` is NOT decoration. Written as
+    // `.and_then(|v| v.to_string().ok())`, a template that is PRESENT but not a
+    // string (an array, an integer) collapses into the same `None` as a template
+    // that is ABSENT — identical in the return type AND in the log, since only
+    // `resolve`'s one `debug!` would fire. A GGUF declaring its template as an
+    // array would then emit "no usable chat template" and fall to a family guess
+    // with no end-of-turn marker: this epic's own failure mode, inside its fix.
+    // Absent is benign and common; present-but-undecodable is a malformed file
+    // and must say so.
+    let template = match md.get("tokenizer.chat_template") {
+        None => None,
+        Some(v) => match v.to_string() {
+            Ok(s) => non_blank(
+                s.clone(),
+                &format!("{} (GGUF metadata)", model_path.display()),
+            ),
+            Err(e) => {
+                tracing::warn!(
+                    "{}: GGUF tokenizer.chat_template is present but not a string \
+                     ({e}); treating the file as declaring no template. This is a \
+                     malformed checkpoint, not a normal one.",
+                    model_path.display()
+                );
+                None
+            }
+        },
+    };
+
+    // Byte-exact: the token is rendered into prompt TEXT and the tokenizer must
+    // recognise the identical bytes. Never trim or normalize here.
+    //
+    // Present-but-wrong-type must not collapse into the same `None` as
+    // absent, and must not pass silently — same rule as
+    // `tokenizer.chat_template` above, applied to the vocabulary array. A
+    // checkpoint whose `tokenizer.ggml.tokens` is present but not an array is
+    // malformed, not merely lacking a vocabulary, and the operator needs to
+    // know which. `tokens_wrong_type` records that this warn already fired,
+    // so `lookup` below does not also claim the key is "absent" for a key
+    // that is present but broken.
+    let mut tokens_wrong_type = false;
+    let tokens = match md.get("tokenizer.ggml.tokens") {
+        None => None,
+        Some(v) => match v.to_vec() {
+            Ok(arr) => Some(arr),
+            Err(e) => {
+                tracing::warn!(
+                    "{}: GGUF tokenizer.ggml.tokens is present but not an array ({e}); \
+                     BOS/EOS token ids cannot be resolved to text.",
+                    model_path.display()
+                );
+                tokens_wrong_type = true;
+                None
+            }
+        },
+    };
+    let lookup = |key: &str| -> Option<String> {
+        // `to_u64()`, NOT `to_u32()`. Fuel's `to_u32` accepts ONLY the `U32`
+        // tag (`fuel-formats/src/gguf.rs:227`) and errors on `I32`/`U64`/`U16`,
+        // while `to_u64` (`:242`) upcasts from U8/U16/U32/U64/Bool. That
+        // NARROWS the class of unreadable integer types rather than removing
+        // it — measured against the pinned rev, `to_u64` still bails on
+        // `I8`/`I16`/`I32`/`I64` (and on `F32`/`F64`/`String`/`Array`), so an
+        // `INT32`-typed id still fails to read. The `Err` arm below is that
+        // residue: with `to_u32().ok()?` OR `to_u64().ok()?` alone, a token id
+        // stored as an unreadable type yields `None` with NO log,
+        // `out.bos`/`out.eos` stay empty, and `special_tokens`' tier-3 warning
+        // then tells the operator the checkpoint "declares no BOS or EOS
+        // token" — which is false. It declared one; we failed to read its
+        // type. Our fixture is safe (both ids verified as tag 4 on the real
+        // file), but the residue must warn rather than disappear.
+        let raw = md.get(key)?;
+        let id = match raw.to_u64() {
+            Ok(n) => match usize::try_from(n) {
+                Ok(i) => i,
+                Err(_) => {
+                    // The ONLY remaining silent path in this function, and it
+                    // was the wrong one to leave silent: an id too large to
+                    // index is a checkpoint that is actively WRONG, not one
+                    // that is merely missing something. Falling through with
+                    // `?` made it indistinguishable from an absent key — in
+                    // the function whose entire job is telling those apart.
+                    tracing::warn!(
+                        "{}: GGUF {key} is {n}, which is too large to index                          tokenizer.ggml.tokens on this platform; leaving that                          token empty. The checkpoint is malformed, not silent.",
+                        model_path.display()
+                    );
+                    return None;
+                }
+            },
+            Err(e) => {
+                tracing::warn!(
+                    "{}: GGUF {key} is present but not an integer type `to_u64` can read \
+                     ({e}); leaving that token empty.",
+                    model_path.display()
+                );
+                return None;
+            }
+        };
+        let toks = match tokens {
+            Some(t) => t,
+            None => {
+                // Do not also claim "absent" for a key that is present but
+                // the wrong type — that warn already fired above.
+                if !tokens_wrong_type {
+                    tracing::warn!(
+                        "{}: GGUF {key} is {id}, but tokenizer.ggml.tokens is absent, so it \
+                         cannot be resolved to text; leaving that token empty.",
+                        model_path.display()
+                    );
+                }
+                return None;
+            }
+        };
+        // Out of range and present-but-not-a-string are different facts about
+        // the file and must not collapse into one `None`: a `toks.get(id)`
+        // miss is a bad id, a `to_string()` error is a bad vocabulary entry.
+        // Asserting one unconditionally when either could have happened would
+        // be self-contradictory on the other's fixture.
+        match toks.get(id) {
+            Some(t) => match t.to_string() {
+                Ok(s) => Some(s.clone()),
+                Err(e) => {
+                    tracing::warn!(
+                        "{}: GGUF {key} is {id}, but tokenizer.ggml.tokens[{id}] is not a \
+                         string ({e}); leaving that token empty.",
+                        model_path.display()
+                    );
+                    None
+                }
+            },
+            None => {
+                tracing::warn!(
+                    "{}: GGUF {key} is {id}, which is out of range for tokenizer.ggml.tokens \
+                     ({} entries); leaving that token empty.",
+                    model_path.display(),
+                    toks.len()
+                );
+                None
+            }
+        }
+    };
+
+    Some(GgufDeclaration {
+        template,
+        bos: lookup("tokenizer.ggml.bos_token_id"),
+        eos: lookup("tokenizer.ggml.eos_token_id"),
+    })
 }
 
 /// Where a checkpoint's companion JSON (`tokenizer_config.json`,
@@ -527,6 +779,27 @@ pub fn resolve(model_dir: &Path) -> ChatTemplate {
     // model's name.
     let meta = metadata_dir(model_dir);
 
+    // Tier 1, GGUF branch — checked BEFORE `tokenizer_config.json`.
+    //
+    // A `.gguf` is file-scoped; a companion JSON is directory-scoped. Two
+    // `.gguf` files can share a directory — which is why sidecars are named
+    // after the checkpoint rather than sharing one — so a single
+    // `tokenizer_config.json` beside them cannot be authoritative for both. The
+    // in-file metadata is unambiguously about THESE weights. Spec §3.
+    if let Some(d) = read_gguf_declaration(model_dir) {
+        if let Some(t) = d.template {
+            tracing::info!("chat template: GGUF metadata");
+            return ChatTemplate {
+                source: t,
+                resolved_by: Resolution::GgufMetadata,
+            };
+        }
+        tracing::debug!(
+            "{}: valid GGUF, no usable tokenizer.chat_template; falling through.",
+            model_dir.display()
+        );
+    }
+
     // Tier 1 — the authoritative source, when the checkpoint ships one.
     if let Ok(raw) = std::fs::read_to_string(meta.join("tokenizer_config.json")) {
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) {
@@ -681,11 +954,36 @@ pub fn special_tokens(model_path: &Path) -> SpecialTokens {
     // See `metadata_dir`.
     let meta = metadata_dir(model_path);
 
+    // Same precedence as `resolve`: a GGUF's own metadata outranks a companion
+    // JSON, per spec §3. Fills each token independently — a file that declares
+    // one and not the other gets the one it declares plus a resolved fallback
+    // for the other, matching the existing per-token behaviour below.
+    if let Some(d) = read_gguf_declaration(model_path) {
+        if let Some(b) = d.bos {
+            out.bos = b;
+        }
+        if let Some(e) = d.eos {
+            out.eos = e;
+        }
+    }
+
     // Tier 1 — the checkpoint's own declaration.
+    //
+    // Per-token and only-if-empty, matching tier 2 below. This is NOT
+    // cosmetic: these two lines were unconditional, so a GGUF whose own
+    // metadata had already supplied `<s>`/`</s>` would have them overwritten
+    // here — with `""` whenever the companion JSON omits the key, which is
+    // usual for a JSON shipped beside a `.gguf`. An empty EOS renders a
+    // template with no end-of-turn marker, which is the defect this module
+    // exists to prevent.
     if let Ok(raw) = std::fs::read_to_string(meta.join("tokenizer_config.json")) {
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) {
-            out.bos = token_field(&v, "bos_token").unwrap_or_default();
-            out.eos = token_field(&v, "eos_token").unwrap_or_default();
+            if out.bos.is_empty() {
+                out.bos = token_field(&v, "bos_token").unwrap_or_default();
+            }
+            if out.eos.is_empty() {
+                out.eos = token_field(&v, "eos_token").unwrap_or_default();
+            }
         }
     }
 
@@ -715,22 +1013,32 @@ pub fn special_tokens(model_path: &Path) -> SpecialTokens {
         }
     }
 
-    // Tier 3 — nothing declared. Say so; do not invent one.
+    // Tier 3 — nothing resolved. Say so; do not invent one.
     if out.bos.is_empty() || out.eos.is_empty() {
         // Names `meta`, not `model_path`: for a `.gguf` checkpoint those differ,
         // and the operator needs the directory the files are actually read
         // from, not the path to the weights.
+        //
+        // "No X could be resolved," NOT "X declares no Y." A GGUF whose own
+        // metadata DOES declare `bos_token_id`/`eos_token_id`, but in a type
+        // or against a token list `read_gguf_declaration`'s `lookup` cannot
+        // read, reaches this same empty `out.bos`/`out.eos` as a checkpoint
+        // that never declared anything — and an earlier warn from that read
+        // already named the real reason. "Declares no X" would be false for
+        // that checkpoint: it declared one; reading it is what failed.
         tracing::warn!(
-            "{} declares no {}; rendering its chat template with an empty string there. \
-             A chat template that references the missing token will omit it. Add a \
-             tokenizer_config.json with bos_token/eos_token, or a config.json with \
-             bos_token_id/eos_token_id whose ids appear in tokenizer.json's added_tokens.",
-            meta.display(),
+            "no {} could be resolved for {}; rendering its chat template with an empty \
+             string there. A chat template that references the missing token will omit \
+             it. If the checkpoint's own metadata declares one, an earlier warning names \
+             why it could not be read. Otherwise, add a tokenizer_config.json with \
+             bos_token/eos_token, or a config.json with bos_token_id/eos_token_id whose \
+             ids appear in tokenizer.json's added_tokens.",
             match (out.bos.is_empty(), out.eos.is_empty()) {
                 (true, true) => "BOS or EOS token",
                 (true, false) => "BOS token",
                 _ => "EOS token",
-            }
+            },
+            meta.display(),
         );
     }
 
@@ -1062,10 +1370,13 @@ pub enum ProbeOverride {
 ///
 /// # The tiers, and why each lands where it does
 ///
-/// * [`Resolution::TokenizerConfig`] — refuse. The checkpoint's own
-///   `chat_template` is the model author's declaration; a registry candidate is
-///   this project's approximation of a family. No probe board can outrank that,
-///   because the probe's three candidates are exactly the approximations.
+/// * [`Resolution::TokenizerConfig`] and [`Resolution::GgufMetadata`] —
+///   refuse. The checkpoint's own chat template — `chat_template` in
+///   `tokenizer_config.json` for a directory checkpoint, or the `.gguf`
+///   file's own embedded metadata for a single-file one — is the model
+///   author's declaration; a registry candidate is this project's
+///   approximation of a family. No probe board can outrank that, because the
+///   probe's three candidates are exactly the approximations.
 /// * [`Resolution::Sidecar`] and [`Resolution::Probe`] — refuse. Both mean a
 ///   sidecar is already on disk: [`resolve`] returns the sidecar's OWN
 ///   `resolved_by`, so `Probe` can only have come from one, and it is precisely
@@ -1080,7 +1391,7 @@ pub enum ProbeOverride {
 /// # It classifies the ANSWER's authority, not the file it arrived in
 ///
 /// [`resolve`] reports a sidecar's own `resolved_by`, so a sidecar can announce
-/// itself as any of the six. One recording `Registry` therefore lands in the
+/// itself as any of the seven. One recording `Registry` therefore lands in the
 /// warn class rather than the refuse class, even though a file exists on disk.
 /// That is the intended reading — what is being weighed is how good the current
 /// answer is, and a pinned registry guess is still a registry guess — but it is
@@ -1091,7 +1402,7 @@ pub enum ProbeOverride {
 ///
 /// # `force`
 ///
-/// `force` turns the three refusals into warnings — it does not silence them.
+/// `force` turns the four refusals into warnings — it does not silence them.
 /// What it must NOT do is anything else: the caller's other refusals
 /// (nonexistent path, empty EOS, unfingerprintable checkpoint, and both
 /// selection rules above) are unaffected by it, and it does not imply `--yes`.
@@ -1111,27 +1422,26 @@ pub fn probe_override_check(current: Resolution, force: bool) -> ProbeOverride {
     // overwrite this function exists to prevent. A new tier must be classified
     // here, or the build fails.
     match current {
-        Resolution::TokenizerConfig => {
+        Resolution::TokenizerConfig | Resolution::GgufMetadata => {
             if force {
-                ProbeOverride::Warn(
-                    "--force: overriding Resolution::TokenizerConfig — the checkpoint's own \
-                     chat_template, which is the model author's declaration — with a probe \
-                     result. It will be read at Resolution::Probe, ahead of that template, on \
-                     every later start."
-                        .to_string(),
-                )
+                ProbeOverride::Warn(format!(
+                    "--force: overriding Resolution::{current:?} — the checkpoint's own chat \
+                     template, which is the model author's declaration — with a probe result. \
+                     It will be read at Resolution::Probe, ahead of that template, on every \
+                     later start."
+                ))
             } else {
-                ProbeOverride::Refuse(
-                    "this checkpoint already resolves at Resolution::TokenizerConfig — it ships \
-                     its own chat_template, which is the model author's declaration and \
+                ProbeOverride::Refuse(format!(
+                    "this checkpoint already resolves at Resolution::{current:?} — it carries \
+                     its own chat template, which is the model author's declaration and \
                      outranks any candidate this probe can offer. A sidecar written here would \
                      be read at Resolution::Probe, AHEAD of that template, on every later start, \
-                     so a strictly worse approximation would replace it silently (measured on \
-                     SmolLM2-360M-Instruct, whose own template injects a default system message \
-                     that registry::CHATML does not). Re-run with --force if overriding the \
-                     checkpoint's own template is genuinely what you mean. Nothing was written."
-                        .to_string(),
-                )
+                     so a strictly worse approximation would replace it silently (measured on a \
+                     directory checkpoint, SmolLM2-360M-Instruct, whose own template injects a \
+                     default system message that registry::CHATML does not). Re-run with \
+                     --force if overriding the checkpoint's own template is genuinely what you \
+                     mean. Nothing was written."
+                ))
             }
         }
         Resolution::Sidecar => {
