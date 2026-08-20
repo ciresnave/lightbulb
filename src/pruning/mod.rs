@@ -123,6 +123,19 @@ pub enum StructuredPattern {
 
     /// N:M structured: Keep N weights per M consecutive weights
     /// Common patterns: 2:4 (50% sparsity), 4:8 (50% sparsity)
+    ///
+    /// **Not renamed to `NM` despite `non_camel_case_types`, for two reasons.**
+    /// `N:M` is the term of art in the sparsity literature — "2:4 sparsity" is
+    /// how the pattern is named in papers and in NVIDIA's tooling — so `N_M`
+    /// carries meaning that `NM` discards to satisfy a style lint.
+    ///
+    /// More concretely: this enum derives `Serialize`/`Deserialize`, so the
+    /// variant name is **wire format**. Renaming it silently changes how any
+    /// persisted `StructuredPattern` round-trips, and a config written by an
+    /// older build would stop deserialising with no compile-time signal. A
+    /// style lint does not know that, which is why this is an allow rather
+    /// than a fix.
+    #[allow(non_camel_case_types)]
     N_M { n: usize, m: usize },
 }
 

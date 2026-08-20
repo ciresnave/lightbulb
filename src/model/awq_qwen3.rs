@@ -131,7 +131,7 @@ fn apply_rope(x: &Tensor, cos: &Tensor, sin: &Tensor) -> Result<Tensor> {
     let x_rotated = Tensor::cat(&[&x2.neg()?, &x1], candlelight::core::D::Minus1)?;
 
     // x * cos + rotate_half(x) * sin
-    (x.broadcast_mul(cos)? + x_rotated.broadcast_mul(sin)?)
+    x.broadcast_mul(cos)? + x_rotated.broadcast_mul(sin)?
 }
 
 /// Qwen3 MLP with AWQ quantization
