@@ -1,26 +1,46 @@
 // Rust FFI bindings for Marlin CUDA kernels (AWQ quantization)
 //
-// PROVENANCE UNRESOLVED — do not add a copyright header here without
-// settling this first, and do not delete this note.
+// PROVENANCE RESOLVED 2026-08-20 — ruled by CireSnave. Do not delete this
+// note; it exists so the question is not re-derived from scratch.
 //
-// The previous header read "Based on candle-vllm's Marlin implementation"
-// and "License: Apache-2.0 OR MIT (dual-licensed like candle-vllm)".
-// Both were measured wrong on 2026-08-20:
+// RULING: this `extern "C"` block is INTERFACE, not expression. Its form is
+// dictated by the CUDA kernel ABI, so two authors binding the same kernel
+// independently produce nearly the same file, and similarity is evidence of a
+// shared constraint rather than of copying. No third-party copyright is owed
+// and this crate's `MIT OR Apache-2.0` is truthful for this file.
 //
-//   * candle-vllm is MIT ONLY (GitHub API spdx_id = MIT, single LICENSE
-//     file). It is not dual-licensed, so "dual-licensed like candle-vllm"
-//     asserts something false about the upstream.
-//   * candle-vllm does not declare these symbols at all. Its
-//     src/backend/gptq.rs:3-4 IMPORTS marlin_4bit_f16, marlin_4bit_bf16,
-//     marlin_awq_4bit_f16, marlin_awq_4bit_bf16, gptq_repack and awq_repack
-//     from `attention_rs::kernels::ffi` — a different project. So the named
-//     upstream does not contain the thing this file resembles.
+// The measurements are kept because a future reader grepping history will find
+// the old header's claims and re-derive all of this otherwise:
 //
-// What this file is: six `extern "C"` declarations whose names are fixed by
-// the CUDA kernel ABI. Whether that is derivable expression at all, and if
-// so from whom, is unsettled — and it MATTERS, because a file derived from
-// an MIT-only upstream cannot be offered under Apache-2.0, which would make
-// this crate's dual licence untrue for this file.
+//   * The old header said "Based on candle-vllm's Marlin implementation" and
+//     "License: Apache-2.0 OR MIT (dual-licensed like candle-vllm)". BOTH were
+//     false. candle-vllm is MIT ONLY (spdx_id = MIT, single LICENSE file), and
+//     it does not declare these symbols at all — its src/backend/gptq.rs:3-4
+//     IMPORTS all six from `attention_rs`. The header named a PEER, not a
+//     parent: another consumer of the same upstream, which is provenance no
+//     "does the URL resolve" check could ever falsify.
+//
+//   * The actual declaring project is guoqingbao/attention.rs,
+//     src/kernels/src/ffi.rs — `license = "MIT"` in Cargo.toml, no LICENSE
+//     file in the repo (hence GitHub reporting `license: null`).
+//
+//   * ONE MEASUREMENT SITS IN TENSION WITH THE RULING'S STATED REASON, and is
+//     recorded rather than dropped. Parameter NAMES are not fixed by the ABI.
+//     The CUDA entry point in marlin_matmul_f16.cu names them
+//     `A, B, scales, zeros, g_idx, C, prob_m, prob_k, prob_n, workspace,
+//     groupsize, stream`. attention.rs's Rust renames six of those
+//     (A→inputs, B→weight, C→out, prob_m/k/n→m/k/n), and this file carries all
+//     six renames identically. So the TYPES and ORDER are ABI-mandated, as the
+//     ruling says; the NAMES were an upstream author's choice and match.
+//     The ruling stands — names are functional labels on a fixed signature —
+//     but "can only be built one way" is exactly true of the signature and not
+//     of the identifiers, and that distinction should not be lost if this is
+//     ever cited as precedent.
+//
+// SCOPE: this ruling covers ABI-mandated bindings ONLY. It does NOT extend to
+// the callers — src/backend/marlin.rs, src/model/awq_qwen3.rs,
+// src/loaders/awq.rs — which choose their own error handling, dispatch and
+// naming, and which were audited separately (see the commit that added this).
 
 use core::ffi::{c_int, c_void};
 
