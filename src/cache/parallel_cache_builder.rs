@@ -329,10 +329,7 @@ impl ParallelKvCache {
     ) -> Result<usize> {
         let k_dims = k_data.dims();
         if k_dims.len() != 4 || k_dims[0] != 1 {
-            candlelight::core::bail!(
-                "Expected [1, heads, span_len, dim], got {:?}",
-                k_dims
-            );
+            candlelight::core::bail!("Expected [1, heads, span_len, dim], got {:?}", k_dims);
         }
 
         let span_len = k_dims[2];
@@ -886,10 +883,7 @@ impl ParallelCacheBuilder {
             //
             // Build a per-cache-position mapping: position → position (identity)
             // so H2O stores metadata keyed by cache position.
-            let key_len = attention_weights
-                .first()
-                .map(|row| row.len())
-                .unwrap_or(0);
+            let key_len = attention_weights.first().map(|row| row.len()).unwrap_or(0);
 
             let mut cache_position_map: std::collections::HashMap<usize, usize> =
                 std::collections::HashMap::with_capacity(key_len);
@@ -1097,7 +1091,13 @@ impl ParallelCacheBuilder {
                     0.0
                 };
 
-                summaries.push((span.id, span.tag, token_count, total_attention, avg_attention));
+                summaries.push((
+                    span.id,
+                    span.tag,
+                    token_count,
+                    total_attention,
+                    avg_attention,
+                ));
             }
         }
 
@@ -1612,9 +1612,7 @@ impl ParallelCacheBuilder {
         let slot = span.slot;
 
         // Update span state
-        span.state = SpanState::PartiallyEvicted {
-            remaining_ranges,
-        };
+        span.state = SpanState::PartiallyEvicted { remaining_ranges };
 
         // Mark positions in the eviction mask
         let mut count = 0;
@@ -2492,7 +2490,6 @@ impl ParallelCacheBuilder {
         )?
         .to_dtype(self.dtype)?;
         let indices = Tensor::new(cache_indices, self.device())?;
-
 
         Ok(IndicesAndMask {
             indices,

@@ -13,9 +13,9 @@
 
 use anyhow::Result;
 use lightbulb::hardware::{
+    HardwareProfile,
     batch_sizing::{BatchSizeConfig, ModelMemoryProfile},
     model_selection::recommend_model,
-    HardwareProfile,
 };
 use lightbulb::model::{ChunkedPrefillConfig, ParallelModelManager};
 use std::env;
@@ -33,7 +33,10 @@ fn main() -> Result<()> {
     let profile = HardwareProfile::detect()?;
     println!("{}", profile.summary());
     println!("   ML Suitability Score: {:.1}/10.0", profile.ml_score);
-    println!("   Recommended Backend: {:?}\n", profile.recommended_backend());
+    println!(
+        "   Recommended Backend: {:?}\n",
+        profile.recommended_backend()
+    );
 
     // === STEP 2: Model Recommendation ===
     println!("2. MODEL RECOMMENDATION");
@@ -43,7 +46,10 @@ fn main() -> Result<()> {
     println!("   Recommended Model: {}", recommendation.model_name);
     println!("   Data Type: {:?}", recommendation.dtype);
     println!("   Backend: {:?}", recommendation.backend);
-    println!("   Expected Throughput: {:.2} tokens/sec", recommendation.estimated_throughput);
+    println!(
+        "   Expected Throughput: {:.2} tokens/sec",
+        recommendation.estimated_throughput
+    );
     println!("   Confidence: {:.1}%\n", recommendation.confidence * 100.0);
 
     // === STEP 3: Batch Size Calculation ===
@@ -80,8 +86,8 @@ fn main() -> Result<()> {
         let start = Instant::now();
         let _manager = ParallelModelManager::load_adaptive(
             model_dir,
-            512,            // context_length
-            Some("f16"),    // dtype
+            512,         // context_length
+            Some("f16"), // dtype
             Some(ChunkedPrefillConfig::default()),
         )?;
         let load_time = start.elapsed();

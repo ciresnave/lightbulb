@@ -411,8 +411,16 @@ mod tests {
         let f16 = parse_dtype(Some("f16")).unwrap();
         let bf16 = parse_dtype(Some("bf16")).unwrap();
         assert_ne!(f16, bf16, "f16 and bf16 must not map to the same DType");
-        assert_eq!(f16, DType::F16, "f16 must map to F16, not merely to some 2-byte type");
-        assert_eq!(bf16, DType::BF16, "bf16 must map to BF16, not merely to some 2-byte type");
+        assert_eq!(
+            f16,
+            DType::F16,
+            "f16 must map to F16, not merely to some 2-byte type"
+        );
+        assert_eq!(
+            bf16,
+            DType::BF16,
+            "bf16 must map to BF16, not merely to some 2-byte type"
+        );
     }
 
     /// An absent dtype defaults to F32.

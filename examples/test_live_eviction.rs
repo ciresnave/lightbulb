@@ -25,8 +25,8 @@ fn main() -> Result<()> {
 
     let mut model = ParallelModelManager::load_gguf(
         &model_path,
-        1,   // max_batch_size (single request at a time)
-        64,  // context_length — deliberately tiny to force eviction
+        1,  // max_batch_size (single request at a time)
+        64, // context_length — deliberately tiny to force eviction
         None,
         None,
     )?;
@@ -37,16 +37,16 @@ fn main() -> Result<()> {
     let config = SegmentedCacheConfig {
         enabled: true,
         capture_attention: true,
-        shadow_mode: false,           // LIVE eviction
-        tiered_demotion: true,        // Demote to RAM, don't delete
+        shadow_mode: false,    // LIVE eviction
+        tiered_demotion: true, // Demote to RAM, don't delete
         log_span_attention: true,
-        h2o_update_interval: 2,       // Frequent updates for small context
+        h2o_update_interval: 2, // Frequent updates for small context
         attention_power: 2.0,
-        base_decay_rate: 0.05,        // Faster decay for tiny context
+        base_decay_rate: 0.05,             // Faster decay for tiny context
         eviction_pressure_threshold: 0.70, // Lower threshold — evict at 70%
         per_token_eviction: false,
         max_ram_demoted_segments: 16,
-        disk_storage_path: None,      // RAM only, no disk
+        disk_storage_path: None, // RAM only, no disk
         ..Default::default()
     };
 
@@ -142,8 +142,5 @@ fn find_model() -> Result<String> {
             return Ok(path.to_string());
         }
     }
-    anyhow::bail!(
-        "Model not found. Tried: {:?}",
-        candidates
-    )
+    anyhow::bail!("Model not found. Tried: {:?}", candidates)
 }

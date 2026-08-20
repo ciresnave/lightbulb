@@ -282,7 +282,7 @@
 
 use std::sync::Arc;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 
 use fuel::inference_context::InferenceContext;
 use fuel::kv_block_pool::{KvGeometry, PhysBlockId, SessionHandle};
@@ -603,7 +603,9 @@ impl<'m> BatchedPagedDecoder<'m> {
         for i in 0..b {
             for j in (i + 1)..b {
                 if batch[i].0 == batch[j].0 {
-                    bail!("BatchedPagedDecoder::step: session appears twice in one batch (rows {i} and {j})");
+                    bail!(
+                        "BatchedPagedDecoder::step: session appears twice in one batch (rows {i} and {j})"
+                    );
                 }
             }
         }
@@ -820,10 +822,7 @@ impl<'m> BatchedPagedDecoder<'m> {
                 cfg.vocab_size
             );
         }
-        Ok(flat
-            .chunks(cfg.vocab_size)
-            .map(|c| c.to_vec())
-            .collect())
+        Ok(flat.chunks(cfg.vocab_size).map(|c| c.to_vec()).collect())
     }
 
     /// One transformer layer at batch width `B`.
@@ -1039,7 +1038,9 @@ impl<'m> BatchedPagedDecoder<'m> {
         }
         last.into_iter()
             .enumerate()
-            .map(|(i, o)| o.with_context(|| format!("prefill_batch: sequence {i} produced no logits")))
+            .map(|(i, o)| {
+                o.with_context(|| format!("prefill_batch: sequence {i} produced no logits"))
+            })
             .collect()
     }
 }
@@ -1227,20 +1228,46 @@ mod tests {
         let mut layers = Vec::with_capacity(config.n_layers);
         for i in 0..config.n_layers {
             layers.push(LayerWeights {
-                attn_q: mat(&format!("model.layers.{i}.self_attn.q_proj.weight"), dim, dim)?,
+                attn_q: mat(
+                    &format!("model.layers.{i}.self_attn.q_proj.weight"),
+                    dim,
+                    dim,
+                )?,
                 attn_q_bias: None,
-                attn_k: mat(&format!("model.layers.{i}.self_attn.k_proj.weight"), kv_dim, dim)?,
+                attn_k: mat(
+                    &format!("model.layers.{i}.self_attn.k_proj.weight"),
+                    kv_dim,
+                    dim,
+                )?,
                 attn_k_bias: None,
-                attn_v: mat(&format!("model.layers.{i}.self_attn.v_proj.weight"), kv_dim, dim)?,
+                attn_v: mat(
+                    &format!("model.layers.{i}.self_attn.v_proj.weight"),
+                    kv_dim,
+                    dim,
+                )?,
                 attn_v_bias: None,
-                attn_o: mat(&format!("model.layers.{i}.self_attn.o_proj.weight"), dim, dim)?,
-                ffn_gate: mat(&format!("model.layers.{i}.mlp.gate_proj.weight"), ffn_dim, dim)?,
-                ffn_up: mat(&format!("model.layers.{i}.mlp.up_proj.weight"), ffn_dim, dim)?,
-                ffn_down: mat(&format!("model.layers.{i}.mlp.down_proj.weight"), dim, ffn_dim)?,
+                attn_o: mat(
+                    &format!("model.layers.{i}.self_attn.o_proj.weight"),
+                    dim,
+                    dim,
+                )?,
+                ffn_gate: mat(
+                    &format!("model.layers.{i}.mlp.gate_proj.weight"),
+                    ffn_dim,
+                    dim,
+                )?,
+                ffn_up: mat(
+                    &format!("model.layers.{i}.mlp.up_proj.weight"),
+                    ffn_dim,
+                    dim,
+                )?,
+                ffn_down: mat(
+                    &format!("model.layers.{i}.mlp.down_proj.weight"),
+                    dim,
+                    ffn_dim,
+                )?,
                 attn_norm_gain: vecf(&format!("model.layers.{i}.input_layernorm.weight"))?,
-                ffn_norm_gain: vecf(&format!(
-                    "model.layers.{i}.post_attention_layernorm.weight"
-                ))?,
+                ffn_norm_gain: vecf(&format!("model.layers.{i}.post_attention_layernorm.weight"))?,
             });
         }
         let weights = LlamaWeights {
@@ -1285,18 +1312,14 @@ mod tests {
             head_dim: hd,
             elem_size: 4,
         };
-        let pool = DeviceKvPool::new(geom, DType::F32, &dev)
-            .map_err(|e| anyhow::anyhow!("{e:?}"))?;
+        let pool =
+            DeviceKvPool::new(geom, DType::F32, &dev).map_err(|e| anyhow::anyhow!("{e:?}"))?;
 
         // Three "batch rows" of new K, shaped exactly as the decoder shapes them:
         // [B, Hkv, 1, D], sliced per row and reshaped to the block's slot layout.
         let b = 3usize;
         let src_data = rand_f32(b * hkv * hd, 7);
-        let src = LazyTensor::from_f32(
-            src_data.clone(),
-            Shape::from_dims(&[b, hkv, 1, hd]),
-            &dev,
-        );
+        let src = LazyTensor::from_f32(src_data.clone(), Shape::from_dims(&[b, hkv, 1, hd]), &dev);
         // Deliberately non-monotonic, non-identity targets.
         let targets: [(usize, usize); 3] = [(4, 2), (1, 0), (3, 3)];
 
@@ -1394,22 +1417,15 @@ mod tests {
         let dev = Device::cpu();
 
         let x_data = rand_f32(b * heads * hd, 11);
-        let x = LazyTensor::from_f32(
-            x_data.clone(),
-            Shape::from_dims(&[b, heads, 1, hd]),
-            &dev,
-        );
+        let x = LazyTensor::from_f32(x_data.clone(), Shape::from_dims(&[b, heads, 1, hd]), &dev);
         let (cos, sin) = batched_rope_tables(&x, base, &positions, hd)?;
         let got = rope_batched(&x, &cos, &sin)?.realize_f32();
 
         let per_row = heads * hd;
         for (row, &pos) in positions.iter().enumerate() {
             let row_data = x_data[row * per_row..(row + 1) * per_row].to_vec();
-            let xr = LazyTensor::from_f32(
-                row_data,
-                Shape::from_dims(&[1usize, heads, 1, hd]),
-                &dev,
-            );
+            let xr =
+                LazyTensor::from_f32(row_data, Shape::from_dims(&[1usize, heads, 1, hd]), &dev);
             let (c, s) = xr.rope_tables_const(base, pos, 1, hd);
             let want = xr
                 .rope_with_tables_decomposed(&c, &s)
@@ -1464,8 +1480,8 @@ mod tests {
             head_dim: d,
             elem_size: 4,
         };
-        let mut pool = DeviceKvPool::new(geom, DType::F32, &dev)
-            .map_err(|e| anyhow::anyhow!("{e:?}"))?;
+        let mut pool =
+            DeviceKvPool::new(geom, DType::F32, &dev).map_err(|e| anyhow::anyhow!("{e:?}"))?;
 
         // A filler first, so no session gets an identity physical layout.
         let filler = pool.core_mut().open();
@@ -1519,11 +1535,7 @@ mod tests {
 
         let q_data = rand_f32(b * hq * d, 42);
         let run = |block_table: Vec<u32>| -> Result<Vec<f32>> {
-            let q = LazyTensor::from_f32(
-                q_data.clone(),
-                Shape::from_dims(&[b, hq, 1, d]),
-                &dev,
-            );
+            let q = LazyTensor::from_f32(q_data.clone(), Shape::from_dims(&[b, hq, 1, d]), &dev);
             let kc = q.const_placeholder_like(pool.pool_shape().clone(), DType::F32);
             let vc = q.const_placeholder_like(pool.pool_shape().clone(), DType::F32);
             let bt = q.const_u32_like(block_table, pt.block_table_shape());
@@ -1687,7 +1699,11 @@ mod tests {
             }
         }
         for (i, toks) in seqs.iter().enumerate() {
-            assert_eq!(next[i], toks.len(), "SCHEDULE does not consume sequence {i}");
+            assert_eq!(
+                next[i],
+                toks.len(),
+                "SCHEDULE does not consume sequence {i}"
+            );
         }
         Ok(out)
     }
@@ -1895,7 +1911,10 @@ mod tests {
                 "layer {l}: b's decode mutated the donor's K block — this is the silent \
                  cross-session corruption, and it produces wrong logits rather than an error"
             );
-            assert_eq!(*v_before, v_after, "layer {l}: b's decode mutated the donor's V block");
+            assert_eq!(
+                *v_before, v_after,
+                "layer {l}: b's decode mutated the donor's V block"
+            );
         }
 
         // 3. The prefix survived the break: slots 0..2 of the new block match
@@ -1997,8 +2016,8 @@ mod tests {
             head_dim: cfg.head_dim,
             elem_size: 4,
         };
-        let mut pool = DeviceKvPool::new(geom, DType::F32, &dev)
-            .map_err(|e| anyhow::anyhow!("{e:?}"))?;
+        let mut pool =
+            DeviceKvPool::new(geom, DType::F32, &dev).map_err(|e| anyhow::anyhow!("{e:?}"))?;
         let s = pool.core_mut().open();
 
         let mut dec = BatchedPagedDecoder::new(&model, 16, 4)?;
@@ -2045,8 +2064,8 @@ mod tests {
             head_dim: cfg.head_dim,
             elem_size: 4,
         };
-        let mut pool = DeviceKvPool::new(geom, DType::F32, &dev)
-            .map_err(|e| anyhow::anyhow!("{e:?}"))?;
+        let mut pool =
+            DeviceKvPool::new(geom, DType::F32, &dev).map_err(|e| anyhow::anyhow!("{e:?}"))?;
         for (i, p) in prompts.iter().enumerate() {
             let s = pool.core_mut().open();
             let mut last = Vec::new();
@@ -2087,7 +2106,10 @@ mod tests {
         let b = dec.open_session();
         let c = dec.open_session();
 
-        assert!(dec.can_admit(&[(0, 1), (0, 1), (0, 1)]), "3 blocks, 3 tokens");
+        assert!(
+            dec.can_admit(&[(0, 1), (0, 1), (0, 1)]),
+            "3 blocks, 3 tokens"
+        );
         dec.step(&[(a, 1), (b, 2), (c, 3)])?;
         assert_eq!(dec.free_blocks(), 0);
 
@@ -2162,8 +2184,14 @@ mod tests {
             Ok(_) => panic!("a non-F32 projection must be refused at construction"),
             Err(e) => e.to_string(),
         };
-        assert!(msg.contains("attn_q"), "the error must name the weight: {msg}");
-        assert!(msg.contains("loader_f32"), "the error must say what to do: {msg}");
+        assert!(
+            msg.contains("attn_q"),
+            "the error must name the weight: {msg}"
+        );
+        assert!(
+            msg.contains("loader_f32"),
+            "the error must say what to do: {msg}"
+        );
     }
 
     // ---- TinyLlama, behind #[ignore] --------------------------------------
@@ -2254,8 +2282,12 @@ mod tests {
         }
         let elapsed = started.elapsed();
 
-        let d0 = tok.decode(&out[0], true).map_err(|e| anyhow::anyhow!("{e}"))?;
-        let d1 = tok.decode(&out[1], true).map_err(|e| anyhow::anyhow!("{e}"))?;
+        let d0 = tok
+            .decode(&out[0], true)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        let d1 = tok
+            .decode(&out[1], true)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
         eprintln!("seq 0: {d0:?}");
         eprintln!("seq 1: {d1:?}");
         eprintln!(
@@ -2339,7 +2371,10 @@ mod tests {
         );
 
         let env_usize = |k: &str, d: usize| -> usize {
-            std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d)
+            std::env::var(k)
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(d)
         };
         let prompt_len = env_usize("LB_SWEEP_PROMPT", 8);
         let steps = env_usize("LB_SWEEP_STEPS", 4);
@@ -2420,12 +2455,7 @@ mod tests {
             for i in 0..=steps {
                 let t0 = Instant::now();
                 logits = model
-                    .forward_with_kv_context_persistent(
-                        &[next],
-                        &mut cache,
-                        &mut ctx,
-                        &mut session,
-                    )
+                    .forward_with_kv_context_persistent(&[next], &mut cache, &mut ctx, &mut session)
                     .map_err(|e| anyhow::anyhow!("baseline decode: {e:?}"))?;
                 let dt = t0.elapsed();
                 // Step 0 is warm-up: the persistent session is built on first
@@ -2528,7 +2558,11 @@ mod tests {
         eprintln!(
             "  => paged {} the contiguous baseline at TinyLlama scale on CPU, \
              under lockstep-uniform contexts (the batched path's best case).",
-            if best.2 < contiguous { "BEATS" } else { "does NOT beat" }
+            if best.2 < contiguous {
+                "BEATS"
+            } else {
+                "does NOT beat"
+            }
         );
         Ok(())
     }

@@ -48,7 +48,7 @@ async fn main() -> Result<()> {
         model_max_batch_size: 16,
         model_context_length: 4096,
         enable_audit_log: database_url.is_some(), // Disable audit logging without database
-        tls: Default::default(), // TLS disabled by default
+        tls: Default::default(),                  // TLS disabled by default
     };
 
     tracing::info!("Starting Lightbulb API server");

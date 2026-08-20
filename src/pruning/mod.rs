@@ -351,10 +351,9 @@ impl WandaScorer {
 
     /// Get averaged activation norms
     fn get_activation_norms(&self) -> Result<Tensor> {
-        let norms = self
-            .activation_norms
-            .as_ref()
-            .ok_or_else(|| candlelight::core::Error::Msg("No activation norms accumulated".into()))?;
+        let norms = self.activation_norms.as_ref().ok_or_else(|| {
+            candlelight::core::Error::Msg("No activation norms accumulated".into())
+        })?;
 
         // Average over number of batches seen
         if self.samples_seen > 0 {

@@ -118,26 +118,22 @@ impl MarlinMatMul {
         let out_shape = Shape::from_dims(&[m, n]);
         let elem_count = m * n;
         let out = unsafe {
-            CudaStorage::alloc(
-                self.precision.dtype(),
-                elem_count,
-                inputs.device().clone(),
-            )?
+            CudaStorage::alloc(self.precision.dtype(), elem_count, inputs.device().clone())?
         };
 
         // Allocate workspace (Marlin requires temporary workspace)
         // Size: typically 16 * n elements
         let workspace_size = 16 * n;
-        let workspace = unsafe {
-            CudaStorage::alloc(DType::U8, workspace_size, inputs.device().clone())?
-        };
+        let workspace =
+            unsafe { CudaStorage::alloc(DType::U8, workspace_size, inputs.device().clone())? };
 
         // Get raw pointers
         let inputs_ptr = inputs.as_cuda_slice::<f16>()?.device_ptr() as *const std::ffi::c_void;
         let weights_ptr = weights.as_cuda_slice::<i32>()?.device_ptr() as *const c_int;
         let scales_ptr = scales.as_cuda_slice::<f16>()?.device_ptr() as *const std::ffi::c_void;
         let out_ptr = out.as_cuda_slice::<f16>()?.device_ptr() as *mut std::ffi::c_void;
-        let workspace_ptr = workspace.as_cuda_slice::<u8>()?.device_ptr() as *const std::ffi::c_void;
+        let workspace_ptr =
+            workspace.as_cuda_slice::<u8>()?.device_ptr() as *const std::ffi::c_void;
 
         // Get CUDA stream
         let stream = inputs.device().cuda_stream() as i64;
@@ -246,7 +242,14 @@ impl CustomOp3 for MarlinMatMul {
         scales: &CudaStorage,
         scales_shape: &Shape,
     ) -> Result<(CudaStorage, Shape)> {
-        self.cuda_fwd_impl(inputs, weights, scales, inputs_shape, weights_shape, scales_shape)
+        self.cuda_fwd_impl(
+            inputs,
+            weights,
+            scales,
+            inputs_shape,
+            weights_shape,
+            scales_shape,
+        )
     }
 }
 

@@ -678,10 +678,9 @@ impl KvCompressor for RkvScorer {
         let redundancy = self.compute_redundancy(keys, ctx)?;
 
         // Get importance from context (updated by update_attention)
-        let importance = ctx
-            .importance
-            .as_ref()
-            .ok_or_else(|| candlelight::core::Error::Msg("No importance scores available".into()))?;
+        let importance = ctx.importance.as_ref().ok_or_else(|| {
+            candlelight::core::Error::Msg("No importance scores available".into())
+        })?;
 
         // Compute joint scores and select tokens
         let joint_scores = self.compute_joint_score(importance, &redundancy);

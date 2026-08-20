@@ -113,7 +113,9 @@ mod tests {
         use fuel::inference_context::{DecodeSession, InferenceContext, KvCache};
 
         let Some(dir) = tinyllama_dir() else {
-            panic!("no TinyLlama snapshot — this test asserts numerical behaviour, so it fails rather than skipping");
+            panic!(
+                "no TinyLlama snapshot — this test asserts numerical behaviour, so it fails rather than skipping"
+            );
         };
         let loaded = crate::model_fuel::loader_f32::load_llama_f32_from_dir(&dir)?;
         let prompt: Vec<u32> = vec![1, 450, 7483, 310, 3444, 338];

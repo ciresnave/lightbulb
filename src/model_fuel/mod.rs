@@ -112,8 +112,8 @@ pub mod session;
 /// Returns the realized product so a caller can assert on real values rather than
 /// on the absence of a panic.
 pub fn smoke_matmul() -> Vec<f32> {
-    use fuel::lazy::LazyTensor;
     use fuel::Device;
+    use fuel::lazy::LazyTensor;
 
     let dev = Device::cpu();
 
@@ -155,8 +155,8 @@ mod tests {
     #[test]
     #[should_panic(expected = "same graph")]
     fn independently_constructed_tensors_cannot_be_combined() {
-        use fuel::lazy::LazyTensor;
         use fuel::Device;
+        use fuel::lazy::LazyTensor;
 
         let dev = Device::cpu();
         let a = LazyTensor::from_f32(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], (2usize, 3usize), &dev);

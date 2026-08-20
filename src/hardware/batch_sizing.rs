@@ -76,12 +76,11 @@ impl ModelMemoryProfile {
     pub fn kv_cache_bytes_per_request(&self, dtype_bytes: usize) -> u64 {
         // head_dim = hidden_size / num_heads (assume num_heads = num_kv_heads for simplicity)
         let head_dim = self.hidden_size / self.num_kv_heads.max(1);
-        
-        let kv_elements_per_layer = 
-            2 * self.num_kv_heads * self.context_window * head_dim;
-        
+
+        let kv_elements_per_layer = 2 * self.num_kv_heads * self.context_window * head_dim;
+
         let total_elements = self.num_layers * kv_elements_per_layer;
-        
+
         (total_elements * dtype_bytes) as u64
     }
 
@@ -131,21 +130,21 @@ pub fn calculate_optimal_batch_size(
     let config = config.unwrap_or_default();
 
     // === 1. Memory-limited batch size ===
-    
+
     // Available memory for inference (after OS overhead)
-    let available_memory = (profile.memory.available_bytes as f64 
-        * config.memory_utilization_target) as u64;
-    
+    let available_memory =
+        (profile.memory.available_bytes as f64 * config.memory_utilization_target) as u64;
+
     // Memory needed for model weights (shared across all requests)
     let model_weights = model.weights_bytes;
-    
+
     // Remaining memory for KV caches
     let memory_for_kv = available_memory.saturating_sub(model_weights);
-    
+
     // Per-request memory (KV cache only, since weights are shared)
-    let per_request_memory = (model.total_bytes_per_request(dtype_bytes) as f64 
-        * config.memory_safety_margin) as u64;
-    
+    let per_request_memory =
+        (model.total_bytes_per_request(dtype_bytes) as f64 * config.memory_safety_margin) as u64;
+
     let memory_limited_batch = if per_request_memory > 0 {
         (memory_for_kv / per_request_memory) as usize
     } else {
@@ -153,36 +152,36 @@ pub fn calculate_optimal_batch_size(
     };
 
     // === 2. CPU-limited batch size ===
-    
+
     // Scale with CPU cores, but apply diminishing returns
     // Formula: batch_size = sqrt(cores) × multiplier
     // - Dual-core: sqrt(2) × 2 ≈ 3
     // - 16-core: sqrt(16) × 2 = 8
     // - 128-core: sqrt(128) × 2 ≈ 23
     let cpu_cores = profile.cpu.physical_cores;
-    
+
     // If GPU is available, CPU constraint is less relevant (GPU does the heavy lifting)
     // Use a high value that won't be the bottleneck
     let cpu_limited_batch = if profile.gpu.is_some() {
-        config.max_batch_size  // Don't let CPU limit when GPU is available
+        config.max_batch_size // Don't let CPU limit when GPU is available
     } else {
         // CPU-only: conservative scaling
         ((cpu_cores as f64).sqrt() * 2.0).ceil() as usize
     };
 
     // === 3. GPU-limited batch size (if applicable) ===
-    
+
     let gpu_limited_batch = if let Some(gpu) = &profile.gpu {
         // GPU batch sizing: VRAM capacity is primary constraint
         let vram_for_kv = ((gpu.vram_bytes as f64 * config.memory_utilization_target) as u64)
             .saturating_sub(model_weights);
-        
+
         let gpu_batch = if per_request_memory > 0 {
             (vram_for_kv / per_request_memory) as usize
         } else {
             config.max_batch_size
         };
-        
+
         // GPUs benefit from larger batches (kernel launch amortization)
         // Boost by 1.5x compared to CPU
         ((gpu_batch as f64) * 1.5).ceil() as usize
@@ -191,7 +190,7 @@ pub fn calculate_optimal_batch_size(
     };
 
     // === 4. Final batch size: minimum of all constraints ===
-    
+
     let optimal_batch = memory_limited_batch
         .min(cpu_limited_batch)
         .min(gpu_limited_batch)
@@ -229,11 +228,11 @@ impl RuntimeBatchAdjuster {
     pub fn record_batch_memory(&mut self, total_memory_used: u64, batch_size: usize) {
         if batch_size > 0 {
             let per_request = total_memory_used / batch_size as u64;
-            
+
             self.peak_memory_per_request = Some(
                 self.peak_memory_per_request
                     .map(|peak| peak.max(per_request))
-                    .unwrap_or(per_request)
+                    .unwrap_or(per_request),
             );
         }
     }
@@ -256,39 +255,45 @@ impl RuntimeBatchAdjuster {
         queue_length: usize,
     ) -> Option<usize> {
         let utilization = current_memory_usage as f64 / available_memory as f64;
-        
+
         // Reduce batch size if memory pressure is high (>80%)
         if utilization > 0.8 && self.current_batch_size > self.config.min_batch_size {
             let new_batch_size = (self.current_batch_size * 3 / 4).max(self.config.min_batch_size);
-            
+
             self.adjustment_history.push((
                 std::time::Instant::now(),
                 new_batch_size,
-                format!("Reduced: High memory pressure ({:.1}%)", utilization * 100.0),
+                format!(
+                    "Reduced: High memory pressure ({:.1}%)",
+                    utilization * 100.0
+                ),
             ));
-            
+
             self.current_batch_size = new_batch_size;
             return Some(new_batch_size);
         }
-        
+
         // Increase batch size if utilization is low (<50%) and queue is growing
-        if utilization < 0.5 
-            && queue_length > self.current_batch_size 
-            && self.current_batch_size < self.config.max_batch_size 
+        if utilization < 0.5
+            && queue_length > self.current_batch_size
+            && self.current_batch_size < self.config.max_batch_size
         {
             let new_batch_size = (self.current_batch_size * 5 / 4).min(self.config.max_batch_size);
-            
+
             self.adjustment_history.push((
                 std::time::Instant::now(),
                 new_batch_size,
-                format!("Increased: Low utilization ({:.1}%), queue backlog ({})", 
-                    utilization * 100.0, queue_length),
+                format!(
+                    "Increased: Low utilization ({:.1}%), queue backlog ({})",
+                    utilization * 100.0,
+                    queue_length
+                ),
             ));
-            
+
             self.current_batch_size = new_batch_size;
             return Some(new_batch_size);
         }
-        
+
         None
     }
 
@@ -317,23 +322,26 @@ mod tests {
             num_kv_heads: 32,
             context_window: 512,
         };
-        
+
         let kv_bytes = model.kv_cache_bytes_per_request(2); // f16
-        
+
         // Expected: 32 layers × 2 (K+V) × 32 heads × 512 context × 128 head_dim × 2 bytes
         // = 32 × 2 × 32 × 512 × 128 × 2 = 268,435,456 bytes ≈ 256 MB
-        
-        println!("KV cache per request: {:.1} MB", kv_bytes as f64 / (1024.0 * 1024.0));
+
+        println!(
+            "KV cache per request: {:.1} MB",
+            kv_bytes as f64 / (1024.0 * 1024.0)
+        );
         assert!(kv_bytes > 200 * 1024 * 1024); // At least 200 MB
         assert!(kv_bytes < 400 * 1024 * 1024); // Less than 400 MB
     }
 
     #[test]
     fn test_batch_size_scaling() {
-        use crate::hardware::{CpuInfo, MemoryInfo, GpuInfo, GpuBackend};
+        use crate::hardware::{CpuInfo, GpuBackend, GpuInfo, MemoryInfo};
 
         // Test different hardware profiles
-        
+
         // 1. Minimal hardware: 4GB RAM, dual-core CPU
         let profile_minimal = HardwareProfile {
             cpu: CpuInfo {
@@ -350,7 +358,7 @@ mod tests {
             gpu: None,
             ml_score: 3.0,
         };
-        
+
         // 2. Mid-range hardware: 16GB RAM, 8-core CPU
         let profile_mid = HardwareProfile {
             cpu: CpuInfo {
@@ -367,7 +375,7 @@ mod tests {
             gpu: None,
             ml_score: 6.0,
         };
-        
+
         // 3. High-end hardware: 32GB RAM, 16-core CPU, 24GB GPU
         let profile_high = HardwareProfile {
             cpu: CpuInfo {
@@ -389,7 +397,7 @@ mod tests {
             }),
             ml_score: 9.0,
         };
-        
+
         // Llama 3B model
         let model = ModelMemoryProfile {
             weights_bytes: 6 * 1024 * 1024 * 1024,
@@ -398,21 +406,25 @@ mod tests {
             num_kv_heads: 32,
             context_window: 512,
         };
-        
-        let batch_minimal = calculate_optimal_batch_size(&profile_minimal, &model, 2, None).unwrap();
+
+        let batch_minimal =
+            calculate_optimal_batch_size(&profile_minimal, &model, 2, None).unwrap();
         let batch_mid = calculate_optimal_batch_size(&profile_mid, &model, 2, None).unwrap();
         let batch_high = calculate_optimal_batch_size(&profile_high, &model, 2, None).unwrap();
-        
+
         println!("Batch sizes:");
         println!("  Minimal (4GB): {}", batch_minimal);
         println!("  Mid (16GB): {}", batch_mid);
         println!("  High (32GB + GPU): {}", batch_high);
-        
+
         // Verify scaling: minimal < mid, and high is at least as good as mid
         assert!(batch_minimal >= 2, "Minimal should be at least 2");
         assert!(batch_mid > batch_minimal, "Mid should exceed minimal");
-        assert!(batch_high >= batch_mid, "High should be at least as good as mid");
-        
+        assert!(
+            batch_high >= batch_mid,
+            "High should be at least as good as mid"
+        );
+
         // Verify reasonable bounds
         assert!(batch_minimal <= 8);
         assert!(batch_mid <= 32);
@@ -423,28 +435,37 @@ mod tests {
     fn test_runtime_adjustment() {
         let config = BatchSizeConfig::default();
         let mut adjuster = RuntimeBatchAdjuster::new(8, config);
-        
+
         // Simulate high memory pressure
         let available = 16 * 1024 * 1024 * 1024u64; // 16GB
         let high_usage = (available as f64 * 0.85) as u64; // 85% usage
-        
+
         let adjustment = adjuster.check_adjustment(high_usage, available, 5);
         assert!(adjustment.is_some());
         assert!(adjustment.unwrap() < 8); // Should reduce
-        
-        println!("Adjustment after high memory: {} -> {}", 8, adjustment.unwrap());
-        
+
+        println!(
+            "Adjustment after high memory: {} -> {}",
+            8,
+            adjustment.unwrap()
+        );
+
         // Simulate low utilization with queue backlog
         let low_usage = (available as f64 * 0.3) as u64; // 30% usage
         let queue_length = 20; // Many pending requests
-        
+
         let adjustment2 = adjuster.check_adjustment(low_usage, available, queue_length);
         if let Some(new_batch) = adjustment2 {
-            println!("Adjustment after low utilization: {} -> {}", 
-                adjuster.current_batch_size(), new_batch);
+            println!(
+                "Adjustment after low utilization: {} -> {}",
+                adjuster.current_batch_size(),
+                new_batch
+            );
             // Either increased or stayed same (clamped at max)
-            assert!(new_batch >= adjuster.current_batch_size(), 
-                "Should increase or stay same when memory available");
+            assert!(
+                new_batch >= adjuster.current_batch_size(),
+                "Should increase or stay same when memory available"
+            );
         } else {
             println!("No adjustment needed - already at optimal size");
         }

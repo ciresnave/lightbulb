@@ -55,11 +55,7 @@ pub fn build_system_instruction(
 
 /// Build the correction/tightening user message used on retry attempt `n`
 /// (1-indexed; attempt 1 means the second inference call).
-pub fn build_tightening_message(
-    attempt: u32,
-    choices: &[String],
-    allow_index: bool,
-) -> String {
+pub fn build_tightening_message(attempt: u32, choices: &[String], allow_index: bool) -> String {
     let choice_list = choices
         .iter()
         .enumerate()
@@ -242,7 +238,12 @@ mod tests {
     #[test]
     fn inline_word() {
         assert_eq!(
-            parse("After analysis my answer is maybe.", &choices(), false, true),
+            parse(
+                "After analysis my answer is maybe.",
+                &choices(),
+                false,
+                true
+            ),
             Some("maybe".to_string())
         );
     }
@@ -256,7 +257,12 @@ mod tests {
     fn prefers_last_line() {
         // Both "yes" and "no" appear; last line wins.
         assert_eq!(
-            parse("First I thought yes.\nFinal answer:\nno", &choices(), false, true),
+            parse(
+                "First I thought yes.\nFinal answer:\nno",
+                &choices(),
+                false,
+                true
+            ),
             Some("no".to_string())
         );
     }

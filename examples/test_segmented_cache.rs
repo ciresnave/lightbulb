@@ -45,8 +45,7 @@ fn run_validation(model_path: &str) -> Result<()> {
     let start = std::time::Instant::now();
 
     let mut model = ParallelModelManager::load_gguf(
-        model_path,
-        2,    // max_batch_size (small for testing)
+        model_path, 2,    // max_batch_size (small for testing)
         256,  // context_length (small to trigger pressure faster)
         None, // chunked_prefill_config
         None, // device (auto-detect)
@@ -77,7 +76,10 @@ fn run_validation(model_path: &str) -> Result<()> {
     println!("Enabling segmented cache (shadow mode)...");
     println!("  attention_power: {}", config.attention_power);
     println!("  base_decay_rate: {}", config.base_decay_rate);
-    println!("  eviction_pressure_threshold: {}", config.eviction_pressure_threshold);
+    println!(
+        "  eviction_pressure_threshold: {}",
+        config.eviction_pressure_threshold
+    );
     println!("  h2o_update_interval: {}", config.h2o_update_interval);
     println!();
 
@@ -102,7 +104,11 @@ fn run_validation(model_path: &str) -> Result<()> {
     }
 
     let turn1_time = gen_start.elapsed();
-    println!("Turn 1 complete in {:.2}s ({} decode steps)\n", turn1_time.as_secs_f32(), step);
+    println!(
+        "Turn 1 complete in {:.2}s ({} decode steps)\n",
+        turn1_time.as_secs_f32(),
+        step
+    );
 
     // === Turn 2: Second user prompt (different topic) ===
     println!("--- Turn 2: Second user prompt ---");
@@ -123,7 +129,11 @@ fn run_validation(model_path: &str) -> Result<()> {
     }
 
     let turn2_time = gen_start.elapsed();
-    println!("Turn 2 complete in {:.2}s ({} decode steps)\n", turn2_time.as_secs_f32(), step);
+    println!(
+        "Turn 2 complete in {:.2}s ({} decode steps)\n",
+        turn2_time.as_secs_f32(),
+        step
+    );
 
     // === Turn 3: Third prompt to accumulate more spans ===
     println!("--- Turn 3: Third user prompt ---");
@@ -144,7 +154,11 @@ fn run_validation(model_path: &str) -> Result<()> {
     }
 
     let turn3_time = gen_start.elapsed();
-    println!("Turn 3 complete in {:.2}s ({} decode steps)\n", turn3_time.as_secs_f32(), step);
+    println!(
+        "Turn 3 complete in {:.2}s ({} decode steps)\n",
+        turn3_time.as_secs_f32(),
+        step
+    );
 
     // === Final Report ===
     println!("=== Validation Summary ===\n");
@@ -165,12 +179,16 @@ fn run_validation(model_path: &str) -> Result<()> {
         println!("  - Spans are being created but not scored");
     } else {
         println!("\nSpan Attention Rankings (most attended first):");
-        println!("{:>5} | {:>18} | {:>6} | {:>12} | {:>12}",
-            "ID", "Tag", "Tokens", "Total Attn", "Avg Attn");
+        println!(
+            "{:>5} | {:>18} | {:>6} | {:>12} | {:>12}",
+            "ID", "Tag", "Tokens", "Total Attn", "Avg Attn"
+        );
         println!("{}", "-".repeat(65));
         for (span_id, tag, token_count, total_attn, avg_attn) in &summaries {
-            println!("{:>5} | {:>18?} | {:>6} | {:>12.4} | {:>12.6}",
-                span_id, tag, token_count, total_attn, avg_attn);
+            println!(
+                "{:>5} | {:>18?} | {:>6} | {:>12.4} | {:>12.6}",
+                span_id, tag, token_count, total_attn, avg_attn
+            );
         }
     }
 

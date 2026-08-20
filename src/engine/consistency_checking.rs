@@ -300,10 +300,7 @@ impl ConsistencyChecker {
                             conflicts.push(Conflict {
                                 conflict_type: ConflictType::DirectContradiction,
                                 existing_fact: existing.clone(),
-                                explanation: format!(
-                                    "Contradicts existing fact about {}",
-                                    subject
-                                ),
+                                explanation: format!("Contradicts existing fact about {}", subject),
                                 confidence: 0.95,
                             });
                         } else {
@@ -423,7 +420,9 @@ impl ConsistencyChecker {
         let words1: Vec<&str> = text1.split_whitespace().take(3).collect();
         let words2: Vec<&str> = text2.split_whitespace().take(3).collect();
 
-        words1.iter().any(|w1| words2.iter().any(|w2| w1 == w2 && w1.len() > 3))
+        words1
+            .iter()
+            .any(|w1| words2.iter().any(|w2| w1 == w2 && w1.len() > 3))
     }
 
     /// Extract temporal marker from text

@@ -285,13 +285,19 @@ impl PrecisionProfiler {
 
     /// Record activation statistics for a layer
     pub fn record_activation(&mut self, layer_id: usize, values: &[f32]) {
-        let stats = self.layer_stats.entry(layer_id).or_insert_with(ActivationStats::new);
+        let stats = self
+            .layer_stats
+            .entry(layer_id)
+            .or_insert_with(ActivationStats::new);
         stats.update(values);
     }
 
     /// Record layer latency
     pub fn record_latency(&mut self, layer_id: usize, latency_us: u64) {
-        let latencies = self.layer_latencies.entry(layer_id).or_insert_with(Vec::new);
+        let latencies = self
+            .layer_latencies
+            .entry(layer_id)
+            .or_insert_with(Vec::new);
         latencies.push(latency_us);
 
         // Keep only recent window
@@ -315,7 +321,9 @@ impl PrecisionProfiler {
         // Check if already selected
         if let Some(&precision) = self.layer_precisions.get(&layer_id) {
             // Adjust dynamically if enabled
-            if self.config.dynamic_adjustment && self.batches_processed > self.config.profiling_window {
+            if self.config.dynamic_adjustment
+                && self.batches_processed > self.config.profiling_window
+            {
                 return self.adjust_precision(layer_id, precision);
             }
             return precision;

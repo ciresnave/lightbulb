@@ -306,8 +306,13 @@ pub fn floor_align_prefix(match_len: usize, block_size: usize) -> (usize, usize)
 /// `blocks_required` and `capacity`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AdmissionDecision {
-    Admit { blocks_needed: usize },
-    Reject { blocks_needed: usize, blocks_available: usize },
+    Admit {
+        blocks_needed: usize,
+    },
+    Reject {
+        blocks_needed: usize,
+        blocks_available: usize,
+    },
 }
 
 impl AdmissionDecision {
@@ -362,9 +367,14 @@ impl PagedAdmission {
     fn verdict(&self, need: usize, cap: PoolCapacity) -> AdmissionDecision {
         let available = cap.free_blocks.saturating_sub(self.reserve_blocks);
         if need <= available {
-            AdmissionDecision::Admit { blocks_needed: need }
+            AdmissionDecision::Admit {
+                blocks_needed: need,
+            }
         } else {
-            AdmissionDecision::Reject { blocks_needed: need, blocks_available: available }
+            AdmissionDecision::Reject {
+                blocks_needed: need,
+                blocks_available: available,
+            }
         }
     }
 }
@@ -485,7 +495,10 @@ impl BlockPrefixIndex {
         let hashes = self.chain_hashes(tokens);
         let mut added = 0;
         for (i, h) in hashes.into_iter().enumerate() {
-            let entry = PrefixEntry { donor, blocks: i + 1 };
+            let entry = PrefixEntry {
+                donor,
+                blocks: i + 1,
+            };
             if let Some(prev) = self.by_hash.insert(h, entry) {
                 // Re-pointing an existing chain at a new donor: release the old.
                 self.release_donor(prev.donor);
@@ -546,8 +559,12 @@ impl BlockPrefixIndex {
     }
 
     pub fn donors(&self) -> Vec<SessionHandle> {
-        let mut v: Vec<SessionHandle> =
-            self.donor_refs.iter().filter(|&(_, &n)| n > 0).map(|(&s, _)| s).collect();
+        let mut v: Vec<SessionHandle> = self
+            .donor_refs
+            .iter()
+            .filter(|&(_, &n)| n > 0)
+            .map(|(&s, _)| s)
+            .collect();
         v.sort_by_key(|s| format!("{s:?}"));
         v
     }
@@ -745,7 +762,11 @@ impl SpanBlockMap {
 
         // Greedy admission may overshoot on the last span; that is correct —
         // blocks come in whole-span units here, never partial.
-        EvictionPlan { blocks: chosen, victim_spans: victims, protected_tail }
+        EvictionPlan {
+            blocks: chosen,
+            victim_spans: victims,
+            protected_tail,
+        }
     }
 
     /// Convenience: rank with the real policy, then plan. Proves the two compose
@@ -760,7 +781,14 @@ impl SpanBlockMap {
         filled_tokens: usize,
     ) -> EvictionPlan {
         let ranked = policy.rank_spans_for_eviction(registry);
-        self.plan(registry, slot, &ranked, want_blocks, session_blocks, filled_tokens)
+        self.plan(
+            registry,
+            slot,
+            &ranked,
+            want_blocks,
+            session_blocks,
+            filled_tokens,
+        )
     }
 
     /// Turn H2O's per-block scores into a block set, for callers whose eviction
@@ -808,7 +836,11 @@ impl SpanBlockMap {
         }
         blocks.sort_unstable();
         blocks.dedup();
-        EvictionPlan { blocks, victim_spans: Vec::new(), protected_tail }
+        EvictionPlan {
+            blocks,
+            victim_spans: Vec::new(),
+            protected_tail,
+        }
     }
 
     /// End-to-end H2O eviction: score, plan, detach.
@@ -871,10 +903,12 @@ impl SpanBlockMap {
         s: SessionHandle,
         want_blocks: usize,
     ) -> Result<(EvictionPlan, EvictReport), PolicyError> {
-        let session_blocks =
-            pool.session_blocks(s).ok_or(PolicyError::Alloc(KvAllocError::UnknownSession))?;
-        let filled_tokens =
-            pool.filled_tokens(s).ok_or(PolicyError::Alloc(KvAllocError::UnknownSession))?;
+        let session_blocks = pool
+            .session_blocks(s)
+            .ok_or(PolicyError::Alloc(KvAllocError::UnknownSession))?;
+        let filled_tokens = pool
+            .filled_tokens(s)
+            .ok_or(PolicyError::Alloc(KvAllocError::UnknownSession))?;
         let scores = h2o_block_scores(policy, positions, &self.geom);
         let plan = self.plan_from_block_scores(&scores, want_blocks, session_blocks, filled_tokens);
         let report = pool.evict_blocks(s, &plan.blocks)?;
@@ -909,7 +943,10 @@ impl SpanBlockMap {
         if let Some(t) = protected_tail {
             candidate.remove(&t);
         }
-        candidate.into_iter().filter(|&b| b < session_blocks).collect()
+        candidate
+            .into_iter()
+            .filter(|&b| b < session_blocks)
+            .collect()
     }
 
     /// Reconcile Fuel's `EvictReport` back onto span state.
@@ -929,16 +966,24 @@ impl SpanBlockMap {
         report: &EvictReport,
     ) -> EvictionOutcome {
         debug_assert!(
-            report.freed.iter().all(|b| !report.still_shared.contains(b)),
+            report
+                .freed
+                .iter()
+                .all(|b| !report.still_shared.contains(b)),
             "a block cannot be both freed and still_shared",
         );
 
-        let cuts: Vec<Range<usize>> =
-            report.freed.iter().map(|&b| self.geom.token_range_of_block(b)).collect();
+        let cuts: Vec<Range<usize>> = report
+            .freed
+            .iter()
+            .map(|&b| self.geom.token_range_of_block(b))
+            .collect();
 
         let mut impacts = Vec::with_capacity(plan.victim_spans.len());
         for &span_id in &plan.victim_spans {
-            let Some(span) = registry.get(span_id) else { continue };
+            let Some(span) = registry.get(span_id) else {
+                continue;
+            };
             // **Start from what the span still holds, not from what it once
             // held.** A span is evicted over as many rounds as the scheduler
             // needs; recomputing from `start_pos..end_pos` every time re-adds
@@ -953,8 +998,10 @@ impl SpanBlockMap {
                 SpanState::PartiallyEvicted { remaining_ranges } => remaining_ranges.clone(),
                 SpanState::FullyEvicted => Vec::new(),
             };
-            let remaining: Vec<Range<usize>> =
-                base.iter().flat_map(|p| subtract_ranges(p.clone(), &cuts)).collect();
+            let remaining: Vec<Range<usize>> = base
+                .iter()
+                .flat_map(|p| subtract_ranges(p.clone(), &cuts))
+                .collect();
 
             let (state, impact) = if remaining.is_empty() {
                 (SpanState::FullyEvicted, EvictionImpact::FullyEvicted)
@@ -966,7 +1013,9 @@ impl SpanBlockMap {
                 (span.state.clone(), EvictionImpact::Unchanged)
             } else {
                 (
-                    SpanState::PartiallyEvicted { remaining_ranges: remaining.clone() },
+                    SpanState::PartiallyEvicted {
+                        remaining_ranges: remaining.clone(),
+                    },
                     EvictionImpact::PartiallyEvicted { remaining },
                 )
             };
@@ -1067,7 +1116,9 @@ pub fn h2o_block_scores(
 
     let mut per_block: HashMap<usize, f32> = HashMap::new();
     for (slot, score) in per_slot {
-        let Some(&pos) = positions.get(&slot) else { continue };
+        let Some(&pos) = positions.get(&slot) else {
+            continue;
+        };
         let b = pos / bs;
         let e = per_block.entry(b).or_insert(f32::INFINITY);
         if score < *e {
@@ -1077,7 +1128,9 @@ pub fn h2o_block_scores(
 
     let mut out: Vec<(usize, f32)> = per_block.into_iter().collect();
     out.sort_by(|a, b| {
-        b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal).then(a.0.cmp(&b.0))
+        b.1.partial_cmp(&a.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(a.0.cmp(&b.0))
     });
     out
 }
@@ -1197,7 +1250,10 @@ impl BlockTierMover {
     /// `key_prefix` must be unique per session — keys are
     /// `"{key_prefix}.b{logical:06}"`.
     pub fn new(geom: PagedGeometry, key_prefix: impl Into<String>) -> Self {
-        Self { geom, key_prefix: key_prefix.into() }
+        Self {
+            geom,
+            key_prefix: key_prefix.into(),
+        }
     }
 
     fn key_for(&self, logical: usize) -> String {
@@ -1326,7 +1382,9 @@ impl BlockTierMover {
         let n_layers = self.geom.n_layers();
         let block_elems = self.geom.block_elems();
         for &logical in freed {
-            let Some(data) = payloads.get(&logical) else { continue };
+            let Some(data) = payloads.get(&logical) else {
+                continue;
+            };
             let Some(phys) = plane.blocks().resident_block(s, logical) else {
                 return PolicyError::Invariant(format!(
                     "demote failed ({cause}) AND block {logical} is not resident after the \
@@ -1425,7 +1483,9 @@ fn f32s_to_le_bytes(v: &[f32]) -> Vec<u8> {
 }
 
 fn le_bytes_to_f32s(b: &[u8]) -> Vec<f32> {
-    b.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect()
+    b.chunks_exact(4)
+        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .collect()
 }
 
 // ===========================================================================
@@ -1464,7 +1524,10 @@ mod tests {
             Ok(())
         }
         fn load(&self, key: &str) -> Result<Vec<u8>, String> {
-            self.map.get(key).cloned().ok_or_else(|| format!("missing {key}"))
+            self.map
+                .get(key)
+                .cloned()
+                .ok_or_else(|| format!("missing {key}"))
         }
         fn delete(&mut self, key: &str) -> Result<(), String> {
             self.map.remove(key);
@@ -1524,7 +1587,9 @@ mod tests {
             phys: PhysBlockId,
             data: &[f32],
         ) -> Result<(), PolicyError> {
-            self.buf.borrow_mut().insert((layer, kind == BlockKind::K, phys), data.to_vec());
+            self.buf
+                .borrow_mut()
+                .insert((layer, kind == BlockKind::K, phys), data.to_vec());
             Ok(())
         }
     }
@@ -1567,7 +1632,11 @@ mod tests {
         let conservative: BTreeSet<usize> = blocks_fully_covered(&a, bs).collect();
         let liberal: BTreeSet<usize> = blocks_touched(&a, bs).collect();
 
-        assert_eq!(conservative, BTreeSet::from([0]), "only block 0 is entirely inside A");
+        assert_eq!(
+            conservative,
+            BTreeSet::from([0]),
+            "only block 0 is entirely inside A"
+        );
         assert_eq!(liberal, BTreeSet::from([0, 1]), "A touches block 1 as well");
         assert_ne!(
             conservative, liberal,
@@ -1593,12 +1662,32 @@ mod tests {
         let map = SpanBlockMap::new(g);
         let mut reg = SpanRegistry::new();
         // A: tokens 0..6 (victim). B: tokens 6..12 (survivor). Block 1 straddles.
-        reg.register(CacheSpan::new(1, 0, 0, 6, CacheTag::UserInput, Some("a".into()))).unwrap();
-        reg.register(CacheSpan::new(2, 0, 6, 12, CacheTag::UserInput, Some("b".into()))).unwrap();
+        reg.register(CacheSpan::new(
+            1,
+            0,
+            0,
+            6,
+            CacheTag::UserInput,
+            Some("a".into()),
+        ))
+        .unwrap();
+        reg.register(CacheSpan::new(
+            2,
+            0,
+            6,
+            12,
+            CacheTag::UserInput,
+            Some("b".into()),
+        ))
+        .unwrap();
 
         let plan = map.plan(&reg, 0, &[(1, 0.1)], 4, 3, 12);
         assert_eq!(plan.victim_spans, vec![1]);
-        assert_eq!(plan.blocks, vec![0], "block 1 is shared with survivor B, block 2 is B's");
+        assert_eq!(
+            plan.blocks,
+            vec![0],
+            "block 1 is shared with survivor B, block 2 is B's"
+        );
         assert_eq!(plan.protected_tail, Some(2), "token 11 lives in block 2");
     }
 
@@ -1626,8 +1715,24 @@ mod tests {
         let mut reg = SpanRegistry::new();
         // A (victim) 0..8 fully covers blocks 0 and 1.
         // B (survivor) 6..12 overlaps A on tokens 6,7 — inside block 1.
-        reg.register(CacheSpan::new(1, 0, 0, 8, CacheTag::UserInput, Some("a".into()))).unwrap();
-        reg.register(CacheSpan::new(2, 0, 6, 12, CacheTag::UserInput, Some("b".into()))).unwrap();
+        reg.register(CacheSpan::new(
+            1,
+            0,
+            0,
+            8,
+            CacheTag::UserInput,
+            Some("a".into()),
+        ))
+        .unwrap();
+        reg.register(CacheSpan::new(
+            2,
+            0,
+            6,
+            12,
+            CacheTag::UserInput,
+            Some("b".into()),
+        ))
+        .unwrap();
 
         // The setup must genuinely create the conflict, or this proves nothing.
         let contested = 1usize;
@@ -1658,7 +1763,8 @@ mod tests {
         let map = SpanBlockMap::new(g);
         let mut reg = SpanRegistry::new();
         // One span covering everything; blocks 0,1,2 fully covered by 0..12.
-        reg.register(CacheSpan::new(1, 0, 0, 12, CacheTag::UserInput, None)).unwrap();
+        reg.register(CacheSpan::new(1, 0, 0, 12, CacheTag::UserInput, None))
+            .unwrap();
         let plan = map.plan(&reg, 0, &[(1, 0.0)], 8, 3, 12);
         assert_eq!(plan.protected_tail, Some(2));
         assert_eq!(plan.blocks, vec![0, 1], "block 2 holds the newest token");
@@ -1671,7 +1777,8 @@ mod tests {
         let map = SpanBlockMap::new(g);
         let policy = SegmentedEvictionPolicy::new(SegmentedCacheConfig::default());
         let mut reg = SpanRegistry::new();
-        reg.register(CacheSpan::new(1, 0, 0, 8, CacheTag::UserInput, None)).unwrap();
+        reg.register(CacheSpan::new(1, 0, 0, 8, CacheTag::UserInput, None))
+            .unwrap();
         // No scores recorded yet ⇒ nothing ranked ⇒ empty plan. The point is that
         // rank_spans_for_eviction composes with plan() without VotingAggregator.
         let plan = map.plan_with_policy(&policy, &reg, 0, 4, 2, 8);
@@ -1697,8 +1804,17 @@ mod tests {
         // Now 0 free. Asking for one more token needs 1 block: reject, and the
         // allocator agrees by returning OutOfBlocks.
         let d = adm.decide(&p, 16, 1);
-        assert_eq!(d, AdmissionDecision::Reject { blocks_needed: 1, blocks_available: 0 });
-        assert_eq!(p.append(s, 1), Err(KvAllocError::OutOfBlocks { need: 1, have: 0 }));
+        assert_eq!(
+            d,
+            AdmissionDecision::Reject {
+                blocks_needed: 1,
+                blocks_available: 0
+            }
+        );
+        assert_eq!(
+            p.append(s, 1),
+            Err(KvAllocError::OutOfBlocks { need: 1, have: 0 })
+        );
     }
 
     #[test]
@@ -1711,7 +1827,10 @@ mod tests {
         assert!(!s2.decide(&p, 0, 16).is_admit());
         assert_eq!(
             s2.decide(&p, 0, 16),
-            AdmissionDecision::Reject { blocks_needed: 4, blocks_available: 2 }
+            AdmissionDecision::Reject {
+                blocks_needed: 4,
+                blocks_available: 2
+            }
         );
     }
 
@@ -1726,14 +1845,20 @@ mod tests {
         // A plausible consumer-side reimplementation that is wrong by one.
         let wrong = (16 / 4) + 1;
         assert_eq!(correct, 4);
-        assert_ne!(correct, wrong, "the control must actually differ from the truth");
+        assert_ne!(
+            correct, wrong,
+            "the control must actually differ from the truth"
+        );
 
         // And the difference is verdict-changing at the boundary.
         let adm = PagedAdmission::new(0);
         let good = adm.decide(&p, 0, 16);
         let bad = adm.verdict(wrong, p.capacity());
         assert!(good.is_admit());
-        assert!(!bad.is_admit(), "the off-by-one must flip a legal admit into a reject");
+        assert!(
+            !bad.is_admit(),
+            "the off-by-one must flip a legal admit into a reject"
+        );
     }
 
     // -------------------------------------------------------------------
@@ -1747,7 +1872,11 @@ mod tests {
         let mut p = pool(16, 4);
         let donor = p.open();
         p.append(donor, donor_tokens.len()).unwrap();
-        assert_eq!(idx.record(&donor_tokens, donor), 2, "only whole blocks are indexed");
+        assert_eq!(
+            idx.record(&donor_tokens, donor),
+            2,
+            "only whole blocks are indexed"
+        );
 
         // Query shares 9 tokens then diverges.
         let mut q: Vec<u32> = (0..9).collect();
@@ -1785,7 +1914,12 @@ mod tests {
         p.append(donor, 12).unwrap(); // 3 blocks
 
         let dst = p.open();
-        let m = PrefixMatch { donor, blocks: 2, shared_tokens: 8, remainder_tokens: 0 };
+        let m = PrefixMatch {
+            donor,
+            blocks: 2,
+            shared_tokens: 8,
+            remainder_tokens: 0,
+        };
         let filled = splice_prefix(&mut p, &m, dst).unwrap();
         assert_eq!(filled, 8);
         assert_eq!(filled % bs, 0, "the invariant splice_prefix enforces");
@@ -1794,7 +1928,11 @@ mod tests {
         p.append(dst, 1).unwrap();
         let write_idx = 8 / bs; // forward_paged_step: tok_pos / block_size
         let phys = p.resident_block(dst, write_idx).unwrap();
-        assert_eq!(p.block_refcount(phys), 1, "the write target must be exclusive");
+        assert_eq!(
+            p.block_refcount(phys),
+            1,
+            "the write target must be exclusive"
+        );
         assert_ne!(
             Some(phys),
             p.resident_block(donor, write_idx),
@@ -1849,7 +1987,12 @@ mod tests {
 
         // Now the guard: splice_prefix refuses to create that state.
         let dst2 = p.open();
-        let bad = PrefixMatch { donor: donor6, blocks: 2, shared_tokens: 8, remainder_tokens: 0 };
+        let bad = PrefixMatch {
+            donor: donor6,
+            blocks: 2,
+            shared_tokens: 8,
+            remainder_tokens: 0,
+        };
         let err = splice_prefix(&mut p, &bad, dst2).unwrap_err();
         assert!(
             matches!(err, PolicyError::Invariant(ref m) if m.contains("not block-aligned")),
@@ -1858,7 +2001,12 @@ mod tests {
 
         // And the aligned form of the same donor is accepted.
         let dst3 = p.open();
-        let good = PrefixMatch { donor, blocks: 1, shared_tokens: 4, remainder_tokens: 0 };
+        let good = PrefixMatch {
+            donor,
+            blocks: 1,
+            shared_tokens: 4,
+            remainder_tokens: 0,
+        };
         assert_eq!(splice_prefix(&mut p, &good, dst3).unwrap(), 4);
     }
 
@@ -1892,7 +2040,12 @@ mod tests {
             .collect();
 
         let dst = p.open();
-        let bad = PrefixMatch { donor, blocks: 2, shared_tokens: 8, remainder_tokens: 0 };
+        let bad = PrefixMatch {
+            donor,
+            blocks: 2,
+            shared_tokens: 8,
+            remainder_tokens: 0,
+        };
         let err = splice_prefix(&mut p, &bad, dst).unwrap_err();
         assert!(
             matches!(err, PolicyError::Invariant(ref m) if m.contains("not block-aligned")),
@@ -1905,23 +2058,45 @@ mod tests {
             "dst must hold NOTHING after a refusal — the pre-fix guard spliced first \
              and reported afterwards, leaving dst holding the donor's tokens"
         );
-        assert_eq!(p.session_blocks(dst), Some(0), "dst must own no blocks after a refusal");
+        assert_eq!(
+            p.session_blocks(dst),
+            Some(0),
+            "dst must own no blocks after a refusal"
+        );
         for (i, before) in refs_before.iter().enumerate() {
             let phys = p.resident_block(donor, i).unwrap();
             assert_eq!(
-                p.block_refcount(phys), *before,
+                p.block_refcount(phys),
+                *before,
                 "donor block {i} refcount changed on a refused splice — the donor is \
                  now pinned by a session that holds nothing"
             );
         }
-        assert_eq!(p.free_blocks(), free_before, "free list moved on a refused splice");
-        assert_eq!(p.session_blocks(donor), Some(donor_blocks), "donor block count changed");
-        assert_eq!(p.filled_tokens(donor), Some(donor_filled), "donor fill changed");
+        assert_eq!(
+            p.free_blocks(),
+            free_before,
+            "free list moved on a refused splice"
+        );
+        assert_eq!(
+            p.session_blocks(donor),
+            Some(donor_blocks),
+            "donor block count changed"
+        );
+        assert_eq!(
+            p.filled_tokens(donor),
+            Some(donor_filled),
+            "donor fill changed"
+        );
 
         // And the pool is still usable for the aligned case afterwards — a
         // refusal must not poison the donor for a later legitimate splice.
         let dst2 = p.open();
-        let good = PrefixMatch { donor, blocks: 1, shared_tokens: 4, remainder_tokens: 0 };
+        let good = PrefixMatch {
+            donor,
+            blocks: 1,
+            shared_tokens: 4,
+            remainder_tokens: 0,
+        };
         assert_eq!(splice_prefix(&mut p, &good, dst2).unwrap(), 4);
     }
 
@@ -1932,8 +2107,16 @@ mod tests {
         p.append(donor, 8).unwrap();
         let dst = p.open();
         p.append(dst, 4).unwrap();
-        let m = PrefixMatch { donor, blocks: 2, shared_tokens: 8, remainder_tokens: 0 };
-        assert!(matches!(splice_prefix(&mut p, &m, dst), Err(PolicyError::Invariant(_))));
+        let m = PrefixMatch {
+            donor,
+            blocks: 2,
+            shared_tokens: 8,
+            remainder_tokens: 0,
+        };
+        assert!(matches!(
+            splice_prefix(&mut p, &m, dst),
+            Err(PolicyError::Invariant(_))
+        ));
     }
 
     #[test]
@@ -1962,9 +2145,17 @@ mod tests {
         report: &EvictReport,
     ) -> Vec<(SpanId, EvictionImpact)> {
         // The deliberately-wrong implementation: subtract still_shared too.
-        let mut cuts: Vec<Range<usize>> =
-            report.freed.iter().map(|&b| g.token_range_of_block(b)).collect();
-        cuts.extend(report.still_shared.iter().map(|&b| g.token_range_of_block(b)));
+        let mut cuts: Vec<Range<usize>> = report
+            .freed
+            .iter()
+            .map(|&b| g.token_range_of_block(b))
+            .collect();
+        cuts.extend(
+            report
+                .still_shared
+                .iter()
+                .map(|&b| g.token_range_of_block(b)),
+        );
         plan.victim_spans
             .iter()
             .filter_map(|&id| {
@@ -2000,7 +2191,8 @@ mod tests {
         p.splice(donor, sitter, 0, 2).unwrap(); // both blocks now refcount 2
 
         let mut reg = SpanRegistry::new();
-        reg.register(CacheSpan::new(1, 0, 0, 8, CacheTag::UserInput, None)).unwrap();
+        reg.register(CacheSpan::new(1, 0, 0, 8, CacheTag::UserInput, None))
+            .unwrap();
         let plan = EvictionPlan {
             blocks: vec![0, 1],
             victim_spans: vec![1],
@@ -2008,7 +2200,10 @@ mod tests {
         };
 
         let report = p.evict_blocks(donor, &plan.blocks).unwrap();
-        assert!(report.freed.is_empty(), "both blocks are shared, so nothing is detachable");
+        assert!(
+            report.freed.is_empty(),
+            "both blocks are shared, so nothing is detachable"
+        );
         assert_eq!(report.still_shared, vec![0, 1]);
 
         // Wrong implementation first, so we know the assertion can fail.
@@ -2025,7 +2220,10 @@ mod tests {
             vec![(1, EvictionImpact::Unchanged)],
             "still_shared blocks are STILL RESIDENT — the span is not demoted"
         );
-        assert_ne!(outcome.impacts, wrong, "correct and wrong must differ, or this proves nothing");
+        assert_ne!(
+            outcome.impacts, wrong,
+            "correct and wrong must differ, or this proves nothing"
+        );
         assert_eq!(outcome.blocks_still_resident, vec![0, 1]);
         assert!(outcome.blocks_freed.is_empty());
         assert_eq!(reg.get(1).unwrap().state, SpanState::Active);
@@ -2047,9 +2245,13 @@ mod tests {
         p.splice(donor, sitter, 0, 1).unwrap(); // block 0 shared
 
         let mut reg = SpanRegistry::new();
-        reg.register(CacheSpan::new(1, 0, 0, 12, CacheTag::UserInput, None)).unwrap();
-        let plan =
-            EvictionPlan { blocks: vec![0, 1], victim_spans: vec![1], protected_tail: Some(2) };
+        reg.register(CacheSpan::new(1, 0, 0, 12, CacheTag::UserInput, None))
+            .unwrap();
+        let plan = EvictionPlan {
+            blocks: vec![0, 1],
+            victim_spans: vec![1],
+            protected_tail: Some(2),
+        };
 
         let report = p.evict_blocks(donor, &plan.blocks).unwrap();
         assert_eq!(report.freed, vec![1]);
@@ -2062,12 +2264,16 @@ mod tests {
             outcome.impacts,
             vec![(
                 1,
-                EvictionImpact::PartiallyEvicted { remaining: vec![0..4, 8..12] }
+                EvictionImpact::PartiallyEvicted {
+                    remaining: vec![0..4, 8..12]
+                }
             )]
         );
         assert_eq!(
             reg.get(1).unwrap().state,
-            SpanState::PartiallyEvicted { remaining_ranges: vec![0..4, 8..12] }
+            SpanState::PartiallyEvicted {
+                remaining_ranges: vec![0..4, 8..12]
+            }
         );
     }
 
@@ -2094,38 +2300,61 @@ mod tests {
         p.append(s, 12).unwrap(); // blocks 0,1,2 → tokens 0..12
 
         let mut reg = SpanRegistry::new();
-        reg.register(CacheSpan::new(1, 0, 0, 12, CacheTag::UserInput, None)).unwrap();
+        reg.register(CacheSpan::new(1, 0, 0, 12, CacheTag::UserInput, None))
+            .unwrap();
 
         // Round 1 — block 0 (tokens 0..4).
-        let plan1 =
-            EvictionPlan { blocks: vec![0], victim_spans: vec![1], protected_tail: Some(2) };
+        let plan1 = EvictionPlan {
+            blocks: vec![0],
+            victim_spans: vec![1],
+            protected_tail: Some(2),
+        };
         let r1 = p.evict_blocks(s, &plan1.blocks).unwrap();
         assert_eq!(r1.freed, vec![0], "setup: block 0 must actually be freed");
         let o1 = map.apply_report(&mut reg, &plan1, &r1);
         assert_eq!(
             o1.impacts,
-            vec![(1, EvictionImpact::PartiallyEvicted { remaining: vec![4..12] })]
+            vec![(
+                1,
+                EvictionImpact::PartiallyEvicted {
+                    remaining: vec![4..12]
+                }
+            )]
         );
 
         // Round 2 — block 1 (tokens 4..8). Only 8..12 can still be live.
-        let plan2 =
-            EvictionPlan { blocks: vec![1], victim_spans: vec![1], protected_tail: Some(2) };
+        let plan2 = EvictionPlan {
+            blocks: vec![1],
+            victim_spans: vec![1],
+            protected_tail: Some(2),
+        };
         let r2 = p.evict_blocks(s, &plan2.blocks).unwrap();
         assert_eq!(r2.freed, vec![1], "setup: block 1 must actually be freed");
         let o2 = map.apply_report(&mut reg, &plan2, &r2);
         assert_eq!(
             o2.impacts,
-            vec![(1, EvictionImpact::PartiallyEvicted { remaining: vec![8..12] })],
+            vec![(
+                1,
+                EvictionImpact::PartiallyEvicted {
+                    remaining: vec![8..12]
+                }
+            )],
             "round 2 must fold onto round 1's survivors — tokens 0..4 were freed in \
              round 1 and must not reappear"
         );
         assert_eq!(
             reg.get(1).unwrap().state,
-            SpanState::PartiallyEvicted { remaining_ranges: vec![8..12] }
+            SpanState::PartiallyEvicted {
+                remaining_ranges: vec![8..12]
+            }
         );
 
         // Round 3 — the last block. Now the span really is gone.
-        let plan3 = EvictionPlan { blocks: vec![2], victim_spans: vec![1], protected_tail: None };
+        let plan3 = EvictionPlan {
+            blocks: vec![2],
+            victim_spans: vec![1],
+            protected_tail: None,
+        };
         let r3 = p.evict_blocks(s, &plan3.blocks).unwrap();
         assert_eq!(r3.freed, vec![2], "setup: block 2 must actually be freed");
         let o3 = map.apply_report(&mut reg, &plan3, &r3);
@@ -2149,9 +2378,13 @@ mod tests {
         p.append(s, 12).unwrap();
 
         let mut reg = SpanRegistry::new();
-        reg.register(CacheSpan::new(1, 0, 0, 8, CacheTag::UserInput, None)).unwrap();
-        let plan =
-            EvictionPlan { blocks: vec![0, 1], victim_spans: vec![1], protected_tail: Some(2) };
+        reg.register(CacheSpan::new(1, 0, 0, 8, CacheTag::UserInput, None))
+            .unwrap();
+        let plan = EvictionPlan {
+            blocks: vec![0, 1],
+            victim_spans: vec![1],
+            protected_tail: Some(2),
+        };
         let report = p.evict_blocks(s, &plan.blocks).unwrap();
         assert_eq!(report.freed, vec![0, 1]);
         let outcome = map.apply_report(&mut reg, &plan, &report);
@@ -2181,7 +2414,10 @@ mod tests {
         assert_eq!(report.freed, vec![1]);
 
         // `append` still works — which is all Fuel's own test checks.
-        assert!(p.append(s, 1).is_ok(), "the allocator half really does keep working");
+        assert!(
+            p.append(s, 1).is_ok(),
+            "the allocator half really does keep working"
+        );
 
         // But the block table cannot be materialized, so the next
         // forward_paged_step would fail outright.
@@ -2192,13 +2428,19 @@ mod tests {
         );
 
         p.restore(s, report.handle).unwrap();
-        assert!(p.session_block_table(s).is_ok(), "restore is what re-enables decode");
+        assert!(
+            p.session_block_table(s).is_ok(),
+            "restore is what re-enables decode"
+        );
     }
 
     #[test]
     fn subtract_ranges_coalesces_and_handles_full_cover() {
         assert_eq!(subtract_ranges(0..12, &[4..8]), vec![0..4, 8..12]);
-        assert_eq!(subtract_ranges(0..12, &[0..4, 4..8, 8..12]), Vec::<Range<usize>>::new());
+        assert_eq!(
+            subtract_ranges(0..12, &[0..4, 4..8, 8..12]),
+            Vec::<Range<usize>>::new()
+        );
         assert_eq!(subtract_ranges(0..12, &[]), vec![0..12]);
         // Adjacent cuts leave coalesced survivors, not fragments.
         assert_eq!(subtract_ranges(0..16, &[4..8, 8..12]), vec![0..4, 12..16]);
@@ -2224,7 +2466,10 @@ mod tests {
         let scores = h2o_block_scores(&policy, &positions, &g);
         assert_eq!(scores.len(), 2, "8 tokens at bs=4 ⇒ 2 blocks");
         for (b, s) in &scores {
-            assert!(s.is_infinite() && s.is_sign_positive(), "block {b} lost its +INF score");
+            assert!(
+                s.is_infinite() && s.is_sign_positive(),
+                "block {b} lost its +INF score"
+            );
         }
     }
 
@@ -2252,7 +2497,10 @@ mod tests {
             "one hot token must protect its whole block (block 1 scored {})",
             by_block[&1]
         );
-        assert!(by_block[&1] < by_block[&0], "block 1 must be less evictable than block 0");
+        assert!(
+            by_block[&1] < by_block[&0],
+            "block 1 must be less evictable than block 0"
+        );
     }
 
     /// Each guard in `plan_from_block_scores` gets its own ineligible block, so
@@ -2294,8 +2542,11 @@ mod tests {
         let s = p.open();
         p.append(s, 12).unwrap(); // blocks 0,1,2
 
-        let mut policy =
-            H2OPolicy::new(H2OConfig { enabled: true, num_recent_to_keep: 0, decay_factor: 1.0 });
+        let mut policy = H2OPolicy::new(H2OConfig {
+            enabled: true,
+            num_recent_to_keep: 0,
+            decay_factor: 1.0,
+        });
         let positions = identity_positions(12);
         // One heavily-attended token inside block 1.
         let mut row = vec![0.0f32; 12];
@@ -2303,7 +2554,9 @@ mod tests {
         policy.update_attention_scores(&[row], &positions);
 
         let free_before = p.free_blocks();
-        let (plan, report) = map.evict_with_h2o(&mut p, &policy, &positions, s, 1).unwrap();
+        let (plan, report) = map
+            .evict_with_h2o(&mut p, &policy, &positions, s, 1)
+            .unwrap();
 
         assert_eq!(plan.protected_tail, Some(2), "token 11 lives in block 2");
         assert_eq!(
@@ -2315,7 +2568,11 @@ mod tests {
 
         // Fuel actually executed it — not just a plan that was computed and dropped.
         assert_eq!(report.freed, vec![0]);
-        assert_eq!(p.free_blocks(), free_before + 1, "the block returned to the free list");
+        assert_eq!(
+            p.free_blocks(),
+            free_before + 1,
+            "the block returned to the free list"
+        );
         assert!(p.resident_block(s, 0).is_none(), "block 0 is detached");
         assert!(p.resident_block(s, 1).is_some(), "the hot block survives");
         assert!(p.resident_block(s, 2).is_some(), "the tail survives");
@@ -2328,9 +2585,15 @@ mod tests {
     fn fill_io(plane: &MemPlane, g: &PagedGeometry, phys: PhysBlockId, seed: f32) {
         for layer in 0..g.n_layers() {
             let k: Vec<f32> = (0..g.block_elems()).map(|i| seed + i as f32).collect();
-            let v: Vec<f32> = (0..g.block_elems()).map(|i| seed + 100.0 + i as f32).collect();
-            plane.write_block_f32(layer, BlockKind::K, phys, &k).unwrap();
-            plane.write_block_f32(layer, BlockKind::V, phys, &v).unwrap();
+            let v: Vec<f32> = (0..g.block_elems())
+                .map(|i| seed + 100.0 + i as f32)
+                .collect();
+            plane
+                .write_block_f32(layer, BlockKind::K, phys, &k)
+                .unwrap();
+            plane
+                .write_block_f32(layer, BlockKind::V, phys, &v)
+                .unwrap();
         }
     }
 
@@ -2344,7 +2607,12 @@ mod tests {
     }
     impl FlakyStore {
         fn new(ok_before: usize) -> Self {
-            Self { ok_before, writes: 0, map: HashMap::new(), deleted: Vec::new() }
+            Self {
+                ok_before,
+                writes: 0,
+                map: HashMap::new(),
+                deleted: Vec::new(),
+            }
         }
     }
     impl DiskStore for FlakyStore {
@@ -2357,7 +2625,10 @@ mod tests {
             Ok(())
         }
         fn load(&self, key: &str) -> Result<Vec<u8>, String> {
-            self.map.get(key).cloned().ok_or_else(|| format!("missing {key}"))
+            self.map
+                .get(key)
+                .cloned()
+                .ok_or_else(|| format!("missing {key}"))
         }
         fn delete(&mut self, key: &str) -> Result<(), String> {
             self.map.remove(key);
@@ -2401,7 +2672,9 @@ mod tests {
         let free_before = plane.blocks().free_blocks();
         let blocks_before = plane.blocks().session_blocks(s).unwrap();
 
-        let err = mover.demote(&mut plane, &mut store, s, &[0, 1]).unwrap_err();
+        let err = mover
+            .demote(&mut plane, &mut store, s, &[0, 1])
+            .unwrap_err();
         assert!(
             matches!(err, PolicyError::Store(ref m) if m.contains("disk full")),
             "the ORIGINAL cause must survive the rollback rather than being replaced \
@@ -2413,14 +2686,30 @@ mod tests {
             "block 0 must be resident after a rolled-back demotion — the pre-fix code \
              dropped the Externalized handle, detaching it permanently",
         );
-        let after1 = plane.blocks().resident_block(s, 1).expect("block 1 must be resident");
+        let after1 = plane
+            .blocks()
+            .resident_block(s, 1)
+            .expect("block 1 must be resident");
         assert_eq!(plane.blocks().session_blocks(s), Some(blocks_before));
-        assert_eq!(plane.blocks().free_blocks(), free_before, "free list must be restored");
+        assert_eq!(
+            plane.blocks().free_blocks(),
+            free_before,
+            "free list must be restored"
+        );
 
         // And their bytes are back, at whatever physical ids the restore chose.
-        assert_eq!(plane.read_block_f32(0, BlockKind::K, after0).unwrap(), want0_k);
-        assert_eq!(plane.read_block_f32(0, BlockKind::K, after1).unwrap(), want1_k);
-        assert_eq!(plane.read_block_f32(0, BlockKind::V, after1).unwrap(), want1_v);
+        assert_eq!(
+            plane.read_block_f32(0, BlockKind::K, after0).unwrap(),
+            want0_k
+        );
+        assert_eq!(
+            plane.read_block_f32(0, BlockKind::K, after1).unwrap(),
+            want1_k
+        );
+        assert_eq!(
+            plane.read_block_f32(0, BlockKind::V, after1).unwrap(),
+            want1_v
+        );
 
         // The half-written disk state is gone — a retry must not find a stale key
         // for block 0 while block 1 has none.
@@ -2429,15 +2718,25 @@ mod tests {
             "the partial payload for block 0 survived the rollback: {:?}",
             store.map.keys().collect::<Vec<_>>()
         );
-        assert_eq!(store.deleted.len(), 1, "exactly the one persisted key is deleted");
+        assert_eq!(
+            store.deleted.len(),
+            1,
+            "exactly the one persisted key is deleted"
+        );
 
         // The pool is not poisoned: a real demote/promote cycle still works.
         let mut good = MemStore::default();
         let ticket = mover.demote(&mut plane, &mut good, s, &[1]).unwrap();
         assert_eq!(ticket.freed, vec![1]);
-        assert_eq!(mover.promote(&mut plane, &mut good, s, ticket).unwrap(), vec![1]);
+        assert_eq!(
+            mover.promote(&mut plane, &mut good, s, ticket).unwrap(),
+            vec![1]
+        );
         let final1 = plane.blocks().resident_block(s, 1).unwrap();
-        assert_eq!(plane.read_block_f32(0, BlockKind::K, final1).unwrap(), want1_k);
+        assert_eq!(
+            plane.read_block_f32(0, BlockKind::K, final1).unwrap(),
+            want1_k
+        );
     }
 
     #[test]
@@ -2465,7 +2764,10 @@ mod tests {
         let decoy = plane.blocks_mut().open();
         plane.blocks_mut().append(decoy, 2).unwrap();
         let stolen = plane.blocks().resident_block(decoy, 0).unwrap();
-        assert_eq!(stolen, phys_before, "the decoy must take the block we just freed");
+        assert_eq!(
+            stolen, phys_before,
+            "the decoy must take the block we just freed"
+        );
         fill_io(&plane, &g, stolen, -999.0);
 
         mover.promote(&mut plane, &mut store, s, ticket).unwrap();
@@ -2475,8 +2777,14 @@ mod tests {
             "restore must have allocated a FRESH block — this is why promote queries \
              resident_block AFTER restore"
         );
-        assert_eq!(plane.read_block_f32(0, BlockKind::K, phys_after).unwrap(), expected_k);
-        assert_eq!(plane.read_block_f32(0, BlockKind::V, phys_after).unwrap(), expected_v);
+        assert_eq!(
+            plane.read_block_f32(0, BlockKind::K, phys_after).unwrap(),
+            expected_k
+        );
+        assert_eq!(
+            plane.read_block_f32(0, BlockKind::V, phys_after).unwrap(),
+            expected_v
+        );
     }
 
     /// CONTROL. Flip one f32 in the stored payload and assert the round-trip
@@ -2511,9 +2819,20 @@ mod tests {
         let phys_after = plane.blocks().resident_block(s, 1).unwrap();
         let got_k = plane.read_block_f32(0, BlockKind::K, phys_after).unwrap();
 
-        assert_ne!(got_k, expected_k, "a corrupted payload MUST fail the comparison");
-        assert_eq!(got_k[0], original + 1.0, "and it must fail in exactly the corrupted slot");
-        assert_eq!(got_k[1..], expected_k[1..], "the rest must still round-trip");
+        assert_ne!(
+            got_k, expected_k,
+            "a corrupted payload MUST fail the comparison"
+        );
+        assert_eq!(
+            got_k[0],
+            original + 1.0,
+            "and it must fail in exactly the corrupted slot"
+        );
+        assert_eq!(
+            got_k[1..],
+            expected_k[1..],
+            "the rest must still round-trip"
+        );
     }
 
     /// `still_shared` blocks must never reach the store: they were never
@@ -2534,12 +2853,19 @@ mod tests {
         let ticket = mover.demote(&mut plane, &mut store, s, &[0, 1]).unwrap();
         assert_eq!(ticket.freed, vec![1]);
         assert_eq!(ticket.still_shared, vec![0]);
-        assert_eq!(ticket.bytes_stored_for(), vec![1], "block 0 must NOT be persisted");
+        assert_eq!(
+            ticket.bytes_stored_for(),
+            vec![1],
+            "block 0 must NOT be persisted"
+        );
         assert_eq!(store.map.len(), 1);
         assert!(!store.map.contains_key(&mover.key_for(0)));
 
         // Block 0 is still resident and still backing both sessions.
-        let phys0 = plane.blocks().resident_block(s, 0).expect("block 0 was never detached");
+        let phys0 = plane
+            .blocks()
+            .resident_block(s, 0)
+            .expect("block 0 was never detached");
         assert_eq!(plane.blocks().resident_block(sitter, 0), Some(phys0));
         assert!(plane.blocks().block_refcount(phys0) > 1);
     }
@@ -2564,7 +2890,10 @@ mod tests {
         assert!(dir.path().join(&ticket.keys[0].1).exists());
         mover.promote(&mut plane, &mut store, s, ticket).unwrap();
         let phys_after = plane.blocks().resident_block(s, 1).unwrap();
-        assert_eq!(plane.read_block_f32(0, BlockKind::V, phys_after).unwrap(), expected);
+        assert_eq!(
+            plane.read_block_f32(0, BlockKind::V, phys_after).unwrap(),
+            expected
+        );
         // promote deletes its keys.
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
     }
@@ -2613,6 +2942,9 @@ mod tests {
         assert_eq!(dpool.read_block(0, BlockKind::K, phys_after).unwrap(), k);
         assert_eq!(dpool.read_block(0, BlockKind::V, phys_after).unwrap(), v);
         // And the poisoned old location is untouched by the promote.
-        assert_eq!(dpool.read_block(0, BlockKind::K, phys_before).unwrap(), poison);
+        assert_eq!(
+            dpool.read_block(0, BlockKind::K, phys_before).unwrap(),
+            poison
+        );
     }
 }

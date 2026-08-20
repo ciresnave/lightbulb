@@ -128,7 +128,10 @@ fn main() -> Result<()> {
     // fields that exist rather than inventing stand-ins for the ones that don't.
     println!("  Prefill batches: {}", stats.prefill_batches);
     println!("  Decode batches: {}", stats.decode_batches);
-    println!("  Chunked prefill batches: {}", stats.chunked_prefill_batches);
+    println!(
+        "  Chunked prefill batches: {}",
+        stats.chunked_prefill_batches
+    );
     println!("  Requests processed: {}", stats.total_requests_processed);
     println!("  Max batch size: {}", stats.max_batch_size);
     println!(

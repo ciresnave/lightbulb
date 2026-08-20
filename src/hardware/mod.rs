@@ -17,7 +17,7 @@ pub mod batch_sizing;
 pub mod model_selection;
 
 pub use batch_sizing::{BatchSizeConfig, RuntimeBatchAdjuster, calculate_optimal_batch_size};
-pub use model_selection::{ModelRecommendation, recommend_model, list_viable_models};
+pub use model_selection::{ModelRecommendation, list_viable_models, recommend_model};
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -239,11 +239,12 @@ impl InferenceBackend {
     pub fn to_device(&self) -> candlelight::core::Device {
         match self {
             Self::Cpu => candlelight::core::Device::Cpu,
-            Self::Cuda => {
-                candlelight::core::Device::cuda_if_available(0).unwrap_or(candlelight::core::Device::Cpu)
-            }
+            Self::Cuda => candlelight::core::Device::cuda_if_available(0)
+                .unwrap_or(candlelight::core::Device::Cpu),
             Self::Rocm => candlelight::core::Device::Cpu, // TODO: Add ROCm support to Candle
-            Self::Metal => candlelight::core::Device::new_metal(0).unwrap_or(candlelight::core::Device::Cpu),
+            Self::Metal => {
+                candlelight::core::Device::new_metal(0).unwrap_or(candlelight::core::Device::Cpu)
+            }
             Self::Vulkan => candlelight::core::Device::Cpu, // TODO: Add Vulkan support
         }
     }

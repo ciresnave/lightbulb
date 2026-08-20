@@ -586,7 +586,11 @@ fn runner_up(logits: &[f32], top: usize) -> u32 {
             best = i;
         }
     }
-    if best == usize::MAX { top as u32 } else { best as u32 }
+    if best == usize::MAX {
+        top as u32
+    } else {
+        best as u32
+    }
 }
 
 fn probe_indices(vocab: usize) -> Vec<usize> {
@@ -1353,7 +1357,10 @@ fn control_baseline_identical_input_reports_no_drift() {
         render_drifts(&drifts)
     );
     let inputs = compare_inputs(&f, "synthetic-config-sha", REQUIRED_LOADER, 0);
-    assert!(inputs.is_empty(), "identical inputs reported drift: {inputs:?}");
+    assert!(
+        inputs.is_empty(),
+        "identical inputs reported drift: {inputs:?}"
+    );
 }
 
 /// C1 — a corrupted token id is caught at L1.
@@ -1385,8 +1392,7 @@ fn c2_probe_beyond_tolerance_is_caught() {
     let mut observed = f.cases[0].clone();
 
     // The probe holding SYNTHETIC_BIG_PROBE_IDX's value (20.0).
-    let k = f.cases[0]
-        .steps[0]
+    let k = f.cases[0].steps[0]
         .probe_indices
         .iter()
         .position(|&i| i == SYNTHETIC_BIG_PROBE_IDX)
@@ -1434,7 +1440,12 @@ fn c9_nonfinite_at_an_unprobed_index_is_caught_by_the_counter_alone() {
     let step0 = &f.cases[0].steps[0];
 
     // The sum band this comparison will use, recomputed exactly as compare_case does.
-    let peak = step0.stats.max.to_f32().abs().max(step0.stats.min.to_f32().abs()) as f64;
+    let peak = step0
+        .stats
+        .max
+        .to_f32()
+        .abs()
+        .max(step0.stats.min.to_f32().abs()) as f64;
     let sum_band = (step0.logits_len as f64) * (peak * tol.rel + tol.abs);
 
     // An index that is not a probe, not top1, not top2, and whose value is
@@ -1458,8 +1469,16 @@ fn c9_nonfinite_at_an_unprobed_index_is_caught_by_the_counter_alone() {
         "L1 moved — the NaN displaced the argmax, so this control is not testing what it claims"
     );
     assert_eq!(
-        observed_step.probe_values.iter().map(|v| v.bits.as_str()).collect::<Vec<_>>(),
-        step0.probe_values.iter().map(|v| v.bits.as_str()).collect::<Vec<_>>(),
+        observed_step
+            .probe_values
+            .iter()
+            .map(|v| v.bits.as_str())
+            .collect::<Vec<_>>(),
+        step0
+            .probe_values
+            .iter()
+            .map(|v| v.bits.as_str())
+            .collect::<Vec<_>>(),
         "a probe moved — the victim index was in the probe set after all"
     );
     assert_eq!(
@@ -1519,7 +1538,10 @@ fn c10_whole_vector_shift_is_caught_by_the_sum_band() {
         *v += DELTA;
         touched += 1;
     }
-    assert!(touched > 30_000, "expected to touch most of the vocab, touched {touched}");
+    assert!(
+        touched > 30_000,
+        "expected to touch most of the vocab, touched {touched}"
+    );
 
     let observed_step = derive_step(0, &shifted);
     assert_eq!(
@@ -1527,8 +1549,16 @@ fn c10_whole_vector_shift_is_caught_by_the_sum_band() {
         "the shift displaced the argmax; the control is meant to be invisible to L1"
     );
     assert_eq!(
-        observed_step.probe_values.iter().map(|v| v.bits.as_str()).collect::<Vec<_>>(),
-        step0.probe_values.iter().map(|v| v.bits.as_str()).collect::<Vec<_>>(),
+        observed_step
+            .probe_values
+            .iter()
+            .map(|v| v.bits.as_str())
+            .collect::<Vec<_>>(),
+        step0
+            .probe_values
+            .iter()
+            .map(|v| v.bits.as_str())
+            .collect::<Vec<_>>(),
         "a probe moved; the control is meant to be invisible to L2 probes"
     );
 
@@ -1537,7 +1567,9 @@ fn c10_whole_vector_shift_is_caught_by_the_sum_band() {
     let drifts = compare_case(tol, &f.cases[0], &observed, false);
 
     assert!(
-        drifts.iter().any(|d| d.kind == DriftKind::StatsOutOfTolerance),
+        drifts
+            .iter()
+            .any(|d| d.kind == DriftKind::StatsOutOfTolerance),
         "{touched} values each moved by {DELTA} and NOTHING caught it. Got: {drifts:?}"
     );
 }
@@ -1553,7 +1585,10 @@ fn c10_whole_vector_shift_is_caught_by_the_sum_band() {
 #[test]
 fn c11_a_deleted_or_extra_fixture_case_is_caught() {
     let specs = case_specs();
-    assert!(specs.len() >= 2, "this control needs at least two cases to delete one");
+    assert!(
+        specs.len() >= 2,
+        "this control needs at least two cases to delete one"
+    );
 
     let template = synthetic_fixture().cases[0].clone();
     let build = |names: &[String]| -> GoldenFile {
@@ -1616,8 +1651,7 @@ fn c3_sub_tolerance_nudge_is_not_reported() {
     let tol = &f.tolerance;
     let mut observed = f.cases[0].clone();
 
-    let k = f.cases[0]
-        .steps[0]
+    let k = f.cases[0].steps[0]
         .probe_indices
         .iter()
         .position(|&i| i == SYNTHETIC_BIG_PROBE_IDX)
@@ -1817,13 +1851,17 @@ fn control_wrong_inputs_report_as_fixture_invalid_not_regression() {
     // was recorded for and never checked against.
     let wrong_weights = compare_inputs(&f, "synthetic-config-sha", REQUIRED_LOADER, 4_096);
     assert!(
-        wrong_weights.iter().any(|d| d.kind == DriftKind::CheckpointMismatch),
+        wrong_weights
+            .iter()
+            .any(|d| d.kind == DriftKind::CheckpointMismatch),
         "a checkpoint with identical config.json but different weights was not detected: \
          {wrong_weights:?} — this reports downstream as a REGRESSION and invites re-blessing \
          the fixture against a different model"
     );
     assert!(
-        wrong_weights.iter().all(|d| d.kind.class() == DriftClass::FixtureInvalid),
+        wrong_weights
+            .iter()
+            .all(|d| d.kind.class() == DriftClass::FixtureInvalid),
         "different weights must classify as FixtureInvalid, not as a regression"
     );
 
@@ -1840,7 +1878,11 @@ fn control_wrong_inputs_report_as_fixture_invalid_not_regression() {
     let mut observed = f.cases[0].clone();
     observed.prompt_token_ids.push(99);
     let drifts = compare_case(&f.tolerance, &f.cases[0], &observed, true);
-    assert_eq!(drifts.len(), 1, "a prompt change should short-circuit: {drifts:?}");
+    assert_eq!(
+        drifts.len(),
+        1,
+        "a prompt change should short-circuit: {drifts:?}"
+    );
     assert_eq!(drifts[0].kind, DriftKind::PromptMismatch);
     assert_eq!(drifts[0].kind.class(), DriftClass::FixtureInvalid);
 }
@@ -2009,11 +2051,12 @@ fn committed_fixture_is_self_consistent_if_present() {
             assert_eq!(s.probe_stride, PROBE_STRIDE);
             assert_eq!(s.probe_indices, probe_indices(s.logits_len));
             assert_eq!(s.probe_values.len(), s.probe_indices.len());
-            for v in s
-                .probe_values
-                .iter()
-                .chain([&s.top1_value, &s.top2_value, &s.stats.max, &s.stats.min])
-            {
+            for v in s.probe_values.iter().chain([
+                &s.top1_value,
+                &s.top2_value,
+                &s.stats.max,
+                &s.stats.min,
+            ]) {
                 let round = F32Val::from_f32(v.to_f32());
                 assert_eq!(
                     round.bits, v.bits,
@@ -2048,8 +2091,11 @@ fn committed_fixture_is_self_consistent_if_present() {
         .flat_map(|c| c.steps.iter())
         .map(|s| s.margin_rel)
         .fold(f64::INFINITY, f64::min);
-    let recomputed = derive_tolerance(f.tolerance.measured_run_to_run_max_rel_delta, min_margin_rel)
-        .expect("the committed fixture's tolerance must be derivable");
+    let recomputed = derive_tolerance(
+        f.tolerance.measured_run_to_run_max_rel_delta,
+        min_margin_rel,
+    )
+    .expect("the committed fixture's tolerance must be derivable");
     assert_eq!(
         f.tolerance.rel.to_bits(),
         recomputed.rel.to_bits(),
@@ -2168,7 +2214,10 @@ fn load_f32_verified(dir: &Path) -> anyhow::Result<ModelLease> {
     let guard = MODEL_LEASE.lock().unwrap_or_else(|e| e.into_inner());
     let loaded = load_llama_f32_from_dir(dir)?;
     match loaded.projection_dtype() {
-        Some(fuel::DType::F32) => Ok(ModelLease { loaded, _guard: guard }),
+        Some(fuel::DType::F32) => Ok(ModelLease {
+            loaded,
+            _guard: guard,
+        }),
         Some(other) => anyhow::bail!(
             "the fixture claims the all-f32 path ({REQUIRED_LOADER}), but the projection weights \
              materialized at {other:?}. A bf16 projection routes through a promoting cast that is \
@@ -2203,8 +2252,8 @@ fn capture_logits(
     max_new: usize,
     eos: Option<u32>,
 ) -> anyhow::Result<(Vec<Vec<f32>>, Vec<u32>)> {
-    use fuel::inference_context::{InferenceContext, KvCache};
     use fuel::Device;
+    use fuel::inference_context::{InferenceContext, KvCache};
 
     // Identical to generate.rs: capacity = prompt + max_new + 1.
     let max_seq_len = prompt_tokens.len() + max_new + 1;
@@ -2445,7 +2494,11 @@ fn rustc_version() -> String {
 }
 
 fn cargo_profile() -> &'static str {
-    if cfg!(debug_assertions) { "debug" } else { "release" }
+    if cfg!(debug_assertions) {
+        "debug"
+    } else {
+        "release"
+    }
 }
 
 fn build_provenance(dir: &Path, reason: String) -> Provenance {
@@ -2499,7 +2552,9 @@ fn build_provenance(dir: &Path, reason: String) -> Provenance {
 /// effective thing standing between this fixture and rubber-stamp rot.
 fn bless_reason_or_refuse(exists: bool) -> Result<String, String> {
     if !exists {
-        return Ok("initial capture (no fixture existed; bootstrapping is not a re-blessing)".into());
+        return Ok(
+            "initial capture (no fixture existed; bootstrapping is not a re-blessing)".into(),
+        );
     }
     let key = std::env::var("LIGHTBULB_BLESS_GOLDEN").unwrap_or_default();
     let reason = std::env::var("LIGHTBULB_BLESS_REASON").unwrap_or_default();
@@ -2566,7 +2621,11 @@ fn determinism_probe() -> anyhow::Result<()> {
     let (a, ta) = capture_logits(&loaded, &ids, 4, Some(2))?;
     let (b, tb) = capture_logits(&loaded, &ids, 4, Some(2))?;
     assert_eq!(ta, tb, "same-process runs produced different tokens");
-    assert_eq!(a.len(), b.len(), "same-process runs produced different step counts");
+    assert_eq!(
+        a.len(),
+        b.len(),
+        "same-process runs produced different step counts"
+    );
 
     let mut max_abs = 0f64;
     let mut max_rel = 0f64;
@@ -2588,7 +2647,9 @@ fn determinism_probe() -> anyhow::Result<()> {
         }
     }
 
-    eprintln!("SAME-PROCESS: bit_identical={bit_identical} max_abs={max_abs:e} max_rel={max_rel:e}");
+    eprintln!(
+        "SAME-PROCESS: bit_identical={bit_identical} max_abs={max_abs:e} max_rel={max_rel:e}"
+    );
 
     // Same-process check FIRST, so it is asserted even when the cross-process
     // half below has to bail as incomplete.
@@ -2611,7 +2672,11 @@ fn determinism_probe() -> anyhow::Result<()> {
         let cross_ok = prev == digests;
         eprintln!(
             "CROSS-PROCESS: {} (compared against {})",
-            if cross_ok { "BIT-IDENTICAL" } else { "DIFFERENT" },
+            if cross_ok {
+                "BIT-IDENTICAL"
+            } else {
+                "DIFFERENT"
+            },
             probe_file.display()
         );
         assert!(
@@ -2678,7 +2743,10 @@ fn capture_golden_fixture() -> anyhow::Result<()> {
     let tok = tokenizers::Tokenizer::from_file(dir.join("tokenizer.json"))
         .map_err(|e| anyhow::anyhow!("tokenizer: {e}"))?;
 
-    eprintln!("loading all-f32 weights (~4.4 GB) from {} ...", dir.display());
+    eprintln!(
+        "loading all-f32 weights (~4.4 GB) from {} ...",
+        dir.display()
+    );
     let t0 = std::time::Instant::now();
     let loaded = load_f32_verified(&dir)?;
     eprintln!("loaded in {:.1?}", t0.elapsed());
@@ -2764,10 +2832,15 @@ fn golden_matches_fixture() -> anyhow::Result<()> {
     let fixture: GoldenFile = serde_json::from_str(&fs::read_to_string(&path)?)?;
     let observed_sha = sha256_file(&dir.join("config.json"));
 
-    let observed_weights_len =
-        fs::metadata(dir.join("model.safetensors")).map(|m| m.len()).unwrap_or(0);
-    let input_drifts =
-        compare_inputs(&fixture, &observed_sha, REQUIRED_LOADER, observed_weights_len);
+    let observed_weights_len = fs::metadata(dir.join("model.safetensors"))
+        .map(|m| m.len())
+        .unwrap_or(0);
+    let input_drifts = compare_inputs(
+        &fixture,
+        &observed_sha,
+        REQUIRED_LOADER,
+        observed_weights_len,
+    );
     assert!(
         input_drifts.is_empty(),
         "FIXTURE STALE / WRONG INPUTS — this is NOT a regression:\n{}",
@@ -2954,8 +3027,16 @@ fn c8_cache_capacity_does_not_leak_into_values() -> anyhow::Result<()> {
     for step in 0..steps {
         let a = &small_logits[step];
         let b = &big_logits[step];
-        assert_eq!(a.len(), b.len(), "step {step}: logit width differs between capacities");
-        let d = a.iter().zip(b).filter(|(x, y)| x.to_bits() != y.to_bits()).count();
+        assert_eq!(
+            a.len(),
+            b.len(),
+            "step {step}: logit width differs between capacities"
+        );
+        let d = a
+            .iter()
+            .zip(b)
+            .filter(|(x, y)| x.to_bits() != y.to_bits())
+            .count();
         if d > 0 && first_bad.is_none() {
             first_bad = Some((step, d));
         }
@@ -3020,7 +3101,11 @@ fn c10_forward_returns_the_last_position_not_an_earlier_one() -> anyhow::Result<
 
     let a = &full[0];
     let b = &short[0];
-    assert_eq!(a.len(), b.len(), "logit widths differ — the two prefills are not comparable");
+    assert_eq!(
+        a.len(),
+        b.len(),
+        "logit widths differ — the two prefills are not comparable"
+    );
 
     let identical = a.iter().zip(b).all(|(x, y)| x.to_bits() == y.to_bits());
     assert!(
@@ -3082,10 +3167,22 @@ fn harness_argmax_agrees_with_generate_greedy() -> anyhow::Result<()> {
 /// at ties and this states the contract that would break.
 #[test]
 fn control_argmax_tie_break_is_lowest_index() {
-    assert_eq!(argmax(&[1.0, 3.0, 3.0, 2.0]), 1, "ties must go to the lowest index");
-    assert_eq!(argmax(&[f32::NEG_INFINITY; 4]), 0, "all -inf must yield index 0");
+    assert_eq!(
+        argmax(&[1.0, 3.0, 3.0, 2.0]),
+        1,
+        "ties must go to the lowest index"
+    );
+    assert_eq!(
+        argmax(&[f32::NEG_INFINITY; 4]),
+        0,
+        "all -inf must yield index 0"
+    );
     // NaN never compares `>`, so it can never win — matching generate.rs.
     assert_eq!(argmax(&[f32::NAN, 1.0]), 1);
     assert_eq!(runner_up(&[1.0, 3.0, 3.0, 2.0], 1), 2);
-    assert_eq!(runner_up(&[5.0], 0), 0, "a one-element row has no runner-up");
+    assert_eq!(
+        runner_up(&[5.0], 0),
+        0,
+        "a one-element row has no runner-up"
+    );
 }

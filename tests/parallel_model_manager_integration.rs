@@ -325,9 +325,7 @@ fn test_parallel_deterministic_consistency() {
     let mut batch1 = vec![RequestContext::new(req1)];
 
     for _ in 0..10 {
-        model1
-            .forward_batch(&mut batch1)
-            .expect("Forward failed");
+        model1.forward_batch(&mut batch1).expect("Forward failed");
         if !batch1[0].should_continue() {
             break;
         }
@@ -347,9 +345,7 @@ fn test_parallel_deterministic_consistency() {
     let mut batch2 = vec![RequestContext::new(req2)];
 
     for _ in 0..10 {
-        model2
-            .forward_batch(&mut batch2)
-            .expect("Forward failed");
+        model2.forward_batch(&mut batch2).expect("Forward failed");
         if !batch2[0].should_continue() {
             break;
         }

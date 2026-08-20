@@ -82,13 +82,13 @@ impl ConversationHistory {
         let turn = ConversationTurn::new(self.next_id, role, content);
         let id = turn.id;
         self.total_tokens += turn.tokens;
-        
+
         self.turns.push_back(turn);
         self.next_id += 1;
 
         // Enforce limits
         self.enforce_limits();
-        
+
         id
     }
 
@@ -100,11 +100,12 @@ impl ConversationHistory {
     /// Search for relevant turns (simple keyword match for now)
     pub fn search_relevant(&self, query: &str, max_results: usize) -> Vec<&ConversationTurn> {
         let query_lower = query.to_lowercase();
-        let mut results: Vec<_> = self.turns
+        let mut results: Vec<_> = self
+            .turns
             .iter()
             .filter(|turn| turn.content.to_lowercase().contains(&query_lower))
             .collect();
-        
+
         results.truncate(max_results);
         results
     }
@@ -114,7 +115,8 @@ impl ConversationHistory {
         self.get_recent_turns(include_count)
             .iter()
             .map(|turn| {
-                let content = format!("{}: {}", 
+                let content = format!(
+                    "{}: {}",
                     match turn.role {
                         Role::System => "System",
                         Role::User => "User",
@@ -122,7 +124,7 @@ impl ConversationHistory {
                     },
                     turn.content
                 );
-                
+
                 ContextInjection::new(
                     content,
                     InjectionPosition::ChatHistory,
@@ -174,8 +176,12 @@ impl ConversationHistory {
         }
 
         let user_turns = self.turns.iter().filter(|t| t.role == Role::User).count();
-        let assistant_turns = self.turns.iter().filter(|t| t.role == Role::Assistant).count();
-        
+        let assistant_turns = self
+            .turns
+            .iter()
+            .filter(|t| t.role == Role::Assistant)
+            .count();
+
         format!(
             "Conversation with {} turns ({} user, {} assistant), {} tokens",
             self.turns.len(),
@@ -200,10 +206,10 @@ mod tests {
     #[test]
     fn test_add_turns() {
         let mut history = ConversationHistory::new(ConversationConfig::default());
-        
+
         let id1 = history.add_turn(Role::User, "Hello world".to_string());
         let id2 = history.add_turn(Role::Assistant, "Hi there!".to_string());
-        
+
         assert_eq!(id1, 1);
         assert_eq!(id2, 2);
         assert_eq!(history.turn_count(), 2);
@@ -213,11 +219,11 @@ mod tests {
     #[test]
     fn test_get_recent_turns() {
         let mut history = ConversationHistory::new(ConversationConfig::default());
-        
+
         history.add_turn(Role::User, "First".to_string());
         history.add_turn(Role::Assistant, "Second".to_string());
         history.add_turn(Role::User, "Third".to_string());
-        
+
         let recent = history.get_recent_turns(2);
         assert_eq!(recent.len(), 2);
         assert_eq!(recent[0].content, "Second");
@@ -232,12 +238,12 @@ mod tests {
             ..Default::default()
         };
         let mut history = ConversationHistory::new(config);
-        
+
         // Add turns that exceed token limit
         history.add_turn(Role::User, "one two three four five".to_string()); // 5 tokens
         history.add_turn(Role::Assistant, "six seven eight".to_string()); // 3 tokens
         history.add_turn(Role::User, "nine ten eleven twelve".to_string()); // 4 tokens
-        
+
         // Should have removed first turn to stay under limit
         assert!(history.total_tokens() <= 10);
         assert_eq!(history.turn_count(), 2);
@@ -251,11 +257,11 @@ mod tests {
             ..Default::default()
         };
         let mut history = ConversationHistory::new(config);
-        
+
         history.add_turn(Role::User, "First".to_string());
         history.add_turn(Role::Assistant, "Second".to_string());
         history.add_turn(Role::User, "Third".to_string());
-        
+
         assert_eq!(history.turn_count(), 2);
         let recent = history.get_recent_turns(2);
         assert_eq!(recent[0].content, "Second");
@@ -265,11 +271,11 @@ mod tests {
     #[test]
     fn test_search_relevant() {
         let mut history = ConversationHistory::new(ConversationConfig::default());
-        
+
         history.add_turn(Role::User, "How do I use HashMap?".to_string());
         history.add_turn(Role::Assistant, "HashMap is a key-value store".to_string());
         history.add_turn(Role::User, "What about Vec?".to_string());
-        
+
         let results = history.search_relevant("HashMap", 10);
         assert_eq!(results.len(), 2);
         assert!(results[0].content.contains("HashMap"));
@@ -278,10 +284,10 @@ mod tests {
     #[test]
     fn test_to_context_injections() {
         let mut history = ConversationHistory::new(ConversationConfig::default());
-        
+
         history.add_turn(Role::User, "Hello".to_string());
         history.add_turn(Role::Assistant, "Hi".to_string());
-        
+
         let injections = history.to_context_injections(2);
         assert_eq!(injections.len(), 2);
         assert!(injections[0].content.contains("User: Hello"));
@@ -293,10 +299,10 @@ mod tests {
     #[test]
     fn test_clear() {
         let mut history = ConversationHistory::new(ConversationConfig::default());
-        
+
         history.add_turn(Role::User, "Test".to_string());
         assert_eq!(history.turn_count(), 1);
-        
+
         history.clear();
         assert_eq!(history.turn_count(), 0);
         assert_eq!(history.total_tokens(), 0);
@@ -305,11 +311,11 @@ mod tests {
     #[test]
     fn test_summarize() {
         let mut history = ConversationHistory::new(ConversationConfig::default());
-        
+
         history.add_turn(Role::User, "Question 1".to_string());
         history.add_turn(Role::Assistant, "Answer 1".to_string());
         history.add_turn(Role::User, "Question 2".to_string());
-        
+
         let summary = history.summarize();
         assert!(summary.contains("3 turns"));
         assert!(summary.contains("2 user"));

@@ -112,12 +112,11 @@ pub fn parse(
     let mut result: HashMap<String, Vec<String>> = HashMap::new();
     let text_lower = text.to_lowercase();
 
-    let repeatable_lower: Vec<String> =
-        repeatable_tags.iter().map(|t| t.to_lowercase()).collect();
+    let repeatable_lower: Vec<String> = repeatable_tags.iter().map(|t| t.to_lowercase()).collect();
 
     for original_tag in allowed_tags {
         let tag_lower = original_tag.to_lowercase();
-        let open_tag  = format!("<{tag_lower}>");
+        let open_tag = format!("<{tag_lower}>");
         let close_tag = format!("</{tag_lower}>");
         let is_repeatable = repeatable_lower.contains(&tag_lower);
 
@@ -146,7 +145,10 @@ pub fn parse(
             result.insert(original_tag.clone(), occurrences);
         } else {
             // Last occurrence wins for non-repeatable tags.
-            result.insert(original_tag.clone(), vec![occurrences.into_iter().last().unwrap()]);
+            result.insert(
+                original_tag.clone(),
+                vec![occurrences.into_iter().last().unwrap()],
+            );
         }
     }
 
@@ -155,10 +157,7 @@ pub fn parse(
 
 /// Returns `true` if every tag in `required_tags` has at least one value in
 /// `parsed`.
-pub fn check_cardinality(
-    parsed: &HashMap<String, Vec<String>>,
-    required_tags: &[String],
-) -> bool {
+pub fn check_cardinality(parsed: &HashMap<String, Vec<String>>, required_tags: &[String]) -> bool {
     required_tags
         .iter()
         .all(|t| parsed.get(t).map_or(false, |v| !v.is_empty()))
@@ -169,23 +168,37 @@ mod tests {
     use super::*;
 
     fn tags() -> Vec<String> {
-        vec!["MODE".to_string(), "CONF".to_string(), "EVIDENCE".to_string()]
+        vec![
+            "MODE".to_string(),
+            "CONF".to_string(),
+            "EVIDENCE".to_string(),
+        ]
     }
 
     #[test]
     fn basic_parse() {
-        let text = "<MODE>typecheck_error</MODE>\n<CONF>0.74</CONF>\n<EVIDENCE>see line 42</EVIDENCE>";
+        let text =
+            "<MODE>typecheck_error</MODE>\n<CONF>0.74</CONF>\n<EVIDENCE>see line 42</EVIDENCE>";
         let result = parse(text, &tags(), &[]);
         assert_eq!(
-            result.get("MODE").and_then(|v| v.first()).map(String::as_str),
+            result
+                .get("MODE")
+                .and_then(|v| v.first())
+                .map(String::as_str),
             Some("typecheck_error")
         );
         assert_eq!(
-            result.get("CONF").and_then(|v| v.first()).map(String::as_str),
+            result
+                .get("CONF")
+                .and_then(|v| v.first())
+                .map(String::as_str),
             Some("0.74")
         );
         assert_eq!(
-            result.get("EVIDENCE").and_then(|v| v.first()).map(String::as_str),
+            result
+                .get("EVIDENCE")
+                .and_then(|v| v.first())
+                .map(String::as_str),
             Some("see line 42")
         );
     }
@@ -195,11 +208,17 @@ mod tests {
         let text = "<mode>runtime_error</mode><conf>0.9</conf>";
         let result = parse(text, &tags(), &[]);
         assert_eq!(
-            result.get("MODE").and_then(|v| v.first()).map(String::as_str),
+            result
+                .get("MODE")
+                .and_then(|v| v.first())
+                .map(String::as_str),
             Some("runtime_error")
         );
         assert_eq!(
-            result.get("CONF").and_then(|v| v.first()).map(String::as_str),
+            result
+                .get("CONF")
+                .and_then(|v| v.first())
+                .map(String::as_str),
             Some("0.9")
         );
     }
@@ -209,7 +228,10 @@ mod tests {
         let text = "<MODE>first</MODE> ... <MODE>corrected</MODE>";
         let result = parse(text, &tags(), &[]);
         assert_eq!(
-            result.get("MODE").and_then(|v| v.first()).map(String::as_str),
+            result
+                .get("MODE")
+                .and_then(|v| v.first())
+                .map(String::as_str),
             Some("corrected")
         );
         assert_eq!(result.get("MODE").map(|v| v.len()), Some(1));
@@ -237,10 +259,17 @@ mod tests {
     fn check_cardinality_passes_when_required_present() {
         let text = "<MODE>x</MODE><CONF>0.5</CONF>";
         let result = parse(text, &tags(), &[]);
-        assert!(check_cardinality(&result, &["MODE".to_string(), "CONF".to_string()]));
+        assert!(check_cardinality(
+            &result,
+            &["MODE".to_string(), "CONF".to_string()]
+        ));
         assert!(!check_cardinality(
             &result,
-            &["MODE".to_string(), "CONF".to_string(), "EVIDENCE".to_string()]
+            &[
+                "MODE".to_string(),
+                "CONF".to_string(),
+                "EVIDENCE".to_string()
+            ]
         ));
     }
 }

@@ -382,7 +382,11 @@ mod tests {
 
         // Create linear layer: input=8, output=4
         let weights = Tensor::randn(0.0f32, 1.0, (4, 8), &Device::Cpu)?;
-        let bias = Some(Tensor::zeros((4,), candlelight::core::DType::F32, &Device::Cpu)?);
+        let bias = Some(Tensor::zeros(
+            (4,),
+            candlelight::core::DType::F32,
+            &Device::Cpu,
+        )?);
 
         let sharded_linear = ShardedLinear::from_full_weights(
             &weights,

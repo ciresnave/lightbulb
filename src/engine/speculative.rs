@@ -104,7 +104,13 @@ impl SpeculativeStats {
     }
 
     /// Record a speculation round result
-    pub fn record_round(&mut self, accepted: usize, rejected: usize, draft_us: u64, target_us: u64) {
+    pub fn record_round(
+        &mut self,
+        accepted: usize,
+        rejected: usize,
+        draft_us: u64,
+        target_us: u64,
+    ) {
         self.speculation_rounds += 1;
         self.accepted_tokens += accepted;
         self.rejected_tokens += rejected;
@@ -265,7 +271,8 @@ impl SpeculativeDecoder {
         let rejected_count = draft_tokens.len() - accepted_count;
 
         // Record statistics
-        self.stats.record_round(accepted_count, rejected_count, draft_time, target_time);
+        self.stats
+            .record_round(accepted_count, rejected_count, draft_time, target_time);
 
         // Check if we should fall back
         if self.config.auto_fallback && self.stats.speculation_rounds >= 10 {

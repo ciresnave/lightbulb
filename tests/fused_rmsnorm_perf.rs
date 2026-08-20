@@ -29,11 +29,7 @@ impl BenchConfig {
 }
 
 /// Benchmark a forward pass
-fn benchmark_forward<F>(
-    name: &str,
-    config: &BenchConfig,
-    mut forward_fn: F,
-) -> Result<f64>
+fn benchmark_forward<F>(name: &str, config: &BenchConfig, mut forward_fn: F) -> Result<f64>
 where
     F: FnMut() -> Result<Tensor>,
 {
@@ -50,7 +46,7 @@ where
     let elapsed = start.elapsed();
 
     let avg_ms = elapsed.as_secs_f64() * 1000.0 / config.bench_iters as f64;
-    
+
     println!(
         "  {} ({}): {:.3} ms/iter ({} elements)",
         name,
@@ -66,7 +62,7 @@ where
 #[ignore] // Manual benchmark - run with --ignored
 fn benchmark_cpu() -> Result<()> {
     println!("\n=== CPU Benchmarks ===\n");
-    
+
     let configs = vec![
         BenchConfig {
             name: "Small (Llama-7B layer)",
@@ -100,10 +96,10 @@ fn benchmark_cpu() -> Result<()> {
 
     for config in configs {
         println!("\nConfig: {}", config.name);
-        
+
         let vb = VarBuilder::zeros(dtype, &device);
         let weight = vb.get(config.hidden_size, "weight")?;
-        
+
         let fused = FusedRmsNorm::new_with_weight(weight.clone(), eps);
         let standard = StandardRmsNorm::new(weight, eps);
 
@@ -116,18 +112,12 @@ fn benchmark_cpu() -> Result<()> {
         let input_2d = input.reshape((config.batch_size * config.seq_len, config.hidden_size))?;
 
         // Benchmark standard
-        let standard_time = benchmark_forward(
-            "Standard RmsNorm",
-            &config,
-            || standard.forward(&input_2d),
-        )?;
+        let standard_time =
+            benchmark_forward("Standard RmsNorm", &config, || standard.forward(&input_2d))?;
 
         // Benchmark fused (on CPU, should be same as standard)
-        let fused_time = benchmark_forward(
-            "Fused RmsNorm  ",
-            &config,
-            || fused.forward(&input_2d),
-        )?;
+        let fused_time =
+            benchmark_forward("Fused RmsNorm  ", &config, || fused.forward(&input_2d))?;
 
         let speedup = standard_time / fused_time;
         println!("  Speedup: {:.2}x", speedup);
@@ -142,7 +132,7 @@ fn benchmark_cpu() -> Result<()> {
 #[ignore] // Requires CUDA hardware
 fn benchmark_cuda() -> Result<()> {
     println!("\n=== CUDA Benchmarks ===\n");
-    
+
     let configs = vec![
         BenchConfig {
             name: "Small (Llama-7B layer, batch=1)",
@@ -187,10 +177,10 @@ fn benchmark_cuda() -> Result<()> {
 
     for config in configs {
         println!("\nConfig: {}", config.name);
-        
+
         let vb = VarBuilder::zeros(dtype, &device);
         let weight = vb.get(config.hidden_size, "weight")?;
-        
+
         let fused = FusedRmsNorm::new_with_weight(weight.clone(), eps);
         let standard = StandardRmsNorm::new(weight, eps);
 
@@ -203,24 +193,18 @@ fn benchmark_cuda() -> Result<()> {
         let input_2d = input.reshape((config.batch_size * config.seq_len, config.hidden_size))?;
 
         // Benchmark standard
-        let standard_time = benchmark_forward(
-            "Standard RmsNorm",
-            &config,
-            || standard.forward(&input_2d),
-        )?;
+        let standard_time =
+            benchmark_forward("Standard RmsNorm", &config, || standard.forward(&input_2d))?;
 
         // Benchmark fused (should use fused kernel on CUDA)
-        let fused_time = benchmark_forward(
-            "Fused RmsNorm  ",
-            &config,
-            || fused.forward(&input_2d),
-        )?;
+        let fused_time =
+            benchmark_forward("Fused RmsNorm  ", &config, || fused.forward(&input_2d))?;
 
         let speedup = standard_time / fused_time;
         let improvement = (speedup - 1.0) * 100.0;
-        
+
         println!("  Speedup: {:.2}x ({:.1}% faster)", speedup, improvement);
-        
+
         if speedup >= 1.2 {
             println!("  ✅ Meets 20% improvement target");
         } else if speedup >= 1.1 {
@@ -238,7 +222,7 @@ fn benchmark_cuda() -> Result<()> {
 #[ignore] // Requires CUDA hardware
 fn benchmark_cuda_with_residual() -> Result<()> {
     println!("\n=== CUDA Benchmarks with Residual Addition ===\n");
-    
+
     let configs = vec![
         BenchConfig {
             name: "Llama-7B layer (batch=4)",
@@ -267,10 +251,10 @@ fn benchmark_cuda_with_residual() -> Result<()> {
 
     for config in configs {
         println!("\nConfig: {}", config.name);
-        
+
         let vb = VarBuilder::zeros(dtype, &device);
         let weight = vb.get(config.hidden_size, "weight")?;
-        
+
         let fused = FusedRmsNorm::new_with_weight(weight.clone(), eps);
         let standard = StandardRmsNorm::new(weight, eps);
 
@@ -286,34 +270,27 @@ fn benchmark_cuda_with_residual() -> Result<()> {
             (config.batch_size, config.seq_len, config.hidden_size),
             &device,
         )?;
-        
+
         let input_2d = input.reshape((config.batch_size * config.seq_len, config.hidden_size))?;
-        let residual_2d = residual.reshape((config.batch_size * config.seq_len, config.hidden_size))?;
+        let residual_2d =
+            residual.reshape((config.batch_size * config.seq_len, config.hidden_size))?;
 
         // Benchmark standard (separate operations)
-        let standard_time = benchmark_forward(
-            "Standard (norm + add)",
-            &config,
-            || {
-                let normalized = standard.forward(&input_2d)?;
-                let output = (&normalized + &residual_2d)?;
-                Ok(output)
-            },
-        )?;
+        let standard_time = benchmark_forward("Standard (norm + add)", &config, || {
+            let normalized = standard.forward(&input_2d)?;
+            let output = (&normalized + &residual_2d)?;
+            Ok(output)
+        })?;
 
         // Benchmark fused (single kernel)
-        let fused_time = benchmark_forward(
-            "Fused (norm+add)   ",
-            &config,
-            || {
-                let (output, _) = fused.forward_with_residual(&input_2d, &residual_2d)?;
-                Ok(output)
-            },
-        )?;
+        let fused_time = benchmark_forward("Fused (norm+add)   ", &config, || {
+            let (output, _) = fused.forward_with_residual(&input_2d, &residual_2d)?;
+            Ok(output)
+        })?;
 
         let speedup = standard_time / fused_time;
         let improvement = (speedup - 1.0) * 100.0;
-        
+
         println!("  Speedup: {:.2}x ({:.1}% faster)", speedup, improvement);
         println!("  Note: Fused version saves one kernel launch");
     }
@@ -326,7 +303,7 @@ fn benchmark_cuda_with_residual() -> Result<()> {
 #[ignore] // Requires CUDA hardware
 fn benchmark_cuda_fp16() -> Result<()> {
     println!("\n=== CUDA FP16 Benchmarks ===\n");
-    
+
     let config = BenchConfig {
         name: "Llama-7B layer (FP16, batch=4)",
         hidden_size: 4096,
@@ -342,10 +319,10 @@ fn benchmark_cuda_fp16() -> Result<()> {
 
     println!("Testing FP16 performance (lower precision, higher throughput)");
     println!("Config: {}\n", config.name);
-    
+
     let vb = VarBuilder::zeros(dtype, &device);
     let weight = vb.get(config.hidden_size, "weight")?;
-    
+
     let fused = FusedRmsNorm::new_with_weight(weight.clone(), eps);
     let standard = StandardRmsNorm::new(weight, eps);
 
@@ -354,26 +331,23 @@ fn benchmark_cuda_fp16() -> Result<()> {
         1.0,
         (config.batch_size, config.seq_len, config.hidden_size),
         &device,
-    )?.to_dtype(dtype)?;
+    )?
+    .to_dtype(dtype)?;
     let input_2d = input.reshape((config.batch_size * config.seq_len, config.hidden_size))?;
 
     // Benchmark standard
-    let standard_time = benchmark_forward(
-        "Standard RmsNorm (FP16)",
-        &config,
-        || standard.forward(&input_2d),
-    )?;
+    let standard_time = benchmark_forward("Standard RmsNorm (FP16)", &config, || {
+        standard.forward(&input_2d)
+    })?;
 
     // Benchmark fused
-    let fused_time = benchmark_forward(
-        "Fused RmsNorm (FP16)  ",
-        &config,
-        || fused.forward(&input_2d),
-    )?;
+    let fused_time = benchmark_forward("Fused RmsNorm (FP16)  ", &config, || {
+        fused.forward(&input_2d)
+    })?;
 
     let speedup = standard_time / fused_time;
     let improvement = (speedup - 1.0) * 100.0;
-    
+
     println!("  Speedup: {:.2}x ({:.1}% faster)", speedup, improvement);
 
     Ok(())

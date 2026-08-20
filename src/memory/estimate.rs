@@ -8,10 +8,7 @@ use candlelight::core::DType;
 #[derive(Debug, Clone)]
 pub enum WeightMemory {
     /// Unquantized weights (FP32, FP16, BF16)
-    Unquantized {
-        dtype: DType,
-        num_parameters: usize,
-    },
+    Unquantized { dtype: DType, num_parameters: usize },
 
     /// Quantized weights (AWQ, GPTQ, Marlin)
     Quantized {
@@ -65,11 +62,7 @@ impl WeightMemory {
     /// * `num_parameters` - Total number of parameters
     /// * `group_size` - Quantization group size (-1 for per-channel)
     /// * `quant_method` - "awq", "gptq", or "marlin"
-    pub fn estimate_metadata(
-        num_parameters: usize,
-        group_size: i32,
-        quant_method: &str,
-    ) -> usize {
+    pub fn estimate_metadata(num_parameters: usize, group_size: i32, quant_method: &str) -> usize {
         if group_size <= 0 {
             // Per-channel quantization
             let num_channels = (num_parameters as f64).sqrt() as usize;

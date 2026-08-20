@@ -26,7 +26,7 @@
 use candlelight::core::{Device, Tensor};
 use kiss_ops_vocab::Op;
 use kiss_ref_core::{
-    diff_f32, eval_recipe, reference_f32, DetClass, FlatDag, Monoid, Node, Tolerance,
+    DetClass, FlatDag, Monoid, Node, Tolerance, diff_f32, eval_recipe, reference_f32,
 };
 
 /// Inputs chosen to span the interesting regions of an activation, not just the
@@ -199,16 +199,39 @@ fn rmsnorm_recipe() -> FlatDag {
     FlatDag::new(
         vec![
             Node::Bind(0),
-            Node::Apply { op: Op::Mul, children: vec![0, 0] },
-            Node::Reduce { monoid: Monoid::Sum, axes: vec![1], keepdim: true, child: 1 },
+            Node::Apply {
+                op: Op::Mul,
+                children: vec![0, 0],
+            },
+            Node::Reduce {
+                monoid: Monoid::Sum,
+                axes: vec![1],
+                keepdim: true,
+                child: 1,
+            },
             Node::ReducedCount(vec![1]),
-            Node::Apply { op: Op::Div, children: vec![2, 3] },
+            Node::Apply {
+                op: Op::Div,
+                children: vec![2, 3],
+            },
             Node::RuntimeScalar(0),
-            Node::Apply { op: Op::Add, children: vec![4, 5] },
-            Node::Apply { op: Op::Sqrt, children: vec![6] },
-            Node::Apply { op: Op::Div, children: vec![0, 7] },
+            Node::Apply {
+                op: Op::Add,
+                children: vec![4, 5],
+            },
+            Node::Apply {
+                op: Op::Sqrt,
+                children: vec![6],
+            },
+            Node::Apply {
+                op: Op::Div,
+                children: vec![0, 7],
+            },
             Node::Bind(1),
-            Node::Apply { op: Op::Mul, children: vec![8, 9] },
+            Node::Apply {
+                op: Op::Mul,
+                children: vec![8, 9],
+            },
         ],
         vec![10],
     )
@@ -228,9 +251,23 @@ fn rmsnorm_probe_input() -> (Vec<f32>, usize, usize) {
     let d = 8;
     let x = vec![
         // row 0 — ordinary magnitudes plus a signed zero
-        1.0, -1.0, 0.5, -0.0, 2.0, -3.5, 0.25, 4.0,
+        1.0,
+        -1.0,
+        0.5,
+        -0.0,
+        2.0,
+        -3.5,
+        0.25,
+        4.0,
         // row 1 — a subnormal and a wide dynamic range
-        f32::MIN_POSITIVE / 2.0, 1e-6, 1e3, -1e3, 0.125, -0.125, 7.5, -0.75,
+        f32::MIN_POSITIVE / 2.0,
+        1e-6,
+        1e3,
+        -1e3,
+        0.125,
+        -0.125,
+        7.5,
+        -0.75,
     ];
     (x, rows, d)
 }
@@ -284,7 +321,9 @@ fn rmsnorm_fragment_matches_kiss_ref_recipe() -> anyhow::Result<()> {
             worst = rel;
         }
         if rel > 1e-5 {
-            detail.push_str(&format!("\n  [{i}] kiss-ref={r:e}  lightbulb={c:e}  rel={rel:e}"));
+            detail.push_str(&format!(
+                "\n  [{i}] kiss-ref={r:e}  lightbulb={c:e}  rel={rel:e}"
+            ));
         }
     }
 
@@ -307,10 +346,9 @@ fn recipe_harness_detects_a_wrong_candidate() -> anyhow::Result<()> {
     let dag = rmsnorm_recipe();
     let kx = kiss_ref_core::Tensor::from_vec(x_data, &[rows, d])
         .map_err(|e| anyhow::anyhow!("{e:?}"))?;
-    let kw = kiss_ref_core::Tensor::from_vec(w_data, &[d])
-        .map_err(|e| anyhow::anyhow!("{e:?}"))?;
-    let evaluated = eval_recipe::<f32>(&dag, &[kx, kw], &[1e-5], &[])
-        .map_err(|e| anyhow::anyhow!("{e:?}"))?;
+    let kw = kiss_ref_core::Tensor::from_vec(w_data, &[d]).map_err(|e| anyhow::anyhow!("{e:?}"))?;
+    let evaluated =
+        eval_recipe::<f32>(&dag, &[kx, kw], &[1e-5], &[]).map_err(|e| anyhow::anyhow!("{e:?}"))?;
     let reference = evaluated.outputs[0].as_slice();
 
     assert_eq!(reference.len(), rows * d, "recipe produced the wrong shape");
@@ -419,8 +457,7 @@ fn nan_contamination_pattern_matches_kiss_ref() -> anyhow::Result<()> {
     let dag = rmsnorm_recipe();
     let kx = kiss_ref_core::Tensor::from_vec(x_data, &[rows, d])
         .map_err(|e| anyhow::anyhow!("{e:?}"))?;
-    let kw = kiss_ref_core::Tensor::from_vec(w_data, &[d])
-        .map_err(|e| anyhow::anyhow!("{e:?}"))?;
+    let kw = kiss_ref_core::Tensor::from_vec(w_data, &[d]).map_err(|e| anyhow::anyhow!("{e:?}"))?;
     let evaluated = eval_recipe::<f32>(&dag, &[kx, kw], &[eps as f32], &[])
         .map_err(|e| anyhow::anyhow!("{e:?}"))?;
     let reference = evaluated.outputs[0].as_slice();

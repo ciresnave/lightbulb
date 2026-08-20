@@ -126,10 +126,10 @@ impl OutputContractSpec {
     /// Human-readable name for logging.
     pub fn type_name(&self) -> &'static str {
         match self {
-            Self::EnumChoice { .. }   => "enum_choice",
+            Self::EnumChoice { .. } => "enum_choice",
             Self::TaggedFields { .. } => "tagged_fields",
-            Self::CommitBlock { .. }  => "commit_block",
-            Self::Json                => "json",
+            Self::CommitBlock { .. } => "commit_block",
+            Self::Json => "json",
         }
     }
 }

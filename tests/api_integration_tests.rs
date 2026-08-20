@@ -27,8 +27,11 @@ mod api_tests {
         use sha2::{Digest, Sha256};
         let mut hasher = Sha256::new();
         hasher.update(token.as_bytes());
-        let key_hash: String =
-            hasher.finalize().iter().map(|b| format!("{:02x}", b)).collect();
+        let key_hash: String = hasher
+            .finalize()
+            .iter()
+            .map(|b| format!("{:02x}", b))
+            .collect();
 
         let (client, connection) = tokio_postgres::connect(db_url, tokio_postgres::NoTls)
             .await

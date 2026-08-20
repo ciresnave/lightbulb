@@ -496,12 +496,10 @@ impl BatchedAttention {
             }
 
             let (k_full, v_full) = cache
-                .append(
-                    k_wrapped.as_full(),
-                    v_wrapped.as_full(),
-                    &iam,
-                )
-                .map_err(|e| candlelight::core::Error::Msg(format!("Failed to append KV: {}", e)))?;
+                .append(k_wrapped.as_full(), v_wrapped.as_full(), &iam)
+                .map_err(|e| {
+                    candlelight::core::Error::Msg(format!("Failed to append KV: {}", e))
+                })?;
 
             if layer_idx == 0 {
                 // DEBUG output removed

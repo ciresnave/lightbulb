@@ -578,9 +578,7 @@ use std::time::{Duration, Instant};
 
 // `KvCache` lives in `inference_context`, NOT `lazy` — `lazy` re-exports plenty
 // of neighbouring types, which makes the wrong path look plausible.
-use fuel::inference_context::{
-    InferenceContext, KvCache, PagedDecodePlan, PagedDecodeSession,
-};
+use fuel::inference_context::{InferenceContext, KvCache, PagedDecodePlan, PagedDecodeSession};
 use fuel::kv_block_pool::KvGeometry;
 use fuel::kv_block_pool_device::DeviceKvPool;
 use fuel::lazy::{SamplingStrategy, sample_logits};
@@ -616,7 +614,9 @@ fn median(mut v: Vec<Duration>) -> Duration {
 /// sessions share a prefix that a cache could accidentally serve.
 fn prompt_tokens(i: usize) -> Vec<u32> {
     let len = PROMPT_LEN + i * RAGGED_STRIDE;
-    (0..len).map(|t| (((t + i * 7) * 17) % 1000 + 1) as u32).collect()
+    (0..len)
+        .map(|t| (((t + i * 7) * 17) % 1000 + 1) as u32)
+        .collect()
 }
 
 fn max_new() -> usize {
@@ -758,7 +758,10 @@ impl Windows {
     /// the median were ever emitted — a one-time cost hiding inside an aggregate
     /// is exactly what raw per-round output makes impossible.
     fn steady_rounds_ms(&self) -> Vec<f64> {
-        self.steady.iter().map(|d| d.as_secs_f64() * 1000.0).collect()
+        self.steady
+            .iter()
+            .map(|d| d.as_secs_f64() * 1000.0)
+            .collect()
     }
 }
 
@@ -818,7 +821,9 @@ fn run_paged(
     for i in 0..k {
         let mut logits = Vec::new();
         for &tok in &prompts[i] {
-            logits = loaded.model.forward_paged_step(tok, &mut pool, handles[i])?;
+            logits = loaded
+                .model
+                .forward_paged_step(tok, &mut pool, handles[i])?;
         }
         last_tok[i] = sample_logits(&logits, SamplingStrategy::Greedy, &mut rng[i]);
     }
@@ -907,7 +912,10 @@ fn run_paged_scheduler(
         + 8;
     let mut sched = PagedSessionScheduler::new(
         &loaded.model,
-        KvBudget { block_size: BLOCK_SIZE, num_blocks },
+        KvBudget {
+            block_size: BLOCK_SIZE,
+            num_blocks,
+        },
         DType::F32,
         dev,
     )?;
@@ -1012,7 +1020,9 @@ fn run_contiguous(
     let t = Instant::now();
     for i in 0..k {
         let logits =
-            loaded.model.forward_with_kv_context(&prompts[i], &mut caches[i], &mut ctxs[i])?;
+            loaded
+                .model
+                .forward_with_kv_context(&prompts[i], &mut caches[i], &mut ctxs[i])?;
         last_tok[i] = sample_logits(&logits, SamplingStrategy::Greedy, &mut rng[i]);
     }
     let prefill = t.elapsed();
@@ -1024,7 +1034,9 @@ fn run_contiguous(
             let i = $i;
             let toks = [last_tok[i]];
             let logits = if !persistent {
-                loaded.model.forward_with_kv_context(&toks, &mut caches[i], &mut ctxs[i])?
+                loaded
+                    .model
+                    .forward_with_kv_context(&toks, &mut caches[i], &mut ctxs[i])?
             } else if capture {
                 loaded.model.forward_with_kv_context_captured(
                     &toks,
@@ -1034,7 +1046,9 @@ fn run_contiguous(
                     &mut captured[i],
                 )?
             } else {
-                loaded.model.forward_decode_step(&toks, &mut caches[i], &mut ctxs[i])?
+                loaded
+                    .model
+                    .forward_decode_step(&toks, &mut caches[i], &mut ctxs[i])?
             };
             last_tok[i] = sample_logits(&logits, SamplingStrategy::Greedy, &mut rng[i]);
         }};
@@ -1090,7 +1104,10 @@ fn run_contiguous(
     if k >= 2 {
         let mut refs: Vec<&mut KvCache> = caches.iter_mut().collect();
         let lens: Vec<usize> = refs.iter().map(|c| c.cached_len).collect();
-        match loaded.model.build_batched_decode_logits(&mut refs, &last_tok, dev, DType::F32) {
+        match loaded
+            .model
+            .build_batched_decode_logits(&mut refs, &last_tok, dev, DType::F32)
+        {
             Ok(rows) => eprintln!(
                 "BATCHED_ADMISSION k={k} ACCEPTED cached_lens={lens:?} rows={}",
                 rows.len()
@@ -1120,7 +1137,11 @@ fn run_contiguous(
 /// than re-typing numbers.
 fn summarise(label: &str, cfg: &str, w: &Windows) {
     eprintln!("\n=== {label} ===");
-    eprintln!("  prefill      {:>10.2} ms   ({} sequences, token 0 sampled inside)", ms(w.prefill), w.k);
+    eprintln!(
+        "  prefill      {:>10.2} ms   ({} sequences, token 0 sampled inside)",
+        ms(w.prefill),
+        w.k
+    );
     eprintln!(
         "  first decode {:>10.2} ms   ({:.2} ms/token over {} sequences) <- plan built here",
         ms(w.first_decode),
@@ -1150,7 +1171,10 @@ fn summarise(label: &str, cfg: &str, w: &Windows) {
         // one-time cost hiding in an aggregate is precisely what this prevents.
         eprintln!(
             "  steady rounds ms {:?}",
-            w.steady_rounds_ms().iter().map(|v| (v * 1000.0).round() / 1000.0).collect::<Vec<_>>()
+            w.steady_rounds_ms()
+                .iter()
+                .map(|v| (v * 1000.0).round() / 1000.0)
+                .collect::<Vec<_>>()
         );
     }
     eprintln!(
@@ -1198,7 +1222,10 @@ fn gpu_paged_vs_contiguous_per_token() {
 
     let k = batch_k();
     let n_new = max_new();
-    assert!(n_new >= 3, "LB_MAX_NEW must be >= 3 to leave a non-empty steady window");
+    assert!(
+        n_new >= 3,
+        "LB_MAX_NEW must be >= 3 to leave a non-empty steady window"
+    );
     // `>= 3` is a floor, not sufficient once `LB_CAPTURE=on`: the contiguous
     // arm's capture-build round (token 2) consumes one round the steady
     // window would otherwise get (see Window 3 below), so at `LB_CAPTURE=on`
@@ -1216,7 +1243,11 @@ fn gpu_paged_vs_contiguous_per_token() {
     match arm.as_str() {
         "paged" => {
             let w = run_paged(&loaded, &dev, k, n_new, plan).expect("paged arm");
-            summarise("PAGED (CUDA), isolated for nsys", &format!("arm=paged plan={plan:?}"), &w);
+            summarise(
+                "PAGED (CUDA), isolated for nsys",
+                &format!("arm=paged plan={plan:?}"),
+                &w,
+            );
         }
         "paged_sched" => {
             let w =
@@ -1237,8 +1268,7 @@ fn gpu_paged_vs_contiguous_per_token() {
                  reports NaN instead of failing",
                 3 + capture as usize
             );
-            let w = run_contiguous(&loaded, &dev, k, n_new, plan, capture)
-                .expect("contiguous arm");
+            let w = run_contiguous(&loaded, &dev, k, n_new, plan, capture).expect("contiguous arm");
             summarise(
                 "CONTIGUOUS (CUDA), isolated for nsys",
                 &format!("arm=contiguous plan={plan:?} capture={capture}"),
@@ -1256,8 +1286,8 @@ fn gpu_paged_vs_contiguous_per_token() {
                 3 + capture as usize
             );
             let paged = run_paged(&loaded, &dev, k, n_new, plan).expect("paged arm");
-            let contig = run_contiguous(&loaded, &dev, k, n_new, plan, capture)
-                .expect("contiguous arm");
+            let contig =
+                run_contiguous(&loaded, &dev, k, n_new, plan, capture).expect("contiguous arm");
             summarise("PAGED (CUDA)", &format!("arm=paged plan={plan:?}"), &paged);
             summarise(
                 "CONTIGUOUS (CUDA)",
@@ -1271,7 +1301,10 @@ fn gpu_paged_vs_contiguous_per_token() {
             eprintln!("  paged      {p:.3} ms/token");
             eprintln!("  contiguous {c:.3} ms/token");
             eprintln!("  ratio      {:.3}x", p / c);
-            eprintln!("RATIO k={k} plan={plan:?} capture={capture} paged_over_contiguous={:.4}", p / c);
+            eprintln!(
+                "RATIO k={k} plan={plan:?} capture={capture} paged_over_contiguous={:.4}",
+                p / c
+            );
             eprintln!(
                 "\nNOTE: this ratio is NOT the answer on its own. It cannot distinguish\n\
                  \"no round-trip\" from \"neither arm reached the GPU at all\". Read it only\n\

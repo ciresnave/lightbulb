@@ -108,13 +108,14 @@ fn run_arm(
         // admission from being the thing under measurement.
         num_blocks: 8,
     };
-    let mut sched =
-        PagedSessionScheduler::new(&loaded.model, budget, DType::F32, &Device::cpu())
-            .expect("build the paged scheduler");
+    let mut sched = PagedSessionScheduler::new(&loaded.model, budget, DType::F32, &Device::cpu())
+        .expect("build the paged scheduler");
     sched.set_plan(plan);
     assert_eq!(sched.plan(), plan, "set_plan did not take");
 
-    let prompt: Vec<u32> = (0..PROMPT_LEN).map(|t| ((t * 17) % 1000 + 1) as u32).collect();
+    let prompt: Vec<u32> = (0..PROMPT_LEN)
+        .map(|t| ((t * 17) % 1000 + 1) as u32)
+        .collect();
     let id = sched
         .add_session(&prompt, SamplingStrategy::Greedy, None, MAX_NEW)
         .expect("admit the session");
@@ -131,8 +132,8 @@ fn run_arm(
         let dt = t0.elapsed();
         all_steps.push(dt);
         match i {
-            0 => {}                        // prefill + first token
-            1 => warm_up = dt,             // first decode token
+            0 => {}            // prefill + first token
+            1 => warm_up = dt, // first decode token
             _ => steady.push(dt),
         }
     }
@@ -145,7 +146,10 @@ fn run_arm(
         .map(|(_, toks)| toks.len())
         .unwrap_or(0);
 
-    assert!(!steady.is_empty(), "no steady-state samples — MAX_NEW is too small");
+    assert!(
+        !steady.is_empty(),
+        "no steady-state samples — MAX_NEW is too small"
+    );
     (warm_up, median(steady), count, tokens, all_steps)
 }
 
@@ -155,9 +159,8 @@ fn plan_once_vs_replan() {
     // Deliberately NOT the `return` skip other suites use: an early return from
     // a #[test] is a PASS, so a missing checkpoint would report success having
     // measured nothing. This is a measurement harness; absent data is a failure.
-    let dir = tinyllama_dir().expect(
-        "no TinyLlama snapshot — this harness measures, so it fails rather than skipping",
-    );
+    let dir = tinyllama_dir()
+        .expect("no TinyLlama snapshot — this harness measures, so it fails rather than skipping");
     let loaded = load_llama_f32_from_dir(&dir).expect("load the f32 checkpoint");
 
     // Both arms, one process, one checkpoint load, same commit.
@@ -190,16 +193,27 @@ fn plan_once_vs_replan() {
     );
     eprintln!();
     let speedup = replan_steady.as_secs_f64() / once_steady.as_secs_f64();
-    eprintln!("  steady-state per-token: {replan_steady:.3?} -> {once_steady:.3?}  ({speedup:.2}x)");
+    eprintln!(
+        "  steady-state per-token: {replan_steady:.3?} -> {once_steady:.3?}  ({speedup:.2}x)"
+    );
     // Plan cost as a DIFFERENCE of two direct measurements, not a residual.
     if once_warm > once_steady {
-        eprintln!("  one-off plan build (warm-up minus steady): {:.3?}", once_warm - once_steady);
+        eprintln!(
+            "  one-off plan build (warm-up minus steady): {:.3?}",
+            once_warm - once_steady
+        );
     }
 
     // Non-vacuity: both arms actually decoded.
     let want = PROMPT_LEN + MAX_NEW;
-    assert_eq!(replan_tokens, want, "Replan arm did not produce {want} tokens");
-    assert_eq!(once_tokens, want, "PlanOnce arm did not produce {want} tokens");
+    assert_eq!(
+        replan_tokens, want,
+        "Replan arm did not produce {want} tokens"
+    );
+    assert_eq!(
+        once_tokens, want,
+        "PlanOnce arm did not produce {want} tokens"
+    );
 
     // The control must be a true control: Replan holds no plan.
     assert!(

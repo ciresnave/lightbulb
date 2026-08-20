@@ -259,8 +259,10 @@ impl BatchedTransformer {
                 "model.embed_tokens.weight",
             )?;
 
-
-            QuantizableLinear::from_linear(candlelight::nn::Linear::new(embedding_weight.clone(), None))
+            QuantizableLinear::from_linear(candlelight::nn::Linear::new(
+                embedding_weight.clone(),
+                None,
+            ))
         } else {
             QuantizableLinear::from_linear(candlelight::nn::linear_no_bias(
                 config.hidden_size,
@@ -356,9 +358,9 @@ impl BatchedTransformer {
             match gguf_content.tensor(file, &output_weight_name, device) {
                 Ok(output_tensor) => {
                     // Output layer exists - wrap in QMatMul and QuantizableLinear
-                    QuantizableLinear::from_qmatmul(candlelight::core::quantized::QMatMul::from_qtensor(
-                        output_tensor,
-                    )?)
+                    QuantizableLinear::from_qmatmul(
+                        candlelight::core::quantized::QMatMul::from_qtensor(output_tensor)?,
+                    )
                 }
                 Err(_) => {
                     // Fall back to tied weights if output.weight doesn't exist
@@ -539,7 +541,6 @@ impl BatchedTransformer {
                 last_attn_weights = attn_weights;
             }
             // Note: layer_idx is used internally by block for KV cache access
-
         }
 
         // M3.2 Optimization: Throttle H2O updates (expensive GPU→CPU transfer + allocations)
@@ -560,8 +561,7 @@ impl BatchedTransformer {
                 // Previous code called dims2() which silently failed on the 4D
                 // tensor, so H2O never received data. Fixed: handle both 4D
                 // (batched multi-head) and 2D (pre-aggregated) shapes.
-                let aggregated = if let Ok((_batch, _heads, _seq_q, _seq_k)) =
-                    attn_weights.dims4()
+                let aggregated = if let Ok((_batch, _heads, _seq_q, _seq_k)) = attn_weights.dims4()
                 {
                     // 4D: [batch, num_heads, seq_q, seq_k]
                     // Average across heads (dim 1), then across batch (dim 0)
@@ -874,11 +874,10 @@ impl BatchedTransformer {
         batch_size: usize,
         context_size: usize,
     ) -> Result<()> {
-        let multi_gpu = self
-            .config
-            .multi_gpu
-            .as_ref()
-            .ok_or_else(|| candlelight::core::Error::Msg("Multi-GPU not configured".to_string()))?;
+        let multi_gpu =
+            self.config.multi_gpu.as_ref().ok_or_else(|| {
+                candlelight::core::Error::Msg("Multi-GPU not configured".to_string())
+            })?;
 
         use crate::multi_gpu::distributed_cache::CacheSyncStrategy;
 

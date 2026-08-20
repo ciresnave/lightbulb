@@ -33,8 +33,8 @@ use std::path::Path;
 use std::sync::Arc;
 
 use fuel::lazy::{
-    load_tensor_as_f32, load_transposed_matrix, LayerWeights, LlamaConfig, LlamaModel,
-    LlamaWeights, WeightStorage,
+    LayerWeights, LlamaConfig, LlamaModel, LlamaWeights, WeightStorage, load_tensor_as_f32,
+    load_transposed_matrix,
 };
 use fuel::safetensors::MmapedSafetensors;
 
@@ -78,8 +78,8 @@ pub fn load_llama_f32_from_dir(dir: &Path) -> Result<LoadedLlama> {
         Ok(WeightStorage::F32(Arc::from(v)))
     };
     let vecf = |name: &str| -> Result<Arc<[f32]>> {
-        let v = load_tensor_as_f32(&st, name)
-            .map_err(|e| anyhow::anyhow!("loading {name}: {e:?}"))?;
+        let v =
+            load_tensor_as_f32(&st, name).map_err(|e| anyhow::anyhow!("loading {name}: {e:?}"))?;
         Ok(Arc::from(v))
     };
 
@@ -88,20 +88,46 @@ pub fn load_llama_f32_from_dir(dir: &Path) -> Result<LoadedLlama> {
     let mut layers = Vec::with_capacity(config.n_layers);
     for i in 0..config.n_layers {
         layers.push(LayerWeights {
-            attn_q: mat(&format!("model.layers.{i}.self_attn.q_proj.weight"), dim, dim)?,
+            attn_q: mat(
+                &format!("model.layers.{i}.self_attn.q_proj.weight"),
+                dim,
+                dim,
+            )?,
             attn_q_bias: None,
-            attn_k: mat(&format!("model.layers.{i}.self_attn.k_proj.weight"), kv_dim, dim)?,
+            attn_k: mat(
+                &format!("model.layers.{i}.self_attn.k_proj.weight"),
+                kv_dim,
+                dim,
+            )?,
             attn_k_bias: None,
-            attn_v: mat(&format!("model.layers.{i}.self_attn.v_proj.weight"), kv_dim, dim)?,
+            attn_v: mat(
+                &format!("model.layers.{i}.self_attn.v_proj.weight"),
+                kv_dim,
+                dim,
+            )?,
             attn_v_bias: None,
-            attn_o: mat(&format!("model.layers.{i}.self_attn.o_proj.weight"), dim, dim)?,
-            ffn_gate: mat(&format!("model.layers.{i}.mlp.gate_proj.weight"), ffn_dim, dim)?,
-            ffn_up: mat(&format!("model.layers.{i}.mlp.up_proj.weight"), ffn_dim, dim)?,
-            ffn_down: mat(&format!("model.layers.{i}.mlp.down_proj.weight"), dim, ffn_dim)?,
+            attn_o: mat(
+                &format!("model.layers.{i}.self_attn.o_proj.weight"),
+                dim,
+                dim,
+            )?,
+            ffn_gate: mat(
+                &format!("model.layers.{i}.mlp.gate_proj.weight"),
+                ffn_dim,
+                dim,
+            )?,
+            ffn_up: mat(
+                &format!("model.layers.{i}.mlp.up_proj.weight"),
+                ffn_dim,
+                dim,
+            )?,
+            ffn_down: mat(
+                &format!("model.layers.{i}.mlp.down_proj.weight"),
+                dim,
+                ffn_dim,
+            )?,
             attn_norm_gain: vecf(&format!("model.layers.{i}.input_layernorm.weight"))?,
-            ffn_norm_gain: vecf(&format!(
-                "model.layers.{i}.post_attention_layernorm.weight"
-            ))?,
+            ffn_norm_gain: vecf(&format!("model.layers.{i}.post_attention_layernorm.weight"))?,
         });
     }
 
@@ -264,11 +290,16 @@ mod tests {
     #[ignore = "needs the TinyLlama checkpoint"]
     fn loader_surfaces_eos_and_tokenizer() -> Result<()> {
         let Some(dir) = tinyllama_dir() else {
-            panic!("no TinyLlama snapshot — this test asserts loader behaviour, so it fails rather than skipping");
+            panic!(
+                "no TinyLlama snapshot — this test asserts loader behaviour, so it fails rather than skipping"
+            );
         };
         let loaded = load_llama_f32_from_dir(&dir)?;
 
-        assert!(loaded.is_eos(2), "TinyLlama's </s> is token 2; EOS did not parse");
+        assert!(
+            loaded.is_eos(2),
+            "TinyLlama's </s> is token 2; EOS did not parse"
+        );
         assert!(!loaded.is_eos(0), "token 0 is <unk>, not EOS");
 
         // The tokenizer must round-trip, not merely exist.

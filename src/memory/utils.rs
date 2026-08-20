@@ -103,10 +103,10 @@ mod tests {
     fn test_estimate_parameters() {
         // Llama-7B config
         let params = estimate_parameters(
-            32000,   // vocab_size
-            4096,    // hidden_size
-            11008,   // intermediate_size
-            32,      // num_layers
+            32000, // vocab_size
+            4096,  // hidden_size
+            11008, // intermediate_size
+            32,    // num_layers
         );
 
         // Should be approximately 7B parameters

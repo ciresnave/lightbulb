@@ -637,16 +637,12 @@ impl ParallelModelManager {
         }
 
         // Enable H2O + segmented eviction on the cache builder
-        self.cache_builder
-            .enable_segmented_eviction(config.clone());
+        self.cache_builder.enable_segmented_eviction(config.clone());
 
         // Create tiered storage manager if demotion is enabled
         if config.tiered_demotion {
             let max_ram = config.max_ram_demoted_segments;
-            let mut storage = crate::cache::TieredStorageManager::new(
-                self.device.clone(),
-                max_ram,
-            );
+            let mut storage = crate::cache::TieredStorageManager::new(self.device.clone(), max_ram);
 
             // Set up disk backend if configured
             if let Some(ref path) = config.disk_storage_path {
@@ -839,10 +835,7 @@ impl ParallelModelManager {
                             None,
                         ) {
                             Ok(fact_key) => {
-                                println!(
-                                    "Demoted span {} to RAM (KB key: {})",
-                                    span_id, fact_key
-                                );
+                                println!("Demoted span {} to RAM (KB key: {})", span_id, fact_key);
                             }
                             Err(e) => {
                                 eprintln!("Warning: Failed to demote span {}: {}", span_id, e);
@@ -866,16 +859,12 @@ impl ParallelModelManager {
     /// Registers common tool call patterns (<tool_call>, `[TOOL_CALL]`, <|tool_call|>)
     /// and enables detection in the decode loop.
     pub fn enable_tool_call_detection(&mut self) {
-        self.tool_call_detector =
-            Some(crate::engine::tool_call::ToolCallDetector::with_defaults());
+        self.tool_call_detector = Some(crate::engine::tool_call::ToolCallDetector::with_defaults());
         println!("Tool call detection enabled (3 default patterns)");
     }
 
     /// Enable tool call detection with a custom detector.
-    pub fn set_tool_call_detector(
-        &mut self,
-        detector: crate::engine::tool_call::ToolCallDetector,
-    ) {
+    pub fn set_tool_call_detector(&mut self, detector: crate::engine::tool_call::ToolCallDetector) {
         self.tool_call_detector = Some(detector);
     }
 
@@ -943,11 +932,9 @@ impl ParallelModelManager {
 
         // Create ToolOutput span
         if self.is_segmented_cache_enabled() {
-            let _ = self.cache_builder.begin_span(
-                cache_idx,
-                crate::cache::CacheTag::ToolOutput,
-                None,
-            );
+            let _ =
+                self.cache_builder
+                    .begin_span(cache_idx, crate::cache::CacheTag::ToolOutput, None);
         }
 
         // Create input tensor for mini-prefill
@@ -1540,7 +1527,8 @@ impl ParallelModelManager {
                             // entry under a token sequence that was never the
                             // one prefilled, so a later request with that
                             // sequence would be handed another prompt's KV.
-                            let tokens = self.tokenize(&ctx.request.prompt, ctx.add_special_tokens)?;
+                            let tokens =
+                                self.tokenize(&ctx.request.prompt, ctx.add_special_tokens)?;
 
                             // IMPORTANT: Use only the tokens we actually processed (prefix_len)
                             // In case of chunked prefill, we may have only processed part of the prompt
@@ -1733,8 +1721,7 @@ impl ParallelModelManager {
                         let max_util = self.cache_builder.get_max_utilization();
 
                         if config.shadow_mode {
-                            self.cache_builder
-                                .log_eviction_candidates(config, 5);
+                            self.cache_builder.log_eviction_candidates(config, 5);
                         } else if max_util > config.eviction_pressure_threshold {
                             let config_clone = config.clone();
                             self.handle_eviction_pressure(&config_clone, max_util);
@@ -1802,24 +1789,17 @@ impl ParallelModelManager {
                         if config.tiered_demotion && !config.shadow_mode {
                             // Decode last ~15 tokens to check for RETRIEVE pattern
                             let check_len = ctx.generated_tokens.len().min(15);
-                            let tail = &ctx.generated_tokens
-                                [ctx.generated_tokens.len() - check_len..];
+                            let tail =
+                                &ctx.generated_tokens[ctx.generated_tokens.len() - check_len..];
                             if let Ok(decoded) = self.tokenizer.decode(tail, false) {
                                 if let Some(start) = decoded.find("<RETRIEVE:") {
                                     if let Some(end) = decoded[start..].find('>') {
-                                        let key =
-                                            &decoded[start + 10..start + end];
+                                        let key = &decoded[start + 10..start + end];
                                         // Look up the demoted segment
-                                        if let Some(ref mut storage) =
-                                            self.tiered_storage
-                                        {
-                                            if let Some(span_id) =
-                                                storage.find_by_fact_key(key)
-                                            {
+                                        if let Some(ref mut storage) = self.tiered_storage {
+                                            if let Some(span_id) = storage.find_by_fact_key(key) {
                                                 // Promote back to GPU
-                                                match storage
-                                                    .promote_with_disk(span_id)
-                                                {
+                                                match storage.promote_with_disk(span_id) {
                                                     Ok((slot, range, kv_layers)) => {
                                                         // Re-inject KV tensors into cache
                                                         let mut inject_ok = true;
@@ -1848,15 +1828,17 @@ impl ParallelModelManager {
 
                                                         if inject_ok {
                                                             // Clear evicted positions so mask allows attention again
-                                                            self.cache_builder
-                                                                .clear_evicted_range(
-                                                                    slot,
-                                                                    range.start,
-                                                                    range.end,
-                                                                );
+                                                            self.cache_builder.clear_evicted_range(
+                                                                slot,
+                                                                range.start,
+                                                                range.end,
+                                                            );
                                                             println!(
                                                                 "Promoted span {} back to GPU, re-injected at positions {}..{} (key: {})",
-                                                                span_id, range.start, range.end, key
+                                                                span_id,
+                                                                range.start,
+                                                                range.end,
+                                                                key
                                                             );
                                                         }
                                                     }
@@ -1881,9 +1863,7 @@ impl ParallelModelManager {
                     // Segmented cache: end ModelGeneration span on completion
                     if self.is_segmented_cache_enabled() {
                         if let Some(cache_idx) = ctx.cache_index {
-                            if let Some(span_id) =
-                                self.active_generation_spans.remove(&cache_idx)
-                            {
+                            if let Some(span_id) = self.active_generation_spans.remove(&cache_idx) {
                                 if let Err(e) = self.cache_builder.end_span(span_id) {
                                     eprintln!(
                                         "Warning: Failed to end ModelGeneration span {}: {}",
@@ -1912,8 +1892,7 @@ impl ParallelModelManager {
                                     None,
                                 ) {
                                     Ok(span_id) => {
-                                        self.active_generation_spans
-                                            .insert(cache_idx, span_id);
+                                        self.active_generation_spans.insert(cache_idx, span_id);
                                     }
                                     Err(e) => {
                                         eprintln!(

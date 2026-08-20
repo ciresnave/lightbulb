@@ -333,8 +333,16 @@ mod tests {
     #[test]
     fn select_token_is_greedy_at_zero_and_seeded_above() {
         let peaked = vec![0.1, 3.0, 0.2, 2.9, 0.3];
-        assert_eq!(select_token(&peaked, 0.0, 1), 1, "temperature 0 must be argmax");
-        assert_eq!(select_token(&peaked, 0.0, 999), 1, "greedy must ignore the seed");
+        assert_eq!(
+            select_token(&peaked, 0.0, 1),
+            1,
+            "temperature 0 must be argmax"
+        );
+        assert_eq!(
+            select_token(&peaked, 0.0, 999),
+            1,
+            "greedy must ignore the seed"
+        );
         assert_eq!(
             select_token(&peaked, 1.0, 7),
             select_token(&peaked, 1.0, 7),
@@ -342,7 +350,9 @@ mod tests {
         );
 
         let flat = vec![1.0; 8];
-        let tokens: HashSet<u32> = (1u64..=5).map(|seed| select_token(&flat, 1.0, seed)).collect();
+        let tokens: HashSet<u32> = (1u64..=5)
+            .map(|seed| select_token(&flat, 1.0, seed))
+            .collect();
         assert!(
             tokens.len() > 1,
             "seeds 1..=5 over a flat distribution all produced the same token \

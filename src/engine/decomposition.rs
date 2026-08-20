@@ -51,10 +51,10 @@
 //! assert!(simplified.is_atomic()); // Can solve directly now
 //! ```
 
+use crate::engine::KnowledgeBase;
 use crate::engine::state_persistence::{
     CheckpointManager, create_checkpoint, restore_kb_from_checkpoint,
 };
-use crate::engine::KnowledgeBase;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::time::{SystemTime, UNIX_EPOCH};

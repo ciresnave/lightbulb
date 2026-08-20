@@ -57,11 +57,7 @@ fn test_grow_with_queue_pressure() {
     // Simulate several iterations with moderate token positions
     for _ in 0..15 {
         let positions = pool.get_active_positions();
-        monitor.record_batch(
-            stats.active_slots,
-            stats.pending_requests,
-            &positions,
-        );
+        monitor.record_batch(stats.active_slots, stats.pending_requests, &positions);
     }
 
     // Check if monitor recommends growth
@@ -241,25 +237,25 @@ fn test_memory_estimation_scales_with_position() {
 
     // Late in generation
     let positions_late = vec![400, 450, 480, 500];
-    
+
     // The estimate_memory_usage is private, but we can test via record_batch
     // and check statistics
-    
+
     // For manual verification:
     let kv_per_request = test_model_profile().kv_cache_bytes_per_request(2);
     let per_token = kv_per_request as f64 / test_model_profile().context_window as f64;
-    
+
     let early_total: usize = positions_early.iter().sum();
     let late_total: usize = positions_late.iter().sum();
-    
+
     let early_estimate = (early_total as f64 * per_token) as u64;
     let late_estimate = (late_total as f64 * per_token) as u64;
-    
+
     assert!(
         late_estimate > early_estimate,
         "Memory usage should increase with token position"
     );
-    
+
     println!(
         "✓ Memory estimation: early={} MB, late={} MB",
         early_estimate / (1024 * 1024),

@@ -222,8 +222,8 @@ mod tests {
         let cache_manager = DistributedCacheManager::new(
             topology,
             CacheSyncStrategy::Replicated,
-            4,                       // batch_size
-            2048,                    // context_size
+            4,                             // batch_size
+            2048,                          // context_size
             candlelight::core::DType::F32, // dtype
         )?;
 
@@ -239,8 +239,8 @@ mod tests {
         let mut cache_manager = DistributedCacheManager::new(
             topology,
             CacheSyncStrategy::Replicated,
-            4,                       // batch_size
-            2048,                    // context_size
+            4,                             // batch_size
+            2048,                          // context_size
             candlelight::core::DType::F32, // dtype
         )?;
 

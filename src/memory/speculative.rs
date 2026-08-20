@@ -182,10 +182,7 @@ fn create_weight_memory(
 }
 
 /// Check if models can share embeddings
-fn can_share_embeddings(
-    target: &SimpleTransformerConfig,
-    draft: &SimpleTransformerConfig,
-) -> bool {
+fn can_share_embeddings(target: &SimpleTransformerConfig, draft: &SimpleTransformerConfig) -> bool {
     target.vocab_size == draft.vocab_size && target.hidden_size == draft.hidden_size
 }
 
@@ -289,7 +286,14 @@ mod tests {
         let draft_config = llama_1b_config();
         let draft_quant = awq_config();
 
-        let estimate = estimate_from_configs(&target_config, None, &draft_config, Some(&draft_quant), 1, 2048);
+        let estimate = estimate_from_configs(
+            &target_config,
+            None,
+            &draft_config,
+            Some(&draft_quant),
+            1,
+            2048,
+        );
 
         let display = estimate.display();
         assert!(display.contains("Target:"));

@@ -211,7 +211,8 @@ fn main() -> Result<()> {
     println!("\n📂 Loading model...");
     let model_path = "../models/llama-3b";
     let max_batch_size = *batch_sizes.iter().max().unwrap();
-    let mut model_manager = ParallelModelManager::load(model_path, max_batch_size, 512, Some("f32"), None)?;
+    let mut model_manager =
+        ParallelModelManager::load(model_path, max_batch_size, 512, Some("f32"), None)?;
     println!("✓ Model loaded\n");
 
     let mut results = Vec::new();

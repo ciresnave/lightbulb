@@ -35,7 +35,13 @@ impl Arm {
         let dev = Device::Cpu;
         let builder = ParallelCacheBuilder::new(BATCH, CONTEXT, DType::F32, &dev).unwrap();
         let cache = builder.make_cache(KV_HEADS, HEAD_DIM).unwrap();
-        Self { label, active, builder, cache, samples: Vec::new() }
+        Self {
+            label,
+            active,
+            builder,
+            cache,
+            samples: Vec::new(),
+        }
     }
 }
 
@@ -50,7 +56,9 @@ fn append_cost_all_active_vs_partial() {
     let mut one_off = vec![true; BATCH];
     one_off[BATCH - 1] = false;
     let mut half = vec![true; BATCH];
-    for a in half.iter_mut().take(BATCH / 2) { *a = false; }
+    for a in half.iter_mut().take(BATCH / 2) {
+        *a = false;
+    }
 
     let mut arms = vec![
         Arm::new("all active (fast path)", vec![true; BATCH]),
@@ -86,8 +94,10 @@ fn append_cost_all_active_vs_partial() {
 
     println!("
 TinyLlama geometry: {LAYERS} layers, {KV_HEADS} kv-heads, head_dim {HEAD_DIM}, context {CONTEXT}, batch {BATCH}");
-    println!("{ROUNDS} interleaved rounds x {ITERS} iterations, all arms pre-warmed, CPU, --release
-");
+    println!(
+        "{ROUNDS} interleaved rounds x {ITERS} iterations, all arms pre-warmed, CPU, --release
+"
+    );
     for arm in arms.iter_mut() {
         arm.samples.sort();
         let med = arm.samples[arm.samples.len() / 2];
@@ -95,7 +105,11 @@ TinyLlama geometry: {LAYERS} layers, {KV_HEADS} kv-heads, head_dim {HEAD_DIM}, c
         let max = arm.samples[arm.samples.len() - 1];
         println!(
             "{:<32} median {:>8.1?}  (min {:>8.1?}  max {:>8.1?})  -> {:>8.1?} / decode step",
-            arm.label, med, min, max, med * LAYERS as u32
+            arm.label,
+            med,
+            min,
+            max,
+            med * LAYERS as u32
         );
     }
     println!();

@@ -270,10 +270,7 @@ impl SegmentedEvictionPolicy {
     /// # Returns
     ///
     /// Vector of `(SpanId, relevance_score)` sorted ascending by score.
-    pub fn rank_spans_for_eviction(
-        &self,
-        registry: &SpanRegistry,
-    ) -> Vec<(SpanId, f32)> {
+    pub fn rank_spans_for_eviction(&self, registry: &SpanRegistry) -> Vec<(SpanId, f32)> {
         let mut candidates: Vec<(SpanId, f32)> = self
             .span_scores
             .iter()
@@ -456,11 +453,7 @@ impl PerTokenTracker {
     ///
     /// * `max_evictions` - Maximum number of tokens to evict
     /// * `score_threshold` - Only evict tokens with score below this value
-    pub fn select_evictions(
-        &self,
-        max_evictions: usize,
-        score_threshold: f32,
-    ) -> Vec<usize> {
+    pub fn select_evictions(&self, max_evictions: usize, score_threshold: f32) -> Vec<usize> {
         let mut candidates: Vec<(usize, f32)> = self
             .token_scores
             .iter()
@@ -498,7 +491,10 @@ impl PerTokenTracker {
 
     /// Count how many tokens are still active (not evicted).
     pub fn active_count(&self) -> usize {
-        self.evicted_mask.iter().filter(|&&evicted| !evicted).count()
+        self.evicted_mask
+            .iter()
+            .filter(|&&evicted| !evicted)
+            .count()
     }
 
     /// Count how many tokens have been evicted.

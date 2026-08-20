@@ -79,9 +79,15 @@ fn make_cache_is_zeroed_and_correctly_shaped() {
     // whatever was left here. Uninitialised memory would show up as plausible
     // garbage logits rather than as a crash.
     let k_all = cache.k().flatten_all().unwrap().to_vec1::<f32>().unwrap();
-    assert!(k_all.iter().all(|&x| x == 0.0), "K cache is not zero-initialised");
+    assert!(
+        k_all.iter().all(|&x| x == 0.0),
+        "K cache is not zero-initialised"
+    );
     let v_all = cache.v().flatten_all().unwrap().to_vec1::<f32>().unwrap();
-    assert!(v_all.iter().all(|&x| x == 0.0), "V cache is not zero-initialised");
+    assert!(
+        v_all.iter().all(|&x| x == 0.0),
+        "V cache is not zero-initialised"
+    );
 }
 
 #[test]
@@ -100,11 +106,28 @@ fn indices_and_mask_is_pure() {
     let after_one: Vec<usize> = b.positions().to_vec();
     let second = b.indices_and_mask(1, &[true, true]).unwrap();
 
-    assert_eq!(before, after_one, "indices_and_mask advanced positions; it is documented as pure");
-    assert_eq!(before, b.positions().to_vec(), "positions drifted across two calls");
+    assert_eq!(
+        before, after_one,
+        "indices_and_mask advanced positions; it is documented as pure"
+    );
+    assert_eq!(
+        before,
+        b.positions().to_vec(),
+        "positions drifted across two calls"
+    );
 
-    let m1 = first.mask().flatten_all().unwrap().to_vec1::<f32>().unwrap();
-    let m2 = second.mask().flatten_all().unwrap().to_vec1::<f32>().unwrap();
+    let m1 = first
+        .mask()
+        .flatten_all()
+        .unwrap()
+        .to_vec1::<f32>()
+        .unwrap();
+    let m2 = second
+        .mask()
+        .flatten_all()
+        .unwrap()
+        .to_vec1::<f32>()
+        .unwrap();
     assert_eq!(m1, m2, "two identical calls produced different masks");
 }
 
@@ -141,7 +164,11 @@ fn an_inactive_slot_gets_a_permissive_mask_and_that_is_deliberate() {
     let iam = b.indices_and_mask(1, &[true, false]).unwrap();
     let mask = iam.mask();
     let dims = mask.dims().to_vec();
-    assert_eq!(dims.len(), 4, "mask is documented as (b, h, t, k), got {dims:?}");
+    assert_eq!(
+        dims.len(),
+        4,
+        "mask is documented as (b, h, t, k), got {dims:?}"
+    );
 
     let inactive_row = mask
         .narrow(0, 1, 1)
@@ -201,17 +228,45 @@ fn append_writes_each_slot_at_its_own_position_without_touching_the_others() {
     let iam = b.indices_and_mask(1, &[true, true]).unwrap();
     cache.append(&k, &v, &iam).unwrap();
 
-    assert_eq!(read_at(cache.k(), 0, 0, 2), vec![7.0; HEAD_DIM], "slot 0 K missing at its position");
-    assert_eq!(read_at(cache.k(), 1, 0, 5), vec![9.0; HEAD_DIM], "slot 1 K missing at its position");
-    assert_eq!(read_at(cache.v(), 0, 0, 2), vec![-7.0; HEAD_DIM], "slot 0 V missing");
-    assert_eq!(read_at(cache.v(), 1, 0, 5), vec![-9.0; HEAD_DIM], "slot 1 V missing");
+    assert_eq!(
+        read_at(cache.k(), 0, 0, 2),
+        vec![7.0; HEAD_DIM],
+        "slot 0 K missing at its position"
+    );
+    assert_eq!(
+        read_at(cache.k(), 1, 0, 5),
+        vec![9.0; HEAD_DIM],
+        "slot 1 K missing at its position"
+    );
+    assert_eq!(
+        read_at(cache.v(), 0, 0, 2),
+        vec![-7.0; HEAD_DIM],
+        "slot 0 V missing"
+    );
+    assert_eq!(
+        read_at(cache.v(), 1, 0, 5),
+        vec![-9.0; HEAD_DIM],
+        "slot 1 V missing"
+    );
 
     // Neither slot may appear at the other's position, and nothing may land
     // anywhere else.
-    assert_eq!(read_at(cache.k(), 0, 0, 5), vec![0.0; HEAD_DIM], "slot 1's write leaked into slot 0");
-    assert_eq!(read_at(cache.k(), 1, 0, 2), vec![0.0; HEAD_DIM], "slot 0's write leaked into slot 1");
+    assert_eq!(
+        read_at(cache.k(), 0, 0, 5),
+        vec![0.0; HEAD_DIM],
+        "slot 1's write leaked into slot 0"
+    );
+    assert_eq!(
+        read_at(cache.k(), 1, 0, 2),
+        vec![0.0; HEAD_DIM],
+        "slot 0's write leaked into slot 1"
+    );
     for pos in [0usize, 1, 3, 4, 6, 7] {
-        assert_eq!(read_at(cache.k(), 0, 0, pos), vec![0.0; HEAD_DIM], "slot 0 written at {pos}");
+        assert_eq!(
+            read_at(cache.k(), 0, 0, pos),
+            vec![0.0; HEAD_DIM],
+            "slot 0 written at {pos}"
+        );
     }
 }
 
@@ -251,16 +306,39 @@ fn set_slot_kv_restores_one_slot_and_leaves_the_rest_alone() {
     let v_slot = per_slot_tensor(&[-2.0], prefix_len, &device);
 
     let written = cache.set_slot_kv(1, &k_slot, &v_slot).unwrap();
-    assert_eq!(written, prefix_len, "reported prefix length disagrees with the tensor");
+    assert_eq!(
+        written, prefix_len,
+        "reported prefix length disagrees with the tensor"
+    );
 
     for pos in 0..prefix_len {
-        assert_eq!(read_at(cache.k(), 1, 0, pos), vec![2.0; HEAD_DIM], "slot 1 K missing at {pos}");
-        assert_eq!(read_at(cache.v(), 1, 0, pos), vec![-2.0; HEAD_DIM], "slot 1 V missing at {pos}");
-        assert_eq!(read_at(cache.k(), 0, 0, pos), vec![0.0; HEAD_DIM], "slot 0 was disturbed");
-        assert_eq!(read_at(cache.k(), 2, 0, pos), vec![0.0; HEAD_DIM], "slot 2 was disturbed");
+        assert_eq!(
+            read_at(cache.k(), 1, 0, pos),
+            vec![2.0; HEAD_DIM],
+            "slot 1 K missing at {pos}"
+        );
+        assert_eq!(
+            read_at(cache.v(), 1, 0, pos),
+            vec![-2.0; HEAD_DIM],
+            "slot 1 V missing at {pos}"
+        );
+        assert_eq!(
+            read_at(cache.k(), 0, 0, pos),
+            vec![0.0; HEAD_DIM],
+            "slot 0 was disturbed"
+        );
+        assert_eq!(
+            read_at(cache.k(), 2, 0, pos),
+            vec![0.0; HEAD_DIM],
+            "slot 2 was disturbed"
+        );
     }
     // Past the prefix, slot 1 is still untouched.
-    assert_eq!(read_at(cache.k(), 1, 0, prefix_len), vec![0.0; HEAD_DIM], "wrote beyond the prefix");
+    assert_eq!(
+        read_at(cache.k(), 1, 0, prefix_len),
+        vec![0.0; HEAD_DIM],
+        "wrote beyond the prefix"
+    );
 }
 
 #[test]
@@ -274,7 +352,11 @@ fn reset_batch_index_clears_one_slot_only() {
 
     b.reset_batch_index(1);
 
-    assert_eq!(b.positions(), &[4, 0, 2], "reset_batch_index disturbed a neighbouring slot");
+    assert_eq!(
+        b.positions(),
+        &[4, 0, 2],
+        "reset_batch_index disturbed a neighbouring slot"
+    );
 }
 
 #[test]

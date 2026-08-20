@@ -3,9 +3,9 @@
 //! This benchmark directly measures MLP forward pass with and without fusion
 //! to isolate the performance improvement from CPU kernel fusion.
 
-use lightbulb::model::mlp_wrapper::Mlp;
-use candlelight::core::{Device, DType, Result, Tensor};
+use candlelight::core::{DType, Device, Result, Tensor};
 use candlelight::nn::VarBuilder;
+use lightbulb::model::mlp_wrapper::Mlp;
 use std::time::Instant;
 
 // Benchmark configuration
@@ -64,7 +64,7 @@ fn main() -> Result<()> {
     // Results comparison
     // ============================================================
     println!("\n=== RESULTS ===\n");
-    
+
     let unfused_throughput = 1000.0 / unfused_latency; // tokens/sec
     let fused_throughput = 1000.0 / fused_latency;
 
@@ -78,7 +78,8 @@ fn main() -> Result<()> {
 
     // Calculate improvement
     let latency_improvement = ((unfused_latency - fused_latency) / unfused_latency) * 100.0;
-    let throughput_improvement = ((fused_throughput - unfused_throughput) / unfused_throughput) * 100.0;
+    let throughput_improvement =
+        ((fused_throughput - unfused_throughput) / unfused_throughput) * 100.0;
 
     println!("Improvement:");
     println!("  Latency: {:.1}% faster", latency_improvement);
@@ -89,13 +90,22 @@ fn main() -> Result<()> {
     if throughput_improvement >= 10.0 {
         println!("  ✅ SUCCESS: Achieved target >10% throughput improvement!");
     } else if throughput_improvement >= 5.0 {
-        println!("  ⚠️  Moderate improvement: {:.1}% (target: >10%)", throughput_improvement);
+        println!(
+            "  ⚠️  Moderate improvement: {:.1}% (target: >10%)",
+            throughput_improvement
+        );
         println!("  Note: Fusion benefits may be limited by compiler optimizations.");
     } else if throughput_improvement >= 0.0 {
-        println!("  ⚠️  Minimal improvement: {:.1}% (target: >10%)", throughput_improvement);
+        println!(
+            "  ⚠️  Minimal improvement: {:.1}% (target: >10%)",
+            throughput_improvement
+        );
         println!("  Note: Candle may already be optimizing these operations internally.");
     } else {
-        println!("  ❌ Regression: {:.1}% slower", throughput_improvement.abs());
+        println!(
+            "  ❌ Regression: {:.1}% slower",
+            throughput_improvement.abs()
+        );
         println!("  Note: Fusion overhead may exceed benefits in this configuration.");
     }
 
@@ -116,7 +126,7 @@ fn benchmark_mlp(mlp: &Mlp, input: &Tensor, iterations: usize, label: &str) -> R
 
     // Benchmark
     let mut latencies = Vec::with_capacity(iterations);
-    
+
     for _ in 0..iterations {
         let start = Instant::now();
         let _output = mlp.forward(input)?;
@@ -126,18 +136,23 @@ fn benchmark_mlp(mlp: &Mlp, input: &Tensor, iterations: usize, label: &str) -> R
 
     // Calculate statistics
     let mean_latency: f64 = latencies.iter().sum::<f64>() / latencies.len() as f64;
-    
-    let variance: f64 = latencies.iter()
+
+    let variance: f64 = latencies
+        .iter()
         .map(|&x| {
             let diff = x - mean_latency;
             diff * diff
         })
-        .sum::<f64>() / latencies.len() as f64;
+        .sum::<f64>()
+        / latencies.len() as f64;
     let std_dev = variance.sqrt();
     let cov = (std_dev / mean_latency) * 100.0;
 
     println!("  ✓ {} iterations completed", iterations);
-    println!("  Mean: {:.3} ms, Std dev: {:.3} ms ({:.1}% CoV)", mean_latency, std_dev, cov);
+    println!(
+        "  Mean: {:.3} ms, Std dev: {:.3} ms ({:.1}% CoV)",
+        mean_latency, std_dev, cov
+    );
 
     Ok(mean_latency)
 }

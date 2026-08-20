@@ -32,13 +32,7 @@ fn main() -> Result<()> {
     println!("Loading model...");
     let start = std::time::Instant::now();
 
-    let mut model = ParallelModelManager::load_gguf(
-        &model_path,
-        1,
-        256,
-        None,
-        None,
-    )?;
+    let mut model = ParallelModelManager::load_gguf(&model_path, 1, 256, None, None)?;
 
     println!("Model loaded in {:.2}s\n", start.elapsed().as_secs_f32());
 
@@ -84,11 +78,7 @@ fn main() -> Result<()> {
         println!("\nPhase 2: Injecting tool result...");
 
         // Pause the request
-        batch[0].await_tool_result(
-            "get_weather".to_string(),
-            "Paris".to_string(),
-            None,
-        );
+        batch[0].await_tool_result("get_weather".to_string(), "Paris".to_string(), None);
 
         assert!(
             batch[0].state.is_awaiting_tool_result(),
@@ -100,7 +90,10 @@ fn main() -> Result<()> {
             "get_weather",
             "Current weather in Paris: 22°C, sunny with light clouds. Humidity: 45%.",
         );
-        println!("  Injecting: {:?}", &formatted_result[..formatted_result.len().min(80)]);
+        println!(
+            "  Injecting: {:?}",
+            &formatted_result[..formatted_result.len().min(80)]
+        );
 
         model.inject_tool_result(&mut batch, 0, &formatted_result)?;
 

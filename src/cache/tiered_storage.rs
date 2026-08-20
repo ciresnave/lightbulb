@@ -68,8 +68,7 @@ impl DiskStore for FileDiskStore {
 
     fn load(&self, key: &str) -> Result<Vec<u8>, String> {
         let path = self.base_dir.join(key);
-        std::fs::read(&path)
-            .map_err(|e| format!("Failed to read {}: {}", path.display(), e))
+        std::fs::read(&path).map_err(|e| format!("Failed to read {}: {}", path.display(), e))
     }
 
     fn delete(&mut self, key: &str) -> Result<(), String> {
@@ -255,11 +254,7 @@ impl TieredStorageManager {
     /// # Returns
     ///
     /// The disk storage key, or error if segment not found or not in RAM tier.
-    pub fn demote_to_disk<F>(
-        &mut self,
-        span_id: SpanId,
-        store_fn: F,
-    ) -> Result<String, String>
+    pub fn demote_to_disk<F>(&mut self, span_id: SpanId, store_fn: F) -> Result<String, String>
     where
         F: FnOnce(&str, &[u8]) -> Result<(), String>,
     {
@@ -422,14 +417,18 @@ impl TieredStorageManager {
 
         if let Some(span_id) = oldest_ram {
             // Use the stored disk_store
-            let segment = self.demoted.get_mut(&span_id)
+            let segment = self
+                .demoted
+                .get_mut(&span_id)
                 .ok_or_else(|| format!("Segment {} disappeared", span_id))?;
 
             if segment.tier != StorageTier::Ram {
                 return Err(format!("Segment {} is not in RAM tier", span_id));
             }
 
-            let kv_layers = segment.cpu_kv_layers.take()
+            let kv_layers = segment
+                .cpu_kv_layers
+                .take()
                 .ok_or_else(|| format!("Segment {} has no CPU tensors", span_id))?;
 
             let bytes = tensor_codec::kv_layers_to_bytes(&kv_layers)
@@ -454,11 +453,17 @@ impl TieredStorageManager {
     /// Promote a segment using the stored disk backend (convenience wrapper).
     ///
     /// Handles both RAM and Disk tiers transparently.
-    pub fn promote(&mut self, span_id: SpanId) -> Result<(usize, Range<usize>, Vec<(Tensor, Tensor)>), String> {
+    pub fn promote(
+        &mut self,
+        span_id: SpanId,
+    ) -> Result<(usize, Range<usize>, Vec<(Tensor, Tensor)>), String> {
         self.promote_to_gpu(span_id, |disk_key| {
             // This closure can't borrow self.disk_store because self is already borrowed.
             // We handle this by extracting disk data before calling promote_to_gpu.
-            Err(format!("Use promote_with_disk() for disk-tier segments (key: {})", disk_key))
+            Err(format!(
+                "Use promote_with_disk() for disk-tier segments (key: {})",
+                disk_key
+            ))
         })
     }
 
@@ -471,17 +476,23 @@ impl TieredStorageManager {
         span_id: SpanId,
     ) -> Result<(usize, Range<usize>, Vec<(Tensor, Tensor)>), String> {
         // Check if we need to load from disk first
-        let needs_disk_load = self.demoted.get(&span_id)
+        let needs_disk_load = self
+            .demoted
+            .get(&span_id)
             .map(|seg| seg.tier == StorageTier::Disk)
             .unwrap_or(false);
 
         if needs_disk_load {
             // Pre-load from disk into CPU tensors
-            let disk_key = self.demoted.get(&span_id)
+            let disk_key = self
+                .demoted
+                .get(&span_id)
                 .and_then(|seg| seg.disk_key.clone())
                 .ok_or_else(|| "Disk segment missing key".to_string())?;
 
-            let bytes = self.disk_store.as_ref()
+            let bytes = self
+                .disk_store
+                .as_ref()
                 .ok_or_else(|| "No disk store configured".to_string())?
                 .load(&disk_key)?;
 
@@ -650,9 +661,8 @@ mod tests {
             .unwrap();
 
         // Promote back
-        let result = manager.promote_to_gpu(1, |_key| {
-            panic!("Should not load from disk for RAM tier")
-        });
+        let result =
+            manager.promote_to_gpu(1, |_key| panic!("Should not load from disk for RAM tier"));
 
         assert!(result.is_ok());
         let (slot, range, layers) = result.unwrap();

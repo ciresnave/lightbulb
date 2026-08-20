@@ -110,9 +110,13 @@ fn benchmark_insertion(config: &BenchConfig) -> f64 {
 
     for _ in 0..config.iterations {
         // Create fresh cache builder
-        let mut builder =
-            ParallelCacheBuilder::new(1, 8192, candlelight::core::DType::F16, &candlelight::core::Device::Cpu)
-                .unwrap();
+        let mut builder = ParallelCacheBuilder::new(
+            1,
+            8192,
+            candlelight::core::DType::F16,
+            &candlelight::core::Device::Cpu,
+        )
+        .unwrap();
 
         // Simulate cached conversation
         builder.set_position(0, config.cached_tokens);

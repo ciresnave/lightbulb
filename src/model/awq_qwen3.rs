@@ -149,11 +149,15 @@ impl Qwen3AwqMlp {
         let intermediate_size = cfg.intermediate_size;
 
         let gate_proj = AwqLinear::new(hidden_size, intermediate_size, vb.pp("gate_proj"))
-            .map_err(|e| candlelight::core::Error::Msg(format!("Failed to load gate_proj: {}", e)))?;
+            .map_err(|e| {
+                candlelight::core::Error::Msg(format!("Failed to load gate_proj: {}", e))
+            })?;
         let up_proj = AwqLinear::new(hidden_size, intermediate_size, vb.pp("up_proj"))
             .map_err(|e| candlelight::core::Error::Msg(format!("Failed to load up_proj: {}", e)))?;
         let down_proj = AwqLinear::new(intermediate_size, hidden_size, vb.pp("down_proj"))
-            .map_err(|e| candlelight::core::Error::Msg(format!("Failed to load down_proj: {}", e)))?;
+            .map_err(|e| {
+                candlelight::core::Error::Msg(format!("Failed to load down_proj: {}", e))
+            })?;
 
         Ok(Self {
             gate_proj,
@@ -353,8 +357,11 @@ pub struct AwqQwen3 {
 
 impl AwqQwen3 {
     pub fn new(cfg: &Qwen3Config, vb: VarBuilder) -> Result<Self> {
-        let embed_tokens =
-            candlelight::nn::embedding(cfg.vocab_size, cfg.hidden_size, vb.pp("model.embed_tokens"))?;
+        let embed_tokens = candlelight::nn::embedding(
+            cfg.vocab_size,
+            cfg.hidden_size,
+            vb.pp("model.embed_tokens"),
+        )?;
 
         let rotary = Arc::new(Qwen3RotaryEmbedding::new(vb.dtype(), cfg, vb.device())?);
 

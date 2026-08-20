@@ -120,9 +120,7 @@ impl EmbeddingProvider {
         let mut vec = Vec::with_capacity(self.config.dimension);
         let mut rng_state = seed;
         for _ in 0..self.config.dimension {
-            rng_state = rng_state
-                .wrapping_mul(6364136223846793005)
-                .wrapping_add(1);
+            rng_state = rng_state.wrapping_mul(6364136223846793005).wrapping_add(1);
             let value = ((rng_state >> 32) as f32) / (u32::MAX as f32);
             vec.push(value * 2.0 - 1.0);
         }
@@ -218,11 +216,7 @@ impl RateLimiter {
         let now = SystemTime::now();
 
         while let Some(&oldest) = self.requests.front() {
-            if now
-                .duration_since(oldest)
-                .unwrap_or(Duration::from_secs(0))
-                > self.window
-            {
+            if now.duration_since(oldest).unwrap_or(Duration::from_secs(0)) > self.window {
                 self.requests.pop_front();
             } else {
                 break;
@@ -596,7 +590,9 @@ mod tests {
             content_preview: "pub fn test() {}".to_string(),
         });
 
-        let contexts = provider.provide_context(&query, "Show recent changes").unwrap();
+        let contexts = provider
+            .provide_context(&query, "Show recent changes")
+            .unwrap();
         assert_eq!(contexts.len(), 1);
         assert_eq!(contexts[0].source, "FileWatcherProvider");
         assert!(contexts[0].content.contains("Recent File Changes"));

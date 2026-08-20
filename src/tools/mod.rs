@@ -28,7 +28,7 @@
 //! let tools = registry.get_tools_for_query("analyze this image");
 //! ```
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use std::collections::HashMap;
 
 use crate::pruning::name_mapping::{ModelArchitecture, TensorNameMapper};
@@ -453,10 +453,7 @@ mod tests {
         let result = registry.register_tool(vision_tool);
 
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("requires vision"));
+        assert!(result.unwrap_err().to_string().contains("requires vision"));
     }
 
     #[test]

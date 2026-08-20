@@ -84,7 +84,7 @@ use core::ffi::{c_int, c_void};
 #[allow(dead_code)]
 extern "C" {
     /// Marlin 4-bit FP16 matrix multiplication (GPTQ)
-    /// 
+    ///
     /// Performs quantized matrix multiplication: out = inputs @ weight
     /// where weight is in 4-bit GPTQ format.
     ///
@@ -117,7 +117,7 @@ extern "C" {
     );
 
     /// Marlin 4-bit BF16 matrix multiplication (GPTQ)
-    /// 
+    ///
     /// Same as marlin_4bit_f16 but with BF16 precision.
     pub fn marlin_4bit_bf16(
         inputs: *const c_void,
@@ -135,7 +135,7 @@ extern "C" {
     );
 
     /// Marlin AWQ 4-bit FP16 matrix multiplication
-    /// 
+    ///
     /// Performs quantized matrix multiplication optimized for AWQ format.
     /// AWQ uses activation-aware weight quantization for better accuracy.
     ///
@@ -157,7 +157,7 @@ extern "C" {
     );
 
     /// Marlin AWQ 4-bit BF16 matrix multiplication
-    /// 
+    ///
     /// Same as marlin_awq_4bit_f16 but with BF16 precision.
     pub fn marlin_awq_4bit_bf16(
         inputs: *const c_void,
@@ -175,7 +175,7 @@ extern "C" {
     );
 
     /// Repack weights from GPTQ format to Marlin format
-    /// 
+    ///
     /// Converts GPTQ-quantized weights into Marlin's internal format
     /// for efficient computation.
     ///
@@ -194,7 +194,7 @@ extern "C" {
     );
 
     /// Repack weights from AWQ format to Marlin format
-    /// 
+    ///
     /// Converts AWQ-quantized weights into Marlin's internal format.
     ///
     /// # Arguments

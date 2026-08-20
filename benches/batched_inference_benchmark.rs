@@ -7,7 +7,7 @@
 //!
 //! Results are saved to: benches/results/batch_performance_<timestamp>.json
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 use lightbulb::engine::{Request, RequestContext};
 use lightbulb::model::ParallelModelManager;
 use std::path::Path;
@@ -33,14 +33,9 @@ fn bench_batch_sizes(c: &mut Criterion) {
 
     // Test batch sizes: 1, 2, 4, 8, 16, 32
     for batch_size in [1, 2, 4, 8, 16, 32].iter() {
-        let mut model = ParallelModelManager::load(
-            MODEL_PATH,
-            *batch_size as usize,
-            512,
-            Some("f32"),
-            None,
-        )
-        .expect("Failed to load model");
+        let mut model =
+            ParallelModelManager::load(MODEL_PATH, *batch_size as usize, 512, Some("f32"), None)
+                .expect("Failed to load model");
 
         // Create batch of requests
         let mut batch: Vec<RequestContext> = (0..*batch_size)
@@ -83,14 +78,9 @@ fn bench_decode_throughput(c: &mut Criterion) {
     group.sample_size(10);
 
     for batch_size in [1, 4, 8, 16].iter() {
-        let mut model = ParallelModelManager::load(
-            MODEL_PATH,
-            *batch_size as usize,
-            512,
-            Some("f32"),
-            None,
-        )
-        .expect("Failed to load model");
+        let mut model =
+            ParallelModelManager::load(MODEL_PATH, *batch_size as usize, 512, Some("f32"), None)
+                .expect("Failed to load model");
 
         let mut batch: Vec<RequestContext> = (0..*batch_size)
             .map(|i| {
@@ -136,9 +126,9 @@ fn bench_prefill_lengths(c: &mut Criterion) {
 
     let batch_size = 4;
     let prompts = vec![
-        "Short".to_string(),                                  // ~128 tokens after tokenization
-        "Medium ".repeat(32),                                  // ~512 tokens
-        "Long prompt with more context ".repeat(64),          // ~1024 tokens
+        "Short".to_string(),                         // ~128 tokens after tokenization
+        "Medium ".repeat(32),                        // ~512 tokens
+        "Long prompt with more context ".repeat(64), // ~1024 tokens
         "Very long context prompt with extensive text ".repeat(128), // ~2048 tokens
     ];
 

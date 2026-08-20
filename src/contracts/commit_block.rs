@@ -79,20 +79,20 @@ pub fn build_tightening_message(attempt: u32, block_type: &str) -> String {
 /// followed by non-whitespace content.
 pub fn parse(text: &str, block_type: &str, must_be_last: bool) -> Option<String> {
     let upper = block_type.to_uppercase();
-    let open_sentinel  = format!("<<<COMMIT:{upper} v1>>>");
+    let open_sentinel = format!("<<<COMMIT:{upper} v1>>>");
     let close_sentinel = format!("<<<END:{upper}>>>");
 
     // Case-insensitive search: lower everything for positioning, value from original.
-    let text_lower  = text.to_lowercase();
-    let open_lower  = open_sentinel.to_lowercase();
+    let text_lower = text.to_lowercase();
+    let open_lower = open_sentinel.to_lowercase();
     let close_lower = close_sentinel.to_lowercase();
 
     let open_pos = text_lower.find(&open_lower)?;
     let content_start = open_pos + open_sentinel.len();
 
     let close_pos = text_lower[content_start..].find(&close_lower)?;
-    let abs_close_pos  = content_start + close_pos;
-    let abs_close_end  = abs_close_pos + close_sentinel.len();
+    let abs_close_pos = content_start + close_pos;
+    let abs_close_end = abs_close_pos + close_sentinel.len();
 
     // Enforce must_be_last: nothing non-whitespace after the closing sentinel.
     if must_be_last {

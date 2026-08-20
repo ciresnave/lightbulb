@@ -168,7 +168,8 @@ impl Mlp {
         //
         // Decision: Disable fusion for now. Keep infrastructure for future work
         // when Candle provides proper fused op support.
-        let gate = if self.use_fused_kernels && false {  // Disabled: see NOTE above
+        let gate = if self.use_fused_kernels && false {
+            // Disabled: see NOTE above
             // Fused path: gate_proj + silu in one operation
             // Note: fused_linear_silu currently only supports QuantizableLinear::Regular
             // For quantized models, fall back to unfused path

@@ -277,8 +277,7 @@ pub fn kv_layers_from_bytes(bytes: &[u8], device: &Device) -> Result<Vec<(Tensor
         ));
     }
 
-    let num_layers =
-        u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as usize;
+    let num_layers = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as usize;
     let mut offset = 4;
     let mut layers = Vec::with_capacity(num_layers);
 
@@ -397,8 +396,10 @@ mod tests {
     fn test_kv_layers_roundtrip() {
         let k1 = Tensor::from_vec(vec![1.0_f32, 2.0, 3.0, 4.0], &[1, 2, 2], &Device::Cpu).unwrap();
         let v1 = Tensor::from_vec(vec![5.0_f32, 6.0, 7.0, 8.0], &[1, 2, 2], &Device::Cpu).unwrap();
-        let k2 = Tensor::from_vec(vec![9.0_f32, 10.0, 11.0, 12.0], &[1, 2, 2], &Device::Cpu).unwrap();
-        let v2 = Tensor::from_vec(vec![13.0_f32, 14.0, 15.0, 16.0], &[1, 2, 2], &Device::Cpu).unwrap();
+        let k2 =
+            Tensor::from_vec(vec![9.0_f32, 10.0, 11.0, 12.0], &[1, 2, 2], &Device::Cpu).unwrap();
+        let v2 =
+            Tensor::from_vec(vec![13.0_f32, 14.0, 15.0, 16.0], &[1, 2, 2], &Device::Cpu).unwrap();
 
         let layers = vec![(k1, v1), (k2, v2)];
 

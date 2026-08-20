@@ -375,11 +375,7 @@ pub fn format_tool_result_with_cue(
 ///
 /// Some chat-tuned models expect tool results in a specific role format
 /// that matches their training data. This provides a more structured format.
-pub fn format_tool_result_chat(
-    tool_name: &str,
-    tool_args: &str,
-    result: &str,
-) -> String {
+pub fn format_tool_result_chat(tool_name: &str, tool_args: &str, result: &str) -> String {
     format!(
         "\n<tool_response>\n<tool_name>{}</tool_name>\n<tool_input>{}</tool_input>\n<tool_output>{}</tool_output>\n</tool_response>\nContinue your reasoning using the tool output above as new evidence.\n",
         tool_name, tool_args, result
@@ -455,7 +451,10 @@ mod tests {
 
         // name(args) format
         let result = parser("get_weather(Paris)");
-        assert_eq!(result, Some(("get_weather".to_string(), "Paris".to_string())));
+        assert_eq!(
+            result,
+            Some(("get_weather".to_string(), "Paris".to_string()))
+        );
 
         // name: args format
         let result = parser("search: quantum computing");

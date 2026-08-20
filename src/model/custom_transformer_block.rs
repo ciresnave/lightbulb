@@ -417,8 +417,18 @@ mod tests {
         let device = Device::Cpu;
         // RoPE cos/sin are generated at half the head dimension (freqs for pairs)
         let half_dim = head_dim / 2;
-        let cos = Tensor::ones((max_seq_len, half_dim), candlelight::core::DType::F32, &device).unwrap();
-        let sin = Tensor::zeros((max_seq_len, half_dim), candlelight::core::DType::F32, &device).unwrap();
+        let cos = Tensor::ones(
+            (max_seq_len, half_dim),
+            candlelight::core::DType::F32,
+            &device,
+        )
+        .unwrap();
+        let sin = Tensor::zeros(
+            (max_seq_len, half_dim),
+            candlelight::core::DType::F32,
+            &device,
+        )
+        .unwrap();
         (cos, sin)
     }
 

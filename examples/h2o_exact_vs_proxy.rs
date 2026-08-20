@@ -67,11 +67,9 @@ fn main() -> Result<()> {
     println!("prompt tokens: {seq}");
 
     // ---- real weights, layer 0 ----
-    let tensors = candlelight::core::safetensors::load(
-        format!("{SNAPSHOT}/model.safetensors"),
-        &device,
-    )
-    .context("loading safetensors")?;
+    let tensors =
+        candlelight::core::safetensors::load(format!("{SNAPSHOT}/model.safetensors"), &device)
+            .context("loading safetensors")?;
 
     let get = |name: &str| -> Result<Tensor> {
         tensors
@@ -87,84 +85,87 @@ fn main() -> Result<()> {
     let embedded = embed.index_select(&idx, 0)?; // [seq, hidden]
 
     println!();
-    println!("{:>5} {:>6} {:>10} {:>10} {:>8} {:>12}", "layer", "evict", "mean ovlp", "min ovlp", "worst", "l_q spread");
+    println!(
+        "{:>5} {:>6} {:>10} {:>10} {:>8} {:>12}",
+        "layer", "evict", "mean ovlp", "min ovlp", "worst", "l_q spread"
+    );
     for layer in [0usize, 5, 11, 16, 21] {
-    let ln_w = get(&format!("model.layers.{layer}.input_layernorm.weight"))?;
-    let q_w = get(&format!("model.layers.{layer}.self_attn.q_proj.weight"))?;
-    let k_w = get(&format!("model.layers.{layer}.self_attn.k_proj.weight"))?;
-    let x = candlelight::nn::ops::rms_norm(&embedded, &ln_w, EPS as f32)?;
+        let ln_w = get(&format!("model.layers.{layer}.input_layernorm.weight"))?;
+        let q_w = get(&format!("model.layers.{layer}.self_attn.q_proj.weight"))?;
+        let k_w = get(&format!("model.layers.{layer}.self_attn.k_proj.weight"))?;
+        let x = candlelight::nn::ops::rms_norm(&embedded, &ln_w, EPS as f32)?;
 
-    // ---- Q, K projections ----
-    let q = x.matmul(&q_w.t()?)?.reshape((seq, N_HEADS, HEAD_DIM))?;
-    let k = x.matmul(&k_w.t()?)?.reshape((seq, N_KV_HEADS, HEAD_DIM))?;
+        // ---- Q, K projections ----
+        let q = x.matmul(&q_w.t()?)?.reshape((seq, N_HEADS, HEAD_DIM))?;
+        let k = x.matmul(&k_w.t()?)?.reshape((seq, N_KV_HEADS, HEAD_DIM))?;
 
-    // ---- RoPE ----
-    let (cos, sin) = rope_tables(seq, HEAD_DIM, &device)?;
-    let q = apply_rope(&q, &cos, &sin, seq, N_HEADS)?;
-    let k = apply_rope(&k, &cos, &sin, seq, N_KV_HEADS)?;
+        // ---- RoPE ----
+        let (cos, sin) = rope_tables(seq, HEAD_DIM, &device)?;
+        let q = apply_rope(&q, &cos, &sin, seq, N_HEADS)?;
+        let k = apply_rope(&k, &cos, &sin, seq, N_KV_HEADS)?;
 
-    let scale = 1.0f64 / (HEAD_DIM as f64).sqrt();
+        let scale = 1.0f64 / (HEAD_DIM as f64).sqrt();
 
-    let mut rows: Vec<(usize, Vec<f64>, Vec<f64>, Vec<f64>)> = Vec::new();
-    for h in 0..N_HEADS {
-        let kv_h = h / (N_HEADS / N_KV_HEADS); // GQA
-        let qh = q.i((.., h, ..))?; // [seq, dim]
-        let kh = k.i((.., kv_h, ..))?; // [seq, dim]
-        let scores = (qh.matmul(&kh.t()?)? * scale)?; // [seq, seq]
-        let scores = causal_mask(&scores, seq, &device)?;
-        let s: Vec<Vec<f32>> = scores.to_vec2()?;
+        let mut rows: Vec<(usize, Vec<f64>, Vec<f64>, Vec<f64>)> = Vec::new();
+        for h in 0..N_HEADS {
+            let kv_h = h / (N_HEADS / N_KV_HEADS); // GQA
+            let qh = q.i((.., h, ..))?; // [seq, dim]
+            let kh = k.i((.., kv_h, ..))?; // [seq, dim]
+            let scores = (qh.matmul(&kh.t()?)? * scale)?; // [seq, seq]
+            let scores = causal_mask(&scores, seq, &device)?;
+            let s: Vec<Vec<f32>> = scores.to_vec2()?;
 
-        // Exact: Σ_q softmax(s[q])[k].  Proxy: Σ_q exp(s[q][k] − max_q).
-        let mut exact = vec![0.0f64; seq];
-        let mut proxy = vec![0.0f64; seq];
-        let mut l_values = Vec::with_capacity(seq);
-        for row in s.iter() {
-            let m = row.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-            let e: Vec<f64> = row.iter().map(|&v| ((v - m) as f64).exp()).collect();
-            let l: f64 = e.iter().sum();
-            l_values.push(l);
-            for (kk, &ev) in e.iter().enumerate() {
-                exact[kk] += ev / l; // normalized
-                proxy[kk] += ev; // un-normalized
+            // Exact: Σ_q softmax(s[q])[k].  Proxy: Σ_q exp(s[q][k] − max_q).
+            let mut exact = vec![0.0f64; seq];
+            let mut proxy = vec![0.0f64; seq];
+            let mut l_values = Vec::with_capacity(seq);
+            for row in s.iter() {
+                let m = row.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+                let e: Vec<f64> = row.iter().map(|&v| ((v - m) as f64).exp()).collect();
+                let l: f64 = e.iter().sum();
+                l_values.push(l);
+                for (kk, &ev) in e.iter().enumerate() {
+                    exact[kk] += ev / l; // normalized
+                    proxy[kk] += ev; // un-normalized
+                }
             }
+            rows.push((h, exact, proxy, l_values));
         }
-        rows.push((h, exact, proxy, l_values));
-    }
 
-    for &frac in &[0.10f64, 0.25, 0.50] {
-        let n_evict = ((seq as f64) * frac).round() as usize;
-        let mut overlaps = Vec::new();
-        let mut worst = (0usize, 1.0f64);
-        for (h, exact, proxy, _) in &rows {
-            let a = lowest_k(exact, n_evict);
-            let b = lowest_k(proxy, n_evict);
-            let inter = a.intersection(&b).count();
-            let ov = inter as f64 / n_evict.max(1) as f64;
-            overlaps.push(ov);
-            if ov < worst.1 {
-                worst = (*h, ov);
+        for &frac in &[0.10f64, 0.25, 0.50] {
+            let n_evict = ((seq as f64) * frac).round() as usize;
+            let mut overlaps = Vec::new();
+            let mut worst = (0usize, 1.0f64);
+            for (h, exact, proxy, _) in &rows {
+                let a = lowest_k(exact, n_evict);
+                let b = lowest_k(proxy, n_evict);
+                let inter = a.intersection(&b).count();
+                let ov = inter as f64 / n_evict.max(1) as f64;
+                overlaps.push(ov);
+                if ov < worst.1 {
+                    worst = (*h, ov);
+                }
             }
+            let mean = overlaps.iter().sum::<f64>() / overlaps.len() as f64;
+            let min = overlaps.iter().cloned().fold(f64::INFINITY, f64::min);
+            // l_q spread drives the distortion: uniform l_q ⇒ proxy ≈ exact.
+            let spread = {
+                let (_, _, _, l) = &rows[worst.0];
+                let mx = l.iter().cloned().fold(f64::MIN, f64::max);
+                let mn = l.iter().cloned().fold(f64::MAX, f64::min);
+                mx / mn.max(1e-30)
+            };
+            println!(
+                "{:>5} {:>5.0}% {:>9.1}% {:>9.1}% {:>8} {:>11.1}x",
+                layer,
+                frac * 100.0,
+                mean * 100.0,
+                min * 100.0,
+                format!("h{}", worst.0),
+                spread
+            );
         }
-        let mean = overlaps.iter().sum::<f64>() / overlaps.len() as f64;
-        let min = overlaps.iter().cloned().fold(f64::INFINITY, f64::min);
-        // l_q spread drives the distortion: uniform l_q ⇒ proxy ≈ exact.
-        let spread = {
-            let (_, _, _, l) = &rows[worst.0];
-            let mx = l.iter().cloned().fold(f64::MIN, f64::max);
-            let mn = l.iter().cloned().fold(f64::MAX, f64::min);
-            mx / mn.max(1e-30)
-        };
-        println!(
-            "{:>5} {:>5.0}% {:>9.1}% {:>9.1}% {:>8} {:>11.1}x",
-            layer,
-            frac * 100.0,
-            mean * 100.0,
-            min * 100.0,
-            format!("h{}", worst.0),
-            spread
-        );
-    }
-    rows.clear();
+        rows.clear();
     }
 
     println!();
@@ -214,8 +215,12 @@ fn apply_rope(t: &Tensor, cos: &Tensor, sin: &Tensor, seq: usize, heads: usize) 
     let half = HEAD_DIM / 2;
     let x1 = t.narrow(2, 0, half)?; // [seq, heads, half]
     let x2 = t.narrow(2, half, half)?;
-    let cos = cos.reshape((seq, 1, half))?.broadcast_as((seq, heads, half))?;
-    let sin = sin.reshape((seq, 1, half))?.broadcast_as((seq, heads, half))?;
+    let cos = cos
+        .reshape((seq, 1, half))?
+        .broadcast_as((seq, heads, half))?;
+    let sin = sin
+        .reshape((seq, 1, half))?
+        .broadcast_as((seq, heads, half))?;
     let r1 = ((&x1 * &cos)? - (&x2 * &sin)?)?;
     let r2 = ((&x2 * &cos)? + (&x1 * &sin)?)?;
     Ok(Tensor::cat(&[r1, r2], 2)?)

@@ -22,21 +22,21 @@ impl BatchedTransformerAdapter {
     /// Create a new adapter wrapping a BatchedTransformer
     pub fn new(model: BatchedTransformer, max_seq_len: usize) -> Result<Self> {
         let config = model.config();
-        
+
         // Create cache builder
         let cache_builder = crate::cache::ParallelCacheBuilder::new(
-            1,                // batch_size: single slot for speculative decoding
-            max_seq_len,      // context: maximum sequence length
-            model.dtype(),    // dtype
-            model.device(),   // device
+            1,              // batch_size: single slot for speculative decoding
+            max_seq_len,    // context: maximum sequence length
+            model.dtype(),  // dtype
+            model.device(), // device
         )?;
 
         // Create per-layer KV caches
         let mut caches = Vec::with_capacity(config.num_hidden_layers);
         for _ in 0..config.num_hidden_layers {
             caches.push(cache_builder.make_cache(
-                config.num_key_value_heads,  // num_kv_heads
-                config.head_dim(),           // head_dim
+                config.num_key_value_heads, // num_kv_heads
+                config.head_dim(),          // head_dim
             )?);
         }
 
