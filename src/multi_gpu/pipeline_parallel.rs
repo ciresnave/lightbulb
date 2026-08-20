@@ -44,7 +44,7 @@ impl PipelineStage {
 
     /// Process one micro-batch through this stage's layers
     ///
-    /// Forwards the micro-batch through layers [layers[0], layers[-1]+1) using
+    /// Forwards the micro-batch through layers `[layers[0], layers[-1]+1)` using
     /// the provided model's forward_layers method.
     ///
     /// # Arguments

@@ -366,7 +366,7 @@ impl BatchMetadata {
     ///
     /// Returns a tensor with shape:
     /// - Decode: [batch_size, 1] - one position per request
-    /// - Prefill: [total_tokens] - position within each prompt
+    /// - Prefill: `[total_tokens]` - position within each prompt
     ///
     /// # Arguments
     /// * `device` - Device to create tensor on

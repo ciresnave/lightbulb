@@ -255,7 +255,7 @@ pub enum TerminationPolicy {
     /// Terminate when improvement plateaus
     ConvergenceDetection { window: usize, threshold: f32 },
 
-    /// Terminate on special token (e.g., [DONE])
+    /// Terminate on special token (e.g., `[DONE]`)
     SpecialToken(u32),
 
     /// Combined policies (any match triggers termination)

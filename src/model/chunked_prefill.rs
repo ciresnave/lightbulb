@@ -153,7 +153,7 @@ impl ChunkedBatch {
     }
 
     /// Create a flattened 1D tensor for BatchedTransformer input
-    /// Returns tensor of shape [total_tokens] where total_tokens = batch_size * seq_len
+    /// Returns tensor of shape `[total_tokens]` where total_tokens = batch_size * seq_len
     pub fn to_flat_tensor(&self, dtype: DType, device: &Device) -> Result<Tensor> {
         if self.token_sequences.is_empty() {
             return Err(anyhow::anyhow!("Cannot create tensor from empty batch"));

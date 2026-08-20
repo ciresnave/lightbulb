@@ -128,7 +128,7 @@ impl BatchedLlamaWrapper {
     /// Each prompt is processed independently with its own cache.
     ///
     /// # Arguments
-    /// * `tokens` - Concatenated token tensor [total_tokens]
+    /// * `tokens` - Concatenated token tensor `[total_tokens]`
     /// * `metadata` - Batch structure with cu_seqlens
     /// * `per_request_caches` - Individual cache for each request
     ///

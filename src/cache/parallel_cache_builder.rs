@@ -26,7 +26,7 @@ use std::collections::HashMap;
 ///
 /// 1. **indices**: Tensor of shape [batch_size, seq_len] containing cache positions
 ///    where each token's K/V should be written. For example, if processing 2 requests
-///    with 3 tokens each, indices might be [[0,1,2], [5,6,7]] meaning:
+///    with 3 tokens each, indices might be `[[0,1,2], [5,6,7]]` meaning:
 ///    - Request 0: write to positions 0, 1, 2
 ///    - Request 1: write to positions 5, 6, 7
 ///
@@ -97,7 +97,7 @@ impl ParallelKvCache {
     ///
     /// 2. **Indices**: Shape [batch_size, seq_len]
     ///    - Tells us which cache position each token should write to
-    ///    - Example: [[5,6,7], [10,11,12]] means:
+    ///    - Example: `[[5,6,7], [10,11,12]]` means:
     ///      - Batch 0: write 3 tokens to positions 5, 6, 7
     ///      - Batch 1: write 3 tokens to positions 10, 11, 12
     ///
@@ -872,7 +872,7 @@ impl ParallelCacheBuilder {
     ///
     /// # Arguments
     ///
-    /// * `attention_weights` - Attention weights [query_pos][key_pos]
+    /// * `attention_weights` - Attention weights `[query_pos][key_pos]`
     ///   Should be aggregated across heads if multi-head
     ///
     /// This method should be called after each forward pass to track
@@ -1811,7 +1811,7 @@ impl ParallelCacheBuilder {
     ///
     /// When inserting context mid-conversation, you need to re-process evicted content
     /// to rebuild the KV cache. This helper constructs the proper token sequence:
-    /// [cached_prefix] + [inserted_context] + [evicted_suffix]
+    /// `[cached_prefix] + [inserted_context] + [evicted_suffix]`
     ///
     /// # Arguments
     ///
@@ -1991,8 +1991,8 @@ impl ParallelCacheBuilder {
     /// # Implementation
     ///
     /// Sets both position and calculates the cache index via modulo:
-    /// - position[slot] = position
-    /// - indices[slot] = position % context
+    /// - `position[slot]` = position
+    /// - `indices[slot]` = position % context
     ///
     /// This ensures the cache index wraps correctly for long sequences.
     pub fn set_position(&mut self, slot: usize, position: usize) {
@@ -2172,8 +2172,8 @@ impl ParallelCacheBuilder {
     ///    - Creates lower-triangular pattern for new tokens + full access to cache
     ///
     /// 3. **Update position**: Advance slot's position by seq_len
-    ///    - position[slot] += seq_len
-    ///    - indices[slot] = new_position % context
+    ///    - `position[slot]` += seq_len
+    ///    - `indices[slot]` = new_position % context
     ///
     /// # Returns
     ///

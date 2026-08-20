@@ -438,7 +438,7 @@ impl BatchedTransformer {
     /// Forward pass through the transformer
     ///
     /// # Arguments
-    /// * `input_ids` - Token IDs tensor of shape [total_tokens]
+    /// * `input_ids` - Token IDs tensor of shape `[total_tokens]`
     /// * `cache_builder` - Tracks KV cache positions for each slot
     /// * `caches` - Per-layer KV caches
     /// * `metadata` - Batch metadata with sequence information
@@ -638,7 +638,7 @@ impl BatchedTransformer {
     ///
     /// # Arguments
     ///
-    /// * `input_ids` - Token IDs tensor of shape [total_tokens]
+    /// * `input_ids` - Token IDs tensor of shape `[total_tokens]`
     /// * `cache_builder` - Tracks KV cache positions for each slot
     /// * `caches` - Per-layer KV caches (will be updated with new K/V values)
     /// * `metadata` - Batch metadata with sequence information

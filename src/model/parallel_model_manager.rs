@@ -863,7 +863,7 @@ impl ParallelModelManager {
 
     /// Enable tool call detection with default patterns.
     ///
-    /// Registers common tool call patterns (<tool_call>, [TOOL_CALL], <|tool_call|>)
+    /// Registers common tool call patterns (<tool_call>, `[TOOL_CALL]`, <|tool_call|>)
     /// and enables detection in the decode loop.
     pub fn enable_tool_call_detection(&mut self) {
         self.tool_call_detector =

@@ -127,7 +127,7 @@ pub trait SpeculativeModel: Send + Sync {
     ///
     /// # Returns
     ///
-    /// Logits tensor of shape [vocab_size]
+    /// Logits tensor of shape `[vocab_size]`
     fn forward_logits(&mut self, tokens: &[u32], position: usize) -> Result<Tensor>;
 
     /// Get the device this model runs on

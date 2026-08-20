@@ -65,7 +65,7 @@ pub struct AttentionSnapshot {
 /// Defines the start and end markers that delimit a tool call in model output,
 /// plus a parser function that extracts the tool name and arguments.
 pub struct ToolCallPattern {
-    /// Start marker text (e.g., "<tool_call>", "[TOOL_CALL]", "```tool\n").
+    /// Start marker text — e.g. `<tool_call>`, `[TOOL_CALL]`, or a fenced `tool` opener.
     pub start_marker: String,
 
     /// End marker text (e.g., "</tool_call>", "[/TOOL_CALL]", "\n```").
