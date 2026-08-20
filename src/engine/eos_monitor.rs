@@ -63,7 +63,7 @@ pub struct EosMonitor {
 impl EosMonitor {
     /// `window` is clamped to at least 1.
     ///
-    /// **Not** to avoid a divide by zero. [`Self::rate`] divides by
+    /// **Not** to avoid a divide by zero. The private `rate` helper divides by
     /// `recent.len()`, never by `window`, so a zero window yields an ordinary
     /// finite rate: probed with the clamp removed, `EosMonitor::new(0, 0.25)`
     /// reports `stop_rate() == Some(0.333…)` after three samples and
