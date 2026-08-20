@@ -25,3 +25,9 @@ temp_candle_ext/
 
 # rustc crash dumps (see the -j 4 build race; dumps are evidence, not artifacts to commit)
 rustc-ice-*.txt
+
+# Local tooling scratch — not part of the crate.
+# Gitignored rather than left untracked so `git status` can be EMPTY: a status
+# that always has one line is a status nobody reads, and an unread status is
+# how uncommitted work survives on one disk.
+supertool

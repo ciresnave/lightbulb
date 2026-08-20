@@ -33,7 +33,7 @@ struct Arm {
 impl Arm {
     fn new(label: &'static str, active: Vec<bool>) -> Self {
         let dev = Device::Cpu;
-        let mut builder = ParallelCacheBuilder::new(BATCH, CONTEXT, DType::F32, &dev).unwrap();
+        let builder = ParallelCacheBuilder::new(BATCH, CONTEXT, DType::F32, &dev).unwrap();
         let cache = builder.make_cache(KV_HEADS, HEAD_DIM).unwrap();
         Self { label, active, builder, cache, samples: Vec::new() }
     }
