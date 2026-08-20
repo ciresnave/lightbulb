@@ -109,11 +109,31 @@ fn indices_and_mask_is_pure() {
 }
 
 #[test]
-fn a_masked_out_slot_attends_to_nothing() {
-    // A slot not participating this step must not attend anywhere. If its mask
-    // row were non-zero it would attend to stale KV belonging to a previous
-    // request in the same physical slot — a cross-request leak that produces
-    // fluent, wrong output rather than an error.
+fn an_inactive_slot_gets_a_permissive_mask_and_that_is_deliberate() {
+    // An inactive slot's mask row is ALL ZEROS, which `IndicesAndMask`'s own
+    // doc defines as "can attend" (src/cache/parallel_cache_builder.rs:32-36).
+    // So the row is permitted to attend everywhere, including stale KV left by
+    // a previous occupant of the same physical slot.
+    //
+    // That reads like a cross-request leak and is not one. The alternative —
+    // an all -inf row, which is what "masked out" would literally mean — is
+    // NUMERICALLY INVALID: softmax subtracts the row max, so every entry
+    // becomes exp(-inf - -inf) = NaN. Verified against candlelight rather than
+    // assumed: `softmax_last_dim` over a row of f32::NEG_INFINITY returns
+    // [NaN, NaN, NaN, NaN]. A NaN row in a batched forward is far worse than a
+    // permissive one, because NaN propagates and a discarded row does not.
+    //
+    // What actually protects the paused request is that its cache is NOT
+    // WRITTEN while it is inactive — see `an_inactive_slot_keeps_its_cached_kv`,
+    // which is the test that can fail if that protection regresses. This test
+    // pins the mask as intentional so nobody "fixes" it into NaN.
+    //
+    // An earlier version of this test asserted the same values under the name
+    // `a_masked_out_slot_attends_to_nothing`, with a failure message claiming
+    // a non-zero row would mean it "can attend to stale KV" — exactly backwards
+    // for additive masking. It therefore could not fail in the direction it
+    // claimed to guard, and would have failed if the code were changed to match
+    // its own name.
     let (mut b, _device) = builder(2, 8);
     b.set_position(0, 2);
     b.set_position(1, 2);
@@ -123,18 +143,30 @@ fn a_masked_out_slot_attends_to_nothing() {
     let dims = mask.dims().to_vec();
     assert_eq!(dims.len(), 4, "mask is documented as (b, h, t, k), got {dims:?}");
 
-    let masked_row = mask
+    let inactive_row = mask
         .narrow(0, 1, 1)
         .unwrap()
         .flatten_all()
         .unwrap()
         .to_vec1::<f32>()
         .unwrap();
+    // `== 0.0` is the whole invariant: it rules out -inf (which softmaxes to
+    // NaN) and NaN itself in one predicate, since neither equals zero. An
+    // earlier revision followed this with a separate `!is_nan()` assertion,
+    // which was dead weight — it cannot fail if this one passes.
     assert!(
-        masked_row.iter().all(|&x| x == 0.0),
-        "the masked-out slot has non-zero mask entries, so it can attend to stale KV"
+        inactive_row.iter().all(|&x| x == 0.0),
+        concat!(
+            "the inactive slot's mask is not all-zero. If this was an intentional ",
+            "change to -inf: softmax over an all -inf row yields NaN. The protection ",
+            "this row does NOT provide is supplied by append honouring ",
+            "IndicesAndMask.active — see an_inactive_slot_keeps_its_cached_kv."
+        )
     );
 
+    // Control: the ACTIVE slot's row must contain -inf for future positions.
+    // Without this the test would pass against an implementation that returned
+    // an all-zero mask for every slot, which would break causal attention.
     let active_row = mask
         .narrow(0, 0, 1)
         .unwrap()
@@ -143,9 +175,11 @@ fn a_masked_out_slot_attends_to_nothing() {
         .to_vec1::<f32>()
         .unwrap();
     assert!(
-        active_row.iter().any(|&x| x != 0.0),
-        "the ACTIVE slot's mask is all zeros — this test would pass vacuously if \
-         every mask were zero, so the control matters"
+        active_row.iter().any(|&x| x == f32::NEG_INFINITY),
+        concat!(
+            "the ACTIVE slot's mask has no -inf entries, so causal masking is not ",
+            "being applied and this test's all-zero assertion above is vacuous"
+        )
     );
 }
 
@@ -241,4 +275,116 @@ fn reset_batch_index_clears_one_slot_only() {
     b.reset_batch_index(1);
 
     assert_eq!(b.positions(), &[4, 0, 2], "reset_batch_index disturbed a neighbouring slot");
+}
+
+#[test]
+fn an_inactive_slot_keeps_its_cached_kv() {
+    // CR.1's contract, stated at parallel_model_manager.rs:1309: a request in
+    // AwaitingToolResult is included in the decode batch as inactive because
+    // "KV cache is preserved". A slot that is inactive this step must therefore
+    // read back afterwards exactly as it did before.
+    //
+    // The failure this guards is not an error. `append` scatters K/V for every
+    // batch row, and an inactive slot's indices are its REAL live write
+    // position rather than a sentinel — so the paused request's cache gets
+    // overwritten with whatever that row computed while it was masked out.
+    // It resumes attending over corrupted history and produces fluent, wrong
+    // output with nothing logged.
+    let (mut b, device) = builder(2, 8);
+    let mut cache = b.make_cache(HEADS, HEAD_DIM).unwrap();
+    b.set_position(0, 0);
+    b.set_position(1, 0);
+
+    // Both slots write once. Slot 1 is the request that will pause; 7.0 is the
+    // KV it must still have afterwards.
+    let iam_both = b.indices_and_mask(1, &[true, true]).unwrap();
+    let k1 = per_slot_tensor(&[1.0, 7.0], 1, &device);
+    let v1 = per_slot_tensor(&[1.0, 7.0], 1, &device);
+    cache.append(&k1, &v1, &iam_both).unwrap();
+    assert_eq!(
+        read_at(cache.k(), 1, 0, 0),
+        vec![7.0; HEAD_DIM],
+        "setup failed: slot 1 never received its KV, so the real assertion below would be vacuous"
+    );
+
+    // Slot 1 pauses. Slot 0 keeps decoding.
+    let iam_one = b.indices_and_mask(1, &[true, false]).unwrap();
+    let k2 = per_slot_tensor(&[2.0, 99.0], 1, &device);
+    let v2 = per_slot_tensor(&[2.0, 99.0], 1, &device);
+    cache.append(&k2, &v2, &iam_one).unwrap();
+
+    assert_eq!(
+        read_at(cache.k(), 1, 0, 0),
+        vec![7.0; HEAD_DIM],
+        "the paused slot's K cache was overwritten while it was inactive — \
+         CR.1 promises this KV is preserved, and a resumed tool-call request \
+         will attend over corrupted history"
+    );
+    assert_eq!(
+        read_at(cache.v(), 1, 0, 0),
+        vec![7.0; HEAD_DIM],
+        "the paused slot's V cache was overwritten while it was inactive"
+    );
+
+    // Control: the ACTIVE slot must still have been written, or this test would
+    // pass against an `append` that simply does nothing. Asserted on BOTH K and
+    // V — a fix that guarded one and not the other would leave V stale while
+    // this test stayed green.
+    assert_eq!(
+        read_at(cache.k(), 0, 0, 0),
+        vec![2.0; HEAD_DIM],
+        "the active slot's K was NOT written — append is a no-op and the assertions above prove nothing"
+    );
+    assert_eq!(
+        read_at(cache.v(), 0, 0, 0),
+        vec![2.0; HEAD_DIM],
+        "the active slot's V was NOT written while its K was — the two are guarded separately in append"
+    );
+}
+
+#[test]
+fn an_all_inactive_batch_leaves_every_slot_untouched() {
+    // Companion to `an_inactive_slot_keeps_its_cached_kv`, which covers a mixed
+    // batch. This covers the degenerate one: a step where NOTHING is active,
+    // which happens when every request in the batch is paused or completed.
+    //
+    // It passes against the current implementation — the mixed-batch fix
+    // already covers it — so it is a regression guard rather than a driver. It
+    // earns its place because the fast path in `append` branches on
+    // `active.iter().all(...)`, and a future refactor that inverted or
+    // short-circuited that branch would silently make an all-inactive batch
+    // write again, with no mixed-batch test failing.
+    let (mut b, device) = builder(2, 8);
+    let mut cache = b.make_cache(HEADS, HEAD_DIM).unwrap();
+    b.set_position(0, 0);
+    b.set_position(1, 0);
+
+    let iam_both = b.indices_and_mask(1, &[true, true]).unwrap();
+    let k1 = per_slot_tensor(&[3.0, 5.0], 1, &device);
+    let v1 = per_slot_tensor(&[3.0, 5.0], 1, &device);
+    cache.append(&k1, &v1, &iam_both).unwrap();
+
+    let k_before = cache.k().flatten_all().unwrap().to_vec1::<f32>().unwrap();
+    let v_before = cache.v().flatten_all().unwrap().to_vec1::<f32>().unwrap();
+    assert!(
+        k_before.iter().any(|&x| x != 0.0),
+        "setup failed: nothing was written, so an unchanged cache below would prove nothing"
+    );
+
+    // Every slot pauses. This step must not touch the cache at all.
+    let iam_none = b.indices_and_mask(1, &[false, false]).unwrap();
+    let k2 = per_slot_tensor(&[99.0, 99.0], 1, &device);
+    let v2 = per_slot_tensor(&[99.0, 99.0], 1, &device);
+    cache.append(&k2, &v2, &iam_none).unwrap();
+
+    assert_eq!(
+        cache.k().flatten_all().unwrap().to_vec1::<f32>().unwrap(),
+        k_before,
+        "an all-inactive append modified the K cache; every slot's history is now wrong"
+    );
+    assert_eq!(
+        cache.v().flatten_all().unwrap().to_vec1::<f32>().unwrap(),
+        v_before,
+        "an all-inactive append modified the V cache; every slot's history is now wrong"
+    );
 }
