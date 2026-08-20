@@ -32,10 +32,20 @@
 //     (A→inputs, B→weight, C→out, prob_m/k/n→m/k/n), and this file carries all
 //     six renames identically. So the TYPES and ORDER are ABI-mandated, as the
 //     ruling says; the NAMES were an upstream author's choice and match.
-//     The ruling stands — names are functional labels on a fixed signature —
-//     but "can only be built one way" is exactly true of the signature and not
-//     of the identifiers, and that distinction should not be lost if this is
-//     ever cited as precedent.
+//     TWO SEPARATE QUESTIONS, and they are not in conflict — read them apart
+//     or this note looks self-contradictory:
+//       (1) WAS it derived?  Yes. Six matching renames is not convergence.
+//       (2) Was what was derived PROTECTABLE?  The ruling says no: the
+//           signature is ABI-dictated, and the identifiers are functionally
+//           inert labels on a dictated signature — they affect neither
+//           linkage, calling convention, nor codegen, which puts them nearer
+//           to comments than to code.
+//     "We can show we copied it" and "what we copied was protectable" are
+//     different claims. The evidence answers the first; the ruling answers the
+//     second. So the ruling stands — but "can only be built one way" is exactly
+//     true of the signature and NOT of the identifiers, and that distinction
+//     must not be lost if this is ever cited as precedent for a file that is
+//     not an ABI binding.
 //
 // SCOPE: this ruling covers ABI-mandated bindings ONLY. It does NOT extend to
 // the callers — src/backend/marlin.rs, src/model/awq_qwen3.rs,
