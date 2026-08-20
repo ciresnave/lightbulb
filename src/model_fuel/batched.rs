@@ -232,7 +232,7 @@
 //!      `PagedAttn` kernel into the binding table is Fuel's PC-3.)
 //!    * **Our tiering uses the f32-typed pool API.** `write_block` / `read_block`
 //!      reject a non-F32 pool and direct callers to `write_block_bytes` /
-//!      `read_block_bytes`. So a bf16 pool is possible, but [`BlockTierMover`]
+//!      `read_block_bytes`. So a bf16 pool is possible, but [`crate::model_fuel::policies::BlockTierMover`]
 //!      would have to move bytes instead of `f32`s — a real change, not a flag.
 //!
 //!    Note this rule is **specific to the paged path**. The contiguous path's
@@ -441,7 +441,7 @@ impl<'m> BatchedPagedDecoder<'m> {
     /// would buy nothing. And because the pool's `f32`-typed byte movement
     /// (`write_block` / `read_block`, hence `evict` / `restore`) rejects a
     /// non-F32 pool — a bf16 pool would need the `_bytes` variants throughout
-    /// [`BlockTierMover`].
+    /// [`crate::model_fuel::policies::BlockTierMover`].
     ///
     /// Revisit when Fuel's PC-3 lands a CUDA `PagedAttn` kernel: at that point
     /// bf16 becomes a real question rather than a pointless one.
