@@ -52,6 +52,33 @@
 // src/loaders/awq.rs — which choose their own error handling, dispatch and
 // naming, and which were audited separately (see the commit that added this).
 
+// ⚠️ NOTHING IN THIS TREE CAN PROVIDE THESE SYMBOLS.
+//
+// The CUDA sources that defined them lived in `kernels/` and were deleted on
+// 2026-08-20 as unattributed verbatim third-party code (see that commit, and
+// build.rs). Enabling `feature = "cuda"` and reaching this path would now fail
+// at LINK time rather than at compile time.
+//
+// In practice nothing changes: `build.rs`'s `compile_cuda_kernels()` was always
+// a stub, so these symbols were never provided even when the sources were here.
+// Stated explicitly so the next reader meets the fact in the file instead of in
+// a linker error.
+//
+// Fuel does NOT yet cover this. Measured 2026-08-20 by Fuel's architect at
+// their `origin/main`: `fuel-cuda-backend/src/baracuda/quant_w4a16.rs` is 747
+// lines with ZERO tests and ZERO call sites — never invoked. The `marlin` and
+// `awq` cargo features its doc comment names do not exist, and `enum
+// QuantFormat` has no definition anywhere in their workspace. Their summary:
+// "the kernels are dead code with a `pub mod` in front of them." It is not
+// scheduled. And GAP-190 (`fuel-ir/src/stype.rs:340`) is a design blocker
+// upstream of the wiring: `AffineBlock` cannot distinguish a CODEBOOK quant
+// family from a LINEAR one, so Marlin and NF4 collapse onto one descriptor —
+// "there is no scale for which a linear dequant reproduces NF4."
+//
+// So this scaffolding is kept deliberately, not by neglect: it is our own code,
+// it carries no licence exposure now that `kernels/` is gone, and it retires
+// with candlelight along with the rest of that path.
+
 use core::ffi::{c_int, c_void};
 
 #[allow(dead_code)]
