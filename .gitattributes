@@ -1,0 +1,12 @@
+# Licence files must stay byte-canonical so they remain hash-verifiable.
+#
+# The portfolio rule is that LICENSE-APACHE is verbatim canonical BECAUSE a
+# verbatim file can be checked against the canonical text and an edited one
+# cannot. That check is a sha256, and a sha256 is not line-ending agnostic.
+#
+# Ours hash correctly today only because this clone happens to be LF. On a
+# machine with core.autocrlf=true a fresh clone would rewrite them to CRLF and
+# the hash would stop matching — canonical by luck rather than by pin. Fuel's
+# were CRLF and non-canonical by one leading blank line, and were cleared TWICE
+# by two agents running two different narrow tests.
+LICENSE-*   text eol=lf

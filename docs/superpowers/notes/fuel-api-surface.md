@@ -7,6 +7,29 @@ correction on contact. Later plans are written against *this document*, not agai
 inference. Re-verify against a newer commit before trusting it — `fuel-core` is mid-retirement
 into `fuel-ir`/`fuel-hardware`/`fuel-memory` and paths move.
 
+> ## ⚠️ DO NOT RENAME SYMBOLS IN THIS FILE. It is a pinned record, not live code.
+>
+> This documents Fuel **as it was at `13279179`**. Fuel has since dropped the
+> `Lazy` prefix throughout — `LazyTensor` → `Tensor`, `LazyVarBuilder` →
+> `VarBuilder`, `fuel_graph::Tensor` → `NodeHandle`, across 296 files.
+>
+> **A mechanical sweep over this file would not merely make it stale — it would
+> make it FALSE, and undetectably.** At `13279179`, `Tensor` was the *eager*
+> type, a distinct thing that has since been deleted. Rewriting `LazyTensor` →
+> `Tensor` here would assert that Fuel had `Tensor` at that commit, describing
+> an API that never existed, in a document whose entire value is that it was
+> verified against a named revision.
+>
+> The 10 `Lazy*` occurrences below are **correct for the pin named above and
+> must stay**. When the port bumps to the post-rename pin, write a NEW pinned
+> record; do not edit this one.
+>
+> Recorded because a Fuel lane and Fuel's architect independently hit the
+> converse of this in one night: a mechanical rename rewrote a `git grep` string
+> *inside a fenced code block*, collapsing a claim and its positive control into
+> one string asserted to return both 0 and 1. **Executable-looking text in prose
+> is rewritten by ordinary refactoring, and nothing reads Markdown to catch it.**
+
 **Evidence key**: `[read]` = read from source at the stated `file:line`. `[ran]` = executed.
 
 ---
