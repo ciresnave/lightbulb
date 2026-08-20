@@ -1,6 +1,26 @@
 // Rust FFI bindings for Marlin CUDA kernels (AWQ quantization)
-// Based on candle-vllm's Marlin implementation
-// License: Apache-2.0 OR MIT (dual-licensed like candle-vllm)
+//
+// PROVENANCE UNRESOLVED — do not add a copyright header here without
+// settling this first, and do not delete this note.
+//
+// The previous header read "Based on candle-vllm's Marlin implementation"
+// and "License: Apache-2.0 OR MIT (dual-licensed like candle-vllm)".
+// Both were measured wrong on 2026-08-20:
+//
+//   * candle-vllm is MIT ONLY (GitHub API spdx_id = MIT, single LICENSE
+//     file). It is not dual-licensed, so "dual-licensed like candle-vllm"
+//     asserts something false about the upstream.
+//   * candle-vllm does not declare these symbols at all. Its
+//     src/backend/gptq.rs:3-4 IMPORTS marlin_4bit_f16, marlin_4bit_bf16,
+//     marlin_awq_4bit_f16, marlin_awq_4bit_bf16, gptq_repack and awq_repack
+//     from `attention_rs::kernels::ffi` — a different project. So the named
+//     upstream does not contain the thing this file resembles.
+//
+// What this file is: six `extern "C"` declarations whose names are fixed by
+// the CUDA kernel ABI. Whether that is derivable expression at all, and if
+// so from whom, is unsettled — and it MATTERS, because a file derived from
+// an MIT-only upstream cannot be offered under Apache-2.0, which would make
+// this crate's dual licence untrue for this file.
 
 use core::ffi::{c_int, c_void};
 

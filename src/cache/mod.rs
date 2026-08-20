@@ -1,9 +1,10 @@
 //! KV Cache implementations for parallel batching
 //!
-//! Forked from Candle's ScatteredCacheBuilder with modifications for:
-//! - Independent per-slot position tracking (no global increment)
-//! - Slot clearing capability
-//! - Efficient position setting (O(1) instead of O(n))
+//! This module itself contains no third-party code. The fork it used to
+//! describe is [`parallel_cache_builder`], which carries its own upstream
+//! copyright and SPDX header — see that file. Stated here because the
+//! previous wording read as though `mod.rs` were itself derived, which
+//! invites a provenance header on a file that needs none.
 
 pub mod cache_span;
 pub mod eviction_policy;

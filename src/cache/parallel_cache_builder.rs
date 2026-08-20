@@ -1,6 +1,7 @@
 //! Parallel Cache Builder - Forked from Candle's ScatteredCacheBuilder
 //!
 //! Copyright (c) 2023 Hugging Face
+//! Copyright (c) 2025-2026 Eric Evans
 //! SPDX-License-Identifier: Apache-2.0 OR MIT
 //!
 //! Modified for parallel batching with variable-length sequences:

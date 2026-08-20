@@ -6,8 +6,9 @@
 //!
 //! # Architecture
 //!
-//! Based on candle-vllm's batched attention approach, adapted for our
-//! ScatteredKvCache infrastructure:
+//! Structured like any batched-attention implementation, adapted for our
+//! ScatteredKvCache infrastructure. The steps below are the standard
+//! transformer sequence, not code taken from anywhere:
 //!
 //! 1. **Q/K/V Projections** - Linear transformations batched across sequences
 //! 2. **RoPE** - Rotary Position Embeddings applied to Q/K
