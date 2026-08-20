@@ -25,50 +25,22 @@ fn main() {
 
 #[cfg(feature = "cuda")]
 fn compile_cuda_kernels() {
-    // TODO: Implement CUDA kernel compilation
+    // NOT IMPLEMENTED, and the kernels it referred to have been REMOVED.
     //
-    // This function will compile Marlin CUDA kernels when properly implemented.
-    // Currently requires:
-    // 1. CUDA Toolkit 12.0+ installed
-    // 2. NVCC compiler in PATH
-    // 3. Proper compute capability flags (sm_80, sm_89, etc.)
+    // This stub used to list `kernels/src/marlin_matmul_*.cu`,
+    // `kernels/src/marlin_repack.cu` and `kernels/marlin/*.cuh` as the files it
+    // would compile "when properly implemented". Those eight files were deleted
+    // on 2026-08-20: they were verbatim third-party CUDA, byte-identical to
+    // guoqingbao/attention.rs (MIT-only), carrying no attribution, in a crate
+    // declaring `MIT OR Apache-2.0`. They also could never have compiled — the
+    // `.cu` files `#include "marlin_gptq_cuda_kernel.cuh"` and
+    // "marlin_cuda_kernel.cuh", neither of which was ever in this repository.
+    // A partial vendor of someone else's kernels, wired to nothing.
     //
-    // Kernel files to compile:
-    // - kernels/src/marlin_matmul_f16.cu
-    // - kernels/src/marlin_matmul_bf16.cu
-    // - kernels/src/marlin_matmul_awq_f16.cu
-    // - kernels/src/marlin_matmul_awq_bf16.cu
-    // - kernels/src/marlin_repack.cu
-    //
-    // Headers:
-    // - kernels/marlin/marlin.cuh
-    // - kernels/marlin/marlin_dtypes.cuh
-    //
-    // Example compilation (reference from candle-vllm):
-    // ```
-    // use cc::Build;
-    //
-    // let mut build = Build::new();
-    // build
-    //     .cuda(true)
-    //     .flag("-std=c++17")
-    //     .flag("-O3")
-    //     .flag("--expt-relaxed-constexpr")
-    //     .flag("-gencode")
-    //     .flag("arch=compute_80,code=sm_80")  // Ampere
-    //     .flag("-gencode")
-    //     .flag("arch=compute_89,code=sm_89")  // Ada Lovelace
-    //     .include("kernels/marlin")
-    //     .file("kernels/src/marlin_matmul_f16.cu")
-    //     .file("kernels/src/marlin_matmul_bf16.cu")
-    //     .file("kernels/src/marlin_matmul_awq_f16.cu")
-    //     .file("kernels/src/marlin_matmul_awq_bf16.cu")
-    //     .file("kernels/src/marlin_repack.cu")
-    //     .compile("marlin_kernels");
-    //
-    // println!("cargo:rustc-link-lib=static=marlin_kernels");
-    // println!("cargo:rustc-link-lib=dylib=cudart");
-    // ```
+    // If the AWQ/Marlin GPU path is ever revived, DO NOT restore them from git.
+    // Re-vendor deliberately with attribution, or use Fuel's
+    // `fuel-cuda-backend/src/baracuda/quant_w4a16.rs`, which covers Marlin and
+    // AWQ W4A16 on the backend this project is porting to.
 
     println!("cargo:warning=CUDA kernel compilation not yet implemented");
     println!("cargo:warning=AWQ quantization requires manual CUDA setup");
