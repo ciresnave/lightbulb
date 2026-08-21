@@ -6,6 +6,11 @@
 # them, and this header says so rather than letting the file's existence imply
 # enforcement.
 #
+# TOOLCHAIN: pinned. rust-toolchain.toml pins 1.98.0 by explicit version, so
+# these gates report a claim about a NAMED compiler rather than an ambient one.
+# Before that file, the default on this machine was NIGHTLY 1.99.0 and every
+# green this repo reported was a claim about a compiler nobody had stated.
+#
 # Usage: bash scripts/check.sh
 set -uo pipefail
 cd "$(dirname "$0")/.."

@@ -1,0 +1,20 @@
+# Pinned to an EXPLICIT VERSION, never an alias.
+#
+# Portfolio ruling 2026-08-21: every Rust repo pins 1.98.0 by number. `stable`
+# is a moving alias — two machines resolve it differently, and this box's
+# `stable` was 1.97.1 while current stable was 1.98.0. "Verify with +stable to
+# match CI" is underspecified for exactly that reason: Fuel's CI Clippy was red
+# on 13 sites of a lint that did not exist on this machine's `stable` at all.
+#
+# What this buys is LINT AND WARNING REPRODUCIBILITY, not correctness. Exact
+# float ops are strict IEEE-754 and bit-identical across rustc versions (no
+# fast-math, no reordering, no auto-FMA — a language guarantee), and
+# transcendentals route through the `libm` CRATE, a versioned dependency, so
+# their bits track the crate rather than the compiler. A compiler bump does not
+# change what anything computes.
+#
+# Before this file, the ambient default on this machine was NIGHTLY 1.99.0 —
+# so every green this repo has reported was a claim about an unnamed compiler.
+[toolchain]
+channel    = "1.98.0"
+components = ["rustfmt", "clippy"]
