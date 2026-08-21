@@ -27,7 +27,16 @@ echo "── cargo fmt --all --check"
 cargo fmt --all --check >/dev/null 2>&1 || { echo "   FAIL: formatting differs"; fail=1; }
 
 echo "── cargo doc (rustdoc lints only — see note)"
-# CRITICAL: deny the RUSTDOC lints specifically, NOT `-D warnings`.
+# The deny lives in src/lib.rs as a CRATE-LEVEL ATTRIBUTE, not here.
+#
+# It used to be RUSTDOCFLAGS on this line. That applies to EVERY rustdoc
+# invocation including dependencies, defeating cargo's lint-cap for registry
+# crates: CI's first run failed on 16 broken links inside hardware-query-0.2.1
+# -- someone else's crate, on Linux-only paths this machine never compiles,
+# which is exactly why it passed locally and failed on ubuntu-latest.
+#
+# The old comment below is kept because its point still holds and is why the
+# attribute names the two rustdoc lints rather than using `deny(warnings)`.
 #
 # With `RUSTDOCFLAGS=-D warnings`, any ordinary rustc lint — an unused import,
 # an unused `mut` — aborts the run BEFORE rustdoc reaches link resolution. The
@@ -39,8 +48,7 @@ echo "── cargo doc (rustdoc lints only — see note)"
 # before the thing it measures. Scoping the deny to rustdoc's own lints means
 # a stray rustc warning can no longer mask a broken link. Verified by
 # reintroducing an `unused_mut` and confirming the link count was unchanged.
-RUSTDOCFLAGS="-D rustdoc::broken_intra_doc_links -D rustdoc::private_intra_doc_links" \
-  cargo doc --workspace --no-deps >/dev/null 2>&1 \
+cargo doc --workspace --no-deps >/dev/null 2>&1 \
   || { echo "   FAIL: broken or private intra-doc links"; fail=1; }
 
 echo "── cargo test --lib"

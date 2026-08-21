@@ -1,3 +1,17 @@
+// Doc-link lints live HERE, as crate-level attributes, NOT in RUSTDOCFLAGS.
+//
+// `RUSTDOCFLAGS=-D rustdoc::broken_intra_doc_links` applies to EVERY rustdoc
+// invocation, including dependencies, and defeats cargo's lint-cap for
+// registry crates. CI's first run failed on 16 broken links inside
+// `hardware-query-0.2.1` -- someone else's crate, on Linux-only code paths
+// this machine never compiles, which is why it passed locally and failed on
+// ubuntu-latest. A crate-level attribute cannot leak into a dependency.
+//
+// It is also the better mechanism regardless of CI: it travels with the code,
+// so a plain `cargo doc` enforces it for anyone, rather than only for whoever
+// remembers the environment variable.
+#![deny(rustdoc::broken_intra_doc_links, rustdoc::private_intra_doc_links)]
+
 pub mod api;
 pub mod backend; // Hardware-specific backends (CUDA, ROCm, etc.)
 pub mod cache;

@@ -54,8 +54,6 @@ jobs:
         # resolution, the command emits no link diagnostics, and a grep for them
         # returns zero — which reads identically to "none found". That produced
         # a reported "0 broken links" here when there were 24.
-        env:
-          RUSTDOCFLAGS: -D rustdoc::broken_intra_doc_links -D rustdoc::private_intra_doc_links
         run: cargo doc --workspace --no-deps
 
       - name: test
