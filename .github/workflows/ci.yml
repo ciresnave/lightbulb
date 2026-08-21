@@ -54,8 +54,11 @@ jobs:
     # or Habana driver version should report is a judgement call, not a typo.
     #
     # 0.2.1 is the newest published version, so there is nothing to bump to.
-    # `system-analysis` is ours and is used at src/hardware/mod.rs:102, so it
-    # is not trivially removable either.
+    # `system-analysis` is ours: `use system_analysis::SystemAnalyzer` inside
+    # `HardwareProfile::detect()` in src/hardware/mod.rs. So it is not trivially
+    # removable either. (Named by SYMBOL, not by line -- a line number in a
+    # comment moves silently on any insertion above it, and this comment is
+    # meant to be read long after it was written.)
     #
     # Windows is the platform this project is developed on, targets CUDA on,
     # and is known to build on. A green gate on the platform that exists beats
