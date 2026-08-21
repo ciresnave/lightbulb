@@ -79,7 +79,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: fmt
-        run: cargo fmt --all --check
+        shell: bash
+        run: |
+          cargo fmt --all --check
+          echo fmt >> .gates-ran
 
       - name: doc links
         # Scoped to rustdoc's OWN lints, NOT `-D warnings`. With `-D warnings`,
@@ -87,7 +90,10 @@ jobs:
         # resolution, the command emits no link diagnostics, and a grep for them
         # returns zero — which reads identically to "none found". That produced
         # a reported "0 broken links" here when there were 24.
-        run: cargo doc --workspace --no-deps
+        shell: bash
+        run: |
+          cargo doc --workspace --no-deps
+          echo doc >> .gates-ran
 
       # WHAT THIS GATE COVERS, AND WHAT A GREEN TICK HERE DOES NOT MEAN.
       # Measured, identical across runs 32498482991 and 32500847148:
@@ -125,4 +131,38 @@ jobs:
       # exercised. Widening it needs a runner with the model and a GPU, which
       # is a separate change; stating the limit is not.
       - name: test
-        run: cargo test --tests
+        shell: bash
+        run: |
+          cargo test --tests
+          echo test >> .gates-ran
+
+      # A DELETED STEP IS A SILENTLY DISABLED GATE. Without this, removing the
+      # `fmt` step does not turn anything red -- the job simply runs three
+      # steps instead of four and reports success. An absent gate and a passing
+      # gate produce the same green tick, which is the same shape as the seven
+      # suites above that compile to an empty binary and print `ok. 0 passed`.
+      #
+      # Each gate appends a marker only on success (`shell: bash` runs with
+      # `-eo pipefail`, so a failed gate aborts the step before its echo). This
+      # step then demands the full set. Deleting a gate now costs TWO edits in
+      # TWO places instead of one, which makes it deliberate rather than
+      # accidental.
+      #
+      # WHAT THIS DOES NOT CATCH, stated because a guard trusted past its reach
+      # is worse than no guard: the expected list is HARDCODED HERE. Adding a
+      # FOURTH gate and forgetting to add its marker leaves that gate unguarded
+      # and this check still green. It closes deletion, not omission.
+      - name: every gate must have run
+        shell: bash
+        run: |
+          expected="fmt doc test"
+          test -f .gates-ran || { echo "::error::no gate markers written at all"; exit 1; }
+          missing=""
+          for g in $expected; do
+            grep -qx "$g" .gates-ran || missing="$missing $g"
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::declared gates that never ran:$missing"
+            exit 1
+          fi
+          echo "all gates ran:"; cat .gates-ran
