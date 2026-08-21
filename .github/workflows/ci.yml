@@ -1,0 +1,175 @@
+# Minimal CI. Runs the same gates as scripts/check.sh.
+#
+# WHEN IT RUNS, precisely: pushes to `main`, and pull requests. NOT on a push
+# to an arbitrary branch -- see the `on:` block below. A branch pushed with no
+# PR open against it RUNS NOTHING AND REPORTS NOTHING, which is silence rather
+# than a green tick, but is still easy to mistake for "the gates were fine".
+# Measured, not assumed: a scratch branch pushed on 2026-08-21 produced zero
+# runs until a PR was opened for it.
+#
+# WHY THIS EXISTS: before it, 812 tests across 30 binaries had only ever run on
+# one machine, and nothing verified a pushed commit except someone choosing to
+# run it. scripts/check.sh was "armed, not automatic" by its own header. In one
+# day of looking, this repo turned out to have accumulated 472 formatting hunks,
+# 24 broken intra-doc links and a 14-day-old open PR — all of which are exactly
+# what accumulates when nothing runs. The maintainer being careful is not an
+# instrument.
+#
+# NO TOOLCHAIN IS NAMED HERE, DELIBERATELY. `rust-toolchain.toml` pins 1.98.0
+# and its components, and rustup on the runner honours it automatically. Naming
+# a toolchain in this file too would put the version in two places and need its
+# own assertion to keep them equal — removing the duplication is better than
+# asserting over it. If a future edit adds `toolchain:` to a setup step, it must
+# also add that assertion.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  # Full parallelism ICEs rustc on the maintainer's machine; -j 4 is the
+  # standing workaround there. Kept here so local and CI runs are the same
+  # command rather than merely similar ones.
+  CARGO_BUILD_JOBS: 4
+
+jobs:
+  gates:
+    # WINDOWS, NOT LINUX, AND THIS IS A MEASURED CONSTRAINT RATHER THAN A
+    # PREFERENCE. Lightbulb does not currently build on Linux at all:
+    #
+    #   system-analysis 0.2.1  ->  hardware-query 0.2.1
+    #
+    # 16 compile errors, and they are TWO UNRELATED DEFECTS, not one:
+    #
+    #   13x error[E0433]  cpu.rs  -- bare `fs::read_to_string(...)` with no
+    #                                `use std::fs;` anywhere in the file
+    #    3x error[E0599]  tpu.rs  -- Self::get_edge_tpu_driver_version() (x2,
+    #                                :207 :245) and Self::get_habana_driver_
+    #                                version() (:306) HAVE ZERO DEFINITIONS in
+    #                                the crate. Not a missing import: missing
+    #                                functions. (Sibling get_tpu_driver_version
+    #                                at :355 does exist -- that is the control.)
+    #
+    # All 16 sit under `#[cfg(target_os = "linux")]`, which is why every build
+    # this project has ever run -- all on Windows -- compiled clean.
+    #
+    # SO THE FIX IS NOT ONE LINE. One line closes the E0433s; the E0599s need
+    # two functions written or three call sites removed, and what an Edge-TPU
+    # or Habana driver version should report is a judgement call, not a typo.
+    #
+    # 0.2.1 is the newest published version, so there is nothing to bump to.
+    # `system-analysis` is ours: `use system_analysis::SystemAnalyzer` inside
+    # `HardwareProfile::detect()` in src/hardware/mod.rs. So it is not trivially
+    # removable either. (Named by SYMBOL, not by line -- a line number in a
+    # comment moves silently on any insertion above it, and this comment is
+    # meant to be read long after it was written.)
+    #
+    # Windows is the platform this project is developed on, targets CUDA on,
+    # and is known to build on. A green gate on the platform that exists beats
+    # a red gate on the one we would like to.
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show the toolchain CI actually resolved
+        # Printed rather than assumed: a green whose compiler is unnamed is a
+        # claim about nothing in particular. This is the CI-side counterpart of
+        # pinning, and it should read 1.98.0.
+        run: |
+          rustup show active-toolchain
+          rustc --version
+          cargo fmt --version
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: fmt
+        shell: bash
+        run: |
+          cargo fmt --all --check
+          echo fmt >> .gates-ran
+
+      - name: doc links
+        # Scoped to rustdoc's OWN lints, NOT `-D warnings`. With `-D warnings`,
+        # any ordinary rustc lint aborts the run BEFORE rustdoc reaches link
+        # resolution, the command emits no link diagnostics, and a grep for them
+        # returns zero — which reads identically to "none found". That produced
+        # a reported "0 broken links" here when there were 24.
+        shell: bash
+        run: |
+          cargo doc --workspace --no-deps
+          echo doc >> .gates-ran
+
+      # WHAT THIS GATE COVERS, AND WHAT A GREEN TICK HERE DOES NOT MEAN.
+      # Measured, identical across runs 32498482991 and 32500847148:
+      #
+      #   812 passed   0 failed   66 ignored   30 suites
+      #     15 suites ran something
+      #      7 compiled to an empty binary   (0 passed, 0 ignored)
+      #      8 compiled but were all skipped (0 passed, N ignored)
+      #
+      # DEFAULT FEATURES ONLY. Four integration files are `#![cfg(feature =
+      # "fuel-engine")]` or `"fuel-cuda"` at FILE SCOPE, so under default
+      # features they compile to an empty binary and print, in full:
+      #
+      #   test result: ok. 0 passed; 0 failed; 0 ignored
+      #
+      # A SUITE THAT RAN NOTHING IS INDISTINGUISHABLE FROM A SUITE THAT PASSED,
+      # and `cargo test` exits 0 either way. The vanished four are
+      # api_result_metadata, chat_template_e2e, fuel_engine_http and
+      # gpu_paged_vs_contiguous -- and the middle two are THE BEHAVIOURAL
+      # ACCEPTANCE GATES FOR THE CHAT-TEMPLATE / GGUF WORK. They are the tests
+      # most worth running and this gate does not run them.
+      #
+      # EIGHT further suites do compile but are entirely `#[ignore]` (they need
+      # a real ~2.2 GB checkpoint or a GPU): multi_gpu_validation (12),
+      # enhanced_correctness_tests (8), api_integration_tests (6),
+      # contracts_live (5), gguf_serving_e2e (2), fused_rmsnorm_perf (1),
+      # kv_append_perf_probe (1), paged_plan_once (1).
+      #
+      # The other three empty binaries are src/main.rs and the two src/bin
+      # targets -- binaries with no unit tests, which is normal and not a gap.
+      #
+      # So this tick means "the library's unit tests and the feature-independent
+      # integration tests pass on Windows." IT DOES NOT MEAN the Fuel engine
+      # path, chat-template rendering end to end, or GGUF serving were
+      # exercised. Widening it needs a runner with the model and a GPU, which
+      # is a separate change; stating the limit is not.
+      - name: test
+        shell: bash
+        run: |
+          cargo test --tests
+          echo test >> .gates-ran
+
+      # A DELETED STEP IS A SILENTLY DISABLED GATE. Without this, removing the
+      # `fmt` step does not turn anything red -- the job simply runs three
+      # steps instead of four and reports success. An absent gate and a passing
+      # gate produce the same green tick, which is the same shape as the seven
+      # suites above that compile to an empty binary and print `ok. 0 passed`.
+      #
+      # Each gate appends a marker only on success (`shell: bash` runs with
+      # `-eo pipefail`, so a failed gate aborts the step before its echo). This
+      # step then demands the full set. Deleting a gate now costs TWO edits in
+      # TWO places instead of one, which makes it deliberate rather than
+      # accidental.
+      #
+      # WHAT THIS DOES NOT CATCH, stated because a guard trusted past its reach
+      # is worse than no guard: the expected list is HARDCODED HERE. Adding a
+      # FOURTH gate and forgetting to add its marker leaves that gate unguarded
+      # and this check still green. It closes deletion, not omission.
+      - name: every gate must have run
+        shell: bash
+        run: |
+          expected="fmt doc test"
+          test -f .gates-ran || { echo "::error::no gate markers written at all"; exit 1; }
+          missing=""
+          for g in $expected; do
+            grep -qx "$g" .gates-ran || missing="$missing $g"
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::declared gates that never ran:$missing"
+            exit 1
+          fi
+          echo "all gates ran:"; cat .gates-ran

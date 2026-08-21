@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # Local quality gates. ARMED, NOT AUTOMATIC.
 #
-# This repository has no CI. Nothing runs these on a schedule, on push, or on
-# a pull request. They are a convention that holds only while someone runs
-# them, and this header says so rather than letting the file's existence imply
-# enforcement.
+# .github/workflows/ci.yml runs these same gates on every push to main and on
+# every pull request, so they are no longer convention-only. This script stays
+# as the local form: it is what you run BEFORE pushing, and it is the thing CI
+# mirrors rather than the other way round. If the two ever diverge, this file
+# is not the authority — CI is what actually gates.
 #
 # TOOLCHAIN: pinned. rust-toolchain.toml pins 1.98.0 by explicit version, so
 # these gates report a claim about a NAMED compiler rather than an ambient one.
@@ -26,7 +27,16 @@ echo "── cargo fmt --all --check"
 cargo fmt --all --check >/dev/null 2>&1 || { echo "   FAIL: formatting differs"; fail=1; }
 
 echo "── cargo doc (rustdoc lints only — see note)"
-# CRITICAL: deny the RUSTDOC lints specifically, NOT `-D warnings`.
+# The deny lives in src/lib.rs as a CRATE-LEVEL ATTRIBUTE, not here.
+#
+# It used to be RUSTDOCFLAGS on this line. That applies to EVERY rustdoc
+# invocation including dependencies, defeating cargo's lint-cap for registry
+# crates: CI's first run failed on 16 broken links inside hardware-query-0.2.1
+# -- someone else's crate, on Linux-only paths this machine never compiles,
+# which is exactly why it passed locally and failed on ubuntu-latest.
+#
+# The old comment below is kept because its point still holds and is why the
+# attribute names the two rustdoc lints rather than using `deny(warnings)`.
 #
 # With `RUSTDOCFLAGS=-D warnings`, any ordinary rustc lint — an unused import,
 # an unused `mut` — aborts the run BEFORE rustdoc reaches link resolution. The
@@ -38,8 +48,7 @@ echo "── cargo doc (rustdoc lints only — see note)"
 # before the thing it measures. Scoping the deny to rustdoc's own lints means
 # a stray rustc warning can no longer mask a broken link. Verified by
 # reintroducing an `unused_mut` and confirming the link count was unchanged.
-RUSTDOCFLAGS="-D rustdoc::broken_intra_doc_links -D rustdoc::private_intra_doc_links" \
-  cargo doc --workspace --no-deps >/dev/null 2>&1 \
+cargo doc --workspace --no-deps >/dev/null 2>&1 \
   || { echo "   FAIL: broken or private intra-doc links"; fail=1; }
 
 echo "── cargo test --lib"
