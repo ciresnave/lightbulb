@@ -30,7 +30,23 @@ env:
 
 jobs:
   gates:
-    runs-on: ubuntu-latest
+    # WINDOWS, NOT LINUX, AND THIS IS A MEASURED CONSTRAINT RATHER THAN A
+    # PREFERENCE. Lightbulb does not currently build on Linux at all:
+    #
+    #   system-analysis 0.2.1  ->  hardware-query 0.2.1
+    #   hardware-query/src/cpu.rs:412  fs::read_to_string("/proc/cpuinfo")
+    #   error[E0433]: cannot find module or crate `fs`
+    #
+    # That crate's Linux-only path calls `fs::` without importing `std::fs`, so
+    # it fails to COMPILE (13 sites in cpu.rs, 3 more in tpu.rs). 0.2.1 is the
+    # newest published version, so there is nothing to bump to. It is a
+    # transitive dep -- `system-analysis` is ours and is used at
+    # src/hardware/mod.rs:102 -- so it is not trivially removable either.
+    #
+    # Windows is the platform this project is developed on, targets CUDA on,
+    # and is known to build on. A green gate on the platform that exists beats
+    # a red gate on the one we would like to.
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
 
