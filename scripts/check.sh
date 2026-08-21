@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # Local quality gates. ARMED, NOT AUTOMATIC.
 #
-# This repository has no CI. Nothing runs these on a schedule, on push, or on
-# a pull request. They are a convention that holds only while someone runs
-# them, and this header says so rather than letting the file's existence imply
-# enforcement.
+# .github/workflows/ci.yml runs these same gates on every push to main and on
+# every pull request, so they are no longer convention-only. This script stays
+# as the local form: it is what you run BEFORE pushing, and it is the thing CI
+# mirrors rather than the other way round. If the two ever diverge, this file
+# is not the authority — CI is what actually gates.
 #
 # TOOLCHAIN: pinned. rust-toolchain.toml pins 1.98.0 by explicit version, so
 # these gates report a claim about a NAMED compiler rather than an ambient one.

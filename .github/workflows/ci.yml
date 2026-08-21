@@ -1,0 +1,62 @@
+# Minimal CI. Runs the same gates as scripts/check.sh, on every push and PR.
+#
+# WHY THIS EXISTS: before it, 812 tests across 30 binaries had only ever run on
+# one machine, and nothing verified a pushed commit except someone choosing to
+# run it. scripts/check.sh was "armed, not automatic" by its own header. In one
+# day of looking, this repo turned out to have accumulated 472 formatting hunks,
+# 24 broken intra-doc links and a 14-day-old open PR — all of which are exactly
+# what accumulates when nothing runs. The maintainer being careful is not an
+# instrument.
+#
+# NO TOOLCHAIN IS NAMED HERE, DELIBERATELY. `rust-toolchain.toml` pins 1.98.0
+# and its components, and rustup on the runner honours it automatically. Naming
+# a toolchain in this file too would put the version in two places and need its
+# own assertion to keep them equal — removing the duplication is better than
+# asserting over it. If a future edit adds `toolchain:` to a setup step, it must
+# also add that assertion.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  # Full parallelism ICEs rustc on the maintainer's machine; -j 4 is the
+  # standing workaround there. Kept here so local and CI runs are the same
+  # command rather than merely similar ones.
+  CARGO_BUILD_JOBS: 4
+
+jobs:
+  gates:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show the toolchain CI actually resolved
+        # Printed rather than assumed: a green whose compiler is unnamed is a
+        # claim about nothing in particular. This is the CI-side counterpart of
+        # pinning, and it should read 1.98.0.
+        run: |
+          rustup show active-toolchain
+          rustc --version
+          cargo fmt --version
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: fmt
+        run: cargo fmt --all --check
+
+      - name: doc links
+        # Scoped to rustdoc's OWN lints, NOT `-D warnings`. With `-D warnings`,
+        # any ordinary rustc lint aborts the run BEFORE rustdoc reaches link
+        # resolution, the command emits no link diagnostics, and a grep for them
+        # returns zero — which reads identically to "none found". That produced
+        # a reported "0 broken links" here when there were 24.
+        env:
+          RUSTDOCFLAGS: -D rustdoc::broken_intra_doc_links -D rustdoc::private_intra_doc_links
+        run: cargo doc --workspace --no-deps
+
+      - name: test
+        run: cargo test --tests
