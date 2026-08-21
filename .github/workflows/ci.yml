@@ -1,4 +1,11 @@
-# Minimal CI. Runs the same gates as scripts/check.sh, on every push and PR.
+# Minimal CI. Runs the same gates as scripts/check.sh.
+#
+# WHEN IT RUNS, precisely: pushes to `main`, and pull requests. NOT on a push
+# to an arbitrary branch -- see the `on:` block below. A branch pushed with no
+# PR open against it RUNS NOTHING AND REPORTS NOTHING, which is silence rather
+# than a green tick, but is still easy to mistake for "the gates were fine".
+# Measured, not assumed: a scratch branch pushed on 2026-08-21 produced zero
+# runs until a PR was opened for it.
 #
 # WHY THIS EXISTS: before it, 812 tests across 30 binaries had only ever run on
 # one machine, and nothing verified a pushed commit except someone choosing to
