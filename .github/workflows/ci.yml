@@ -87,9 +87,12 @@ jobs:
         run: cargo doc --workspace --no-deps
 
       # WHAT THIS GATE COVERS, AND WHAT A GREEN TICK HERE DOES NOT MEAN.
-      # Measured from run 32498482991, not assumed:
+      # Measured, identical across runs 32498482991 and 32500847148:
       #
-      #   812 passed   0 failed   61 ignored   29 suites
+      #   812 passed   0 failed   66 ignored   30 suites
+      #     15 suites ran something
+      #      7 compiled to an empty binary   (0 passed, 0 ignored)
+      #      8 compiled but were all skipped (0 passed, N ignored)
       #
       # DEFAULT FEATURES ONLY. Four integration files are `#![cfg(feature =
       # "fuel-engine")]` or `"fuel-cuda"` at FILE SCOPE, so under default
@@ -104,10 +107,14 @@ jobs:
       # ACCEPTANCE GATES FOR THE CHAT-TEMPLATE / GGUF WORK. They are the tests
       # most worth running and this gate does not run them.
       #
-      # Seven further suites do compile but are entirely `#[ignore]` (they need
-      # a real ~2.2 GB checkpoint or a GPU): api_integration_tests,
-      # enhanced_correctness_tests, fused_rmsnorm_perf, gguf_serving_e2e,
-      # kv_append_perf_probe, multi_gpu_validation, paged_plan_once.
+      # EIGHT further suites do compile but are entirely `#[ignore]` (they need
+      # a real ~2.2 GB checkpoint or a GPU): multi_gpu_validation (12),
+      # enhanced_correctness_tests (8), api_integration_tests (6),
+      # contracts_live (5), gguf_serving_e2e (2), fused_rmsnorm_perf (1),
+      # kv_append_perf_probe (1), paged_plan_once (1).
+      #
+      # The other three empty binaries are src/main.rs and the two src/bin
+      # targets -- binaries with no unit tests, which is normal and not a gap.
       #
       # So this tick means "the library's unit tests and the feature-independent
       # integration tests pass on Windows." IT DOES NOT MEAN the Fuel engine
