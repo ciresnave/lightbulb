@@ -86,5 +86,33 @@ jobs:
         # a reported "0 broken links" here when there were 24.
         run: cargo doc --workspace --no-deps
 
+      # WHAT THIS GATE COVERS, AND WHAT A GREEN TICK HERE DOES NOT MEAN.
+      # Measured from run 32498482991, not assumed:
+      #
+      #   812 passed   0 failed   61 ignored   29 suites
+      #
+      # DEFAULT FEATURES ONLY. Four integration files are `#![cfg(feature =
+      # "fuel-engine")]` or `"fuel-cuda"` at FILE SCOPE, so under default
+      # features they compile to an empty binary and print, in full:
+      #
+      #   test result: ok. 0 passed; 0 failed; 0 ignored
+      #
+      # A SUITE THAT RAN NOTHING IS INDISTINGUISHABLE FROM A SUITE THAT PASSED,
+      # and `cargo test` exits 0 either way. The vanished four are
+      # api_result_metadata, chat_template_e2e, fuel_engine_http and
+      # gpu_paged_vs_contiguous -- and the middle two are THE BEHAVIOURAL
+      # ACCEPTANCE GATES FOR THE CHAT-TEMPLATE / GGUF WORK. They are the tests
+      # most worth running and this gate does not run them.
+      #
+      # Seven further suites do compile but are entirely `#[ignore]` (they need
+      # a real ~2.2 GB checkpoint or a GPU): api_integration_tests,
+      # enhanced_correctness_tests, fused_rmsnorm_perf, gguf_serving_e2e,
+      # kv_append_perf_probe, multi_gpu_validation, paged_plan_once.
+      #
+      # So this tick means "the library's unit tests and the feature-independent
+      # integration tests pass on Windows." IT DOES NOT MEAN the Fuel engine
+      # path, chat-template rendering end to end, or GGUF serving were
+      # exercised. Widening it needs a runner with the model and a GPU, which
+      # is a separate change; stating the limit is not.
       - name: test
         run: cargo test --tests
