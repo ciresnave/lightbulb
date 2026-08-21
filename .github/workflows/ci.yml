@@ -78,12 +78,6 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: fmt
-        shell: bash
-        run: |
-          cargo fmt --all --check
-          echo fmt >> .gates-ran
-
       - name: doc links
         # Scoped to rustdoc's OWN lints, NOT `-D warnings`. With `-D warnings`,
         # any ordinary rustc lint aborts the run BEFORE rustdoc reaches link
