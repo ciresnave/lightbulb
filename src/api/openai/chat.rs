@@ -1750,31 +1750,83 @@ mod tests {
     /// separately, making it level-triggered, the behaviour the design
     /// explicitly rejects — left all 644 tests green.
     ///
-    /// **The reasoning below is known-insufficient — not fixed here.**
-    /// `with_default` scopes which subscriber the calling thread's own event
-    /// calls use, but `tracing-core`'s per-callsite `Interest` cache is
-    /// process-global, so a `with_default` subscriber installed on one thread
-    /// can still miss events under the parallel test harness. `capture_logs`
-    /// in `tests/chat_template_render.rs` measured this directly (~6-10%
-    /// spurious failures across a multi-run sample) and documents both the
-    /// mechanism and the fix — one subscriber, installed once, for the whole
-    /// process, with per-test isolation via a thread-local buffer instead of
-    /// a thread-local subscriber. Porting that fix here is deliberately
-    /// deferred: it is transcription, not design, and this helper's 7
-    /// call sites are untouched by this branch.
+    /// **Not `with_default` per call.** An earlier version of this helper
+    /// installed a fresh thread-local-default subscriber on every call,
+    /// reasoning that `with_default` is thread-local and therefore safe under
+    /// the parallel test harness. That reasoning is false: `with_default`
+    /// scopes which subscriber a thread's own *event calls* use, but
+    /// `tracing-core`'s per-callsite `Interest` cache is **process-global**.
+    /// Many threads installing different subscribers concurrently can settle
+    /// that cache with a callsite marked uninteresting while a
+    /// genuinely-listening subscriber is active on another thread, and the
+    /// event is then dropped silently. `capture_logs` in
+    /// `tests/chat_template_render.rs` measured exactly this: ~6-10% spurious
+    /// failures across a multi-run sample, 0 with `--test-threads=1` (which
+    /// isolates the cause to concurrency), and ~27% of the mutation that test
+    /// exists to catch going UNDETECTED.
+    ///
+    /// **The fix: one subscriber, installed once, for the whole process.**
+    /// With exactly one subscriber ever registered, `Interest` is computed
+    /// once and never changes for the rest of the run — the race is gone by
+    /// construction rather than by timing. Per-test isolation comes from a
+    /// thread-local *buffer* instead of a thread-local subscriber: the single
+    /// global subscriber's `MakeWriter` looks up the calling thread's buffer
+    /// and writes there, or discards silently on every thread outside an
+    /// active `warnings_while` call.
+    ///
+    /// **`Level::WARN` stays the max level, deliberately.** All 7 call sites
+    /// assert either on a warn line or on the ABSENCE of one; widening to
+    /// `TRACE` would fold unrelated info/debug output into the same `Vec` and
+    /// quietly break every `is_empty()` assertion among them.
+    ///
+    /// **THIS IS A LATENT HAZARD REMOVED, NOT A MEASURED FAILURE FIXED, and
+    /// the distinction is the point.** Before landing this, the old
+    /// `with_default` version was run against the full lib suite **70 times**
+    /// — 30 at the default thread count, 40 at `--test-threads=32` to
+    /// maximise concurrent subscriber installs — and produced **0 failures**.
+    /// So a green suite here CANNOT distinguish the two implementations, and
+    /// the 30 clean runs the new version also produced are evidence of
+    /// nothing on their own. The rate in this binary is below roughly 4% at
+    /// 95% confidence; it is not the 6-10% `capture_logs` measured.
+    ///
+    /// **Why the same defect is live there and dormant here:** the race needs
+    /// a thread WITHOUT a capturing subscriber to register the callsite first
+    /// and poison the global `Interest` cache. This callsite sits behind an
+    /// early return — `record` is edge-triggered, so `warn!` is reached only
+    /// on the completion that actually crosses the rate threshold. In this
+    /// binary essentially only the four capturing tests ever cross it. In
+    /// `chat_template_render.rs` the equivalent callsites are hit constantly
+    /// by non-capturing tests, which is what makes it fire there.
+    ///
+    /// That immunity is an accident of which tests exercise the guard, not a
+    /// property of the helper. **The first test that crosses the EOS
+    /// threshold outside a `warnings_while` block makes the race live**, and
+    /// it would arrive as an unrelated test going intermittently red.
     fn warnings_while(f: impl FnOnce()) -> Vec<String> {
+        use std::cell::RefCell;
         use std::io::Write;
-        use std::sync::{Arc, Mutex};
+        use std::sync::{Arc, Mutex, OnceLock};
 
-        #[derive(Clone, Default)]
-        struct Sink(Arc<Mutex<Vec<u8>>>);
+        thread_local! {
+            static WARN_BUF: RefCell<Option<Arc<Mutex<Vec<u8>>>>> =
+                const { RefCell::new(None) };
+        }
 
-        impl Write for Sink {
+        #[derive(Clone)]
+        struct ThreadLocalWriter;
+
+        impl Write for ThreadLocalWriter {
             fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-                self.0
-                    .lock()
-                    .expect("the capture buffer is never held across a panic")
-                    .extend_from_slice(buf);
+                WARN_BUF.with(|cell| {
+                    if let Some(sink) = cell.borrow().as_ref() {
+                        sink.lock()
+                            .expect("the capture buffer is never held across a panic")
+                            .extend_from_slice(buf);
+                    }
+                });
+                // Success is reported for the discard case too: a thread with
+                // no buffer installed is simply not being captured, which is
+                // not a write failure.
                 Ok(buf.len())
             }
             fn flush(&mut self) -> std::io::Result<()> {
@@ -1782,24 +1834,59 @@ mod tests {
             }
         }
 
-        impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Sink {
-            type Writer = Sink;
+        impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for ThreadLocalWriter {
+            type Writer = ThreadLocalWriter;
             fn make_writer(&'a self) -> Self::Writer {
                 self.clone()
             }
         }
 
-        let sink = Sink::default();
-        let subscriber = tracing_subscriber::fmt()
-            .with_writer(sink.clone())
-            .with_max_level(tracing::Level::WARN)
-            .with_ansi(false)
-            .without_time()
-            .finish();
-        tracing::subscriber::with_default(subscriber, f);
+        static INIT: OnceLock<()> = OnceLock::new();
+        INIT.get_or_init(|| {
+            let subscriber = tracing_subscriber::fmt()
+                .with_writer(ThreadLocalWriter)
+                .with_max_level(tracing::Level::WARN)
+                .with_ansi(false)
+                .without_time()
+                .finish();
+            // `Err` means another global default already exists. This crate
+            // installs none, so it should not happen -- but a logging helper
+            // must not panic the suite over it. If it ever does, that other
+            // subscriber's writer is used instead of `ThreadLocalWriter` and
+            // every call here returns an empty `Vec`, which the call sites
+            // asserting on warn CONTENT turn red immediately rather than
+            // passing silently.
+            let _ = tracing::subscriber::set_global_default(subscriber);
+        });
+
+        // RAII rather than a clear after `f()`: an assertion that fails INSIDE
+        // the closure unwinds past a plain clear, leaving the buffer installed
+        // for the rest of the worker thread's life. `Drop` runs on unwind, so
+        // this cannot leak however `f` exits.
+        struct BufGuard;
+        impl BufGuard {
+            fn install(sink: &Arc<Mutex<Vec<u8>>>) -> Self {
+                WARN_BUF.with(|cell| *cell.borrow_mut() = Some(Arc::clone(sink)));
+                Self
+            }
+        }
+        impl Drop for BufGuard {
+            fn drop(&mut self) {
+                // `try_with`, not `with`: during thread teardown the
+                // thread-local may already be destroyed, and a panic inside a
+                // `Drop` that is itself running during unwind aborts the
+                // process rather than failing a test.
+                let _ = WARN_BUF.try_with(|cell| *cell.borrow_mut() = None);
+            }
+        }
+
+        let sink = Arc::new(Mutex::new(Vec::new()));
+        {
+            let _guard = BufGuard::install(&sink);
+            f();
+        }
 
         let captured = sink
-            .0
             .lock()
             .expect("the capture buffer is never held across a panic")
             .clone();
