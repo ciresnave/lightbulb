@@ -24,7 +24,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use super::decomposition::{Decomposition, DecompositionHistory, Problem};
 use super::knowledge_base::{EvictionRecord, Fact, KnowledgeBase};
 
-/// Checkpoint identifier (timestamp-based)
+/// Checkpoint identifier: `checkpoint_{timestamp_ms}_{seq}`.
+///
+/// The trailing sequence number is what makes it unique — a millisecond alone
+/// is not a key, and this id is both the filename and the metadata map key.
+/// See [`create_checkpoint`] for the collision this prevents.
 pub type CheckpointId = String;
 
 /// Full inference state snapshot
