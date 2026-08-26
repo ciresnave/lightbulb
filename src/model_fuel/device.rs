@@ -51,7 +51,7 @@ mod tests {
         let dev = super::select();
         // Realizing a trivial graph proves the device is not merely
         // constructed but actually drivable.
-        let a = fuel::lazy::LazyTensor::from_f32(vec![2.0, 3.0], (1usize, 2usize), &dev);
+        let a = fuel::lazy::Tensor::from_f32(vec![2.0, 3.0], (1usize, 2usize), &dev);
         let w = a.const_f32_like(vec![1.0, 0.0, 0.0, 1.0], (2usize, 2usize));
         let y = a.matmul(&w).expect("matmul on the selected device");
         assert_eq!(y.realize_f32(), vec![2.0, 3.0]);

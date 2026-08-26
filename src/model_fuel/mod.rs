@@ -6,13 +6,13 @@
 //!
 //! # The three rules this module is built to
 //!
-//! **1. Graph affinity.** Every `LazyTensor::from_*` constructor mints a *new*
+//! **1. Graph affinity.** Every `Tensor::from_*` constructor mints a *new*
 //! graph, and tensors from different graphs cannot be combined — every binary op
 //! asserts it. So there is exactly one root per graph and everything else is
 //! built on it:
 //!
 //! ```text
-//! let x = LazyTensor::from_f32(...);      // the root — activations
+//! let x = Tensor::from_f32(...);      // the root — activations
 //! let w = x.const_f32_like(...);          // weights, on x's graph
 //! let y = x.matmul(&w);                   // ✓
 //! ```
@@ -113,18 +113,18 @@ pub mod session;
 /// on the absence of a panic.
 pub fn smoke_matmul() -> Vec<f32> {
     use fuel::Device;
-    use fuel::lazy::LazyTensor;
+    use fuel::lazy::Tensor;
 
     let dev = Device::cpu();
 
     // a = [[1, 2, 3],
     //      [4, 5, 6]]                    — the ROOT; owns the graph.
-    let a = LazyTensor::from_f32(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], (2usize, 3usize), &dev);
+    let a = Tensor::from_f32(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], (2usize, 3usize), &dev);
 
     // w = [[1, 0],
     //      [0, 1],
     //      [1, 1]]                       — built on a's graph, per rule 1.
-    // NOT `LazyTensor::from_f32(..)`, which would mint a second graph and panic
+    // NOT `Tensor::from_f32(..)`, which would mint a second graph and panic
     // at the matmul.
     let w = a.const_f32_like(vec![1.0, 0.0, 0.0, 1.0, 1.0, 1.0], (3usize, 2usize));
 
@@ -156,12 +156,12 @@ mod tests {
     #[should_panic(expected = "same graph")]
     fn independently_constructed_tensors_cannot_be_combined() {
         use fuel::Device;
-        use fuel::lazy::LazyTensor;
+        use fuel::lazy::Tensor;
 
         let dev = Device::cpu();
-        let a = LazyTensor::from_f32(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], (2usize, 3usize), &dev);
+        let a = Tensor::from_f32(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], (2usize, 3usize), &dev);
         // A SECOND graph — this is the mistake the module doc warns about.
-        let w = LazyTensor::from_f32(vec![1.0, 0.0, 0.0, 1.0, 1.0, 1.0], (3usize, 2usize), &dev);
+        let w = Tensor::from_f32(vec![1.0, 0.0, 0.0, 1.0, 1.0, 1.0], (3usize, 2usize), &dev);
         let _ = a.matmul(&w);
     }
 }

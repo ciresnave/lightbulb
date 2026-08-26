@@ -212,8 +212,8 @@
     #     paths = ["../fuel-lightbulb-port"]
     # — which overrides the git source without touching the manifest, so a
     # working tree stays publishable.
-    fuel             = { git = "https://github.com/ciresnave/fuel", rev = "8771997eac86b2a786bebcdcadda16fdcf2d28dc", package = "fuel-core" }
-    fuel-cpu-backend = { git = "https://github.com/ciresnave/fuel", rev = "8771997eac86b2a786bebcdcadda16fdcf2d28dc" }
+    fuel             = { git = "https://github.com/ciresnave/fuel", rev = "2d0c04b71b456d313d6873f7099866c38e63a0ba", package = "fuel-core" }
+    fuel-cpu-backend = { git = "https://github.com/ciresnave/fuel", rev = "2d0c04b71b456d313d6873f7099866c38e63a0ba" }
     # Only used to CONSTRUCT a `CudaDevice` in the GPU measurement harness.
     # `fuel-core` provides `impl From<CudaDevice> for Device` (its `cuda_backend`
     # module) but re-exports only `builder_arg`, not `CudaDevice` itself — so a
@@ -224,7 +224,7 @@
     # allowed to be optional"), and a PLAIN dev-dependency would run nvcc on
     # every `cargo test` including CPU-only ones. Optional + feature-activated
     # keeps default builds free of it entirely.
-    fuel-cuda-backend = { git = "https://github.com/ciresnave/fuel", rev = "8771997eac86b2a786bebcdcadda16fdcf2d28dc", optional = true }
+    fuel-cuda-backend = { git = "https://github.com/ciresnave/fuel", rev = "2d0c04b71b456d313d6873f7099866c38e63a0ba", optional = true }
 
 [[bin]]
 name = "lightbulb-cli"
@@ -253,7 +253,7 @@ kiss-ops-vocab = "0.2.0"
 # DEV-only on purpose — Lightbulb's library does not depend on Fuel's scheduler,
 # it has its own. This is here so the A/B harness in tests/paged_plan_once.rs can
 # drive Fuel's paged decode path directly and measure the plan-once flag.
-fuel-inference = { git = "https://github.com/ciresnave/fuel", rev = "8771997eac86b2a786bebcdcadda16fdcf2d28dc" }
+fuel-inference = { git = "https://github.com/ciresnave/fuel", rev = "2d0c04b71b456d313d6873f7099866c38e63a0ba" }
 tempfile       = "3"
 tower          = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
