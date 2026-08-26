@@ -1424,8 +1424,7 @@ mod tests {
         let per_row = heads * hd;
         for (row, &pos) in positions.iter().enumerate() {
             let row_data = x_data[row * per_row..(row + 1) * per_row].to_vec();
-            let xr =
-                Tensor::from_f32(row_data, Shape::from_dims(&[1usize, heads, 1, hd]), &dev);
+            let xr = Tensor::from_f32(row_data, Shape::from_dims(&[1usize, heads, 1, hd]), &dev);
             let (c, s) = xr.rope_tables_const(base, pos, 1, hd);
             let want = xr
                 .rope_with_tables_decomposed(&c, &s)
