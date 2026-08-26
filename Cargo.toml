@@ -203,9 +203,25 @@
     # `--features cuda` at all. A branch dependency would make this crate's
     # buildability a function of when you cloned it.
     #
-    # `8771997e` is the rev every test on this branch was verified against, and
-    # it is the one that repaired that CUDA break. Bump it deliberately, with a
-    # re-run, not as a drive-by.
+    # `2d0c04b7` is the rev every test here was verified against: 812 passed,
+    # 0 failed, 68 ignored, 32 suites, identical to the pre-bump baseline.
+    # Verified AT THE REV rather than at `origin/main`, which had already moved
+    # five commits past it by the time this landed -- all mechanical (a
+    # `cargo fmt --all` landing, a blame-ignore file, hooks tooling, a docs
+    # note), none touching the API surface.
+    #
+    # The predecessor `8771997e` is the rev that repaired the CUDA break above,
+    # and it is kept here as history, NOT as a baseline. It predates Fuel's
+    # GAP-182, so it carried a HIGH (`libyml`, unsound + unmaintained, no patch)
+    # and a MEDIUM (`serde_yml`) advisory into this crate; both are cleared at
+    # `2d0c04b7`, and the replacement `unsafe-libyaml 0.2.11` is past
+    # GHSA-r24f-hg58-vfrw's 0.2.10 fix.
+    #
+    # Bump it deliberately, with a re-run, not as a drive-by -- and UPDATE THIS
+    # PARAGRAPH WHEN YOU DO. A comment naming a tested baseline is a factual
+    # claim with no compiler behind it: this one asserted `8771997e` for one
+    # commit after the manifest already said otherwise, which would have pointed
+    # the next reader at a rev 651 commits stale.
     #
     # LOCAL DEVELOPMENT against a Fuel checkout: do NOT edit these lines back to
     # paths. Add a gitignored `.cargo/config.toml` instead —
