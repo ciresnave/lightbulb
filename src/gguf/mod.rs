@@ -225,8 +225,20 @@ impl Content {
                     _ => None,
                 })
                 .unwrap_or("<absent>");
+            // Per-kind, because the gpt2 explanation is wrong for bert/t5/gemma4 --
+            // and a refusal that confidently explains the wrong obstacle sends the
+            // reader somewhere there is nothing to find.
+            let detail = if model_kind == "gpt2" {
+                "`gpt2` files DO carry merges, so BPE could be rebuilt from them -- what blocks it is that each declares a different `tokenizer.ggml.pre`, naming a different pre-tokenizer splitting rule (12 distinct values in one local corpus: smollm, qwen2, falcon, starcoder, llama-bpe, command-r, deepseek-coder, deepseek-llm, gpt-2, mpt, refact, qwen35). Picking one would reproduce this function's original defect: a tokenizer that is plausible and wrong."
+            } else {
+                "Rebuilding it needs that tokenizer model's own construction, which this function does not implement. Only SentencePiece-lineage checkpoints carrying merges are handled."
+            };
+            // ONE physical line per literal, deliberately. An earlier version used
+            // `\` continuations and shipped a real newline into the message, so any
+            // caller printing only the first line lost `pre` -- the most useful value
+            // in it. The rendered string is what matters, not how the source looks.
             bail!(
-                "GGUF tokenizer.ggml.model is {model_kind:?} (tokenizer.ggml.pre = \n                 {pre:?}); only {SPM:?} is supported. `gpt2`-model files DO carry merges \n                 -- all 22 of them in one local corpus -- so BPE could be rebuilt from \n                 them. What blocks it is that each declares a different \n                 `tokenizer.ggml.pre`, naming a DIFFERENT pre-tokenizer splitting rule: \n                 12 distinct values in that same corpus (smollm, qwen2, falcon, \n                 starcoder, llama-bpe, command-r, deepseek-coder, deepseek-llm, gpt-2, \n                 mpt, refact, qwen35). Picking one would reproduce this function's \n                 original defect -- a tokenizer that is plausible and wrong, with no error \n                 anywhere. Supporting these means implementing the pre-tokenizer each \n                 `pre` value names, not relaxing this check."
+                "GGUF tokenizer.ggml.model is {model_kind:?} (tokenizer.ggml.pre = {pre:?}); only {SPM:?} is supported. {detail} Refusing to approximate: a guessed tokenizer produces plausible nonsense with no error anywhere."
             );
         }
 

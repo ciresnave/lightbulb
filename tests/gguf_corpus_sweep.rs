@@ -23,12 +23,29 @@
 
 use std::path::PathBuf;
 
-fn corpus() -> Option<Vec<PathBuf>> {
+/// Returns the `.gguf` files found, plus any directories that could not be
+/// read — reported rather than silently skipped, since a partial walk would
+/// shrink the corpus this test's claim rests on.
+fn corpus() -> Option<(Vec<PathBuf>, Vec<String>)> {
     let root = PathBuf::from(std::env::var_os("LIGHTBULB_GGUF_CORPUS")?);
     let mut out = Vec::new();
+    let mut unreadable = Vec::new();
     let mut stack = vec![root];
     while let Some(d) = stack.pop() {
-        for entry in std::fs::read_dir(&d).ok()?.flatten() {
+        // An unreadable directory must NOT abort the walk. It previously used
+        // `read_dir(&d).ok()?`, so one permission error returned `None` from the
+        // middle of the scan and the caller then reported "set
+        // LIGHTBULB_GGUF_CORPUS" -- a confident diagnosis of a different
+        // failure. Worse, a PARTIAL walk would silently shrink the corpus this
+        // test's whole claim rests on.
+        let entries = match std::fs::read_dir(&d) {
+            Ok(e) => e,
+            Err(e) => {
+                unreadable.push(format!("{}: {e}", d.display()));
+                continue;
+            }
+        };
+        for entry in entries.flatten() {
             let p = entry.path();
             if p.is_dir() {
                 stack.push(p);
@@ -41,20 +58,28 @@ fn corpus() -> Option<Vec<PathBuf>> {
         }
     }
     out.sort();
-    (!out.is_empty()).then_some(out)
+    Some((out, unreadable))
 }
 
 #[test]
 #[ignore = "needs a local GGUF corpus; set LIGHTBULB_GGUF_CORPUS"]
 fn every_gguf_either_rebuilds_a_tokenizer_or_refuses_with_a_reason() {
-    let files = corpus().expect("set LIGHTBULB_GGUF_CORPUS to a directory containing .gguf files");
+    let (files, unreadable_dirs) =
+        corpus().expect("set LIGHTBULB_GGUF_CORPUS to a directory containing .gguf files");
+    assert!(
+        unreadable_dirs.is_empty(),
+        "the corpus walk was incomplete, so any count below understates it: {unreadable_dirs:?}"
+    );
     let mut ok = 0usize;
     let mut refused = 0usize;
     let mut silent = Vec::new();
 
     for path in &files {
         let name = path.file_name().unwrap().to_string_lossy().into_owned();
-        let content = match lightbulb::gguf::Content::read(path.to_str().unwrap()) {
+        // `Content::read` takes `AsRef<Path>`, so the `PathBuf` goes straight in.
+        // `path.to_str().unwrap()` panicked on a non-UTF-8 path -- in the test
+        // whose entire assertion is that this code never panics.
+        let content = match lightbulb::gguf::Content::read(path) {
             Ok(c) => c,
             Err(e) => {
                 // Not a readable GGUF at all — still an error with a reason,
