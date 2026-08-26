@@ -124,6 +124,25 @@ pub fn load_local_llama(
 ///
 /// Note: Quantized models don't use a separate KV cache object - the cache
 /// is built into the model's forward pass.
+///
+/// # UNREACHABLE FROM THIS CRATE, AND THAT NEARLY COST A DAY
+///
+/// **Nothing calls this.** The GGUF serving path runs through
+/// [`crate::model::parallel_model_manager::ParallelModelManager::load_gguf`],
+/// reached from `engine::model_runner`. This function is kept only because it
+/// is `pub` in a `pub mod` and removing it would break any external consumer.
+///
+/// It matters because **both functions call `Content::extract_tokenizer`, and
+/// nothing in either name says which one is live.** While fixing a defect in
+/// that tokenizer, applying the fix here instead of to the live path would
+/// have produced an unchanged end-to-end failure — which reads as evidence
+/// against a correct diagnosis. **A correct fix applied to the wrong caller is
+/// indistinguishable from a wrong fix**, and it arrives disguised as a
+/// refutation.
+///
+/// So: if you change tokenizer or config handling, change it in
+/// `parallel_model_manager`, and treat any edit here as documentation of a
+/// path no test exercises. Verify by call site, not by name.
 pub fn load_gguf_llama(
     gguf_path: &str,
 ) -> Result<(

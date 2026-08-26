@@ -16,7 +16,7 @@
 
 mod parser;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use memmap2::Mmap;
 use std::collections::HashMap;
 use std::fs::File;
@@ -135,46 +135,200 @@ impl Content {
     ///
     /// # Returns
     /// A tokenizers::Tokenizer instance ready for encoding/decoding
+    /// Rebuild the checkpoint's own tokenizer from GGUF metadata.
+    ///
+    /// **A GGUF carries everything needed to reconstruct the reference
+    /// tokenizer exactly, and an earlier version of this function threw all of
+    /// it away.** It built a `Unigram` whose scores were INVENTED as
+    /// `-(id as f64)` — the negative token index — while
+    /// `tokenizer.ggml.scores` and `tokenizer.ggml.merges` sat unread. Unigram
+    /// picks the segmentation maximising total score, so fabricated scores made
+    /// short low-id pieces always win.
+    ///
+    /// Measured against `TinyLlama-1.1B-Chat-v1.0`'s own `tokenizer.json`, for
+    /// the prompt this project's GGUF end-to-end test sends:
+    ///
+    /// | | old | reference |
+    /// |---|---|---|
+    /// | id count | 28 | 22 |
+    /// | `capital` | `c`+`ap`+`it`+`al` | `capital` (7483) |
+    /// | `France` | `F`+`ran`+`ce` | `France` (3444) |
+    /// | newline | **id 0 — the UNK token** | `<0x0A>` (13) |
+    /// | BOS with `add_special_tokens` | absent | `<s>` (1) |
+    ///
+    /// The model was fed UNK for every newline and shattered subwords
+    /// throughout, which is the measured cause of the garbage completions in
+    /// `tests/gguf_serving_e2e.rs`.
+    ///
+    /// **The reference is BPE, not Unigram.** This checkpoint's
+    /// `tokenizer.ggml.merges` (61249) and `tokenizer.ggml.tokens` (32000) are
+    /// BYTE-IDENTICAL to its `tokenizer.json` — verified by direct comparison —
+    /// so this rebuilds BPE from them and mirrors the reference's normalizer,
+    /// decoder and post-processor rather than approximating them.
+    ///
+    /// # `merges` is required, and a Unigram fallback was tried and rejected
+    ///
+    /// Two shapes of `llama` GGUF exist. One carries `tokenizer.ggml.merges`
+    /// (converted from a HuggingFace `tokenizer.json`) and is rebuilt here
+    /// exactly. The other carries `tokenizer.ggml.scores` and **no merges**,
+    /// written by llama.cpp's own SentencePiece converter — measured locally,
+    /// 3 of 4 `llama`-model files. **Those are refused.**
+    ///
+    /// A Unigram-from-real-scores path for them was implemented and then
+    /// **removed after measuring it**. It builds, and it fixes byte fallback —
+    /// newline stops being UNK — but the segmentation is still wrong:
+    ///
+    /// ```text
+    /// unigram-from-scores  29 ids  us+er   c+ap+it+al   F+ran+ce
+    /// reference            22 ids  user    capital      France
+    /// ```
+    ///
+    /// **The scores are real; the algorithm is not the same one.** llama.cpp's
+    /// SPM tokenizer is a scored bigram-merge; `tokenizers`' `Unigram` is
+    /// Viterbi over unigram log-probabilities. Feeding SPM scores to Unigram
+    /// produces plausible output that is not the checkpoint's own — the exact
+    /// class of defect this function exists to remove, in a quieter form,
+    /// because the words look almost right.
+    ///
+    /// So an unsupported shape is an ERROR rather than a fabrication. A wrong
+    /// tokenizer produces fluent-looking nonsense with nothing in the logs,
+    /// which is far worse to debug than a refusal to load. Supporting these
+    /// files needs SPM's merge algorithm, not a different model with the same
+    /// numbers in it.
     pub fn extract_tokenizer(&self) -> Result<tokenizers::Tokenizer> {
-        // Get required metadata fields
-        let tokens = self
-            .get_metadata_string_array("tokenizer.ggml.tokens")
-            .context("Missing tokenizer.ggml.tokens in GGUF metadata")?;
+        use tokenizers::{
+            AddedToken, Tokenizer,
+            decoders::{
+                byte_fallback::ByteFallback, fuse::Fuse, sequence::Sequence as DecoderSequence,
+                strip::Strip,
+            },
+            models::bpe::BPE,
+            normalizers::{Prepend, Replace, Sequence as NormalizerSequence},
+            processors::template::TemplateProcessing,
+        };
 
-        // Check what tokenizer model this is
-        let _tokenizer_model = self
+        const SPM: &str = "llama";
+        let model_kind = self
             .metadata()
             .get("tokenizer.ggml.model")
             .and_then(|v| match v {
                 Value::String(s) => Some(s.as_str()),
                 _ => None,
-            });
+            })
+            .unwrap_or("<absent>");
+        if model_kind != SPM {
+            bail!(
+                "GGUF tokenizer.ggml.model is {model_kind:?}; only {SPM:?} (SentencePiece \
+                 reconstructed as byte-fallback BPE) is supported. Refusing to guess: an \
+                 approximated tokenizer produces plausible nonsense with no error anywhere."
+            );
+        }
 
-        // Build tokenizer using tokenizers crate
-        // Use Unigram model which is more flexible (no [UNK] requirement)
-        use tokenizers::{
-            Tokenizer, models::unigram::Unigram, pre_tokenizers::metaspace::Metaspace,
-        };
+        let tokens = self
+            .get_metadata_string_array("tokenizer.ggml.tokens")
+            .context("Missing tokenizer.ggml.tokens in GGUF metadata")?;
 
-        // Build vocab with scores (use negative index as score)
-        let vocab: Vec<(String, f64)> = tokens
+        let merges_raw = self
+            .get_metadata_string_array("tokenizer.ggml.merges")
+            .context(
+                "GGUF has no tokenizer.ggml.merges. This is a SentencePiece-converted checkpoint, \
+             and rebuilding it needs SPM's scored bigram-merge algorithm. Building a Unigram \
+             from tokenizer.ggml.scores instead was measured and does NOT reproduce the \
+             checkpoint's segmentation (29 ids against the reference's 22: `capital` came out \
+             as c+ap+it+al), so it is refused rather than approximated.",
+            )?;
+
+        let vocab: tokenizers::models::bpe::Vocab = tokens
             .iter()
             .enumerate()
-            .map(|(id, token)| (token.clone(), -(id as f64)))
+            .map(|(id, t)| (t.clone(), id as u32))
             .collect();
 
-        // Create unigram model (more flexible than WordLevel)
-        // Unigram::from takes (vocab, unk_id, byte_fallback)
-        let model = Unigram::from(vocab, Some(0), false)
-            .map_err(|e| anyhow::anyhow!("Failed to build Unigram model: {}", e))?;
+        // GGUF stores each merge as one space-separated pair, exactly as
+        // `tokenizer.json` does.
+        let merges: Vec<(String, String)> = merges_raw
+            .iter()
+            .map(|m| {
+                m.split_once(' ')
+                    .map(|(a, b)| (a.to_string(), b.to_string()))
+                    .ok_or_else(|| anyhow::anyhow!("malformed merge entry {m:?}: no space"))
+            })
+            .collect::<Result<_>>()?;
 
-        // Create tokenizer
-        let mut tokenizer = Tokenizer::new(model);
+        let bpe = BPE::builder()
+            .vocab_and_merges(vocab, merges)
+            // Load-bearing: without it every byte with no vocab entry becomes
+            // UNK. That is what turned each newline in a chat prompt into id 0.
+            .byte_fallback(true)
+            .build()
+            .map_err(|e| anyhow::anyhow!("building BPE from GGUF vocab and merges: {e}"))?;
 
-        // Add pre-tokenizer (metaspace for handling spaces)
-        tokenizer.with_pre_tokenizer(Some(Metaspace::default()));
+        let mut tokenizer = Tokenizer::new(bpe);
+
+        // Mirrors the reference tokenizer.json: Prepend then " " -> U+2581, and
+        // NO pre-tokenizer. The old code's `Metaspace` pre-tokenizer was a
+        // different mechanism reaching a similar-looking result.
+        let replace_space = Replace::new(" ", "\u{2581}")
+            .map_err(|e| anyhow::anyhow!("building the space normalizer: {e}"))?;
+        tokenizer.with_normalizer(Some(NormalizerSequence::new(vec![
+            Prepend::new("\u{2581}".to_string()).into(),
+            replace_space.into(),
+        ])));
+        tokenizer.with_pre_tokenizer(None::<tokenizers::pre_tokenizers::PreTokenizerWrapper>);
+
+        let replace_back = Replace::new("\u{2581}", " ")
+            .map_err(|e| anyhow::anyhow!("building the space decoder: {e}"))?;
+        tokenizer.with_decoder(Some(DecoderSequence::new(vec![
+            replace_back.into(),
+            ByteFallback::default().into(),
+            Fuse::new().into(),
+            Strip::new(' ', 1, 0).into(),
+        ])));
+
+        // Control tokens must be registered or they tokenize as ordinary text:
+        // the EOS marker would become its individual characters.
+        let unk_id = self.token_id("tokenizer.ggml.unknown_token_id");
+        let bos_id = self.token_id("tokenizer.ggml.bos_token_id");
+        let eos_id = self.token_id("tokenizer.ggml.eos_token_id");
+        let specials: Vec<AddedToken> = [unk_id, bos_id, eos_id]
+            .iter()
+            .flatten()
+            .filter_map(|&id| tokens.get(id as usize))
+            .map(|t| AddedToken::from(t.clone(), true))
+            .collect();
+        if !specials.is_empty() {
+            tokenizer.add_special_tokens(&specials);
+        }
+
+        // `tokenizer.ggml.add_bos_token` is a real per-model field and it
+        // VARIES: true for llama-spm / gemma / phi-3 / deepseek, false for
+        // every SmolLM2 build. It is ABSENT from this checkpoint, and
+        // llama.cpp's default for a `llama` tokenizer is to add BOS, so absent
+        // means true here rather than false.
+        let add_bos = self
+            .metadata()
+            .get("tokenizer.ggml.add_bos_token")
+            .and_then(|v| v.to_bool().ok())
+            .unwrap_or(true);
+        if add_bos {
+            if let (Some(bos), Some(id)) = (bos_id.and_then(|i| tokens.get(i as usize)), bos_id) {
+                let processor = TemplateProcessing::builder()
+                    .try_single(format!("{bos}:0 $A:0"))
+                    .map_err(|e| anyhow::anyhow!("building the BOS post-processor: {e}"))?
+                    .special_tokens(vec![(bos.clone(), id)])
+                    .build()
+                    .map_err(|e| anyhow::anyhow!("building the BOS post-processor: {e}"))?;
+                tokenizer.with_post_processor(Some(processor));
+            }
+        }
 
         Ok(tokenizer)
+    }
+
+    /// A `tokenizer.ggml.*_token_id` as a `u32`, or `None` if absent or not an
+    /// integer.
+    fn token_id(&self, key: &str) -> Option<u32> {
+        self.metadata().get(key)?.to_u32().ok()
     }
 
     // Helper methods for metadata extraction

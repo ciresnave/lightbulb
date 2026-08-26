@@ -27,20 +27,35 @@
 //!
 //! Despite that, the served completion is STILL garbage of the same shape as
 //! the pre-fix baseline above. See
-//! [`a_gguf_completion_is_still_garbage_after_correct_templating`] for the
+//! [`a_gguf_is_served_a_coherent_answer`] for the
 //! measured text, its reproducibility, and why that is a separate, already-
 //! recorded defect rather than something this epic failed to fix.
 //!
-//! **This falsifies the spec's root-cause claim, not its observation.**
+//! **This falsified the spec's root-cause claim, not its observation.**
 //! Spec §1 attributed the garbage output to the rendered prompt carrying no
-//! end-of-turn marker, so the model free-associates. The prompt now
-//! demonstrably carries the marker, and the model free-associates anyway —
-//! so "no marker" was not the (or not the only) mechanism. The observation
-//! that a chat-tuned model was producing role-marker garbage was real; the
-//! explanation for it does not survive this measurement. Whatever the actual
-//! mechanism is, it lives downstream of chat-template resolution — see the
-//! sibling test's doc comment for the specific next diagnostic step, which
-//! this epic does not take.
+//! end-of-turn marker, so the model free-associates. The prompt demonstrably
+//! carried the marker and the model free-associated anyway — so "no marker"
+//! was not the mechanism. The observation was real; the explanation for it did
+//! not survive measurement.
+//!
+//! # The actual mechanism, found 2026-08-26
+//!
+//! **The tokenizer, not the prompt.** `Content::extract_tokenizer` built a
+//! `Unigram` model whose scores were INVENTED as `-(id as f64)` — the negative
+//! token index — while the GGUF's own `tokenizer.ggml.merges` (61249) and
+//! `tokenizer.ggml.tokens` (32000), which are BYTE-IDENTICAL to this
+//! checkpoint's `tokenizer.json`, sat unread. `byte_fallback` was off, so every
+//! newline became id 0, the UNK token; and there was no post-processor, so BOS
+//! was never added and `add_special_tokens` was inert.
+//!
+//! The model was being fed UNK for every newline and shattered subwords
+//! throughout — `capital` as `c`+`ap`+`it`+`al`, `France` as `F`+`ran`+`ce`.
+//! **28 ids where the reference produces 22.** That is not a prompt defect at
+//! all, which is why three rounds of asserting on the rendered STRING never
+//! found it: a correct rendered string is not a correct token sequence.
+//!
+//! `tests/gguf_tokenizer_fidelity.rs` now gates the token ids against the
+//! checkpoint's own tokenizer, id for id, on both `add_special_tokens` arms.
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
@@ -121,7 +136,7 @@ async fn serve_the_fixed_prompt(path: &Path) -> (StatusCode, serde_json::Value) 
 /// of this test did, and failed: not because resolution is wrong — the three
 /// assertions below all pass — but because of a separate, downstream defect
 /// recorded in the sibling test
-/// [`a_gguf_completion_is_still_garbage_after_correct_templating`]. Mixing
+/// [`a_gguf_is_served_a_coherent_answer`]. Mixing
 /// that assertion into this test would make a correct fix look broken every
 /// time this file runs, which is worse than not gating the completion text
 /// at all.
@@ -179,46 +194,37 @@ async fn a_gguf_is_served_with_its_own_template() {
     );
 }
 
-/// A recorded defect, not a regression: even given the correctly rendered
-/// prompt this file's sibling test now proves resolution produces, the
-/// served completion is still garbage. This test is EXPECTED TO FAIL today.
+/// The whole point: a real GGUF, served over HTTP, answers the question.
 ///
-/// Measured completion, byte-identical across four independent runs at
-/// `temperature: 0.0` (two by an implementer in this investigation, one
-/// reproduced independently by the fix's reviewer, and one by the
-/// re-review, 82s, exit 101):
+/// **This was the recorded-defect test and it was EXPECTED TO FAIL.** Given a
+/// provably correct rendered prompt, the served completion was still garbage:
 ///
 /// ```text
 /// "| ass istant | i | user | user | ass istant | | | | | ass istant | < | user |"
 /// ```
 ///
-/// At the point this fails, assertions 1–4 below all already passed:
-/// `bos == "<s>"`, `eos == "</s>"`, `resolved_by == Resolution::GgufMetadata`,
-/// HTTP 200 with valid JSON — see
-/// [`a_gguf_is_served_with_its_own_template`], which additionally proves the
-/// rendered prompt text itself is exactly
-/// `"<|user|>\nName the capital of France.</s>\n<|assistant|>\n"`, confirmed
-/// by a temporary `eprintln!` in `build_prompt_from_raw`
-/// (`src/api/openai/chat.rs`) during this investigation and reverted before
-/// commit. So the defect below is downstream of chat-template resolution —
-/// outside what this epic (reading a GGUF's own metadata for its chat
-/// template) claims to fix, and outside its "Deliberately out of scope"
-/// boundary, which never covered GGUF quantized-generation correctness.
+/// byte-identical across four independent runs at `temperature: 0.0`. It is
+/// flipped to a live assertion here because it now genuinely passes, not
+/// because anything it asserts was weakened — the assertion is the same
+/// `contains("Paris")` it always made. Measured 2026-08-26 on
+/// `TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF` @ `52e7645b`, Q4_0, CUDA:
 ///
-/// This is NOT investigated further on this branch. The specific next
-/// diagnostic step, for whoever picks this up: **"the rendered prompt text
-/// is correct" is not "the token IDs fed to the model are correct."** A
-/// prior epic on this codebase shipped a BOS-doubling defect of exactly this
-/// shape — a template interpolates `bos_token` into prompt *text* while a
-/// tokenizer's `TemplateProcessing` post-processor prepends BOS again,
-/// yielding `128000, 128000, …`, a pair the model never saw in training
-/// (`BuiltPrompt::add_special_tokens` exists in `chat.rs` because of this).
-/// The next step is dumping the actual token IDs fed for this prompt on the
-/// GGUF path and comparing them against llama.cpp's for the same string —
-/// not re-reading the rendered text, which is already proven correct.
+/// ```text
+/// completion: "France| Paris, France</s>"
+/// ```
+///
+/// **The cause was the tokenizer, not the prompt** — see this file's header.
+/// The rendered prompt had been correct for a week; the ids built from it were
+/// not, and every earlier gate asserted on the string.
+///
+/// The completion is coherent and terminates on EOS, but it is not pristine:
+/// the leading `"France|"` is an artifact worth a look. It is recorded here
+/// rather than asserted against, because the assertion this test owns is that
+/// the model ANSWERS, and inventing a stricter one to match today's exact bytes
+/// would make an unrelated sampling change look like a regression.
 #[tokio::test]
-#[ignore = "recorded downstream defect — EXPECTED TO FAIL; also needs the GGUF checkpoint"]
-async fn a_gguf_completion_is_still_garbage_after_correct_templating() {
+#[ignore = "needs the GGUF checkpoint (637 MB); set LIGHTBULB_GGUF"]
+async fn a_gguf_is_served_a_coherent_answer() {
     let path = gguf_path().expect(MISSING);
 
     let (status, v) = serve_the_fixed_prompt(&path).await;
