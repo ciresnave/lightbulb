@@ -24,7 +24,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use super::decomposition::{Decomposition, DecompositionHistory, Problem};
 use super::knowledge_base::{EvictionRecord, Fact, KnowledgeBase};
 
-/// Checkpoint identifier (timestamp-based)
+/// Checkpoint identifier: `checkpoint_{timestamp_ms}_{seq}`.
+///
+/// The trailing sequence number is what makes it unique — a millisecond alone
+/// is not a key, and this id is both the filename and the metadata map key.
+/// See [`create_checkpoint`] for the collision this prevents.
 pub type CheckpointId = String;
 
 /// Full inference state snapshot
@@ -439,7 +443,25 @@ pub fn create_checkpoint(
         .unwrap()
         .as_millis() as u64;
 
-    let id = format!("checkpoint_{}", timestamp);
+    // A MILLISECOND IS NOT A UNIQUE KEY. The id was `checkpoint_{timestamp}`
+    // alone, and the id is the FILENAME (`{id}.json`) and the metadata map key
+    // -- so two checkpoints created in the same millisecond got the same id,
+    // the second overwrote the first on disk, and the map kept one entry where
+    // the caller had made two. `save` reported success for both.
+    //
+    // Not hypothetical: `test_clear_all_checkpoints` saves three in a tight
+    // loop and asserts three exist. It passes on a machine slow enough for the
+    // loop to straddle a millisecond boundary and fails on one that is not,
+    // which is why it went green here 40/40 and red on CI.
+    //
+    // The counter makes the id unique WITHIN A PROCESS by construction rather
+    // than by timing. `timestamp` stays in the id for readability and is
+    // unchanged as a FIELD -- ordering reads `metadata.timestamp`, never the
+    // id string, so nothing that sorts or prunes is affected.
+    static CHECKPOINT_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = CHECKPOINT_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+    let id = format!("checkpoint_{timestamp}_{seq}");
 
     // Snapshot KB
     let kb_snapshot = KnowledgeBaseSnapshot {
@@ -675,6 +697,29 @@ mod tests {
 
         let loaded = manager.load(&checkpoint.id).unwrap();
         assert_eq!(loaded.active_problems.len(), 1);
+    }
+
+    /// Ids must be unique by construction, not by the clock ticking between
+    /// calls.
+    ///
+    /// **1000 rather than 2, deliberately.** With millisecond ids, two
+    /// consecutive calls collide only if they land in the same millisecond —
+    /// likely on a fast machine but not guaranteed, so a 2-call test is itself
+    /// timing-dependent and can go green against the very defect it targets.
+    /// 1000 consecutive calls cannot span 1000 milliseconds on any machine that
+    /// runs this suite, so the old code fails this DETERMINISTICALLY.
+    #[test]
+    fn checkpoint_ids_are_unique_within_a_process() {
+        let kb = KnowledgeBase::new();
+        let ids: std::collections::HashSet<String> = (0..1000)
+            .map(|_| create_checkpoint(&kb, vec![], HashMap::new(), HashMap::new()).id)
+            .collect();
+        assert_eq!(
+            ids.len(),
+            1000,
+            "{} distinct ids from 1000 checkpoints — colliding ids overwrite each              other's files and silently lose checkpoints",
+            ids.len()
+        );
     }
 
     #[test]
