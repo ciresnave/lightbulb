@@ -29,7 +29,7 @@
 //! # Why prefill is one token at a time (and batching still pays)
 //!
 //! `Op::PagedAttn` is decode-only, `Sq == 1`. **Nothing validates that** —
-//! `LazyTensor::paged_attn` reads `sq` and never checks it — so it is a silent
+//! `Tensor::paged_attn` reads `sq` and never checks it — so it is a silent
 //! wrong-answer trap rather than an error. The reason it is real:
 //!
 //! - the CPU fast kernel **is** causal at `Sq>1`
@@ -137,7 +137,7 @@
 //! it.** These are two different facts and it is easy to credit the wrong one.
 //!
 //! *Cause, and it is sufficient on its own:* `forward_paged_step_batched` mints
-//! a fresh graph root every call (`LazyTensor::from_f32`, `fuel-core/src/
+//! a fresh graph root every call (`Tensor::from_f32`, `fuel-core/src/
 //! lazy.rs:7599` in the `fuel-lightbulb-port` worktree), and by rule 1 every
 //! `from_*` starts a NEW graph. Position enters concretely too (`tok_pos`, a
 //! plain `usize`, :7540). Note this sweep's geometry: prompt 8 + 5 steps = final
@@ -213,7 +213,7 @@
 //! # The three rules, as they land here
 //!
 //! 1. **Graph affinity.** The token-embedding table is the root
-//!    (`LazyTensor::from_f32`) and *everything* — weights, RoPE tables, the u32
+//!    (`Tensor::from_f32`) and *everything* — weights, RoPE tables, the u32
 //!    block table, and the pool placeholders — is `const_*_like` off it.
 //! 2. **F32.** [`BatchedPagedDecoder::new`] rejects any non-`F32` projection at
 //!    construction — but **not for the reason this doc used to give.** It said
@@ -249,7 +249,7 @@
 //!
 //! # The one piece of math reimplemented here, and why
 //!
-//! `LazyTensor::rope_with_tables_decomposed` requires `cos`/`sin` to be **exactly
+//! `Tensor::rope_with_tables_decomposed` requires `cos`/`sin` to be **exactly
 //! `[seq, d]`** where `seq = dims[rank-2]`. At `q = [B, Hq, 1, D]` that is
 //! `[1, D]` — *one shared position for the whole batch*. Batched decode has `B`
 //! sequences at `B` different absolute positions, so that call is unusable at
@@ -257,7 +257,7 @@
 //!
 //! [`rope_batched`] reimplements the rotate-half application over a
 //! `[B, 1, 1, D]` table. It does **not** reimplement the table math: the per-row
-//! cos/sin come from Fuel's own `LazyTensor::rope_tables_const` (which delegates
+//! cos/sin come from Fuel's own `Tensor::rope_tables_const` (which delegates
 //! to `fuel_graph::build_rope_tables`), concatenated along the batch axis. So the
 //! only new code is `x*cos + rotate_half(x)*sin`, and it is gated by a test that
 //! at `B == 1` it is bit-identical to `rope_with_tables_decomposed` — plus a
@@ -290,7 +290,7 @@ use fuel::kv_block_pool_device::DeviceKvPool;
 use fuel::lazy::{LayerWeights, LlamaConfig, LlamaModel, WeightStorage};
 use fuel::{DType, Device, Shape};
 
-use fuel::lazy::LazyTensor;
+use fuel::lazy::Tensor;
 
 /// Rotary position embedding at a **per-batch-row** position.
 ///
@@ -298,7 +298,7 @@ use fuel::lazy::LazyTensor;
 /// for sequence `b`'s own absolute position). Broadcasting over the head axis is
 /// what makes one table row serve all of that sequence's heads.
 ///
-/// This is `fuel_graph::Tensor::rope_with_tables_decomposed`'s body
+/// This is `fuel_graph::NodeHandle::rope_with_tables_decomposed`'s body
 /// (`fuel-graph/src/lib.rs` ~6931-6955) with the table shape generalised from
 /// "one position" to "one position per row" — same ops, same order, same
 /// associativity:
@@ -307,10 +307,10 @@ use fuel::lazy::LazyTensor;
 /// y = x * cos + concat(-x[..., D/2..], x[..., ..D/2]) * sin
 /// ```
 ///
-/// It exists only because the `LazyTensor` wrapper hard-requires `cos.dims() ==
+/// It exists only because the `Tensor` wrapper hard-requires `cos.dims() ==
 /// [seq, d]` with `seq = x.dims[rank-2]`, which at decode is `1`. See the module
 /// docs.
-pub fn rope_batched(x: &LazyTensor, cos: &LazyTensor, sin: &LazyTensor) -> Result<LazyTensor> {
+pub fn rope_batched(x: &Tensor, cos: &Tensor, sin: &Tensor) -> Result<Tensor> {
     let dims: Vec<usize> = x.shape().dims().to_vec();
     let rank = dims.len();
     if rank < 2 {
@@ -355,21 +355,21 @@ pub fn rope_batched(x: &LazyTensor, cos: &LazyTensor, sin: &LazyTensor) -> Resul
 /// `positions[b]`.
 ///
 /// Built by concatenating `B` calls to Fuel's own
-/// [`LazyTensor::rope_tables_const`] along the batch axis — the
+/// [`Tensor::rope_tables_const`] along the batch axis — the
 /// `(theta, position) → (cos, sin)` math stays Fuel's canonical
 /// `fuel_graph::build_rope_tables` rather than being duplicated here. At `B == 1`
 /// this is bit-for-bit the same const the single-sequence path emits.
 ///
 /// `anchor` supplies the graph (rule 1).
 fn batched_rope_tables(
-    anchor: &LazyTensor,
+    anchor: &Tensor,
     rope_base: f64,
     positions: &[usize],
     head_dim: usize,
-) -> Result<(LazyTensor, LazyTensor)> {
+) -> Result<(Tensor, Tensor)> {
     let row_shape = Shape::from_dims(&[1usize, 1, 1, head_dim]);
-    let mut cos_acc: Option<LazyTensor> = None;
-    let mut sin_acc: Option<LazyTensor> = None;
+    let mut cos_acc: Option<Tensor> = None;
+    let mut sin_acc: Option<Tensor> = None;
     for &pos in positions {
         // `[1, head_dim]` from Fuel's canonical table builder, viewed as one
         // batch row.
@@ -401,7 +401,7 @@ fn batched_rope_tables(
 
 /// `rms_norm(x) * gain` — Fuel's `apply_affine_rms_norm` is private, so this is
 /// the same three lines (`lazy.rs` ~9042) rebuilt on the public API.
-fn affine_rms_norm(x: &LazyTensor, gain: &Arc<[f32]>, dim: usize, eps: f64) -> Result<LazyTensor> {
+fn affine_rms_norm(x: &Tensor, gain: &Arc<[f32]>, dim: usize, eps: f64) -> Result<Tensor> {
     if gain.len() != dim {
         bail!("affine_rms_norm: gain len {} != dim {dim}", gain.len());
     }
@@ -729,7 +729,7 @@ impl<'m> BatchedPagedDecoder<'m> {
 
         // THE ROOT (rule 1). `from_f32` takes `impl Into<Arc<[f32]>>`, so cloning
         // the embedding table is a refcount bump, not a 262 MB copy.
-        let embed = LazyTensor::from_f32(
+        let embed = Tensor::from_f32(
             w.token_embedding.clone(),
             Shape::from_dims(&[cfg.vocab_size, dim]),
             &self.device,
@@ -801,7 +801,7 @@ impl<'m> BatchedPagedDecoder<'m> {
 
         let h_norm = affine_rms_norm(&h, &w.final_norm_gain, dim, cfg.norm_eps)?;
         // `apply_linear` became fallible in Fuel (7ed43541-era); it used to
-        // return `LazyTensor` directly.
+        // return `Tensor` directly.
         let logits = w
             .output
             .apply_linear(&h_norm, dim, cfg.vocab_size)
@@ -834,21 +834,21 @@ impl<'m> BatchedPagedDecoder<'m> {
     #[allow(clippy::too_many_arguments)]
     fn layer_batched(
         &self,
-        x: &LazyTensor,
+        x: &Tensor,
         layer: &LayerWeights,
-        k_ph: &LazyTensor,
-        v_ph: &LazyTensor,
-        rope_cos: &LazyTensor,
-        rope_sin: &LazyTensor,
-        block_table: &LazyTensor,
-        context_lens: &LazyTensor,
+        k_ph: &Tensor,
+        v_ph: &Tensor,
+        rope_cos: &Tensor,
+        rope_sin: &Tensor,
+        block_table: &Tensor,
+        context_lens: &Tensor,
         phys: &[PhysBlockId],
         slot: &[usize],
         scale: f32,
         b: usize,
         dim: usize,
         kv_dim: usize,
-    ) -> Result<LazyTensor> {
+    ) -> Result<Tensor> {
         let cfg = &self.model.config;
         let (hkv, hd) = (cfg.n_kv_heads, cfg.head_dim);
 
@@ -872,7 +872,7 @@ impl<'m> BatchedPagedDecoder<'m> {
             .add_optional_trailing_bias(layer.attn_v_bias.as_ref())
             .map_err(|e| anyhow::anyhow!("layer: v bias: {e:?}"))?;
 
-        let to_heads = |t: &LazyTensor, heads: usize, what: &str| -> Result<LazyTensor> {
+        let to_heads = |t: &Tensor, heads: usize, what: &str| -> Result<Tensor> {
             t.reshape(Shape::from_dims(&[b, 1, heads, hd]))
                 .and_then(|r| r.permute([0usize, 2, 1, 3]))
                 .map_err(|e| anyhow::anyhow!("layer: {what} head reshape: {e:?}"))
@@ -1319,7 +1319,7 @@ mod tests {
         // [B, Hkv, 1, D], sliced per row and reshaped to the block's slot layout.
         let b = 3usize;
         let src_data = rand_f32(b * hkv * hd, 7);
-        let src = LazyTensor::from_f32(src_data.clone(), Shape::from_dims(&[b, hkv, 1, hd]), &dev);
+        let src = Tensor::from_f32(src_data.clone(), Shape::from_dims(&[b, hkv, 1, hd]), &dev);
         // Deliberately non-monotonic, non-identity targets.
         let targets: [(usize, usize); 3] = [(4, 2), (1, 0), (3, 3)];
 
@@ -1417,15 +1417,14 @@ mod tests {
         let dev = Device::cpu();
 
         let x_data = rand_f32(b * heads * hd, 11);
-        let x = LazyTensor::from_f32(x_data.clone(), Shape::from_dims(&[b, heads, 1, hd]), &dev);
+        let x = Tensor::from_f32(x_data.clone(), Shape::from_dims(&[b, heads, 1, hd]), &dev);
         let (cos, sin) = batched_rope_tables(&x, base, &positions, hd)?;
         let got = rope_batched(&x, &cos, &sin)?.realize_f32();
 
         let per_row = heads * hd;
         for (row, &pos) in positions.iter().enumerate() {
             let row_data = x_data[row * per_row..(row + 1) * per_row].to_vec();
-            let xr =
-                LazyTensor::from_f32(row_data, Shape::from_dims(&[1usize, heads, 1, hd]), &dev);
+            let xr = Tensor::from_f32(row_data, Shape::from_dims(&[1usize, heads, 1, hd]), &dev);
             let (c, s) = xr.rope_tables_const(base, pos, 1, hd);
             let want = xr
                 .rope_with_tables_decomposed(&c, &s)
@@ -1535,7 +1534,7 @@ mod tests {
 
         let q_data = rand_f32(b * hq * d, 42);
         let run = |block_table: Vec<u32>| -> Result<Vec<f32>> {
-            let q = LazyTensor::from_f32(q_data.clone(), Shape::from_dims(&[b, hq, 1, d]), &dev);
+            let q = Tensor::from_f32(q_data.clone(), Shape::from_dims(&[b, hq, 1, d]), &dev);
             let kc = q.const_placeholder_like(pool.pool_shape().clone(), DType::F32);
             let vc = q.const_placeholder_like(pool.pool_shape().clone(), DType::F32);
             let bt = q.const_u32_like(block_table, pt.block_table_shape());
@@ -1959,7 +1958,7 @@ mod tests {
     /// **CONTROL for the oracle's most important sensitivity.** Replay the same
     /// schedule but give every row in a step row 0's RoPE position — the mistake
     /// a batched decoder makes if it reaches for
-    /// `LazyTensor::rope_with_tables_decomposed` (which only accepts one shared
+    /// `Tensor::rope_with_tables_decomposed` (which only accepts one shared
     /// position at `[B, H, 1, D]`) instead of building per-row tables.
     ///
     /// The oracle MUST catch it. If this test ever starts failing, the oracle has

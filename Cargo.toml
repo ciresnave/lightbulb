@@ -203,17 +203,33 @@
     # `--features cuda` at all. A branch dependency would make this crate's
     # buildability a function of when you cloned it.
     #
-    # `8771997e` is the rev every test on this branch was verified against, and
-    # it is the one that repaired that CUDA break. Bump it deliberately, with a
-    # re-run, not as a drive-by.
+    # `2d0c04b7` is the rev every test here was verified against: 812 passed,
+    # 0 failed, 68 ignored, 32 suites, identical to the pre-bump baseline.
+    # Verified AT THE REV rather than at `origin/main`, which had already moved
+    # five commits past it by the time this landed -- all mechanical (a
+    # `cargo fmt --all` landing, a blame-ignore file, hooks tooling, a docs
+    # note), none touching the API surface.
+    #
+    # The predecessor `8771997e` is the rev that repaired the CUDA break above,
+    # and it is kept here as history, NOT as a baseline. It predates Fuel's
+    # GAP-182, so it carried a HIGH (`libyml`, unsound + unmaintained, no patch)
+    # and a MEDIUM (`serde_yml`) advisory into this crate; both are cleared at
+    # `2d0c04b7`, and the replacement `unsafe-libyaml 0.2.11` is past
+    # GHSA-r24f-hg58-vfrw's 0.2.10 fix.
+    #
+    # Bump it deliberately, with a re-run, not as a drive-by -- and UPDATE THIS
+    # PARAGRAPH WHEN YOU DO. A comment naming a tested baseline is a factual
+    # claim with no compiler behind it: this one asserted `8771997e` for one
+    # commit after the manifest already said otherwise, which would have pointed
+    # the next reader at a rev 651 commits stale.
     #
     # LOCAL DEVELOPMENT against a Fuel checkout: do NOT edit these lines back to
     # paths. Add a gitignored `.cargo/config.toml` instead —
     #     paths = ["../fuel-lightbulb-port"]
     # — which overrides the git source without touching the manifest, so a
     # working tree stays publishable.
-    fuel             = { git = "https://github.com/ciresnave/fuel", rev = "8771997eac86b2a786bebcdcadda16fdcf2d28dc", package = "fuel-core" }
-    fuel-cpu-backend = { git = "https://github.com/ciresnave/fuel", rev = "8771997eac86b2a786bebcdcadda16fdcf2d28dc" }
+    fuel             = { git = "https://github.com/ciresnave/fuel", rev = "2d0c04b71b456d313d6873f7099866c38e63a0ba", package = "fuel-core" }
+    fuel-cpu-backend = { git = "https://github.com/ciresnave/fuel", rev = "2d0c04b71b456d313d6873f7099866c38e63a0ba" }
     # Only used to CONSTRUCT a `CudaDevice` in the GPU measurement harness.
     # `fuel-core` provides `impl From<CudaDevice> for Device` (its `cuda_backend`
     # module) but re-exports only `builder_arg`, not `CudaDevice` itself — so a
@@ -224,7 +240,7 @@
     # allowed to be optional"), and a PLAIN dev-dependency would run nvcc on
     # every `cargo test` including CPU-only ones. Optional + feature-activated
     # keeps default builds free of it entirely.
-    fuel-cuda-backend = { git = "https://github.com/ciresnave/fuel", rev = "8771997eac86b2a786bebcdcadda16fdcf2d28dc", optional = true }
+    fuel-cuda-backend = { git = "https://github.com/ciresnave/fuel", rev = "2d0c04b71b456d313d6873f7099866c38e63a0ba", optional = true }
 
 [[bin]]
 name = "lightbulb-cli"
@@ -253,7 +269,7 @@ kiss-ops-vocab = "0.2.0"
 # DEV-only on purpose — Lightbulb's library does not depend on Fuel's scheduler,
 # it has its own. This is here so the A/B harness in tests/paged_plan_once.rs can
 # drive Fuel's paged decode path directly and measure the plan-once flag.
-fuel-inference = { git = "https://github.com/ciresnave/fuel", rev = "8771997eac86b2a786bebcdcadda16fdcf2d28dc" }
+fuel-inference = { git = "https://github.com/ciresnave/fuel", rev = "2d0c04b71b456d313d6873f7099866c38e63a0ba" }
 tempfile       = "3"
 tower          = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
