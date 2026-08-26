@@ -16,7 +16,7 @@
 
 mod parser;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use memmap2::Mmap;
 use std::collections::HashMap;
 use std::fs::File;
@@ -166,9 +166,35 @@ impl Content {
     /// so this rebuilds BPE from them and mirrors the reference's normalizer,
     /// decoder and post-processor rather than approximating them.
     ///
-    /// An unsupported tokenizer model is an ERROR rather than a fabrication: a
-    /// wrong tokenizer produces fluent-looking nonsense with nothing in the
-    /// logs, which is far worse to debug than a refusal to load.
+    /// # `merges` is required, and a Unigram fallback was tried and rejected
+    ///
+    /// Two shapes of `llama` GGUF exist. One carries `tokenizer.ggml.merges`
+    /// (converted from a HuggingFace `tokenizer.json`) and is rebuilt here
+    /// exactly. The other carries `tokenizer.ggml.scores` and **no merges**,
+    /// written by llama.cpp's own SentencePiece converter — measured locally,
+    /// 3 of 4 `llama`-model files. **Those are refused.**
+    ///
+    /// A Unigram-from-real-scores path for them was implemented and then
+    /// **removed after measuring it**. It builds, and it fixes byte fallback —
+    /// newline stops being UNK — but the segmentation is still wrong:
+    ///
+    /// ```text
+    /// unigram-from-scores  29 ids  us+er   c+ap+it+al   F+ran+ce
+    /// reference            22 ids  user    capital      France
+    /// ```
+    ///
+    /// **The scores are real; the algorithm is not the same one.** llama.cpp's
+    /// SPM tokenizer is a scored bigram-merge; `tokenizers`' `Unigram` is
+    /// Viterbi over unigram log-probabilities. Feeding SPM scores to Unigram
+    /// produces plausible output that is not the checkpoint's own — the exact
+    /// class of defect this function exists to remove, in a quieter form,
+    /// because the words look almost right.
+    ///
+    /// So an unsupported shape is an ERROR rather than a fabrication. A wrong
+    /// tokenizer produces fluent-looking nonsense with nothing in the logs,
+    /// which is far worse to debug than a refusal to load. Supporting these
+    /// files needs SPM's merge algorithm, not a different model with the same
+    /// numbers in it.
     pub fn extract_tokenizer(&self) -> Result<tokenizers::Tokenizer> {
         use tokenizers::{
             AddedToken, Tokenizer,
@@ -191,7 +217,7 @@ impl Content {
             })
             .unwrap_or("<absent>");
         if model_kind != SPM {
-            anyhow::bail!(
+            bail!(
                 "GGUF tokenizer.ggml.model is {model_kind:?}; only {SPM:?} (SentencePiece \
                  reconstructed as byte-fallback BPE) is supported. Refusing to guess: an \
                  approximated tokenizer produces plausible nonsense with no error anywhere."
@@ -201,11 +227,15 @@ impl Content {
         let tokens = self
             .get_metadata_string_array("tokenizer.ggml.tokens")
             .context("Missing tokenizer.ggml.tokens in GGUF metadata")?;
+
         let merges_raw = self
             .get_metadata_string_array("tokenizer.ggml.merges")
             .context(
-                "Missing tokenizer.ggml.merges in GGUF metadata. Without merges a BPE vocabulary \
-                 cannot be rebuilt, and inventing an ordering silently changes every segmentation.",
+                "GGUF has no tokenizer.ggml.merges. This is a SentencePiece-converted checkpoint, \
+             and rebuilding it needs SPM's scored bigram-merge algorithm. Building a Unigram \
+             from tokenizer.ggml.scores instead was measured and does NOT reproduce the \
+             checkpoint's segmentation (29 ids against the reference's 22: `capital` came out \
+             as c+ap+it+al), so it is refused rather than approximated.",
             )?;
 
         let vocab: tokenizers::models::bpe::Vocab = tokens
