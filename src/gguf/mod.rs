@@ -217,10 +217,16 @@ impl Content {
             })
             .unwrap_or("<absent>");
         if model_kind != SPM {
+            let pre = self
+                .metadata()
+                .get("tokenizer.ggml.pre")
+                .and_then(|v| match v {
+                    Value::String(s) => Some(s.as_str()),
+                    _ => None,
+                })
+                .unwrap_or("<absent>");
             bail!(
-                "GGUF tokenizer.ggml.model is {model_kind:?}; only {SPM:?} (SentencePiece \
-                 reconstructed as byte-fallback BPE) is supported. Refusing to guess: an \
-                 approximated tokenizer produces plausible nonsense with no error anywhere."
+                "GGUF tokenizer.ggml.model is {model_kind:?} (tokenizer.ggml.pre = \n                 {pre:?}); only {SPM:?} is supported. `gpt2`-model files DO carry merges \n                 -- all 22 of them in one local corpus -- so BPE could be rebuilt from \n                 them. What blocks it is that each declares a different \n                 `tokenizer.ggml.pre`, naming a DIFFERENT pre-tokenizer splitting rule: \n                 12 distinct values in that same corpus (smollm, qwen2, falcon, \n                 starcoder, llama-bpe, command-r, deepseek-coder, deepseek-llm, gpt-2, \n                 mpt, refact, qwen35). Picking one would reproduce this function's \n                 original defect -- a tokenizer that is plausible and wrong, with no error \n                 anywhere. Supporting these means implementing the pre-tokenizer each \n                 `pre` value names, not relaxing this check."
             );
         }
 
