@@ -1859,10 +1859,32 @@ mod tests {
             let _ = tracing::subscriber::set_global_default(subscriber);
         });
 
+        // RAII rather than a clear after `f()`: an assertion that fails INSIDE
+        // the closure unwinds past a plain clear, leaving the buffer installed
+        // for the rest of the worker thread's life. `Drop` runs on unwind, so
+        // this cannot leak however `f` exits.
+        struct BufGuard;
+        impl BufGuard {
+            fn install(sink: &Arc<Mutex<Vec<u8>>>) -> Self {
+                WARN_BUF.with(|cell| *cell.borrow_mut() = Some(Arc::clone(sink)));
+                Self
+            }
+        }
+        impl Drop for BufGuard {
+            fn drop(&mut self) {
+                // `try_with`, not `with`: during thread teardown the
+                // thread-local may already be destroyed, and a panic inside a
+                // `Drop` that is itself running during unwind aborts the
+                // process rather than failing a test.
+                let _ = WARN_BUF.try_with(|cell| *cell.borrow_mut() = None);
+            }
+        }
+
         let sink = Arc::new(Mutex::new(Vec::new()));
-        WARN_BUF.with(|cell| *cell.borrow_mut() = Some(Arc::clone(&sink)));
-        f();
-        WARN_BUF.with(|cell| *cell.borrow_mut() = None);
+        {
+            let _guard = BufGuard::install(&sink);
+            f();
+        }
 
         let captured = sink
             .lock()
