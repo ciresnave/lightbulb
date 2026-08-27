@@ -198,3 +198,8 @@ jobs:
             exit 1
           fi
           echo "all gates ran:"; cat .gates-ran
+
+          # PRINTED ON SUCCESS, DELIBERATELY. A green run is exactly when
+          # someone is about to over-read what was checked, so the limits go
+          # where the green is, not in a doc they would have to think to open.
+          echo "::warning::CI NEVER RUNS Lightbulb's behavioural acceptance tests. chat_template_e2e (a chat model answers AND stops), fuel_engine_http (the completion is coherent English) and gguf_serving_e2e (a real GGUF served end to end) require a GPU and a ~2.2 GB checkpoint. There is no GPU runner, by decision (2026-08-27, cost). They are COMPILED here so they cannot rot, and executed only by a person on a GPU box. 'Nobody ran it this month' and 'it passes' look identical from this log — see scripts/check.sh for the command."
