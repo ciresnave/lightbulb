@@ -75,6 +75,24 @@
 //!   4. 200, right content, never stops -> EOS.
 //!
 //! Run: `cargo test --release --features fuel-engine --test fuel_engine_http -- --ignored --nocapture`
+//!
+//! # ⚠️ THIS FILE IS NEVER RUN BY CI, BY DECISION
+//!
+//! CireSnave ruled on 2026-08-27 that Lightbulb gets no GPU CI runner — a cost
+//! constraint, not a judgement about these tests. `.github/workflows/ci.yml`
+//! COMPILES this file (via `--features fuel-engine --no-run`, which needs no
+//! GPU) so it cannot rot into non-compiling state, but it never executes a
+//! single test here.
+//!
+//! **So the claim this file makes is verified by a person running it on demand,
+//! and by nothing else.** "Nobody ran it this month" and "it passes" are
+//! indistinguishable from the repository, which is why `scripts/check.sh`
+//! prints this file in its NOT RUN block on every invocation including
+//! successful ones.
+//!
+//! If you are about to trust a green board on a change that touches prompting,
+//! templating or decoding: this is the test that would have caught it, and it
+//! did not run.
 #![cfg(feature = "fuel-engine")]
 
 use std::path::PathBuf;

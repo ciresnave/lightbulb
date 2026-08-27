@@ -55,5 +55,32 @@ echo "── cargo test --lib"
 cargo test $J --lib 2>&1 | grep -E "^test result" || { echo "   FAIL: lib tests"; fail=1; }
 
 echo
-[ $fail -eq 0 ] && echo "all gates passed" || echo "GATES FAILED"
+# ── What these gates do NOT cover ────────────────────────────────────────────
+# PRINTED UNCONDITIONALLY, INCLUDING ON SUCCESS. That is the whole point: the
+# line below is read at the moment someone is about to trust a green result.
+#
+# CireSnave ruled on 2026-08-27 that Lightbulb gets no GPU CI runner — a cost
+# constraint, not a judgement about these tests. So the two behavioural
+# acceptance gates in this repo are verified by a person running them on
+# demand, and by nothing else.
+#
+# The hazard that creates is the one this repo keeps meeting in other forms:
+# "nobody ran it this month" and "it passes" are INDISTINGUISHABLE from the
+# outside. A silent absence looks exactly like coverage. So this reports the
+# gap every run rather than leaving it to be discovered — the same treatment
+# `gpu_paged_vs_contiguous` got in its own file, made routine.
+echo "── NOT RUN HERE (require a GPU and a ~2.2 GB checkpoint)"
+echo "   chat_template_e2e   a chat model answers its own template AND stops"
+echo "   fuel_engine_http    the completion is coherent English, not a 200 with noise"
+echo "   gguf_serving_e2e    a real GGUF is served end to end"
+echo "   These are NEVER CI-verified: no GPU runner exists, by decision."
+echo "   Run them yourself on a GPU box:"
+echo "     LIGHTBULB_GGUF=<path>.gguf cargo test --release --features fuel-engine \\"
+echo "       --test chat_template_e2e --test fuel_engine_http --test gguf_serving_e2e \\"
+echo "       -- --ignored --nocapture --test-threads=1"
+echo "   --test-threads=1 is load-bearing: each test loads its own ~2.2 GB copy"
+echo "   of the checkpoint and in parallel they exhaust host memory."
+
+echo
+[ $fail -eq 0 ] && echo "all gates passed (see NOT RUN above — it is not empty)" || echo "GATES FAILED"
 exit $fail
