@@ -143,6 +143,31 @@ jobs:
           cargo test --tests
           echo test >> .gates-ran
 
+      # THE FOUR EMPTY BINARIES ABOVE ARE NOT MERELY UNRUN -- THEY ARE UNCOMPILED.
+      # `#![cfg(feature = "...")]` at file scope means default-feature CI never
+      # type-checks a line of them, so they can rot into non-compiling state and
+      # the only signal is `ok. 0 passed`, which is what a passing suite prints.
+      #
+      # `fuel-engine = []` is a bare flag with no dependencies, so building
+      # against it needs NO GPU and NO checkpoint. That makes 9 tests across
+      # chat_template_e2e, fuel_engine_http and api_result_metadata compile
+      # here -- including the two behavioural acceptance gates for the
+      # chat-template and GGUF work.
+      #
+      # `--no-run` deliberately: they are all `#[ignore]`d and need a ~2.2 GB
+      # checkpoint to execute. RUNNING them needs a runner with the model and a
+      # GPU, which is a capacity decision and is NOT what this step claims.
+      # This step claims only that the code still compiles, which is the half
+      # that costs nothing.
+      #
+      # NOT COVERED: gpu_paged_vs_contiguous is behind `fuel-cuda`, which pulls
+      # `dep:fuel-cuda-backend` and needs CUDA. It stays uncompiled here.
+      - name: feature-gated tests compile
+        shell: bash
+        run: |
+          cargo test --features fuel-engine --tests --no-run
+          echo featgate >> .gates-ran
+
       # A DELETED STEP IS A SILENTLY DISABLED GATE. Without this, removing the
       # `fmt` step does not turn anything red -- the job simply runs three
       # steps instead of four and reports success. An absent gate and a passing
@@ -162,7 +187,7 @@ jobs:
       - name: every gate must have run
         shell: bash
         run: |
-          expected="fmt doc test"
+          expected="fmt doc test featgate"
           test -f .gates-ran || { echo "::error::no gate markers written at all"; exit 1; }
           missing=""
           for g in $expected; do
