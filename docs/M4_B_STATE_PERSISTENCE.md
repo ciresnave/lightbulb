@@ -13,8 +13,9 @@ State persistence enables checkpoint/restore of full inference state for product
 
 ### InferenceCheckpoint
 
-Full state snapshot. The id is `checkpoint_{timestamp_ms}_{pid}_{seq}` — a
-process-monotonic sequence number follows the timestamp:
+Full state snapshot. The id is `checkpoint_{timestamp_ms}_{pid}_{seq}` — the
+OS process id and a process-monotonic counter follow the timestamp, because a
+millisecond alone is not a unique key:
 
 ```rust
 pub struct InferenceCheckpoint {
