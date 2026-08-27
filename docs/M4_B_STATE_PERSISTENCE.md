@@ -13,12 +13,12 @@ State persistence enables checkpoint/restore of full inference state for product
 
 ### InferenceCheckpoint
 
-Full state snapshot. The id is `checkpoint_{timestamp_ms}_{seq}` — a
+Full state snapshot. The id is `checkpoint_{timestamp_ms}_{pid}_{seq}` — a
 process-monotonic sequence number follows the timestamp:
 
 ```rust
 pub struct InferenceCheckpoint {
-    pub id: CheckpointId,                                    // "checkpoint_{timestamp_ms}_{seq}"
+    pub id: CheckpointId,                                    // "checkpoint_{timestamp_ms}_{pid}_{seq}"
     pub timestamp: u64,                                      // Millisecond precision
     pub kv_cache_state: Option<KvCacheSnapshot>,            // Layer-wise cache snapshot
     pub kb_snapshot: KnowledgeBaseSnapshot,                 // All KB facts + history
@@ -82,10 +82,11 @@ impl CheckpointManager {
 - Eviction happens after successful save (maintain limit)
 
 ### 3. Timestamp-Based IDs
-- `checkpoint_{timestamp_ms}_{seq}` — the millisecond timestamp is for
+- `checkpoint_{timestamp_ms}_{pid}_{seq}` — the millisecond timestamp is for
   readability and ORDERING IS NOT READ FROM IT (`list_checkpoints` sorts on the
-  `timestamp` FIELD, `prune` uses `min_by_key` on the same field). The trailing
-  `{seq}` is a process-monotonic counter and is what makes the id unique.
+  `timestamp` FIELD, `prune` uses `min_by_key` on the same field). `{pid}` is the OS process id and `{seq}` a process-monotonic counter;
+  together they are what make the id unique, within a process AND across two
+  sharing a directory.
 
   **A millisecond is not a unique key, and this format used to end at the
   timestamp.** Because the id is both the filename and the metadata map key,

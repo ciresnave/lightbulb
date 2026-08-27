@@ -24,10 +24,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use super::decomposition::{Decomposition, DecompositionHistory, Problem};
 use super::knowledge_base::{EvictionRecord, Fact, KnowledgeBase};
 
-/// Checkpoint identifier: `checkpoint_{timestamp_ms}_{seq}`.
+/// Checkpoint identifier: `checkpoint_{timestamp_ms}_{pid}_{seq}`.
 ///
-/// The trailing sequence number is what makes it unique — a millisecond alone
+/// The `{pid}` and `{seq}` fields are what make it unique — a millisecond alone
 /// is not a key, and this id is both the filename and the metadata map key.
+/// `{seq}` closes collisions within a process, `{pid}` across two sharing a
+/// directory.
 /// See [`create_checkpoint`] for the collision this prevents.
 pub type CheckpointId = String;
 
@@ -432,6 +434,33 @@ impl CheckpointManager {
 }
 
 /// Helper to create a checkpoint from current state
+/// The id for a checkpoint created at `timestamp_ms`, by process `pid`, with
+/// per-process sequence number `seq`.
+///
+/// **Split out from [`create_checkpoint`] so the collision properties are
+/// testable.** `pid` and `seq` are ambient in the caller — `std::process::id()`
+/// and an atomic counter — and a test cannot vary ambient values. Taking them
+/// as parameters makes "two processes, same millisecond, same sequence" an
+/// ordinary assertion instead of a second process.
+///
+/// Each field closes a distinct collision:
+///
+/// - `timestamp_ms` alone is NOT a key. It was the whole id once, and because
+///   the id is the filename and the metadata map key, two checkpoints in one
+///   millisecond overwrote each other while `save()` returned `Ok` — measured
+///   at 3 distinct ids from 1000 saves.
+/// - `seq` closes that within a process.
+/// - `pid` closes it ACROSS processes. Without it, two workers sharing a
+///   checkpoint directory collide on their first save: both start `seq` at 0,
+///   and starting within the same millisecond is ordinary rather than unlucky.
+///
+/// The timestamp stays for readability and is never parsed — ordering reads the
+/// `timestamp` FIELD (`list_checkpoints` sorts on it, `prune` takes
+/// `min_by_key`), never this string.
+fn checkpoint_id(timestamp_ms: u64, pid: u32, seq: u64) -> CheckpointId {
+    format!("checkpoint_{timestamp_ms}_{pid}_{seq}")
+}
+
 pub fn create_checkpoint(
     kb: &KnowledgeBase,
     decomposition_history: Vec<DecompositionHistory>,
@@ -461,7 +490,7 @@ pub fn create_checkpoint(
     static CHECKPOINT_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let seq = CHECKPOINT_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-    let id = format!("checkpoint_{timestamp}_{seq}");
+    let id = checkpoint_id(timestamp, std::process::id(), seq);
 
     // Snapshot KB
     let kb_snapshot = KnowledgeBaseSnapshot {
@@ -697,6 +726,28 @@ mod tests {
 
         let loaded = manager.load(&checkpoint.id).unwrap();
         assert_eq!(loaded.active_problems.len(), 1);
+    }
+
+    /// Two processes writing the same checkpoint directory must not collide.
+    ///
+    /// **The worst case is the FIRST save of each**, which is why the sequence
+    /// numbers here are both 0: every process starts its counter at 0, so two
+    /// workers launched together collide on save #1 unless the id carries
+    /// something process-specific. Starting within the same millisecond is
+    /// ordinary for two workers spawned by one supervisor, not unlucky.
+    ///
+    /// Testable at all only because [`checkpoint_id`] takes `pid` as a
+    /// parameter rather than reading `std::process::id()` internally — a test
+    /// cannot vary an ambient value, and spawning a second process to prove a
+    /// formatting property would be testing the OS instead of this code.
+    #[test]
+    fn ids_from_two_processes_in_one_millisecond_do_not_collide() {
+        let a = checkpoint_id(1_700_000_000_000, 4242, 0);
+        let b = checkpoint_id(1_700_000_000_000, 9999, 0);
+        assert_ne!(
+            a, b,
+            "same millisecond, same sequence, different processes — ids collide,              so the second process overwrites the first's checkpoint file"
+        );
     }
 
     /// Ids must be unique by construction, not by the clock ticking between
