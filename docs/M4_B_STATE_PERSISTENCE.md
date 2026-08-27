@@ -83,11 +83,17 @@ impl CheckpointManager {
 - Eviction happens after successful save (maintain limit)
 
 ### 3. Timestamp-Based IDs
-- `checkpoint_{timestamp_ms}_{pid}_{seq}` — the millisecond timestamp is for
-  readability and ORDERING IS NOT READ FROM IT (`list_checkpoints` sorts on the
-  `timestamp` FIELD, `prune` uses `min_by_key` on the same field). `{pid}` is the OS process id and `{seq}` a process-monotonic counter;
-  together they are what make the id unique, within a process AND across two
-  sharing a directory.
+- `checkpoint_{timestamp_ms}_{pid}_{seq}` — three fields, each closing a
+  distinct collision:
+
+  - `{timestamp_ms}` is for READABILITY ONLY. **Ordering is never read from
+    it:** `list_checkpoints` sorts on the `timestamp` FIELD and `prune` uses
+    `min_by_key` on the same field, never this string.
+  - `{seq}` is a process-monotonic counter — it closes collisions WITHIN a
+    process.
+  - `{pid}` is the OS process id — it closes them ACROSS two processes sharing
+    a directory. Both start `seq` at 0, so without it co-spawned workers
+    collide on their first save.
 
   **A millisecond is not a unique key, and this format used to end at the
   timestamp.** Because the id is both the filename and the metadata map key,

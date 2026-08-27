@@ -746,7 +746,7 @@ mod tests {
         let b = checkpoint_id(1_700_000_000_000, 9999, 0);
         assert_ne!(
             a, b,
-            "same millisecond, same sequence, different processes — ids collide,              so the second process overwrites the first's checkpoint file"
+            "same millisecond, same sequence, different processes — ids collide, so the second process overwrites the first's checkpoint file"
         );
     }
 
@@ -768,7 +768,7 @@ mod tests {
         assert_eq!(
             ids.len(),
             1000,
-            "{} distinct ids from 1000 checkpoints — colliding ids overwrite each              other's files and silently lose checkpoints",
+            "{} distinct ids from 1000 checkpoints — colliding ids overwrite each other's files and silently lose checkpoints",
             ids.len()
         );
     }
