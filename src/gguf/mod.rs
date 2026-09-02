@@ -505,6 +505,9 @@ impl Content {
             "qwen35" => Some(
                 r#"No admissible reference exists for it. The obvious candidate, `Qwen/Qwen3-8B`, turns out to declare a pre-tokenizer and vocab BYTE-IDENTICAL to `Qwen/Qwen2-7B`, so it is a reference for `qwen2` and not for this name. llama.cpp does define a distinct QWEN35 rule, matching `[\p{L}\p{M}]+` where the qwen2 rule matches `\p{L}+` — and this build's 130-case corpus CANNOT TELL THE TWO APART: measured, they differ on 0 of 130, because the qwen2 normalizer is NFC and composes away the combining marks that are the only thing the difference turns on. A 0-of-130 result here carries no information about which rule is correct, so adding it would be an entry with vacuous evidence."#,
             ),
+            "starcoder" | "mpt" => Some(
+                r#"Investigated and refused: no reference exists for THIS checkpoint. Both have a vocab that is byte-identical to another model's — `starcoder` to `bigcode/starcoder2-7b` (49152 tokens, 48872 merges, ZERO mismatches, not even tail extras) and `mpt` to this corpus's own gpt-neox vocab file (tokens and merges identical). Their own references are gated on HuggingFace (HTTP 401). Both score 0 of 130 against the stand-in, and that is NOT sufficient: vocab identity does not imply RULE identity. Measured on this very corpus, `Qwen/Qwen3-8B` has a vocab and pre-tokenizer byte-identical to `Qwen/Qwen2-7B` while llama.cpp assigns those two `pre` names DIFFERENT rules — so an identical vocab is consistent with a different splitting rule, and only the checkpoint's own `tokenizer.json` settles it. Supporting but insufficient: `bigcode/starcoder2-7b` declares the SAME rule as `smallcloudai/Refact-1_6B-fim`, which IS verified here against its own model, and llama.cpp groups starcoder with refact and mpt with gpt-2. Those remove a reason for doubt; they do not supply the reference."#,
+            ),
             "<absent>" => Some(
                 r#"An absent `tokenizer.ggml.pre` is not a name, it is the lack of one, and this table keys on names. The corpus file that omits it (gpt-neox) does verify 0 of 130 against `EleutherAI/gpt-neox-20b`, but keying on absence would apply that one checkpoint's rule to EVERY future GGUF that omits the field — which is precisely the one-rule-for-all-checkpoints failure this table exists to prevent. Re-export the checkpoint with `tokenizer.ggml.pre` set, or add its name here."#,
             ),
@@ -533,6 +536,7 @@ impl Content {
         "deepseek-coder",
         "refact",
         "deepseek-llm",
+        "llama-bpe",
     ];
 
     /// The pre-tokenizer for a `tokenizer.ggml.pre` name, or `None` if this
@@ -607,6 +611,14 @@ impl Content {
             "deepseek-llm" => Some((
                 r##"{"type":"Sequence","pretokenizers":[{"type":"Split","pattern":{"Regex":"[\r\n]"},"behavior":"Isolated","invert":false},{"type":"Split","pattern":{"Regex":"\\s?[A-Za-zµÀ-ÖØ-öø-ƺƼ-ƿǄ-ʓʕ-ʯͰ-ͳͶͷͻ-ͽͿΆΈ-ΊΌΎ-ΡΣ-ϵϷ-ҁҊ-ԯԱ-ՖႠ-ჅᎠ-Ᏽᏸ-ᏽᲐ-ᲺᲽ-Ჿᴀ-ᴫᵫ-ᵷᵹ-ᶚḀ-ἕἘ-Ἕἠ-ὅὈ-Ὅὐ-ὗὙὛὝὟ-ώᾀ-ᾴᾶ-ᾼιῂ-ῄῆ-ῌῐ-ΐῖ-Ίῠ-Ῥῲ-ῴῶ-ῼℂℇℊ-ℓℕℙ-ℝℤΩℨK-ℭℯ-ℴℹℼ-ℿⅅ-ⅉⅎↃↄⰀ-ⱻⱾ-ⳤⳫ-ⳮⳲⳳꙀ-ꙭꚀ-ꚛꜢ-ꝯꝱ-ꞇꞋ-ꞎꭰ-ꮿﬀ-ﬆﬓ-ﬗＡ-Ｚａ-ｚ𐐀-𐑏𐒰-𐓓𐓘-𐓻𐲀-𐲲𐳀-𐳲𑢠-𑣟𞤀-𞥃]+"},"behavior":"Isolated","invert":false},{"type":"Split","pattern":{"Regex":"\\s?[!-/:-~！-／：-～‘-‟　-。]+"},"behavior":"Isolated","invert":false},{"type":"Split","pattern":{"Regex":"\\s+$"},"behavior":"Isolated","invert":false},{"type":"Split","pattern":{"Regex":"[一-龥ࠀ-一가-퟿]+"},"behavior":"Isolated","invert":false},{"type":"Digits","individual_digits":true},{"type":"ByteLevel","add_prefix_space":false,"trim_offsets":true,"use_regex":false}]}"##,
                 r##"{"type":"Sequence","normalizers":[]}"##,
+            )),
+            // meta-llama/Meta-Llama-3-8B, fetched from the NousResearch mirror of
+            // the SAME checkpoint (the canonical repo is gated). Verified 0 of 130;
+            // the GGUF carries 128256 tokens against the reference model's 128000,
+            // the extra 256 being its special tokens, confirmed at the tail.
+            "llama-bpe" => Some((
+                r##"{"type":"Sequence","pretokenizers":[{"type":"Split","pattern":{"Regex":"(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\\r\\n\\p{L}\\p{N}]?\\p{L}+|\\p{N}{1,3}| ?[^\\s\\p{L}\\p{N}]+[\\r\\n]*|\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+"},"behavior":"Isolated","invert":false},{"type":"ByteLevel","add_prefix_space":false,"trim_offsets":true,"use_regex":false}]}"##,
+                r##"null"##,
             )),
             _ => None,
         }
@@ -785,8 +797,13 @@ mod bpe_spec_tests {
     /// prevent.
     #[test]
     fn an_unlisted_pre_has_no_spec() {
-        assert!(Content::bpe_pre_tokenizer("llama-bpe").is_none());
+        // `llama-bpe` was here until it was verified against
+        // `meta-llama/Meta-Llama-3-8B` and added, at which point this test went
+        // red — which is the pair working: the allowlist grew and its negative
+        // half noticed.
         assert!(Content::bpe_pre_tokenizer("command-r").is_none());
+        assert!(Content::bpe_pre_tokenizer("starcoder").is_none());
+        assert!(Content::bpe_pre_tokenizer("qwen35").is_none());
         assert!(Content::bpe_pre_tokenizer("<absent>").is_none());
         assert!(Content::bpe_pre_tokenizer("").is_none());
     }

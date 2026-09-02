@@ -131,16 +131,17 @@ zeros of the right shape would also satisfy. They now run in the ordinary
 Measured by `tests/gguf_corpus_sweep.rs` over every local GGUF:
 
 ```
-30 files total = 13 REBUILT + 17 that do not load    (was 1 + 29; re-measured 2026-09-02)
+30 files total = 14 REBUILT + 16 that do not load    (was 1 + 29; re-measured 2026-09-02)
 
- 13  rebuilt
+ 14  rebuilt
         1  SentencePiece   TinyLlama-1.1B-Chat-v1.0 Q4_0
-       12  byte-level BPE  SmolLM2-135M-Instruct x6, plus the gpt-2, falcon,
-                           qwen2, deepseek-coder, refact and deepseek-llm vocab files
- 12  refused by the tokenizer
-        6  tokenizer.ggml.model = "gpt2", `pre` NOT VERIFIED
-              mpt, starcoder, command-r, llama-bpe   (references GATED on HF, 401)
-              qwen35, gpt-neox(absent)               (refused for cause, see below)
+       13  byte-level BPE  SmolLM2-135M-Instruct x6, plus the gpt-2, falcon,
+                           qwen2, deepseek-coder, refact, deepseek-llm and
+                           llama-bpe vocab files
+ 11  refused by the tokenizer
+        5  tokenizer.ggml.model = "gpt2", `pre` NOT VERIFIED
+              command-r                              (reference GATED on HF, 401)
+              starcoder, mpt, qwen35, gpt-neox(absent)  (refused for cause, below)
         3  model = "llama" but NO merges   (llama-spm, phi-3, baichuan)
         1  bert     1  t5     1  gemma4
   5  unreadable BEFORE the tokenizer is reached
@@ -173,9 +174,28 @@ that omits the field — the one-rule-for-all-checkpoints failure the table exis
 to prevent. Both refusals carry their own reason at the point of failure, so the
 work already done and found negative is not silently repeated.
 
-The remaining four — `mpt`, `starcoder`, `command-r`, `llama-bpe` — have
-references GATED on HuggingFace (HTTP 401), so no admissible reference is
-reachable from here.
+`llama-bpe` was gated at `meta-llama/Meta-Llama-3-8B` and is now verified via
+the **NousResearch mirror of the same checkpoint** — a mirror is the same model,
+which is what makes it admissible where a similar model is not.
+
+⚠️ **`starcoder` and `mpt` score 0 of 130 and are REFUSED**, for the same reason
+as `qwen35`. Their own references are gated, but each has a vocab
+**byte-identical to another model's** — `starcoder` to `bigcode/starcoder2-7b`
+(49152 tokens, 48872 merges, zero mismatches, not even tail extras) and `mpt` to
+this corpus's own gpt-neox vocab file (tokens and merges identical). Scoring
+against the stand-in gives 0 of 130, and **that is not sufficient: vocab
+identity does not imply rule identity.** Measured on this very corpus,
+`Qwen/Qwen3-8B` has a vocab AND pre-tokenizer byte-identical to `Qwen/Qwen2-7B`
+while llama.cpp assigns those two `pre` names different rules — so an identical
+vocab is consistent with a different splitting rule.
+
+Supporting but insufficient, and recorded so it is not re-derived:
+`bigcode/starcoder2-7b` declares the SAME rule as `smallcloudai/Refact-1_6B-fim`,
+which IS verified here against its own model, and llama.cpp groups starcoder with
+refact and mpt with gpt-2. Those remove a reason for doubt; they do not supply
+the reference.
+
+Only `command-r` remains blocked purely by the gate (HTTP 401).
 
 The table stores each checkpoint's declared pre-tokenizer and normalizer as its
 own JSON, copied verbatim, so provenance is auditable by diffing against the
