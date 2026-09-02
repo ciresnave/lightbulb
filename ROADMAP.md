@@ -102,6 +102,31 @@ other, and this one had gone stale while still reading as a considered decision.
 The eight bails above remain **public enum variants a caller can select**, and
 selecting them fails with a reason.
 
+### And the strategies that DO NOT bail had never been executed
+
+**Measured 2026-09-02.** `ShardingStrategy::ColumnWise` and `RowWise` are
+implemented, and both tests covering them were `#[ignore]`d behind *"Requires
+multi-GPU setup"* — **a requirement neither had.** They call
+`Device::cuda_if_available`, which falls back to CPU. So the two working
+strategies had never run, on any machine.
+
+**Running them found a defect.** Both forward paths added the bias with `+`
+where the shapes require `broadcast_add`: `output` is `[batch, out_features]`
+and the bias is `[out_features]`, so **every `ShardedLinear` carrying a bias
+failed at runtime** with `shape mismatch in add, lhs: [2, 4], rhs: [4]`.
+
+**The existing test would have caught it.** `test_sharded_linear_column_wise`
+passes a bias — it would have failed the moment it ran, and it never ran. That
+is the finding: not a missing test, an unrun one, held out of reach by a
+requirement it did not have.
+
+Both paths are fixed, and the replacement tests assert the claim the module
+exists to make — **a sharded linear equals the unsharded one** — for two world
+sizes, against a directly computed `input @ weights^T + bias`. The superseded
+tests asserted output SHAPE and `Ok`-ness, which a implementation returning
+zeros of the right shape would also satisfy. They now run in the ordinary
+`cargo test --lib`.
+
 **2. `✅ COMPLETE: GGUF/other Candle-supported quant formats usable end-to-end`.**
 Measured by `tests/gguf_corpus_sweep.rs` over every local GGUF:
 

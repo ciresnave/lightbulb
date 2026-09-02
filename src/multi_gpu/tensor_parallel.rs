@@ -284,10 +284,15 @@ impl ShardedLinear {
         // Concatenate along output dimension (dim=1)
         let mut output = TensorShard::gather(&local_outputs, 1)?;
 
-        // Add bias if present
+        // Add bias if present.
+        //
+        // `broadcast_add`, NOT `+`. `output` is [batch, out_features] and the
+        // bias is [out_features]; plain `+` requires identical shapes and
+        // returns "shape mismatch in add, lhs: [2, 4], rhs: [4]". Every
+        // `ShardedLinear` carrying a bias failed at runtime.
         if let Some(bias) = &self.bias {
             let bias_on_device = bias.to_device(output.device())?;
-            output = (output + bias_on_device)?;
+            output = output.broadcast_add(&bias_on_device)?;
         }
 
         Ok(output)
@@ -335,10 +340,15 @@ impl ShardedLinear {
         // All-reduce (sum partial outputs)
         let mut output = TensorShard::all_reduce(&local_outputs)?;
 
-        // Add bias if present
+        // Add bias if present.
+        //
+        // `broadcast_add`, NOT `+`. `output` is [batch, out_features] and the
+        // bias is [out_features]; plain `+` requires identical shapes and
+        // returns "shape mismatch in add, lhs: [2, 4], rhs: [4]". Every
+        // `ShardedLinear` carrying a bias failed at runtime.
         if let Some(bias) = &self.bias {
             let bias_on_device = bias.to_device(output.device())?;
-            output = (output + bias_on_device)?;
+            output = output.broadcast_add(&bias_on_device)?;
         }
 
         Ok(output)
@@ -349,20 +359,42 @@ impl ShardedLinear {
 mod tests {
     use super::*;
 
+    /// Two plain CPU "devices".
+    ///
+    /// Every test in this module was `#[ignore]`d behind "Requires multi-GPU
+    /// setup", and none of them needed one: sharding, gather, all-reduce and
+    /// the sharded matmuls are device-agnostic. So the implemented strategies —
+    /// `ColumnWise` and `RowWise`, the two that do NOT bail — had never been
+    /// executed by CI on any machine.
+    fn cpus(n: usize) -> Vec<Device> {
+        vec![Device::Cpu; n]
+    }
+
+    fn flat(t: &Tensor) -> Vec<f32> {
+        t.flatten_all().unwrap().to_vec1::<f32>().unwrap()
+    }
+
+    fn max_abs_diff(a: &Tensor, b: &Tensor) -> f32 {
+        flat(a)
+            .iter()
+            .zip(flat(b).iter())
+            .map(|(x, y)| (x - y).abs())
+            .fold(0.0f32, f32::max)
+    }
+
+    /// Sharding then gathering must return the ORIGINAL VALUES, not merely the
+    /// original shape.
+    ///
+    /// The superseded `test_tensor_shard_column_wise` asserted `dims()` at each
+    /// step and stopped there — a shard implementation returning zeros of the
+    /// right shape would have passed it.
     #[test]
-    #[ignore] // Requires multi-GPU setup
-    fn test_tensor_shard_column_wise() -> Result<()> {
-        let devices = vec![Device::cuda_if_available(0)?, Device::cuda_if_available(1)?];
-
-        // Create [4, 8] tensor, shard along dim=0 (rows)
-        let full_tensor = Tensor::randn(0.0f32, 1.0, (4, 8), &Device::Cpu)?;
-        let shards = TensorShard::from_full_tensor(&full_tensor, &devices, 0)?;
-
+    fn sharding_then_gathering_round_trips_the_values() -> Result<()> {
+        let full = Tensor::randn(0.0f32, 1.0, (4, 8), &Device::Cpu)?;
+        let shards = TensorShard::from_full_tensor(&full, &cpus(2), 0)?;
         assert_eq!(shards.len(), 2);
-        assert_eq!(shards[0].local_shard.dims(), &[2, 8]); // Each shard: [2, 8]
-        assert_eq!(shards[1].local_shard.dims(), &[2, 8]);
+        assert_eq!(shards[0].local_shard.dims(), &[2, 8]);
 
-        // Gather and verify
         let gathered = TensorShard::gather(
             &shards
                 .iter()
@@ -371,37 +403,129 @@ mod tests {
             0,
         )?;
         assert_eq!(gathered.dims(), &[4, 8]);
-
+        assert_eq!(
+            flat(&gathered),
+            flat(&full),
+            "gather did not restore the values"
+        );
         Ok(())
+    }
+
+    /// `all_reduce` is a sum across shards.
+    #[test]
+    fn all_reduce_sums_the_shards() -> Result<()> {
+        let a = Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0], (2, 2), &Device::Cpu)?;
+        let b = Tensor::from_vec(vec![10.0f32, 20.0, 30.0, 40.0], (2, 2), &Device::Cpu)?;
+        let out = TensorShard::all_reduce(&[a, b])?;
+        assert_eq!(flat(&out), vec![11.0, 22.0, 33.0, 44.0]);
+        Ok(())
+    }
+
+    /// A sharded linear must compute what the unsharded one computes.
+    ///
+    /// Shared by the four tests below so each STRATEGY and each WORLD SIZE is
+    /// its own named test. Looping them inside one test works, but a failure
+    /// then reports one name for four claims and you have to read the message
+    /// to learn which combination broke.
+    fn assert_matches_unsharded(
+        strategy: ShardingStrategy,
+        world_size: usize,
+        out_features: usize,
+        in_features: usize,
+        batch: usize,
+        with_bias: bool,
+    ) -> Result<()> {
+        let weights = Tensor::randn(0.0f32, 1.0, (out_features, in_features), &Device::Cpu)?;
+        let input = Tensor::randn(0.0f32, 1.0, (batch, in_features), &Device::Cpu)?;
+        let bias = with_bias
+            .then(|| Tensor::randn(0.0f32, 1.0, (out_features,), &Device::Cpu))
+            .transpose()?;
+
+        // The unsharded reference, computed once. This was a `match` whose two
+        // arms each wrote `input.matmul(&weights.t()?)?` — the same expression
+        // twice, and the bias condition tested twice (once as `with_bias`, once
+        // as `match &bias`). Two copies of an expected value are two places for
+        // it to drift.
+        let mut expected = input.matmul(&weights.t()?)?;
+        if let Some(b) = &bias {
+            expected = expected.broadcast_add(b)?;
+        }
+
+        let sharded =
+            ShardedLinear::from_full_weights(&weights, bias.as_ref(), &cpus(world_size), strategy)?;
+        let got = sharded.forward(&input)?;
+        assert_eq!(got.dims(), expected.dims(), "wrong output shape");
+        let diff = max_abs_diff(&got, &expected);
+        assert!(diff < 1e-4, "disagrees with the unsharded result by {diff}");
+        Ok(())
+    }
+
+    /// **The claim that matters, with a bias — this is the case that was
+    /// broken.** `forward` added the bias with `+` where the shapes need
+    /// `broadcast_add`, so every biased sharded linear failed at runtime.
+    #[test]
+    fn column_wise_with_bias_equals_the_unsharded_linear() -> Result<()> {
+        assert_matches_unsharded(ShardingStrategy::ColumnWise, 2, 4, 8, 2, true)
+    }
+
+    /// The other implemented strategy, same claim. It had the same defect.
+    #[test]
+    fn row_wise_with_bias_equals_the_unsharded_linear() -> Result<()> {
+        assert_matches_unsharded(ShardingStrategy::RowWise, 2, 4, 8, 2, true)
+    }
+
+    /// And it holds for a world size that is not 2.
+    ///
+    /// The necessary pair to the two above: a two-way split can be right by
+    /// symmetry in ways a four-way split is not, and every fixture that existed
+    /// before used two.
+    #[test]
+    fn column_wise_is_correct_for_four_way_sharding() -> Result<()> {
+        assert_matches_unsharded(ShardingStrategy::ColumnWise, 4, 8, 16, 3, false)
     }
 
     #[test]
-    #[ignore] // Requires multi-GPU setup
-    fn test_sharded_linear_column_wise() -> Result<()> {
-        let devices = vec![Device::cuda_if_available(0)?, Device::cuda_if_available(1)?];
+    fn row_wise_is_correct_for_four_way_sharding() -> Result<()> {
+        assert_matches_unsharded(ShardingStrategy::RowWise, 4, 8, 16, 3, false)
+    }
 
-        // Create linear layer: input=8, output=4
+    /// `Hybrid` is a selectable public variant and is not implemented; it must
+    /// say so rather than produce something.
+    #[test]
+    fn hybrid_sharding_reports_that_it_is_unimplemented() -> Result<()> {
         let weights = Tensor::randn(0.0f32, 1.0, (4, 8), &Device::Cpu)?;
-        let bias = Some(Tensor::zeros(
-            (4,),
-            candlelight::core::DType::F32,
-            &Device::Cpu,
-        )?);
-
-        let sharded_linear = ShardedLinear::from_full_weights(
+        // `match` rather than `expect_err`: the latter needs `Debug` on the Ok
+        // type, and `ShardedLinear` does not implement it.
+        let err = match ShardedLinear::from_full_weights(
             &weights,
-            bias.as_ref(),
-            &devices,
-            ShardingStrategy::ColumnWise,
-        )?;
-
-        // Input: [2, 8] (batch=2, features=8)
-        let input = Tensor::randn(0.0f32, 1.0, (2, 8), &Device::Cpu)?;
-
-        // Forward pass
-        let output = sharded_linear.forward(&input)?;
-        assert_eq!(output.dims(), &[2, 4]); // [batch, output_features]
-
+            None,
+            &cpus(2),
+            ShardingStrategy::Hybrid,
+        ) {
+            Ok(_) => panic!("Hybrid must not silently produce a layer"),
+            Err(e) => e,
+        };
+        assert!(
+            format!("{err:#}").contains("Hybrid"),
+            "the error must name the strategy: {err:#}"
+        );
         Ok(())
     }
+
+    // SUPERSEDED by the value-level tests above.
+    //
+    // `test_tensor_shard_column_wise` and `test_sharded_linear_column_wise`
+    // were both `#[ignore]`d behind "Requires multi-GPU setup" and NEITHER
+    // NEEDED ONE -- they called `Device::cuda_if_available`, which falls back
+    // to CPU. So the two implemented sharding strategies had never been
+    // executed anywhere.
+    //
+    // They also asserted shapes and `Ok`-ness only. The second one PASSED A
+    // BIAS, so it would have caught the `broadcast_add` defect the moment it
+    // ran; it never ran. That is the finding: not a missing test, an unrun
+    // one, held out of reach by a requirement it did not have.
+    //
+    // Deleted rather than un-ignored: the replacements assert that a sharded
+    // linear equals the unsharded one, for two world sizes, which is the claim
+    // this module exists to make.
 }
