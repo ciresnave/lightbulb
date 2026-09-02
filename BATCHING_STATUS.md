@@ -1,5 +1,15 @@
 # Parallel Batched Inference - Status Report
 
+> ## ⚠️ SUPERSEDED — this is not a status source
+> 
+> **`ROADMAP.md` is the single roadmap.** Its VERIFIED STATUS block carries
+> figures measured at a named ref. This document's status claims were made at
+> a state the project has left and have **not** been re-validated — treat them
+> as provenance, not as findings.
+> 
+> It claims batching is **100% Complete**. That claim has not been
+> re-validated against the current tree.
+
 ## ✅ What We've Built
 
 ### 1. Complete Batching Infrastructure (100% Complete)

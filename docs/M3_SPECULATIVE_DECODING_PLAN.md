@@ -1,5 +1,14 @@
 # M3: Speculative Decoding Implementation Plan
 
+> ## ⚠️ SUPERSEDED — this is not a status source
+> 
+> **`ROADMAP.md` is the single roadmap.** Its VERIFIED STATUS block carries
+> figures measured at a named ref. This document's status claims were made at
+> a state the project has left and have **not** been re-validated — treat them
+> as provenance, not as findings.
+> 
+> Still valid as a **design** document; superseded only as a status source.
+
 **Status**: PLANNED (Architecture exists, needs production hardening)  
 **Priority**: HIGH (2-4× throughput improvement for long generations)  
 **Timeline**: 2-3 weeks  
