@@ -512,8 +512,6 @@ impl Content {
         }
     }
 
-    /// `tokenizer.ggml.pre` values whose splitting rule has been verified
-    /// id-for-id against a reference. See [`Self::bpe_pre_tokenizer`].
     /// The `tokenizer.ggml.pre` values this build has verified.
     ///
     /// Public so `gguf_bpe_tokenizer_fidelity` can assert that its fixtures
@@ -525,6 +523,8 @@ impl Content {
         Self::VERIFIED_PRE
     }
 
+    /// `tokenizer.ggml.pre` values whose splitting rule has been verified
+    /// id-for-id against a reference. See [`Self::bpe_pre_tokenizer`].
     const VERIFIED_PRE: &'static [&'static str] = &[
         "smollm",
         "gpt-2",
