@@ -12,20 +12,47 @@ use std::path::Path;
 
 const MODEL_PATH: &str = "../models/llama-3b";
 
-fn model_available() -> bool {
-    Path::new(MODEL_PATH).exists()
+/// The checkpoint these tests need, or a LOUD FAILURE.
+///
+/// # Why this panics instead of returning a bool
+///
+/// Every test here opened with a skip that RETURNED SUCCESS:
+///
+/// ```text
+/// if !model_available() {
+///     println!("Skipping test: model not found at {}", MODEL_PATH);
+///     return;
+/// }
+/// ```
+///
+/// **Measured 2026-09-02**, and the worst instance in the repo:
+/// `test_parallel_multi_request_batching` was NOT `#[ignore]`d, so it ran in
+/// the ordinary `cargo test`, printed "Skipping test: model not found", and
+/// reported `ok`. It was counted as a passing test in every green suite report
+/// while executing no assertion at all.
+///
+/// A test that cannot run must say so by NOT RUNNING, never by passing.
+/// `#[ignore]` is the honest gate; a skip that returns success is not, and it
+/// survives removing the honest one.
+///
+/// `LIGHTBULB_LLAMA3B_MODEL` overrides the default path, matching how the GGUF
+/// gates take their fixtures.
+fn require_model() -> String {
+    let path = std::env::var("LIGHTBULB_LLAMA3B_MODEL").unwrap_or_else(|_| MODEL_PATH.to_string());
+    assert!(
+        std::path::Path::new(&path).exists(),
+        "checkpoint not found at {path:?}. These tests are #[ignore]d, so running them is deliberate and a missing checkpoint is a setup error rather than a reason to pass. Set LIGHTBULB_LLAMA3B_MODEL to a model directory."
+    );
+    path
 }
 
 #[test]
 #[ignore] // Run with: cargo test --test parallel_model_manager_integration -- --ignored
 fn test_parallel_model_loading() {
-    if !model_available() {
-        println!("Skipping test: model not found at {}", MODEL_PATH);
-        return;
-    }
+    let model_path = require_model();
 
     let result = ParallelModelManager::load(
-        MODEL_PATH,
+        &model_path,
         4,   // max_batch_size
         512, // context_length
         Some("f32"),
@@ -44,12 +71,9 @@ fn test_parallel_model_loading() {
 #[test]
 #[ignore]
 fn test_parallel_single_request_generation() {
-    if !model_available() {
-        println!("Skipping test: model not found at {}", MODEL_PATH);
-        return;
-    }
+    let model_path = require_model();
 
-    let mut model = ParallelModelManager::load(MODEL_PATH, 4, 512, Some("f32"), None)
+    let mut model = ParallelModelManager::load(&model_path, 4, 512, Some("f32"), None)
         .expect("Failed to load model");
 
     let req = Request {
@@ -88,13 +112,13 @@ fn test_parallel_single_request_generation() {
 }
 
 #[test]
+// Joined its five siblings behind `#[ignore]`: it needs the same checkpoint they
+// do, and without it it was a vacuous pass counted in every green suite report.
+#[ignore] // Run with: cargo test --test parallel_model_manager_integration -- --ignored
 fn test_parallel_multi_request_batching() {
-    if !model_available() {
-        println!("Skipping test: model not found at {}", MODEL_PATH);
-        return;
-    }
+    let model_path = require_model();
 
-    let mut model = ParallelModelManager::load(MODEL_PATH, 8, 512, Some("f32"), None)
+    let mut model = ParallelModelManager::load(&model_path, 8, 512, Some("f32"), None)
         .expect("Failed to load model");
 
     let requests = vec![
@@ -231,10 +255,7 @@ fn test_parallel_multi_request_batching() {
 #[test]
 #[ignore]
 fn test_chunked_prefill_with_variable_lengths() {
-    if !model_available() {
-        println!("Skipping test: model not found at {}", MODEL_PATH);
-        return;
-    }
+    let model_path = require_model();
 
     // Configure chunked prefill with small chunk size for testing
     let chunked_config = ChunkedPrefillConfig {
@@ -244,7 +265,7 @@ fn test_chunked_prefill_with_variable_lengths() {
     };
 
     let mut model =
-        ParallelModelManager::load(MODEL_PATH, 4, 512, Some("f32"), Some(chunked_config))
+        ParallelModelManager::load(&model_path, 4, 512, Some("f32"), Some(chunked_config))
             .expect("Failed to load model");
 
     // Create requests with very different prompt lengths
@@ -305,16 +326,13 @@ fn test_chunked_prefill_with_variable_lengths() {
 #[test]
 #[ignore]
 fn test_parallel_deterministic_consistency() {
-    if !model_available() {
-        println!("Skipping test: model not found at {}", MODEL_PATH);
-        return;
-    }
+    let model_path = require_model();
 
     let prompt = "The capital of France is";
     let max_tokens = 5;
 
     // Run twice with ParallelModelManager to verify deterministic output
-    let mut model1 = ParallelModelManager::load(MODEL_PATH, 4, 512, Some("f32"), None)
+    let mut model1 = ParallelModelManager::load(&model_path, 4, 512, Some("f32"), None)
         .expect("Failed to load model (run 1)");
 
     let req1 = Request {
@@ -334,7 +352,7 @@ fn test_parallel_deterministic_consistency() {
     let tokens1 = batch1[0].generated_tokens.clone();
     let text1 = model1.decode(&tokens1, false).unwrap();
 
-    let mut model2 = ParallelModelManager::load(MODEL_PATH, 4, 512, Some("f32"), None)
+    let mut model2 = ParallelModelManager::load(&model_path, 4, 512, Some("f32"), None)
         .expect("Failed to load model (run 2)");
 
     let req2 = Request {
@@ -370,10 +388,7 @@ fn test_parallel_deterministic_consistency() {
 #[test]
 #[ignore]
 fn test_parallel_performance_metrics() {
-    if !model_available() {
-        println!("Skipping test: model not found at {}", MODEL_PATH);
-        return;
-    }
+    let model_path = require_model();
 
     // Use load_adaptive() to let the hardware detection pick the optimal batch size
     let mut model = ParallelModelManager::load_adaptive(MODEL_PATH, 512, Some("f32"), None)
