@@ -437,15 +437,19 @@ mod tests {
     ) -> Result<()> {
         let weights = Tensor::randn(0.0f32, 1.0, (out_features, in_features), &Device::Cpu)?;
         let input = Tensor::randn(0.0f32, 1.0, (batch, in_features), &Device::Cpu)?;
-        let bias = if with_bias {
-            Some(Tensor::randn(0.0f32, 1.0, (out_features,), &Device::Cpu)?)
-        } else {
-            None
-        };
-        let expected = match &bias {
-            Some(b) => input.matmul(&weights.t()?)?.broadcast_add(b)?,
-            None => input.matmul(&weights.t()?)?,
-        };
+        let bias = with_bias
+            .then(|| Tensor::randn(0.0f32, 1.0, (out_features,), &Device::Cpu))
+            .transpose()?;
+
+        // The unsharded reference, computed once. This was a `match` whose two
+        // arms each wrote `input.matmul(&weights.t()?)?` — the same expression
+        // twice, and the bias condition tested twice (once as `with_bias`, once
+        // as `match &bias`). Two copies of an expected value are two places for
+        // it to drift.
+        let mut expected = input.matmul(&weights.t()?)?;
+        if let Some(b) = &bias {
+            expected = expected.broadcast_add(b)?;
+        }
 
         let sharded =
             ShardedLinear::from_full_weights(&weights, bias.as_ref(), &cpus(world_size), strategy)?;
