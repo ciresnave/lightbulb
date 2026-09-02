@@ -306,10 +306,24 @@ fn test_distributed_cache_replication() -> Result<()> {
     let k_new = create_test_tensor(&[1, 8, 1, 64], &device0)?;
     let v_new = create_test_tensor(&[1, 8, 1, 64], &device0)?;
 
-    // Update cache (should replicate to all GPUs)
-    cache_manager.update_cache(0, 0, &k_new, &v_new)?;
+    // `Replicated` is NOT IMPLEMENTED and now says so. It used to transfer
+    // K/V to every device, drop both, and return `Ok(())`; this test then
+    // printed a success checkmark, which is why the defect survived — the only
+    // assertion was that a call which could not fail did not fail.
+    //
+    // Asserting the error keeps this file honest until someone implements the
+    // strategy, at which point this goes red and must be replaced by the
+    // assertion nothing here makes today: that the K/V actually landed in each
+    // device's cache.
+    let err = cache_manager
+        .update_cache(0, 0, &k_new, &v_new)
+        .expect_err("Replicated is unimplemented and must not report success");
+    assert!(
+        format!("{err:#}").contains("Replicated"),
+        "the error must name the strategy the caller selected: {err:#}"
+    );
 
-    println!("✓ Cache replication across GPUs successful");
+    println!("✓ Replicated cache strategy correctly reports it is unimplemented");
     Ok(())
 }
 

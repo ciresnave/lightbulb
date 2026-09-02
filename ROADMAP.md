@@ -66,19 +66,41 @@ src/multi_gpu/tensor_parallel.rs:222     Hybrid sharding strategy not yet implem
 src/multi_gpu/tensor_parallel.rs:248     Hybrid sharding (second site)
 ```
 
-**And `Replicated` — the variant this block first credited as implemented — is
-not implemented either.** `distributed_cache.rs` copies K/V to each device and
-then `drop`s the result; its own comments read *"would integrate with actual
-cache in M3.6 Task 6"* and *"For now, we've prepared the infrastructure."* So
-`CacheSyncStrategy` offers **three variants and implements none**: two bail
-loudly and one succeeds while doing nothing.
+**And `Replicated` — the variant this block first credited as implemented — was
+not implemented either.** `distributed_cache.rs` copied K/V to each device and
+then `drop`ped the result, returning `Ok(())`; its own comments read *"would
+integrate with actual cache in M3.6 Task 6"* and *"For now, we've prepared the
+infrastructure."* So `CacheSyncStrategy` offers **three variants and implements
+none**.
 
 *(This block said "implements one" until review caught it. A summary correcting
 false completion claims that itself overstated an implementation is the same
 defect one level up, and it is recorded rather than quietly patched.)*
 
-These are **public enum variants a caller can select**, and selecting them either
-fails or silently no-ops.
+**FIXED 2026-09-02: all three now say so.** `Replicated` was the only one that
+lied — its siblings bail — and it is a public enum variant a caller can select.
+It now returns an error naming the strategy and what is actually missing:
+`ParallelCacheBuilder::append` needs an `IndicesAndMask` write plan that
+`update_cache` cannot obtain from `(layer_idx, batch_idx)` alone, so wiring it up
+is a design decision rather than a missing call. **Still 0 of 3 implemented — but
+0 of 3 honest instead of 2 honest and 1 lying.**
+
+**Why it survived:** the only test exercising it asserted that the call returned
+`Ok` — which it could not fail to do — and then printed *"✓ Cache replication
+across GPUs successful"*. It was `#[ignore]`d behind a multi-GPU requirement it
+did not actually need. `DeviceTopology`'s fields are public, so
+`every_cache_sync_strategy_reports_that_it_is_unimplemented` now runs on a plain
+CPU topology in the ordinary `cargo test --lib`, with an observed red state.
+
+**The stale justification is worth recording separately.** The comment explaining
+why the cache write was skipped said *"ParallelCacheBuilder doesn't have
+position() getter"*. That is **false** — it has `position()`, `set_position()`,
+`positions()` and `get_position(slot)`, and `parallel_model_manager.rs` calls the
+last of those. A reason for NOT doing something is a factual claim like any
+other, and this one had gone stale while still reading as a considered decision.
+
+The eight bails above remain **public enum variants a caller can select**, and
+selecting them fails with a reason.
 
 **2. `✅ COMPLETE: GGUF/other Candle-supported quant formats usable end-to-end`.**
 Measured by `tests/gguf_corpus_sweep.rs` over every local GGUF:
@@ -1019,9 +1041,11 @@ M3.6 — Multi-GPU Inference (0.4+)
 **Status**: ⚠️ **CLAIMED COMPLETE (October 27, 2025) — CONTRADICTED.**
 Eight selectable paths bail at runtime: `Sharded`/`Hybrid` cache sync,
 `PipeDream`/`Interleaved1F1B` pipeline scheduling, `Hybrid` tensor sharding.
-`CacheSyncStrategy` offers three variants and implements NONE — `Replicated`
-copies to each device and drops the result. Measured
-2026-09-01; see the VERIFIED STATUS block at the top for the site list.  
+`CacheSyncStrategy` offers three variants and implements NONE. `Replicated`
+copied to each device and dropped the result while returning `Ok(())`; fixed
+2026-09-02 to report that it is unimplemented, so all three are now honest about
+it. Measured 2026-09-01, re-measured 2026-09-02; see the VERIFIED STATUS block at
+the top for the site list.  
 **Added**: Jan 2025 (ChatGPT o1 validation - critical gap for large model serving)  
 **Completed**: October 2025 - Foundation infrastructure for multi-GPU distributed inference
 
