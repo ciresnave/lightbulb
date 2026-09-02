@@ -84,17 +84,50 @@ fails or silently no-ops.
 Measured by `tests/gguf_corpus_sweep.rs` over every local GGUF:
 
 ```
-30 files total = 1 REBUILT + 29 that do not load
+30 files total = 7 REBUILT + 23 that do not load     (was 1 + 29; re-measured 2026-09-02)
 
-  1  rebuilt          TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF Q4_0
- 24  refused by the tokenizer
-       18  tokenizer.ggml.model = "gpt2"   (SmolLM2, qwen2, falcon, starcoder, llama-bpe, ...)
+  7  rebuilt
+        1  SentencePiece   TinyLlama-1.1B-Chat-v1.0 Q4_0
+        6  byte-level BPE  SmolLM2-135M-Instruct (f16, Q4_0, Q4_K_M, Q5_K_S, Q6_K, Q8_0)
+ 18  refused by the tokenizer
+       12  tokenizer.ggml.model = "gpt2", `pre` NOT YET VERIFIED
+              gpt-2, gpt-neox(absent), mpt, starcoder, refact, falcon,
+              command-r, deepseek-coder, deepseek-llm, llama-bpe, qwen2, qwen35
         3  model = "llama" but NO merges   (llama-spm, phi-3, baichuan)
         1  bert     1  t5     1  gemma4
   5  unreadable BEFORE the tokenizer is reached
         2  header parse failure  (tinyllamas-stories-260k, ggml-vocab-aquila)
         3  unknown tensor dtype  (SmolLM2 IQ3_XS, IQ4_XS, Q2_K)
 ```
+
+**Byte-level BPE (`gpt2`) is now supported, but only for `tokenizer.ggml.pre`
+values verified id-for-id against a reference.** `pre` names a splitting rule and
+llama.cpp keeps a different regex per name; the 18 `gpt2` files carry 13 distinct
+values. `smollm` is verified against `SmolLM2-360M-Instruct/tokenizer.json`,
+whose vocab and merges are byte-identical to the corpus GGUFs (49152 tokens,
+48900 merges, zero id mismatches).
+
+**The remaining 12 are refused deliberately, and the measurement says why.**
+Candidate pre-tokenizers were scored against llama.cpp b10757 over the
+`ggml-vocab-*.gguf` files. **Corpus size changed the answer twice:**
+
+```
+  pre                       10 cases   30 cases   130 cases
+  falcon                      10/10      28/30      122/130
+  gpt-2                       10/10      30/30      128/130
+  command-r/refact/starcoder  10/10      30/30      128/130
+  mpt                          9/10      27/30      123/130
+```
+
+At 10 cases `falcon` looked perfect and was not. At 30, `gpt-2` looked perfect
+and was not. At 130 nothing scored perfectly — those values need llama.cpp's own
+per-`pre` regexes, which this crate's `ByteLevel` does not implement.
+
+**A tokenizer right 128 times in 130 is exactly the defect this module exists to
+prevent**, and each larger corpus caught a case the previous one called clean.
+Enabling the remaining values needs a correct regex per value, not a default —
+and it needs to be verified at a corpus size that has stopped changing the
+answer.
 
 *(An earlier version of this block said 13 gpt2 and 4 unreadable, which summed to
 24 of 30 and left six files unaccounted for. Review caught the arithmetic; the

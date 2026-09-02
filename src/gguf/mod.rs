@@ -208,6 +208,7 @@ impl Content {
         };
 
         const SPM: &str = "llama";
+        const BPE_KIND: &str = "gpt2";
         let model_kind = self
             .metadata()
             .get("tokenizer.ggml.model")
@@ -216,6 +217,9 @@ impl Content {
                 _ => None,
             })
             .unwrap_or("<absent>");
+        if model_kind == BPE_KIND {
+            return self.extract_byte_level_bpe_tokenizer();
+        }
         if model_kind != SPM {
             let pre = self
                 .metadata()
@@ -228,50 +232,19 @@ impl Content {
             // Per-kind, because the gpt2 explanation is wrong for bert/t5/gemma4 --
             // and a refusal that confidently explains the wrong obstacle sends the
             // reader somewhere there is nothing to find.
-            let detail = if model_kind == "gpt2" {
-                "`gpt2` files DO carry merges, so BPE could be rebuilt from them -- what blocks it is that each declares a different `tokenizer.ggml.pre`, naming a different pre-tokenizer splitting rule (12 distinct values in one local corpus: smollm, qwen2, falcon, starcoder, llama-bpe, command-r, deepseek-coder, deepseek-llm, gpt-2, mpt, refact, qwen35). Picking one would reproduce this function's original defect: a tokenizer that is plausible and wrong."
-            } else {
-                "Rebuilding it needs that tokenizer model's own construction, which this function does not implement. Only SentencePiece-lineage checkpoints carrying merges are handled."
-            };
+            let detail = "Rebuilding it needs that tokenizer model's own construction, which this function does not implement. Only SentencePiece-lineage checkpoints carrying merges, and byte-level BPE (`gpt2`) whose `tokenizer.ggml.pre` names a verified splitting rule, are handled.";
             // ONE physical line per literal, deliberately. An earlier version used
             // `\` continuations and shipped a real newline into the message, so any
             // caller printing only the first line lost `pre` -- the most useful value
             // in it. The rendered string is what matters, not how the source looks.
             bail!(
-                "GGUF tokenizer.ggml.model is {model_kind:?} (tokenizer.ggml.pre = {pre:?}); only {SPM:?} is supported. {detail} Refusing to approximate: a guessed tokenizer produces plausible nonsense with no error anywhere."
+                "GGUF tokenizer.ggml.model is {model_kind:?} (tokenizer.ggml.pre = {pre:?}); only {SPM:?} and {BPE_KIND:?} are supported. {detail} Refusing to approximate: a guessed tokenizer produces plausible nonsense with no error anywhere."
             );
         }
 
-        let tokens = self
-            .get_metadata_string_array("tokenizer.ggml.tokens")
-            .context("Missing tokenizer.ggml.tokens in GGUF metadata")?;
-
-        let merges_raw = self
-            .get_metadata_string_array("tokenizer.ggml.merges")
-            .context(
-                "GGUF has no tokenizer.ggml.merges. This is a SentencePiece-converted checkpoint, \
-             and rebuilding it needs SPM's scored bigram-merge algorithm. Building a Unigram \
-             from tokenizer.ggml.scores instead was measured and does NOT reproduce the \
-             checkpoint's segmentation (29 ids against the reference's 22: `capital` came out \
-             as c+ap+it+al), so it is refused rather than approximated.",
-            )?;
-
-        let vocab: tokenizers::models::bpe::Vocab = tokens
-            .iter()
-            .enumerate()
-            .map(|(id, t)| (t.clone(), id as u32))
-            .collect();
-
-        // GGUF stores each merge as one space-separated pair, exactly as
-        // `tokenizer.json` does.
-        let merges: Vec<(String, String)> = merges_raw
-            .iter()
-            .map(|m| {
-                m.split_once(' ')
-                    .map(|(a, b)| (a.to_string(), b.to_string()))
-                    .ok_or_else(|| anyhow::anyhow!("malformed merge entry {m:?}: no space"))
-            })
-            .collect::<Result<_>>()?;
+        let (tokens, vocab, merges) = self.vocab_and_merges(
+            "GGUF has no tokenizer.ggml.merges. This is a SentencePiece-converted checkpoint, and rebuilding it needs SPM's scored bigram-merge algorithm. Building a Unigram from tokenizer.ggml.scores instead was measured and does NOT reproduce the checkpoint's segmentation (29 ids against the reference's 22: `capital` came out as c+ap+it+al), so it is refused rather than approximated.",
+        )?;
 
         let bpe = BPE::builder()
             .vocab_and_merges(vocab, merges)
@@ -341,6 +314,189 @@ impl Content {
         }
 
         Ok(tokenizer)
+    }
+
+    /// Rebuild a BYTE-LEVEL BPE tokenizer (`tokenizer.ggml.model == "gpt2"`).
+    ///
+    /// Structurally different from the SentencePiece path above, not a variant
+    /// of it: no normalizer, no `byte_fallback` (byte-level BPE encodes every
+    /// byte through GPT-2's byte-to-unicode map, so there is nothing to fall
+    /// back to), a `ByteLevel` decoder rather than the
+    /// ByteFallback/Fuse/Strip sequence, and — the part that actually blocks
+    /// generic support — a PRE-TOKENIZER that differs per checkpoint.
+    ///
+    /// # `tokenizer.ggml.pre` is the whole difficulty
+    ///
+    /// It names a splitting rule, and llama.cpp keeps a different regex per
+    /// name. Measured over the local corpus: 18 `gpt2` files carrying 13
+    /// distinct `pre` values. Picking one for all of them would reproduce this
+    /// module's original defect in a quieter form — a tokenizer that is
+    /// plausible and wrong.
+    ///
+    /// So [`Self::bpe_pre_tokenizer`] is a table of rules that have been
+    /// VERIFIED against a reference, and anything absent from it is refused.
+    fn extract_byte_level_bpe_tokenizer(&self) -> Result<tokenizers::Tokenizer> {
+        use tokenizers::{
+            AddedToken, Tokenizer, decoders::byte_level::ByteLevel as ByteLevelDecoder,
+            models::bpe::BPE,
+        };
+
+        let pre = self
+            .metadata()
+            .get("tokenizer.ggml.pre")
+            .and_then(|v| match v {
+                Value::String(s) => Some(s.as_str()),
+                _ => None,
+            })
+            .unwrap_or("<absent>");
+
+        let Some(pre_tokenizer) = Self::bpe_pre_tokenizer(pre) else {
+            bail!(
+                "GGUF tokenizer.ggml.pre is {pre:?}, which names a pre-tokenizer splitting rule this build has not verified. Byte-level BPE (`gpt2`) is supported, but only for `pre` values checked id-for-id against a reference: {verified:?}. Refusing to substitute a different rule: the vocab and merges would still load and the output would be plausible and wrong.",
+                verified = Self::VERIFIED_PRE
+            );
+        };
+
+        let (tokens, vocab, merges) = self.vocab_and_merges(
+            "GGUF declares a `gpt2` tokenizer but carries no tokenizer.ggml.merges; byte-level BPE cannot be rebuilt without them",
+        )?;
+
+        let bpe = BPE::builder()
+            .vocab_and_merges(vocab, merges)
+            // FALSE, deliberately, and the opposite of the SPM path. Byte-level
+            // BPE maps every byte into the vocab through GPT-2's byte-to-unicode
+            // table, so there is no unrepresentable byte for a fallback to
+            // catch. The reference `tokenizer.json` for this family agrees:
+            // `byte_fallback: false`, `unk_token: null`.
+            .byte_fallback(false)
+            .build()
+            .map_err(|e| {
+                anyhow::anyhow!("building byte-level BPE from GGUF vocab and merges: {e}")
+            })?;
+
+        let mut tokenizer = Tokenizer::new(bpe);
+        // No normalizer: the reference has `normalizer: null`. The SPM path's
+        // Prepend + U+2581 substitution would corrupt byte-level input.
+        tokenizer.with_normalizer(None::<tokenizers::normalizers::NormalizerWrapper>);
+        tokenizer.with_pre_tokenizer(Some(pre_tokenizer));
+        tokenizer.with_decoder(Some(ByteLevelDecoder::default()));
+
+        // Control tokens must be registered or they tokenize as ordinary text.
+        let specials: Vec<AddedToken> = [
+            self.token_id("tokenizer.ggml.unknown_token_id"),
+            self.token_id("tokenizer.ggml.bos_token_id"),
+            self.token_id("tokenizer.ggml.eos_token_id"),
+            self.token_id("tokenizer.ggml.padding_token_id"),
+        ]
+        .iter()
+        .flatten()
+        .filter_map(|&id| tokens.get(id as usize))
+        .map(|t| AddedToken::from(t.clone(), true))
+        .collect();
+        if !specials.is_empty() {
+            tokenizer.add_special_tokens(&specials);
+        }
+
+        Ok(tokenizer)
+    }
+
+    /// The vocab and merge list, parsed once for both tokenizer families.
+    ///
+    /// Both paths read the SAME two metadata arrays into the SAME two shapes;
+    /// only the message for a missing `merges` differs, which is why that is
+    /// the parameter. This was written out twice, and two copies of a parser
+    /// that must agree is the hazard this module keeps finding elsewhere.
+    ///
+    /// Returns the raw token list too: callers need it to resolve
+    /// `tokenizer.ggml.*_token_id` indices back into token strings.
+    fn vocab_and_merges(
+        &self,
+        missing_merges: &'static str,
+    ) -> Result<(
+        Vec<String>,
+        tokenizers::models::bpe::Vocab,
+        Vec<(String, String)>,
+    )> {
+        let tokens = self
+            .get_metadata_string_array("tokenizer.ggml.tokens")
+            .context("Missing tokenizer.ggml.tokens in GGUF metadata")?;
+        let merges_raw = self
+            .get_metadata_string_array("tokenizer.ggml.merges")
+            .context(missing_merges)?;
+
+        let vocab: tokenizers::models::bpe::Vocab = tokens
+            .iter()
+            .enumerate()
+            .map(|(id, t)| (t.clone(), id as u32))
+            .collect();
+
+        // GGUF stores each merge as one space-separated pair, exactly as
+        // `tokenizer.json` does.
+        let merges: Vec<(String, String)> = merges_raw
+            .iter()
+            .map(|m| {
+                m.split_once(' ')
+                    .map(|(a, b)| (a.to_string(), b.to_string()))
+                    .ok_or_else(|| anyhow::anyhow!("malformed merge entry {m:?}: no space"))
+            })
+            .collect::<Result<_>>()?;
+
+        Ok((tokens, vocab, merges))
+    }
+
+    /// `tokenizer.ggml.pre` values whose splitting rule has been verified
+    /// id-for-id against a reference. See [`Self::bpe_pre_tokenizer`].
+    const VERIFIED_PRE: &'static [&'static str] = &["smollm"];
+
+    /// The pre-tokenizer for a `tokenizer.ggml.pre` name, or `None` if this
+    /// build has not verified that name.
+    ///
+    /// **A table, not a default.** Returning some general-purpose byte-level
+    /// splitter for unknown names is exactly the failure this module exists to
+    /// prevent: the vocab and merges load, encoding succeeds, and the ids are
+    /// wrong in a way nothing reports.
+    fn bpe_pre_tokenizer(pre: &str) -> Option<tokenizers::pre_tokenizers::PreTokenizerWrapper> {
+        use tokenizers::pre_tokenizers::{
+            byte_level::ByteLevel, digits::Digits, sequence::Sequence,
+        };
+        match pre {
+            // Verified against `SmolLM2-360M-Instruct/tokenizer.json`, whose
+            // `pre_tokenizer` is a Sequence of `Digits{individual_digits:true}`
+            // then `ByteLevel{add_prefix_space:false}`. The digit split is the
+            // part that distinguishes it from plain GPT-2, which encodes
+            // " 12345" as " 123" + "45"; both halves are load-bearing and
+            // `gguf_bpe_tokenizer_fidelity` fails 1 of 30 cases without the
+            // `Digits`.
+            //
+            // ⚠️ ONE LINK IN THIS CHAIN IS CORROBORATED, NOT PROVEN. The
+            // reference is the 360M build; the corpus files are 135M. Their
+            // VOCAB AND MERGES were verified byte-identical (49152 tokens,
+            // 48900 merges, zero id mismatches), so the vocab substitution is
+            // established. The PRE_TOKENIZER SPEC is taken from the 360M and
+            // ASSUMED SHARED — no 135M `tokenizer.json` was available locally.
+            //
+            // What corroborates it: our output matches llama.cpp on 128 of 130
+            // cases for this checkpoint, and a genuinely different splitting
+            // rule would diverge far more than twice. What would settle it: the
+            // 135M's own `tokenizer.json`. Recorded because an assumption this
+            // load-bearing outlives the person who knew it was one.
+            //
+            // (Separately, and NOT a defect on our side: those 2 divergences
+            // are llama.cpp's. Measured three ways over the same 130 cases —
+            // ours vs the HF reference 0 disagree, ours vs llama.cpp 2, HF vs
+            // llama.cpp THE SAME 2. llama.cpp's SMOLLM regex omits the trailing
+            // `|\s+` alternative that the checkpoint's declared ByteLevel rule
+            // carries; its own source comments the rewrite. We match the
+            // checkpoint, which is the thing the model was trained with.)
+            "smollm" => Some(
+                Sequence::new(vec![
+                    Digits::new(true).into(),
+                    ByteLevel::new(false, true, true).into(),
+                ])
+                .into(),
+            ),
+            _ => None,
+        }
     }
 
     /// A `tokenizer.ggml.*_token_id` as a `u32`, or `None` if absent or not an
