@@ -1,5 +1,15 @@
 # Path to M5 Completion: What Needs to Be Done
 
+> ## ⚠️ SUPERSEDED — this is not a status source
+> 
+> **`ROADMAP.md` is the single roadmap.** Its VERIFIED STATUS block carries
+> figures measured at a named ref. This document's status claims were made at
+> a state the project has left and have **not** been re-validated — treat them
+> as provenance, not as findings.
+> 
+> Dated January 2026. Its status predates the GGUF tokenizer work, the Fuel
+> pin bump, and the CI gates.
+
 **Date**: January 2026  
 **Current Status**: M0-M2 COMPLETE, M3 PARTIAL, M3.4-M5 PLANNED  
 **Goal**: Complete M0-M5 production core for v1.0 release

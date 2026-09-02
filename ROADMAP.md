@@ -9,6 +9,177 @@ Purpose: a clear plan to reach a robust, fast, and memory-efficient inference en
 > below predate that port and have not been re-validated — treat them as
 > unverified rather than as findings. See `README.md` for the current picture.
 
+---
+
+# ⚠️ VERIFIED STATUS — read this before planning from anything below
+
+**Measured 2026-09-01 at `origin/main` `794b88e`.** Every figure here was
+re-derived at that ref, not carried from a previous report. Anything below this
+block that contradicts it is stale.
+
+**This file is now the SINGLE roadmap.** Six other documents made overlapping and
+conflicting claims; they are superseded and carry banners saying so:
+
+| document | disposition |
+|---|---|
+| `V1_ROADMAP.md` | superseded — kept for provenance. 128 unchecked boxes, 0 checked, and its own Phase 1 is COMPLETE. It declared the project blocked on shipped work for months. |
+| `docs/M5_COMPLETION_ROADMAP.md` | superseded — dated January 2026, status predates the GGUF and Fuel work |
+| `docs/M3_AWQ_IMPLEMENTATION_PLAN.md` | superseded as a *status* source; still valid as a *design* document |
+| `docs/M3_SPECULATIVE_DECODING_PLAN.md` | superseded as a *status* source; still valid as a *design* document |
+| `BATCHING_STATUS.md` | superseded — claims "100% Complete" for batching |
+| `docs/API_IMPLEMENTATION_STATUS.md` | superseded — "Completed (Just Now)" with no date |
+
+## What is actually true
+
+**The server builds and serves.** `cargo check -j 4 --bins` → exit 0.
+`cargo test --lib` → **643 passed, 0 failed, 14 ignored**.
+
+**The Candle→Fuel port — this project's stated direction — is early.**
+
+```
+files importing candlelight    45
+files importing fuel           11
+total src/**/*.rs             112
+```
+
+Fuel is behind the `fuel-engine` feature and is **not at parity**. candlelight
+is the shipping path.
+
+## ⚠️ Three COMPLETE claims below are contradicted by the code
+
+**A document asserting completion over unimplemented code is worse than one
+asserting nothing, because it stops anyone looking.** Each of these is corrected
+in place further down; they are collected here because the pattern matters more
+than any single instance.
+
+**1. `M3.6 — Multi-GPU Inference` says ✅ COMPLETE (October 27, 2025).**
+Eight selectable code paths bail at runtime:
+
+```
+src/multi_gpu/distributed_cache.rs:165   Sharded cache strategy not yet implemented
+src/multi_gpu/distributed_cache.rs:169   Hybrid cache strategy not yet implemented
+src/multi_gpu/pipeline_parallel.rs:361   PipeDream scheduling not yet implemented
+src/multi_gpu/pipeline_parallel.rs:365   Interleaved 1F1B scheduling not yet implemented
+src/multi_gpu/pipeline_parallel.rs:422   PipeDream (second site)
+src/multi_gpu/pipeline_parallel.rs:426   Interleaved 1F1B (second site)
+src/multi_gpu/tensor_parallel.rs:222     Hybrid sharding strategy not yet implemented
+src/multi_gpu/tensor_parallel.rs:248     Hybrid sharding (second site)
+```
+
+**And `Replicated` — the variant this block first credited as implemented — is
+not implemented either.** `distributed_cache.rs` copies K/V to each device and
+then `drop`s the result; its own comments read *"would integrate with actual
+cache in M3.6 Task 6"* and *"For now, we've prepared the infrastructure."* So
+`CacheSyncStrategy` offers **three variants and implements none**: two bail
+loudly and one succeeds while doing nothing.
+
+*(This block said "implements one" until review caught it. A summary correcting
+false completion claims that itself overstated an implementation is the same
+defect one level up, and it is recorded rather than quietly patched.)*
+
+These are **public enum variants a caller can select**, and selecting them either
+fails or silently no-ops.
+
+**2. `✅ COMPLETE: GGUF/other Candle-supported quant formats usable end-to-end`.**
+Measured by `tests/gguf_corpus_sweep.rs` over every local GGUF:
+
+```
+30 files total = 1 REBUILT + 29 that do not load
+
+  1  rebuilt          TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF Q4_0
+ 24  refused by the tokenizer
+       18  tokenizer.ggml.model = "gpt2"   (SmolLM2, qwen2, falcon, starcoder, llama-bpe, ...)
+        3  model = "llama" but NO merges   (llama-spm, phi-3, baichuan)
+        1  bert     1  t5     1  gemma4
+  5  unreadable BEFORE the tokenizer is reached
+        2  header parse failure  (tinyllamas-stories-260k, ggml-vocab-aquila)
+        3  unknown tensor dtype  (SmolLM2 IQ3_XS, IQ4_XS, Q2_K)
+```
+
+*(An earlier version of this block said 13 gpt2 and 4 unreadable, which summed to
+24 of 30 and left six files unaccounted for. Review caught the arithmetic; the
+figures above are re-measured and add up. The gpt2 count is **18**, not 13 — so
+gpt2 support closes more than first reported, not less.)*
+
+**One checkpoint loads** — `TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF` Q4_0, the one
+the tokenizer fix was developed against. Its completion is coherent but carries an
+unexplained artifact (`"France| Paris, France</s>"`).
+
+**3. `M5 KV cache compression (COMPLETE)`** is cited as a satisfied dependency by
+CR.1 and CR.2 (lines ~2701, ~2748). `src/cache/kv_compression.rs:446` is a live
+`todo!("Grouped quantization not yet implemented")` — a panic, not a bail.
+
+### And two unimplemented paths that are NOT claimed complete
+
+Listed separately because the distinction matters: **a gap nobody claimed to have
+closed is an honest gap.** These are open work, not false claims.
+
+- **AWQ is CPU-unusable** — `src/loaders/awq.rs:188` and `src/loaders/mod.rs:349`
+  both bail, CUDA only. (AWQ *Phase 2*, the CustomOp wrappers, is claimed complete
+  and that claim was not checked here.)
+- **Quantization has open dtype holes** — `src/quantization/mod.rs:245` and `:325`
+  bail for unlisted dtypes, on both quantize and dequantize.
+
+### And one claim that is unreconciled rather than false
+
+**`M3.5 — Testing & Hardening` ✅ COMPLETE (October 2025)** is not contradicted by
+a bail or a panic, so it is not in the three above. But much of its content is a
+**design** — "testing strategy designed", a 28-configuration validation matrix,
+benchmarks "phased" — while the tree carries **111 `#[ignore]` markers** and
+**three acceptance tests that never run in CI**. Read it as *"infrastructure and
+strategy exist"*, not *"the matrix runs"*. Marked in place at its own section.
+
+**13 executable unimplemented sites across 7 files** (a 14th match is a doc
+comment referencing one of them).
+
+## Milestone status, reconciled
+
+| milestone | status |
+|---|---|
+| M0 — Baseline | COMPLETE |
+| M1 — Core engine | COMPLETE |
+| M1.4 — Parallel batching infrastructure | COMPLETE |
+| M1.5 — Hardware adaptivity | COMPLETE |
+| M2 — Performance enablers | COMPLETE |
+| **M3 — Acceleration features** | **IN PROGRESS** — M3.3 done; AWQ CPU + quant dtypes open |
+| M3.5 — Testing & Hardening | COMPLETE |
+| **M3.6 — Multi-GPU Inference** | **CLAIMED COMPLETE, 8 PATHS UNIMPLEMENTED** (see above) |
+| M3.7 — Dynamic Name Mapping | CORE COMPLETE, integrations PLANNED |
+| **M4 — Advanced scheduling** | **PLANNED** |
+| **M5 — Frontier options** | **PLANNED** |
+| **M5.5 — CLI, Deployment & Operations** | **PLANNED — this is the v1.0 gate** |
+| M5.6 — Hardware-specific optimizations | PLANNED (post-v1.0; needs hardware/funding) |
+| M6 — Research explorations | PLANNED |
+| M6.5 — Elastic KV cache w/ virtual memory | **PLANNED** — 8 open items. Its own section says "READY TO IMPLEMENT", which is not one of the five statuses in this document's legend; per the legend, designed-but-not-started is PLANNED. Its blocking dependency (`candle-cuda-vmm`) is published. |
+| M6.6 — Semantic Coordinate Space models | PLANNED (post-v1.0) |
+| CR.1–CR.4 — Continuous reasoning / coprogrammer | PLANNED (research) |
+| M7 — Sentience infrastructure | PLANNED (5–10 year) |
+| M8 — Modular training infrastructure | PLANNED |
+
+**v1.0 is gated on M5.5, which is PLANNED. v1.0 is not reached.**
+
+## Test coverage limits
+
+- **111 `#[ignore]` markers** across the tree; **60 `TODO`s** in `src/`.
+- **Three behavioural acceptance tests are never CI-verified** —
+  `chat_template_e2e`, `fuel_engine_http`, `gguf_serving_e2e`. They need a GPU and
+  a ~2.2 GB checkpoint; there is no GPU runner **by decision (2026-08-27, cost)**.
+  CI *compiles* them so they cannot rot, and `scripts/check.sh` prints them in a
+  NOT RUN block on every run including successful ones.
+
+## The real frontier
+
+**Not the roadmap order.** The largest user-visible gap is that **GGUF loads 1
+model in 30**. That is downstream of a deliberate refusal: `gpt2`-family files all
+carry merges and could be rebuilt, but each declares a different
+`tokenizer.ggml.pre` naming a different pre-tokenizer rule — 12 distinct values in
+the local corpus. Guessing one reproduces the original defect (a tokenizer that is
+plausible and wrong). Closing it means implementing those pre-tokenizers and
+proving each byte-identical against a reference, which
+`tests/gguf_tokenizer_fidelity.rs` already has the harness for.
+
+---
+
 ## Status Legend
 
 - **PLANNED**: Feature designed with acceptance criteria defined, not yet started
@@ -483,7 +654,9 @@ M2 — Performance enablers (0.3)
   - References: docs/M3_4_FLASHATTENTION_INTEGRATION.md, tests/flash_attention_tests.rs, examples/benchmark_flashattention.rs
 
 - Quantized model loaders via Candle
-  - ✅ **COMPLETE**: GGUF/other Candle-supported quant formats usable end-to-end
+  - ⚠️ **CONTRADICTED (measured 2026-09-01)**: GGUF/other quant formats usable
+    end-to-end — **1 of 30 local GGUF files loads; 29 do not.** See the VERIFIED
+    STATUS block at the top and `tests/gguf_corpus_sweep.rs`.
   - Acceptance: ✅ run quantized tiny model locally; parity tests pass
   - References: low-bit LLMs survey; model compression survey
 - Lightning GGUF loader with memory-mapped tensor access
@@ -600,7 +773,13 @@ M3 — Acceleration features (0.4)
 
 M3.5 — Testing & Hardening (0.4+)
 
-**Status**: ✅ COMPLETE (October 2025)
+**Status**: ⚠️ **CLAIMED COMPLETE (October 2025) — PARTIALLY UNRECONCILED.**
+Much of the content below is a *design*: "testing strategy designed",
+"validation matrix" of 28 configurations, quality benchmarks "phased". What is
+built is built, but the tree carries **111 `#[ignore]` markers** and **three
+behavioural acceptance tests that never run in CI** (no GPU runner, by cost
+decision) — see the VERIFIED STATUS block at the top. Read this section as
+"infrastructure and strategy exist", not "the matrix runs".
 
 **Implementation Summary**:
 
@@ -692,7 +871,12 @@ M3.5 establishes comprehensive testing and validation infrastructure for product
 
 M3.6 — Multi-GPU Inference (0.4+)
 
-**Status**: ✅ COMPLETE (October 27, 2025)  
+**Status**: ⚠️ **CLAIMED COMPLETE (October 27, 2025) — CONTRADICTED.**
+Eight selectable paths bail at runtime: `Sharded`/`Hybrid` cache sync,
+`PipeDream`/`Interleaved1F1B` pipeline scheduling, `Hybrid` tensor sharding.
+`CacheSyncStrategy` offers three variants and implements NONE — `Replicated`
+copies to each device and drops the result. Measured
+2026-09-01; see the VERIFIED STATUS block at the top for the site list.  
 **Added**: Jan 2025 (ChatGPT o1 validation - critical gap for large model serving)  
 **Completed**: October 2025 - Foundation infrastructure for multi-GPU distributed inference
 
@@ -2268,7 +2452,9 @@ M6 — Research explorations (0.7+)
 
 M6.5 — Elastic KV Cache with Virtual Memory (0.7+)
 
-**Status**: READY TO IMPLEMENT ✅ (candle-cuda-vmm v0.1.0 published!)  
+**Status**: PLANNED — the blocking dependency `candle-cuda-vmm` v0.1.0 is
+published, so this is unblocked rather than started. ("READY TO IMPLEMENT" is
+not one of the five statuses in the legend above; normalised 2026-09-01.)  
 **Added**: October 2025 (Inspired by Meta's KVCached library for elastic multi-model serving)  
 **Updated**: October 2025 - `candle-cuda-vmm` crate now available!
 
@@ -2557,7 +2743,7 @@ curl http://localhost:8080/v1/completions \
 
 **Status**: PLANNED (research-grade capabilities building on M5 KV cache infrastructure)
 
-**Dependencies**: M5 KV cache compression (COMPLETE), segmented KV cache with tiered storage (COMPLETE), M4.B state persistence (COMPLETE)
+**Dependencies**: M5 KV cache compression (⚠️ **claimed COMPLETE, but `src/cache/kv_compression.rs:446` is a live `todo!()` — see VERIFIED STATUS**), segmented KV cache with tiered storage (COMPLETE), M4.B state persistence (COMPLETE)
 
 **Origin**: Design session March-April 2026, consolidated from multi-session architecture exploration
 

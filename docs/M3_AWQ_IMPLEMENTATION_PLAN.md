@@ -1,5 +1,15 @@
 # M3: AWQ/Marlin Quantization Implementation Plan
 
+> ## ⚠️ SUPERSEDED — this is not a status source
+> 
+> **`ROADMAP.md` is the single roadmap.** Its VERIFIED STATUS block carries
+> figures measured at a named ref. This document's status claims were made at
+> a state the project has left and have **not** been re-validated — treat them
+> as provenance, not as findings.
+> 
+> Still valid as a **design** document; superseded only as a status source.
+> AWQ CPU inference remains unimplemented (`src/loaders/awq.rs:188`).
+
 **Status**: PLANNED (Ready to implement)  
 **Priority**: HIGH (enables 4-bit inference with 2× memory reduction)  
 **Timeline**: 2-3 weeks  

@@ -1,5 +1,16 @@
 # Lightbulb v1.0 Release Roadmap
 
+> ## ⚠️ SUPERSEDED — this is not a status source
+> 
+> **`ROADMAP.md` is the single roadmap.** Its VERIFIED STATUS block carries
+> figures measured at a named ref. This document's status claims were made at
+> a state the project has left and have **not** been re-validated — treat them
+> as provenance, not as findings.
+> 
+> It has **128 unchecked boxes and 0 checked**, and its own Phase 1 is
+> COMPLETE — for months it declared the project blocked on work that had
+> already shipped. Kept for provenance.
+
 **Goal**: Production-ready inference server with streaming, authentication, and memory-aware scheduling
 
 > ⚠️ **This document is stale and is kept for provenance.** Its phases were

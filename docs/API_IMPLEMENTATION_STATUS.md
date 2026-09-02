@@ -1,5 +1,15 @@
 # API Implementation Progress
 
+> ## ⚠️ SUPERSEDED — this is not a status source
+> 
+> **`ROADMAP.md` is the single roadmap.** Its VERIFIED STATUS block carries
+> figures measured at a named ref. This document's status claims were made at
+> a state the project has left and have **not** been re-validated — treat them
+> as provenance, not as findings.
+> 
+> It says "Completed (Just Now)" with no date, so it cannot be aged or
+> checked against a ref.
+
 ## Completed (Just Now)
 
 ### 1. OpenAI-Compatible Endpoints ✅
