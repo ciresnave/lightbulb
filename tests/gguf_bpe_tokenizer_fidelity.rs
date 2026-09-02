@@ -86,9 +86,32 @@
 //! dropping `Digits` fails 1 of these 30 cases. Under the older 10-case corpus
 //! it failed none — the same lesson one level down.
 //!
+//! # What each `pre` is verified against
+//!
+//! Every allowlisted value is gated id-for-id against THAT CHECKPOINT'S OWN
+//! `tokenizer.json` — not against llama.cpp, for the reason above. Fetch each
+//! from `https://huggingface.co/<repo>/resolve/main/tokenizer.json`:
+//!
+//! ```text
+//!   pre              reference repo                            corpus GGUF
+//!   smollm           HuggingFaceTB/SmolLM2-360M-Instruct       SmolLM2-135M-Instruct-*
+//!   gpt-2            openai-community/gpt2                     ggml-vocab-gpt-2.gguf
+//!   falcon           tiiuae/falcon-7b                          ggml-vocab-falcon.gguf
+//!   qwen2            Qwen/Qwen2-7B                             ggml-vocab-qwen2.gguf
+//!   deepseek-coder   deepseek-ai/deepseek-coder-6.7b-instruct  ggml-vocab-deepseek-coder.gguf
+//! ```
+//!
+//! **A reference is only admissible once its vocab matches the GGUF's.** All
+//! five were checked before use: `gpt-2` and `falcon` match exactly; `qwen2`
+//! (151936 vs 151643) and `deepseek-coder` (32256 vs 32000) carry extra GGUF
+//! tokens, and those were confirmed to sit ENTIRELY AT THE TAIL — every id
+//! below the reference's vocab size matches — so ordinary text cannot reach
+//! them. `smollm`'s substitution is the 360M reference for 135M files, verified
+//! byte-identical on vocab and merges; see the caveat at the allowlist entry.
+//!
 //! Run:
 //! ```text
-//! LIGHTBULB_BPE_GGUF=<...>.gguf LIGHTBULB_BPE_REF_TOKENIZER=<...>/tokenizer.json \
+//! LIGHTBULB_BPE_PAIRS="<a>.gguf|<a>.json;<b>.gguf|<b>.json" \
 //!   cargo test --test gguf_bpe_tokenizer_fidelity -- --ignored --nocapture
 //! ```
 
@@ -135,11 +158,35 @@ const CASES: &[&str] = &[
     "<|im_start|>user\nhi<|im_end|>",
 ];
 
-fn paths() -> Option<(String, String)> {
-    let gguf = std::env::var("LIGHTBULB_BPE_GGUF").ok()?;
-    let reference = std::env::var("LIGHTBULB_BPE_REF_TOKENIZER").ok()?;
-    (std::path::Path::new(&gguf).is_file() && std::path::Path::new(&reference).is_file())
-        .then_some((gguf, reference))
+/// The (GGUF, reference `tokenizer.json`) pairs to gate.
+///
+/// `LIGHTBULB_BPE_PAIRS` takes several, as `gguf|reference` entries separated by
+/// `;`, so one run covers every allowlisted `tokenizer.ggml.pre`. **A table of
+/// five entries verified by one checkpoint would be four unverified entries
+/// wearing the fifth's evidence.**
+///
+/// Falls back to the single-pair variables when it is unset.
+fn pairs() -> Vec<(String, String)> {
+    if let Ok(list) = std::env::var("LIGHTBULB_BPE_PAIRS") {
+        return list
+            .split(';')
+            .filter(|e| !e.trim().is_empty())
+            .filter_map(|e| e.split_once('|'))
+            .map(|(g, r)| (g.trim().to_string(), r.trim().to_string()))
+            .filter(|(g, r)| std::path::Path::new(g).is_file() && std::path::Path::new(r).is_file())
+            .collect();
+    }
+    let (Ok(gguf), Ok(reference)) = (
+        std::env::var("LIGHTBULB_BPE_GGUF"),
+        std::env::var("LIGHTBULB_BPE_REF_TOKENIZER"),
+    ) else {
+        return Vec::new();
+    };
+    if std::path::Path::new(&gguf).is_file() && std::path::Path::new(&reference).is_file() {
+        vec![(gguf, reference)]
+    } else {
+        Vec::new()
+    }
 }
 
 /// The ids, in order, equal the reference's — on every case.
@@ -150,32 +197,39 @@ fn paths() -> Option<(String, String)> {
 #[test]
 #[ignore = "needs a gpt2-family GGUF and its reference tokenizer.json"]
 fn a_byte_level_ggufs_rebuilt_tokenizer_matches_the_checkpoints_own_ids() {
-    let (gguf, reference) = paths().expect(
-        "set LIGHTBULB_BPE_GGUF to a gpt2-family .gguf and LIGHTBULB_BPE_REF_TOKENIZER to the matching tokenizer.json",
+    let pairs = pairs();
+    assert!(
+        !pairs.is_empty(),
+        "set LIGHTBULB_BPE_PAIRS to `gguf|tokenizer.json` entries separated by `;`, or the single-pair LIGHTBULB_BPE_GGUF / LIGHTBULB_BPE_REF_TOKENIZER"
     );
-    let ours = lightbulb::gguf::Content::read(&gguf)
-        .expect("reading the GGUF")
-        .extract_tokenizer()
-        .expect("rebuilding the tokenizer");
-    let reference = tokenizers::Tokenizer::from_file(&reference).expect("reading the reference");
-
     let mut diffs = Vec::new();
-    for case in CASES {
-        let got = ours.encode(*case, false).expect("ours").get_ids().to_vec();
-        let want = reference
-            .encode(*case, false)
-            .expect("ref")
-            .get_ids()
-            .to_vec();
-        if got != want {
-            diffs.push(format!("  {case:?}\n    ours={got:?}\n     ref={want:?}"));
+    for (gguf, reference) in &pairs {
+        let ours = lightbulb::gguf::Content::read(gguf)
+            .expect("reading the GGUF")
+            .extract_tokenizer()
+            .unwrap_or_else(|e| panic!("rebuilding the tokenizer for {gguf}: {e:#}"));
+        let reference_tok =
+            tokenizers::Tokenizer::from_file(reference).expect("reading the reference");
+        for case in CASES {
+            let got = ours.encode(*case, false).expect("ours").get_ids().to_vec();
+            let want = reference_tok
+                .encode(*case, false)
+                .expect("ref")
+                .get_ids()
+                .to_vec();
+            if got != want {
+                diffs.push(format!(
+                    "  {gguf}\n    {case:?}\n      ours={got:?}\n       ref={want:?}"
+                ));
+            }
         }
+        eprintln!("  checked {} cases against {reference}", CASES.len());
     }
     assert!(
         diffs.is_empty(),
-        "{} of {} cases disagree with the checkpoint's own tokenizer:\n{}",
+        "{} disagreements with the checkpoints' own tokenizers across {} pair(s):\n{}",
         diffs.len(),
-        CASES.len(),
+        pairs.len(),
         diffs.join("\n")
     );
 }

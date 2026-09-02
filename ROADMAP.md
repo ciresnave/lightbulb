@@ -106,15 +106,16 @@ selecting them fails with a reason.
 Measured by `tests/gguf_corpus_sweep.rs` over every local GGUF:
 
 ```
-30 files total = 7 REBUILT + 23 that do not load     (was 1 + 29; re-measured 2026-09-02)
+30 files total = 11 REBUILT + 19 that do not load    (was 1 + 29; re-measured 2026-09-02)
 
-  7  rebuilt
+ 11  rebuilt
         1  SentencePiece   TinyLlama-1.1B-Chat-v1.0 Q4_0
-        6  byte-level BPE  SmolLM2-135M-Instruct (f16, Q4_0, Q4_K_M, Q5_K_S, Q6_K, Q8_0)
- 18  refused by the tokenizer
-       12  tokenizer.ggml.model = "gpt2", `pre` NOT YET VERIFIED
-              gpt-2, gpt-neox(absent), mpt, starcoder, refact, falcon,
-              command-r, deepseek-coder, deepseek-llm, llama-bpe, qwen2, qwen35
+       10  byte-level BPE  SmolLM2-135M-Instruct x6, plus the gpt-2, falcon,
+                           qwen2 and deepseek-coder vocab files
+ 14  refused by the tokenizer
+        8  tokenizer.ggml.model = "gpt2", `pre` NOT YET VERIFIED
+              gpt-neox(absent), mpt, starcoder, refact,
+              command-r, deepseek-llm, llama-bpe, qwen35
         3  model = "llama" but NO merges   (llama-spm, phi-3, baichuan)
         1  bert     1  t5     1  gemma4
   5  unreadable BEFORE the tokenizer is reached
@@ -123,11 +124,33 @@ Measured by `tests/gguf_corpus_sweep.rs` over every local GGUF:
 ```
 
 **Byte-level BPE (`gpt2`) is now supported, but only for `tokenizer.ggml.pre`
-values verified id-for-id against a reference.** `pre` names a splitting rule and
-llama.cpp keeps a different regex per name; the 18 `gpt2` files carry 13 distinct
-values. `smollm` is verified against `SmolLM2-360M-Instruct/tokenizer.json`,
-whose vocab and merges are byte-identical to the corpus GGUFs (49152 tokens,
-48900 merges, zero id mismatches).
+values verified id-for-id against that checkpoint's OWN `tokenizer.json`.** `pre`
+names a splitting rule and llama.cpp keeps a different regex per name; the 18
+`gpt2` files carry 13 distinct values. **Five are verified, each 0 of 130 cases
+disagreeing with its reference:** `smollm`, `gpt-2`, `falcon`, `qwen2`,
+`deepseek-coder`.
+
+The table stores each checkpoint's declared pre-tokenizer and normalizer as its
+own JSON, copied verbatim, so provenance is auditable by diffing against the
+published `tokenizer.json` — and so a 130-character regex like `qwen2`'s is never
+retyped. A reference is admitted only after its vocab is checked against the
+GGUF's: `gpt-2` and `falcon` match exactly, while `qwen2` and `deepseek-coder`
+carry extra GGUF tokens confirmed to sit entirely at the tail.
+
+**A defect in the shipped path was found doing this and is fixed here.** Special
+tokens were registered from four named ids only — `unknown`/`bos`/`eos`/
+`padding` — so any OTHER control token tokenized as ordinary text. Measured on
+SmolLM2 against its own reference, `"<repo_name>"` is token 3 and came out as
+the five characters `[44, 22139, 79, 1245, 46]`. It hid because that checkpoint's
+`bos`/`eos` are `<|im_start|>`/`<|im_end|>`, so the tokens a chat prompt actually
+contains were covered and the rest were not. Registration now reads
+`tokenizer.ggml.token_type` (3 CONTROL, 4 USER_DEFINED).
+
+*(That array is `I32` in this corpus and `Value::to_i64()` returns `Err` for
+`I32`, so the first extraction returned an empty list — and an empty list reads
+exactly like "this checkpoint has no control tokens". The fix was found only
+because the reference comparison stayed red after the change that should have
+fixed it.)*
 
 **The remaining 12 are refused deliberately, and the measurement says why.**
 Candidate pre-tokenizers were scored against llama.cpp b10757 over the
