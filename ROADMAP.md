@@ -66,19 +66,40 @@ src/multi_gpu/tensor_parallel.rs:222     Hybrid sharding strategy not yet implem
 src/multi_gpu/tensor_parallel.rs:248     Hybrid sharding (second site)
 ```
 
-`CacheSyncStrategy` offers three variants and implements one. These are **public
-enum variants a caller can select**, and selecting them fails.
+**And `Replicated` — the variant this block first credited as implemented — is
+not implemented either.** `distributed_cache.rs` copies K/V to each device and
+then `drop`s the result; its own comments read *"would integrate with actual
+cache in M3.6 Task 6"* and *"For now, we've prepared the infrastructure."* So
+`CacheSyncStrategy` offers **three variants and implements none**: two bail
+loudly and one succeeds while doing nothing.
+
+*(This block said "implements one" until review caught it. A summary correcting
+false completion claims that itself overstated an implementation is the same
+defect one level up, and it is recorded rather than quietly patched.)*
+
+These are **public enum variants a caller can select**, and selecting them either
+fails or silently no-ops.
 
 **2. `✅ COMPLETE: GGUF/other Candle-supported quant formats usable end-to-end`.**
 Measured by `tests/gguf_corpus_sweep.rs` over every local GGUF:
 
 ```
-30 files: 1 REBUILT, 29 REFUSED
-  13  tokenizer.ggml.model = "gpt2"  (all 9 SmolLM2 builds, qwen2, falcon, starcoder, llama-bpe, ...)
-   3  model = "llama" but NO merges  (llama-spm, phi-3, baichuan)
-   3  bert / t5 / gemma4
-   4  unreadable before reaching the tokenizer
+30 files total = 1 REBUILT + 29 that do not load
+
+  1  rebuilt          TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF Q4_0
+ 24  refused by the tokenizer
+       18  tokenizer.ggml.model = "gpt2"   (SmolLM2, qwen2, falcon, starcoder, llama-bpe, ...)
+        3  model = "llama" but NO merges   (llama-spm, phi-3, baichuan)
+        1  bert     1  t5     1  gemma4
+  5  unreadable BEFORE the tokenizer is reached
+        2  header parse failure  (tinyllamas-stories-260k, ggml-vocab-aquila)
+        3  unknown tensor dtype  (SmolLM2 IQ3_XS, IQ4_XS, Q2_K)
 ```
+
+*(An earlier version of this block said 13 gpt2 and 4 unreadable, which summed to
+24 of 30 and left six files unaccounted for. Review caught the arithmetic; the
+figures above are re-measured and add up. The gpt2 count is **18**, not 13 — so
+gpt2 support closes more than first reported, not less.)*
 
 **One checkpoint loads** — `TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF` Q4_0, the one
 the tokenizer fix was developed against. Its completion is coherent but carries an
@@ -98,6 +119,15 @@ closed is an honest gap.** These are open work, not false claims.
   and that claim was not checked here.)
 - **Quantization has open dtype holes** — `src/quantization/mod.rs:245` and `:325`
   bail for unlisted dtypes, on both quantize and dequantize.
+
+### And one claim that is unreconciled rather than false
+
+**`M3.5 — Testing & Hardening` ✅ COMPLETE (October 2025)** is not contradicted by
+a bail or a panic, so it is not in the three above. But much of its content is a
+**design** — "testing strategy designed", a 28-configuration validation matrix,
+benchmarks "phased" — while the tree carries **111 `#[ignore]` markers** and
+**three acceptance tests that never run in CI**. Read it as *"infrastructure and
+strategy exist"*, not *"the matrix runs"*. Marked in place at its own section.
 
 **13 executable unimplemented sites across 7 files** (a 14th match is a doc
 comment referencing one of them).
@@ -120,7 +150,7 @@ comment referencing one of them).
 | **M5.5 — CLI, Deployment & Operations** | **PLANNED — this is the v1.0 gate** |
 | M5.6 — Hardware-specific optimizations | PLANNED (post-v1.0; needs hardware/funding) |
 | M6 — Research explorations | PLANNED |
-| M6.5 — Elastic KV cache w/ virtual memory | "READY TO IMPLEMENT", 8 open items |
+| M6.5 — Elastic KV cache w/ virtual memory | **PLANNED** — 8 open items. Its own section says "READY TO IMPLEMENT", which is not one of the five statuses in this document's legend; per the legend, designed-but-not-started is PLANNED. Its blocking dependency (`candle-cuda-vmm`) is published. |
 | M6.6 — Semantic Coordinate Space models | PLANNED (post-v1.0) |
 | CR.1–CR.4 — Continuous reasoning / coprogrammer | PLANNED (research) |
 | M7 — Sentience infrastructure | PLANNED (5–10 year) |
@@ -625,8 +655,8 @@ M2 — Performance enablers (0.3)
 
 - Quantized model loaders via Candle
   - ⚠️ **CONTRADICTED (measured 2026-09-01)**: GGUF/other quant formats usable
-  end-to-end — **1 of 30 local GGUF files loads; 29 are refused.** See the
-  VERIFIED STATUS block at the top and `tests/gguf_corpus_sweep.rs`.
+    end-to-end — **1 of 30 local GGUF files loads; 29 do not.** See the VERIFIED
+    STATUS block at the top and `tests/gguf_corpus_sweep.rs`.
   - Acceptance: ✅ run quantized tiny model locally; parity tests pass
   - References: low-bit LLMs survey; model compression survey
 - Lightning GGUF loader with memory-mapped tensor access
@@ -743,7 +773,13 @@ M3 — Acceleration features (0.4)
 
 M3.5 — Testing & Hardening (0.4+)
 
-**Status**: ✅ COMPLETE (October 2025)
+**Status**: ⚠️ **CLAIMED COMPLETE (October 2025) — PARTIALLY UNRECONCILED.**
+Much of the content below is a *design*: "testing strategy designed",
+"validation matrix" of 28 configurations, quality benchmarks "phased". What is
+built is built, but the tree carries **111 `#[ignore]` markers** and **three
+behavioural acceptance tests that never run in CI** (no GPU runner, by cost
+decision) — see the VERIFIED STATUS block at the top. Read this section as
+"infrastructure and strategy exist", not "the matrix runs".
 
 **Implementation Summary**:
 
@@ -838,7 +874,8 @@ M3.6 — Multi-GPU Inference (0.4+)
 **Status**: ⚠️ **CLAIMED COMPLETE (October 27, 2025) — CONTRADICTED.**
 Eight selectable paths bail at runtime: `Sharded`/`Hybrid` cache sync,
 `PipeDream`/`Interleaved1F1B` pipeline scheduling, `Hybrid` tensor sharding.
-`CacheSyncStrategy` offers three variants and implements one. Measured
+`CacheSyncStrategy` offers three variants and implements NONE — `Replicated`
+copies to each device and drops the result. Measured
 2026-09-01; see the VERIFIED STATUS block at the top for the site list.  
 **Added**: Jan 2025 (ChatGPT o1 validation - critical gap for large model serving)  
 **Completed**: October 2025 - Foundation infrastructure for multi-GPU distributed inference
@@ -2415,7 +2452,9 @@ M6 — Research explorations (0.7+)
 
 M6.5 — Elastic KV Cache with Virtual Memory (0.7+)
 
-**Status**: READY TO IMPLEMENT ✅ (candle-cuda-vmm v0.1.0 published!)  
+**Status**: PLANNED — the blocking dependency `candle-cuda-vmm` v0.1.0 is
+published, so this is unblocked rather than started. ("READY TO IMPLEMENT" is
+not one of the five statuses in the legend above; normalised 2026-09-01.)  
 **Added**: October 2025 (Inspired by Meta's KVCached library for elastic multi-model serving)  
 **Updated**: October 2025 - `candle-cuda-vmm` crate now available!
 
