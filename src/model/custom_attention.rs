@@ -86,6 +86,91 @@ pub struct BatchedAttention {
 
     // Whether to capture attention weights for eviction policies
     capture_attention: bool,
+
+    /// Which dimension pairing RoPE rotates. Determined by where the weights
+    /// came from — see [`RopeLayout`].
+    rope_layout: RopeLayout,
+}
+
+/// Which pairs of head dimensions RoPE rotates together.
+///
+/// **This is a property of the WEIGHTS, not of the architecture**, and getting
+/// it wrong is invisible at position 0 — where `cos = 1`, `sin = 0` and the
+/// rotation is the identity for either pairing — while the error grows with
+/// position index.
+///
+/// Measured 2026-09-02 on `TinyLlama-1.1B-Chat` Q4_0, fitting our logits
+/// against llama.cpp b10757's over its top-100 candidates (`ours = a*ref + b`):
+///
+/// ```text
+///  prompt tokens      a       R^2        with HalfSplit on GGUF weights
+///        1        1.0003    0.9936      <- exact: position 0 is identity
+///        2        0.9720    0.8157
+///        6        0.7106    0.2608
+///       23        0.6086    0.1618
+///       24        0.3103    0.1286      <- served "French" for " capital"
+/// ```
+///
+/// With `AdjacentPair`, every length gives `a` in `[0.999, 1.008]` and
+/// `R^2 >= 0.9959`, and `seq_len=1` is unchanged — the control that shows the
+/// change did this and nothing else.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RopeLayout {
+    /// Pair `x[i]` with `x[i + head_dim/2]` — HuggingFace `rotate_half`.
+    ///
+    /// Correct for weights loaded from HF safetensors.
+    HalfSplit,
+
+    /// Pair `x[2i]` with `x[2i + 1]` — ggml's `ROPE_TYPE_NORM`.
+    ///
+    /// Correct for weights loaded from GGUF. `convert_hf_to_gguf.py` PERMUTES
+    /// `attn_q` and `attn_k` on the way in, precisely so that adjacent-pair
+    /// rotation reproduces what HF's half-split rotation computes. Loading
+    /// those permuted weights and then applying `HalfSplit` rotates the wrong
+    /// dimensions together.
+    AdjacentPair,
+}
+
+/// Apply the RoPE rotation, pairing dimensions according to `layout`.
+///
+/// `x` is `[batch, heads, seq, head_dim]`; `cos`/`sin` are already broadcast to
+/// `[batch, heads, seq, head_dim/2]`. Both layouts apply the SAME rotation to
+/// `head_dim/2` pairs and differ ONLY in which two dimensions form a pair.
+///
+/// Extracted from `BatchedAttention::apply_rotary_emb` so the pairing can be
+/// tested without loading a checkpoint — the defect this distinguishes was
+/// invisible to every test in the tree.
+pub(crate) fn rotate_pairs(
+    x: &Tensor,
+    cos: &Tensor,
+    sin: &Tensor,
+    layout: RopeLayout,
+) -> Result<Tensor> {
+    let shape = x.dims();
+    let (batch, num_heads, seq, head_dim) = (shape[0], shape[1], shape[2], shape[3]);
+    let half_dim = head_dim / 2;
+
+    match layout {
+        RopeLayout::HalfSplit => {
+            let x1 = x.narrow(3, 0, half_dim)?;
+            let x2 = x.narrow(3, half_dim, half_dim)?;
+
+            let out1 = ((&x1 * cos)? - (&x2 * sin)?)?;
+            let out2 = ((&x1 * sin)? + (&x2 * cos)?)?;
+
+            Tensor::cat(&[out1, out2], 3)
+        }
+        RopeLayout::AdjacentPair => {
+            let xp = x.reshape((batch, num_heads, seq, half_dim, 2))?;
+            let x1 = xp.narrow(4, 0, 1)?.squeeze(4)?.contiguous()?;
+            let x2 = xp.narrow(4, 1, 1)?.squeeze(4)?.contiguous()?;
+
+            let out1 = ((&x1 * cos)? - (&x2 * sin)?)?;
+            let out2 = ((&x1 * sin)? + (&x2 * cos)?)?;
+
+            Tensor::stack(&[out1, out2], 4)?.reshape((batch, num_heads, seq, head_dim))
+        }
+    }
 }
 
 impl BatchedAttention {
@@ -144,6 +229,7 @@ impl BatchedAttention {
             use_flash_attn,
             device,
             capture_attention: false,
+            rope_layout: RopeLayout::HalfSplit,
         })
     }
 
@@ -220,6 +306,7 @@ impl BatchedAttention {
             use_flash_attn,
             device: device.clone(),
             capture_attention: false,
+            rope_layout: RopeLayout::AdjacentPair,
         })
     }
 
@@ -714,17 +801,7 @@ impl BatchedAttention {
         let cos_slice = cos_slice.broadcast_as(&target_shape[..])?;
         let sin_slice = sin_slice.broadcast_as(&target_shape[..])?;
 
-        // Split x into two halves along head_dim
-        let x1 = x.narrow(3, 0, half_dim)?;
-        let x2 = x.narrow(3, half_dim, half_dim)?;
-
-        // Apply RoPE formula:
-        // x_out = [x1 * cos - x2 * sin, x1 * sin + x2 * cos]
-        let out1 = ((&x1 * &cos_slice)? - (&x2 * &sin_slice)?)?;
-        let out2 = ((&x1 * &sin_slice)? + (&x2 * &cos_slice)?)?;
-
-        // Concatenate back
-        Tensor::cat(&[out1, out2], 3)
+        rotate_pairs(x, &cos_slice, &sin_slice, self.rope_layout)
     }
     /// Compute batched attention scores and apply to values
     ///
@@ -1439,5 +1516,89 @@ mod tests {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod rope_layout_tests {
+    use super::*;
+    use candlelight::core::Device;
+
+    /// `x = [1, 2, 3, 4]` as `[batch=1, heads=1, seq=1, head_dim=4]`.
+    fn x4() -> Tensor {
+        Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0], (1, 1, 1, 4), &Device::Cpu).unwrap()
+    }
+
+    fn pair(c: f32, s: f32) -> (Tensor, Tensor) {
+        (
+            Tensor::from_vec(vec![c, c], (1, 1, 1, 2), &Device::Cpu).unwrap(),
+            Tensor::from_vec(vec![s, s], (1, 1, 1, 2), &Device::Cpu).unwrap(),
+        )
+    }
+
+    fn flat(t: &Tensor) -> Vec<f32> {
+        t.flatten_all().unwrap().to_vec1::<f32>().unwrap()
+    }
+
+    /// **AT POSITION 0 THE TWO LAYOUTS ARE INDISTINGUISHABLE.**
+    ///
+    /// This is not a curiosity — it is the reason a wrong pairing shipped. At
+    /// position 0, `cos = 1` and `sin = 0`, so the rotation is the identity
+    /// whichever dimensions are paired. Any test, gate or eyeball check that
+    /// exercises a single token cannot tell the layouts apart, and a
+    /// single-token forward pass was measured EXACT against llama.cpp
+    /// (`a = 1.0003`, `R^2 = 0.9936`) while the 24-token one was serving the
+    /// wrong word.
+    #[test]
+    fn at_position_zero_both_layouts_are_the_identity() {
+        let (cos, sin) = pair(1.0, 0.0);
+        let half = rotate_pairs(&x4(), &cos, &sin, RopeLayout::HalfSplit).unwrap();
+        let adj = rotate_pairs(&x4(), &cos, &sin, RopeLayout::AdjacentPair).unwrap();
+        assert_eq!(flat(&half), vec![1.0, 2.0, 3.0, 4.0]);
+        assert_eq!(flat(&adj), vec![1.0, 2.0, 3.0, 4.0]);
+    }
+
+    /// And away from position 0 they are NOT the same operation.
+    ///
+    /// The pair to the test above: without this one, "both layouts agree" would
+    /// be satisfied by a `rotate_pairs` that ignored `layout` entirely, and the
+    /// identity test alone cannot tell correct from constant.
+    ///
+    /// At `cos = 0, sin = 1` (a quarter turn):
+    /// - `HalfSplit` pairs `(1,3)` and `(2,4)` -> `[-3, -4, 1, 2]`
+    /// - `AdjacentPair` pairs `(1,2)` and `(3,4)` -> `[-2, 1, -4, 3]`
+    #[test]
+    fn away_from_position_zero_the_layouts_diverge() {
+        let (cos, sin) = pair(0.0, 1.0);
+        let half = rotate_pairs(&x4(), &cos, &sin, RopeLayout::HalfSplit).unwrap();
+        let adj = rotate_pairs(&x4(), &cos, &sin, RopeLayout::AdjacentPair).unwrap();
+        assert_eq!(flat(&half), vec![-3.0, -4.0, 1.0, 2.0]);
+        assert_eq!(flat(&adj), vec![-2.0, 1.0, -4.0, 3.0]);
+        assert_ne!(flat(&half), flat(&adj));
+    }
+
+    /// The WIRING, which is the half that was actually wrong: both rotations
+    /// were always expressible, only one was ever reachable.
+    ///
+    /// A safetensors-constructed attention must select `HalfSplit`, because HF
+    /// checkpoints store `attn_q`/`attn_k` unpermuted. The GGUF side of this
+    /// pairing is gated behaviourally by `tests/gguf_serving_e2e.rs`, which
+    /// needs a real checkpoint and so cannot live here.
+    ///
+    /// (An earlier version of this test asserted `RopeLayout::AdjacentPair ==
+    /// RopeLayout::AdjacentPair`, which is a tautology that would pass against
+    /// any wiring whatsoever. It is recorded rather than quietly replaced,
+    /// because a vacuous test is indistinguishable from a passing one on every
+    /// report anyone reads.)
+    #[test]
+    fn a_safetensors_attention_selects_half_split() {
+        let vb = candlelight::nn::VarBuilder::zeros(candlelight::DType::F32, &Device::Cpu);
+        let attn =
+            BatchedAttention::new(64, 4, 4, vb).expect("constructing from a zeros VarBuilder");
+        assert_eq!(
+            attn.rope_layout,
+            RopeLayout::HalfSplit,
+            "HF safetensors weights are unpermuted and need rotate_half"
+        );
     }
 }

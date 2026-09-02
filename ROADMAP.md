@@ -104,26 +104,47 @@ gpt2 support closes more than first reported, not less.)*
 **One checkpoint loads** — `TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF` Q4_0, the one
 the tokenizer fix was developed against.
 
-**The artifact string recorded here was `"France| Paris, France</s>"`. That is
-STALE** — it was measured before the BOS fix (PR #19) and is retained only as
-provenance. **Measured 2026-09-02 at `9763030`, the served completion is
-`"The French capital of France.</s>"`**: still wrong, but wrong differently, and
-quoting the old string would send the next reader hunting a defect that no longer
-presents that way.
+**FIXED 2026-09-02.** This checkpoint now serves
+`"The capital of France is Paris.</s>"` and `tests/gguf_serving_e2e.rs`'s
+`a_gguf_is_served_a_coherent_answer` passes.
 
-**The remaining defect is now localised to the forward pass.** Given input proven
-identical id-for-id across 24 tokens, llama.cpp b10757 predicts `" capital"` and
-this engine predicts `"French"`. Positions are correct at the seam (`23, 24, 25,
-26` on two independently-maintained counters) and a single-pass prefill of 24
-tokens reproduces the decode path's answer exactly, so **the prefill→decode seam
-is ruled out**; intra-pass KV handling is not. The engine agrees with the
-reference at 23 tokens and disagrees at 24 — **input-dependent, not uniformly
-broken.**
+**Root cause: the RoPE dimension pairing.** `apply_rotary_emb` paired `x[i]`
+with `x[i + head_dim/2]` — HuggingFace's `rotate_half` — for weights loaded
+from GGUF. Llama-architecture GGUF uses ggml's `ROPE_TYPE_NORM`, which pairs
+`x[2i]` with `x[2i+1]`, and `convert_hf_to_gguf.py` PERMUTES `attn_q`/`attn_k`
+on the way in precisely so that adjacent-pair rotation reproduces what HF's
+half-split rotation computes. Loading those permuted weights and applying
+`HalfSplit` rotates the wrong dimensions together.
 
-**Minimal reproduction is six tokens**, needing no chat template, no BOS
-handling and no cache: `"The capital of France is"` → this engine answers
-`"a"`, llama.cpp answers `" Paris"`. The recorded test carrying this experiment
-and its control arm lands with the diagnosis, not with this entry.
+**Why it survived every gate:** at position 0, `cos = 1` and `sin = 0`, so the
+rotation is the IDENTITY for either pairing. A single-token forward pass was
+measured EXACT against llama.cpp — and every cheaper check looked at token
+identity, which the compression only reorders once it is large enough.
+
+Measured by fitting our logits against llama.cpp b10757 over its top-100
+candidates (`ours = a·ref + b`), before → after:
+
+```
+ prompt tokens        a                    R²              max|residual|
+       1        1.0003 -> 1.0003    0.9936 -> 0.9936     0.073 -> 0.073
+       2        0.9720 -> 1.0078    0.8157 -> 0.9985     1.543 -> 0.152
+       6        0.7106 -> 1.0013    0.2608 -> 0.9991     3.961 -> 0.114
+      23        0.6086 -> 1.0030    0.1618 -> 0.9959     9.400 -> 0.328
+      24        0.3103 -> 0.9994    0.1286 -> 0.9991     7.224 -> 0.156
+```
+
+`seq_len=1` is UNCHANGED, which is the control: position 0 is the identity
+rotation, so the pairing cannot matter there, and the fix therefore did this
+and nothing else. The residual 0.07–0.33 is ordinary Q4_0/f32 implementation
+difference.
+
+The pairing is now a property of the weight SOURCE (`RopeLayout::HalfSplit` for
+safetensors, `AdjacentPair` for GGUF) rather than a constant, so the fix does
+not break the HF path — both constructors are live.
+
+*(The artifact string this block recorded for months, `"France| Paris,
+France</s>"`, was already stale before the fix: it predated the BOS fix in #19.
+Retained here only as provenance.)*
 
 **3. `M5 KV cache compression (COMPLETE)`** is cited as a satisfied dependency by
 CR.1 and CR.2 (lines ~2701, ~2748).
