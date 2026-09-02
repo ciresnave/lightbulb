@@ -421,57 +421,68 @@ mod tests {
         Ok(())
     }
 
-    /// **The claim that matters: a sharded linear must compute what the
-    /// unsharded one computes.**
+    /// A sharded linear must compute what the unsharded one computes.
     ///
-    /// Both non-bailing strategies, against a directly-computed
-    /// `input @ weights^T + bias`. Nothing in this repo asserted this before —
-    /// the previous test checked output shape and that the call returned `Ok`.
-    #[test]
-    fn a_sharded_linear_equals_the_unsharded_one() -> Result<()> {
-        let weights = Tensor::randn(0.0f32, 1.0, (4, 8), &Device::Cpu)?;
-        let bias = Tensor::randn(0.0f32, 1.0, (4,), &Device::Cpu)?;
-        let input = Tensor::randn(0.0f32, 1.0, (2, 8), &Device::Cpu)?;
-        let expected = input.matmul(&weights.t()?)?.broadcast_add(&bias)?;
+    /// Shared by the four tests below so each STRATEGY and each WORLD SIZE is
+    /// its own named test. Looping them inside one test works, but a failure
+    /// then reports one name for four claims and you have to read the message
+    /// to learn which combination broke.
+    fn assert_matches_unsharded(
+        strategy: ShardingStrategy,
+        world_size: usize,
+        out_features: usize,
+        in_features: usize,
+        batch: usize,
+        with_bias: bool,
+    ) -> Result<()> {
+        let weights = Tensor::randn(0.0f32, 1.0, (out_features, in_features), &Device::Cpu)?;
+        let input = Tensor::randn(0.0f32, 1.0, (batch, in_features), &Device::Cpu)?;
+        let bias = if with_bias {
+            Some(Tensor::randn(0.0f32, 1.0, (out_features,), &Device::Cpu)?)
+        } else {
+            None
+        };
+        let expected = match &bias {
+            Some(b) => input.matmul(&weights.t()?)?.broadcast_add(b)?,
+            None => input.matmul(&weights.t()?)?,
+        };
 
-        for strategy in [ShardingStrategy::ColumnWise, ShardingStrategy::RowWise] {
-            let sharded =
-                ShardedLinear::from_full_weights(&weights, Some(&bias), &cpus(2), strategy)?;
-            let got = sharded.forward(&input)?;
-            assert_eq!(
-                got.dims(),
-                expected.dims(),
-                "{strategy:?} produced the wrong shape"
-            );
-            let diff = max_abs_diff(&got, &expected);
-            assert!(
-                diff < 1e-4,
-                "{strategy:?} disagrees with the unsharded result by {diff}"
-            );
-        }
+        let sharded =
+            ShardedLinear::from_full_weights(&weights, bias.as_ref(), &cpus(world_size), strategy)?;
+        let got = sharded.forward(&input)?;
+        assert_eq!(got.dims(), expected.dims(), "wrong output shape");
+        let diff = max_abs_diff(&got, &expected);
+        assert!(diff < 1e-4, "disagrees with the unsharded result by {diff}");
         Ok(())
+    }
+
+    /// **The claim that matters, with a bias — this is the case that was
+    /// broken.** `forward` added the bias with `+` where the shapes need
+    /// `broadcast_add`, so every biased sharded linear failed at runtime.
+    #[test]
+    fn column_wise_with_bias_equals_the_unsharded_linear() -> Result<()> {
+        assert_matches_unsharded(ShardingStrategy::ColumnWise, 2, 4, 8, 2, true)
+    }
+
+    /// The other implemented strategy, same claim. It had the same defect.
+    #[test]
+    fn row_wise_with_bias_equals_the_unsharded_linear() -> Result<()> {
+        assert_matches_unsharded(ShardingStrategy::RowWise, 2, 4, 8, 2, true)
     }
 
     /// And it holds for a world size that is not 2.
     ///
-    /// The pair to the test above: a two-way split can be right by symmetry in
-    /// ways a four-way split is not, and every existing fixture used two.
+    /// The necessary pair to the two above: a two-way split can be right by
+    /// symmetry in ways a four-way split is not, and every fixture that existed
+    /// before used two.
     #[test]
-    fn a_sharded_linear_is_correct_for_four_way_sharding() -> Result<()> {
-        let weights = Tensor::randn(0.0f32, 1.0, (8, 16), &Device::Cpu)?;
-        let input = Tensor::randn(0.0f32, 1.0, (3, 16), &Device::Cpu)?;
-        let expected = input.matmul(&weights.t()?)?;
+    fn column_wise_is_correct_for_four_way_sharding() -> Result<()> {
+        assert_matches_unsharded(ShardingStrategy::ColumnWise, 4, 8, 16, 3, false)
+    }
 
-        for strategy in [ShardingStrategy::ColumnWise, ShardingStrategy::RowWise] {
-            let sharded = ShardedLinear::from_full_weights(&weights, None, &cpus(4), strategy)?;
-            let got = sharded.forward(&input)?;
-            let diff = max_abs_diff(&got, &expected);
-            assert!(
-                diff < 1e-4,
-                "{strategy:?} with world size 4 disagrees by {diff}"
-            );
-        }
-        Ok(())
+    #[test]
+    fn row_wise_is_correct_for_four_way_sharding() -> Result<()> {
+        assert_matches_unsharded(ShardingStrategy::RowWise, 4, 8, 16, 3, false)
     }
 
     /// `Hybrid` is a selectable public variant and is not implemented; it must
