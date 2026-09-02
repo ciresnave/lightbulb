@@ -461,12 +461,33 @@ impl Content {
         };
         match pre {
             // Verified against `SmolLM2-360M-Instruct/tokenizer.json`, whose
-            // vocab and merges are BYTE-IDENTICAL to the SmolLM2 GGUFs in the
-            // corpus (49152 tokens, 48900 merges, zero id mismatches). Its
             // `pre_tokenizer` is a Sequence of `Digits{individual_digits:true}`
-            // then `ByteLevel{add_prefix_space:false}` — the digit split is the
+            // then `ByteLevel{add_prefix_space:false}`. The digit split is the
             // part that distinguishes it from plain GPT-2, which encodes
-            // " 12345" as " 123" + "45".
+            // " 12345" as " 123" + "45"; both halves are load-bearing and
+            // `gguf_bpe_tokenizer_fidelity` fails 1 of 30 cases without the
+            // `Digits`.
+            //
+            // ⚠️ ONE LINK IN THIS CHAIN IS CORROBORATED, NOT PROVEN. The
+            // reference is the 360M build; the corpus files are 135M. Their
+            // VOCAB AND MERGES were verified byte-identical (49152 tokens,
+            // 48900 merges, zero id mismatches), so the vocab substitution is
+            // established. The PRE_TOKENIZER SPEC is taken from the 360M and
+            // ASSUMED SHARED — no 135M `tokenizer.json` was available locally.
+            //
+            // What corroborates it: our output matches llama.cpp on 128 of 130
+            // cases for this checkpoint, and a genuinely different splitting
+            // rule would diverge far more than twice. What would settle it: the
+            // 135M's own `tokenizer.json`. Recorded because an assumption this
+            // load-bearing outlives the person who knew it was one.
+            //
+            // (Separately, and NOT a defect on our side: those 2 divergences
+            // are llama.cpp's. Measured three ways over the same 130 cases —
+            // ours vs the HF reference 0 disagree, ours vs llama.cpp 2, HF vs
+            // llama.cpp THE SAME 2. llama.cpp's SMOLLM regex omits the trailing
+            // `|\s+` alternative that the checkpoint's declared ByteLevel rule
+            // carries; its own source comments the rewrite. We match the
+            // checkpoint, which is the thing the model was trained with.)
             "smollm" => Some(
                 Sequence::new(vec![
                     Digits::new(true).into(),
