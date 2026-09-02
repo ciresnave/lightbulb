@@ -146,31 +146,48 @@ pub(crate) fn rotate_pairs(
     sin: &Tensor,
     layout: RopeLayout,
 ) -> Result<Tensor> {
-    let shape = x.dims();
-    let (batch, num_heads, seq, head_dim) = (shape[0], shape[1], shape[2], shape[3]);
-    let half_dim = head_dim / 2;
-
     match layout {
-        RopeLayout::HalfSplit => {
-            let x1 = x.narrow(3, 0, half_dim)?;
-            let x2 = x.narrow(3, half_dim, half_dim)?;
-
-            let out1 = ((&x1 * cos)? - (&x2 * sin)?)?;
-            let out2 = ((&x1 * sin)? + (&x2 * cos)?)?;
-
-            Tensor::cat(&[out1, out2], 3)
-        }
-        RopeLayout::AdjacentPair => {
-            let xp = x.reshape((batch, num_heads, seq, half_dim, 2))?;
-            let x1 = xp.narrow(4, 0, 1)?.squeeze(4)?.contiguous()?;
-            let x2 = xp.narrow(4, 1, 1)?.squeeze(4)?.contiguous()?;
-
-            let out1 = ((&x1 * cos)? - (&x2 * sin)?)?;
-            let out2 = ((&x1 * sin)? + (&x2 * cos)?)?;
-
-            Tensor::stack(&[out1, out2], 4)?.reshape((batch, num_heads, seq, head_dim))
-        }
+        RopeLayout::HalfSplit => rotate_half_split(x, cos, sin),
+        RopeLayout::AdjacentPair => rotate_adjacent_pair(x, cos, sin),
     }
+}
+
+/// The rotation itself. **Identical for both layouts** — that is the whole
+/// point, and having it in one place means the two cannot drift.
+///
+/// Given a pair of half-width tensors, returns the rotated pair. Which two
+/// dimensions were paired to produce `x1`/`x2` is the caller's business and the
+/// only thing that differs between layouts.
+fn rotate(x1: &Tensor, x2: &Tensor, cos: &Tensor, sin: &Tensor) -> Result<(Tensor, Tensor)> {
+    let out1 = ((x1 * cos)? - (x2 * sin)?)?;
+    let out2 = ((x1 * sin)? + (x2 * cos)?)?;
+    Ok((out1, out2))
+}
+
+/// Pair `x[i]` with `x[i + head_dim/2]` — HuggingFace `rotate_half`.
+///
+/// Correct for weights loaded from HF safetensors. See [`RopeLayout`].
+fn rotate_half_split(x: &Tensor, cos: &Tensor, sin: &Tensor) -> Result<Tensor> {
+    // `dims4()?` rather than `dims()[3]`: the latter panics on a tensor that is
+    // not rank 4, and its sibling below is already checked.
+    let half_dim = x.dims4()?.3 / 2;
+    let x1 = x.narrow(3, 0, half_dim)?;
+    let x2 = x.narrow(3, half_dim, half_dim)?;
+    let (out1, out2) = rotate(&x1, &x2, cos, sin)?;
+    Tensor::cat(&[out1, out2], 3)
+}
+
+/// Pair `x[2i]` with `x[2i + 1]` — ggml `ROPE_TYPE_NORM`.
+///
+/// Correct for weights loaded from GGUF. See [`RopeLayout`].
+fn rotate_adjacent_pair(x: &Tensor, cos: &Tensor, sin: &Tensor) -> Result<Tensor> {
+    let (batch, num_heads, seq, head_dim) = x.dims4()?;
+    let half_dim = head_dim / 2;
+    let xp = x.reshape((batch, num_heads, seq, half_dim, 2))?;
+    let x1 = xp.narrow(4, 0, 1)?.squeeze(4)?.contiguous()?;
+    let x2 = xp.narrow(4, 1, 1)?.squeeze(4)?.contiguous()?;
+    let (out1, out2) = rotate(&x1, &x2, cos, sin)?;
+    Tensor::stack(&[out1, out2], 4)?.reshape((batch, num_heads, seq, head_dim))
 }
 
 impl BatchedAttention {
