@@ -21,8 +21,42 @@ const MODEL_PATH: &str = "../models/Qwen3-32B-AWQ";
 const TOLERANCE_RTOL: f32 = 1e-4; // Relative tolerance
 const TOLERANCE_ATOL: f32 = 1e-5; // Absolute tolerance
 
-fn model_available() -> bool {
-    Path::new(MODEL_PATH).exists()
+/// The checkpoint these tests need, or a LOUD FAILURE.
+///
+/// # Why this panics instead of returning a bool
+///
+/// Every test here used to open with a skip that RETURNED SUCCESS:
+///
+/// ```text
+/// if !model_available() {
+///     println!("Skipping test: model not found");
+///     return Ok(());
+/// }
+/// ```
+///
+/// **Measured 2026-09-02.** Run exactly as this file's header documents —
+/// `cargo test --test enhanced_correctness_tests -- --ignored` — that produced
+/// `test result: ok. 8 passed; 0 failed` with ZERO assertions executed. The
+/// `println!` is swallowed without `--nocapture`, so an operator following the
+/// documented invocation saw eight green tests and nothing else. The only tell
+/// was `finished in 0.00s`.
+///
+/// These tests are already `#[ignore]`d, so running them is a deliberate act.
+/// A missing checkpoint is then a SETUP ERROR, not a reason to report success.
+/// The `#[ignore]` is an honest gate — it does not run and does not claim to.
+/// A skip that passes is the dishonest half, and it SURVIVES removing the
+/// honest one: delete the `#[ignore]` and these go green while asserting
+/// nothing.
+///
+/// `LIGHTBULB_AWQ_MODEL` overrides the default path, matching how
+/// `gguf_serving_e2e` and the tokenizer fidelity gates take their fixtures.
+fn require_model() -> String {
+    let path = std::env::var("LIGHTBULB_AWQ_MODEL").unwrap_or_else(|_| MODEL_PATH.to_string());
+    assert!(
+        Path::new(&path).exists(),
+        "checkpoint not found at {path:?}. These tests are #[ignore]d and were run explicitly, so a missing checkpoint is a setup error rather than a reason to pass. Set LIGHTBULB_AWQ_MODEL to an AWQ checkpoint directory."
+    );
+    path
 }
 
 /// Helper to compare generated tokens between two runs
@@ -53,10 +87,7 @@ fn tokens_match(a: &[u32], b: &[u32]) -> bool {
 #[test]
 #[ignore] // Requires model files
 fn test_batch_vs_sequential_single_token() -> Result<()> {
-    if !model_available() {
-        println!("Skipping test: model not found");
-        return Ok(());
-    }
+    let model_path = require_model();
 
     println!("\n=== Test: Batch vs Sequential (Single Token) ===\n");
 
@@ -69,7 +100,7 @@ fn test_batch_vs_sequential_single_token() -> Result<()> {
     // Sequential processing (batch_size=1)
     let mut sequential_results = Vec::new();
     for prompt in &prompts {
-        let mut model = ParallelModelManager::load(MODEL_PATH, 1, 512, None, None)?;
+        let mut model = ParallelModelManager::load(&model_path, 1, 512, None, None)?;
         let mut batch = vec![RequestContext::new(Request {
             id: "seq".to_string(),
             prompt: prompt.to_string(),
@@ -81,7 +112,7 @@ fn test_batch_vs_sequential_single_token() -> Result<()> {
     }
 
     // Batched processing (batch_size=3)
-    let mut model = ParallelModelManager::load(MODEL_PATH, 3, 512, None, None)?;
+    let mut model = ParallelModelManager::load(&model_path, 3, 512, None, None)?;
     let mut batch: Vec<_> = prompts
         .iter()
         .enumerate()
@@ -116,10 +147,7 @@ fn test_batch_vs_sequential_single_token() -> Result<()> {
 #[test]
 #[ignore]
 fn test_batch_vs_sequential_multi_token() -> Result<()> {
-    if !model_available() {
-        println!("Skipping test: model not found");
-        return Ok(());
-    }
+    let model_path = require_model();
 
     println!("\n=== Test: Batch vs Sequential (10 Tokens) ===\n");
 
@@ -129,7 +157,7 @@ fn test_batch_vs_sequential_multi_token() -> Result<()> {
     // Sequential processing
     let mut sequential_results = Vec::new();
     for prompt in &prompts {
-        let mut model = ParallelModelManager::load(MODEL_PATH, 1, 512, None, None)?;
+        let mut model = ParallelModelManager::load(&model_path, 1, 512, None, None)?;
         let mut batch = vec![RequestContext::new(Request {
             id: "seq".to_string(),
             prompt: prompt.to_string(),
@@ -147,7 +175,7 @@ fn test_batch_vs_sequential_multi_token() -> Result<()> {
     }
 
     // Batched processing
-    let mut model = ParallelModelManager::load(MODEL_PATH, 2, 512, None, None)?;
+    let mut model = ParallelModelManager::load(&model_path, 2, 512, None, None)?;
     let mut batch: Vec<_> = prompts
         .iter()
         .enumerate()
@@ -190,10 +218,7 @@ fn test_batch_vs_sequential_multi_token() -> Result<()> {
 #[test]
 #[ignore]
 fn test_variable_sequence_lengths() -> Result<()> {
-    if !model_available() {
-        println!("Skipping test: model not found");
-        return Ok(());
-    }
+    let model_path = require_model();
 
     println!("\n=== Test: Variable Sequence Lengths ===\n");
 
@@ -203,7 +228,7 @@ fn test_variable_sequence_lengths() -> Result<()> {
         "Long prompt with significantly more context and many words to process".repeat(4), // ~100 tokens
     ];
 
-    let mut model = ParallelModelManager::load(MODEL_PATH, 3, 512, None, None)?;
+    let mut model = ParallelModelManager::load(&model_path, 3, 512, None, None)?;
     let mut batch: Vec<_> = prompts
         .iter()
         .enumerate()
@@ -228,10 +253,7 @@ fn test_variable_sequence_lengths() -> Result<()> {
 #[test]
 #[ignore]
 fn test_kv_cache_consistency() -> Result<()> {
-    if !model_available() {
-        println!("Skipping test: model not found");
-        return Ok(());
-    }
+    let model_path = require_model();
 
     println!("\n=== Test: KV Cache Consistency ===\n");
 
@@ -239,7 +261,7 @@ fn test_kv_cache_consistency() -> Result<()> {
     let prompt = "The meaning of life is";
 
     // First run
-    let mut model1 = ParallelModelManager::load(MODEL_PATH, 1, 512, None, None)?;
+    let mut model1 = ParallelModelManager::load(&model_path, 1, 512, None, None)?;
     let mut batch1 = vec![RequestContext::new(Request {
         id: "run1".to_string(),
         prompt: prompt.to_string(),
@@ -252,7 +274,7 @@ fn test_kv_cache_consistency() -> Result<()> {
     let result1 = batch1[0].generated_tokens.clone();
 
     // Second run (should be identical)
-    let mut model2 = ParallelModelManager::load(MODEL_PATH, 1, 512, None, None)?;
+    let mut model2 = ParallelModelManager::load(&model_path, 1, 512, None, None)?;
     let mut batch2 = vec![RequestContext::new(Request {
         id: "run2".to_string(),
         prompt: prompt.to_string(),
@@ -279,14 +301,11 @@ fn test_kv_cache_consistency() -> Result<()> {
 #[test]
 #[ignore]
 fn test_edge_case_empty_prompt() -> Result<()> {
-    if !model_available() {
-        println!("Skipping test: model not found");
-        return Ok(());
-    }
+    let model_path = require_model();
 
     println!("\n=== Test: Edge Case - Empty Prompt ===\n");
 
-    let mut model = ParallelModelManager::load(MODEL_PATH, 1, 512, None, None)?;
+    let mut model = ParallelModelManager::load(&model_path, 1, 512, None, None)?;
     let mut batch = vec![RequestContext::new(Request {
         id: "empty".to_string(),
         prompt: "".to_string(),
@@ -307,17 +326,14 @@ fn test_edge_case_empty_prompt() -> Result<()> {
 #[test]
 #[ignore]
 fn test_edge_case_max_length() -> Result<()> {
-    if !model_available() {
-        println!("Skipping test: model not found");
-        return Ok(());
-    }
+    let model_path = require_model();
 
     println!("\n=== Test: Edge Case - Max Length ===\n");
 
     let context_len = 128; // Small context for faster testing
     let prompt = "Word ".repeat(100); // Prompt near max length
 
-    let mut model = ParallelModelManager::load(MODEL_PATH, 1, context_len, None, None)?;
+    let mut model = ParallelModelManager::load(&model_path, 1, context_len, None, None)?;
     let mut batch = vec![RequestContext::new(Request {
         id: "maxlen".to_string(),
         prompt: prompt.clone(),
@@ -349,15 +365,12 @@ fn test_edge_case_max_length() -> Result<()> {
 #[test]
 #[ignore]
 fn test_batch_dynamic_completion() -> Result<()> {
-    if !model_available() {
-        println!("Skipping test: model not found");
-        return Ok(());
-    }
+    let model_path = require_model();
 
     println!("\n=== Test: Dynamic Batch Completion ===\n");
 
     // Requests with different max_new_tokens
-    let mut model = ParallelModelManager::load(MODEL_PATH, 3, 512, None, None)?;
+    let mut model = ParallelModelManager::load(&model_path, 3, 512, None, None)?;
     let mut batch = vec![
         RequestContext::new(Request {
             id: "short".to_string(),
@@ -406,10 +419,7 @@ fn test_batch_dynamic_completion() -> Result<()> {
 #[test]
 #[ignore]
 fn test_attention_masking() -> Result<()> {
-    if !model_available() {
-        println!("Skipping test: model not found");
-        return Ok(());
-    }
+    let model_path = require_model();
 
     println!("\n=== Test: Attention Masking ===\n");
 
@@ -420,7 +430,7 @@ fn test_attention_masking() -> Result<()> {
     ];
 
     // Process in batch (padding will be applied)
-    let mut model1 = ParallelModelManager::load(MODEL_PATH, 2, 512, None, None)?;
+    let mut model1 = ParallelModelManager::load(&model_path, 2, 512, None, None)?;
     let mut batch: Vec<_> = prompts
         .iter()
         .enumerate()
@@ -439,7 +449,7 @@ fn test_attention_masking() -> Result<()> {
     let batch_result = batch[0].generated_tokens.clone();
 
     // Process first prompt alone (no padding)
-    let mut model2 = ParallelModelManager::load(MODEL_PATH, 1, 512, None, None)?;
+    let mut model2 = ParallelModelManager::load(&model_path, 1, 512, None, None)?;
     let mut single = vec![RequestContext::new(Request {
         id: "single".to_string(),
         prompt: prompts[0].to_string(),

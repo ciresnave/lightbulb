@@ -70,6 +70,15 @@ use tower::ServiceExt;
 /// asserted byte-for-byte by `gguf_serving_e2e.rs`.
 const RENDERED: &str = "<|user|>\nName the capital of France.</s>\n<|assistant|>\n";
 
+/// Why a missing checkpoint FAILS here rather than skipping.
+///
+/// These are `#[ignore]`d, so running them is a deliberate act and a missing
+/// checkpoint is a setup error. `let Some(p) = gguf_path() else { return }`
+/// reported `ok` for a diagnostic that never executed — the same shape measured
+/// in `enhanced_correctness_tests`, where the documented invocation produced
+/// `8 passed; 0 failed` with zero assertions run.
+const MISSING: &str = "no GGUF checkpoint. Set LIGHTBULB_GGUF to a .gguf file; these tests are #[ignore]d, so being run at all means you intended them to execute.";
+
 fn gguf_path() -> Option<PathBuf> {
     let p = PathBuf::from(std::env::var_os("LIGHTBULB_GGUF")?);
     p.is_file().then_some(p)
@@ -120,7 +129,7 @@ async fn complete_raw(path: &Path, prompt: &str, max_tokens: usize) -> serde_jso
 #[tokio::test]
 #[ignore = "needs the GGUF checkpoint; set LIGHTBULB_GGUF"]
 async fn c1_a0_the_raw_path_reproduces_the_chat_path() {
-    let Some(path) = gguf_path() else { return };
+    let path = gguf_path().expect(MISSING);
     let v = complete_raw(&path, RENDERED, 24).await;
     let text = v["choices"][0]["text"].as_str().unwrap_or("");
     let n = v["usage"]["prompt_tokens"].as_u64().unwrap_or(0);
@@ -139,7 +148,7 @@ async fn c1_a0_the_raw_path_reproduces_the_chat_path() {
 #[tokio::test]
 #[ignore = "needs the GGUF checkpoint; set LIGHTBULB_GGUF"]
 async fn c1_a1_a_24_token_single_pass_prefill() {
-    let Some(path) = gguf_path() else { return };
+    let path = gguf_path().expect(MISSING);
     let prompt = format!("{RENDERED}The");
     let v = complete_raw(&path, &prompt, 8).await;
     let text = v["choices"][0]["text"].as_str().unwrap_or("");
@@ -163,7 +172,7 @@ async fn c1_a1_a_24_token_single_pass_prefill() {
 #[tokio::test]
 #[ignore = "needs the GGUF checkpoint; set LIGHTBULB_GGUF"]
 async fn h2_flatness_across_prompt_lengths() {
-    let Some(path) = gguf_path() else { return };
+    let path = gguf_path().expect(MISSING);
     let long = format!("{RENDERED}The");
     for p in ["", "Hello", "The capital of France is", RENDERED, &long] {
         let v = complete_raw(&path, p, 1).await;
