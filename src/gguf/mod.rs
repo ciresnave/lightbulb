@@ -350,7 +350,7 @@ impl Content {
             })
             .unwrap_or("<absent>");
 
-        let Some(pre_tokenizer) = Self::bpe_pre_tokenizer(pre) else {
+        let Some((pre_json, norm_json)) = Self::bpe_pre_tokenizer(pre) else {
             bail!(
                 "GGUF tokenizer.ggml.pre is {pre:?}, which names a pre-tokenizer splitting rule this build has not verified. Byte-level BPE (`gpt2`) is supported, but only for `pre` values checked id-for-id against a reference: {verified:?}. Refusing to substitute a different rule: the vocab and merges would still load and the output would be plausible and wrong.",
                 verified = Self::VERIFIED_PRE
@@ -375,24 +375,65 @@ impl Content {
             })?;
 
         let mut tokenizer = Tokenizer::new(bpe);
-        // No normalizer: the reference has `normalizer: null`. The SPM path's
-        // Prepend + U+2581 substitution would corrupt byte-level input.
-        tokenizer.with_normalizer(None::<tokenizers::normalizers::NormalizerWrapper>);
+        // The checkpoint's own declared normalizer and pre-tokenizer. Most are
+        // `null`; `qwen2` declares NFC, and the SPM path's Prepend + U+2581
+        // substitution would corrupt byte-level input for all of them.
+        let normalizer: Option<tokenizers::normalizers::NormalizerWrapper> =
+            serde_json::from_str(norm_json).map_err(|e| {
+                anyhow::anyhow!(
+                    "the recorded normalizer for tokenizer.ggml.pre={pre:?} is not valid JSON: {e}"
+                )
+            })?;
+        tokenizer.with_normalizer(normalizer);
+        let pre_tokenizer: tokenizers::pre_tokenizers::PreTokenizerWrapper = serde_json::from_str(
+            pre_json,
+        )
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "the recorded pre-tokenizer for tokenizer.ggml.pre={pre:?} is not valid JSON: {e}"
+            )
+        })?;
         tokenizer.with_pre_tokenizer(Some(pre_tokenizer));
         tokenizer.with_decoder(Some(ByteLevelDecoder::default()));
 
-        // Control tokens must be registered or they tokenize as ordinary text.
-        let specials: Vec<AddedToken> = [
-            self.token_id("tokenizer.ggml.unknown_token_id"),
-            self.token_id("tokenizer.ggml.bos_token_id"),
-            self.token_id("tokenizer.ggml.eos_token_id"),
-            self.token_id("tokenizer.ggml.padding_token_id"),
-        ]
-        .iter()
-        .flatten()
-        .filter_map(|&id| tokens.get(id as usize))
-        .map(|t| AddedToken::from(t.clone(), true))
-        .collect();
+        // EVERY control token must be registered, not just the four named ids.
+        //
+        // This registered only `unknown`/`bos`/`eos`/`padding`, and anything
+        // else the checkpoint marks as a control token then tokenized as
+        // ORDINARY TEXT. Measured on SmolLM2-135M against its own
+        // `tokenizer.json`: `"<repo_name>"` is token 3 for the reference and
+        // came out as `[44, 22139, 79, 1245, 46]` — the characters — for us.
+        // It went unnoticed because that checkpoint's `bos`/`eos` happen to be
+        // `<|im_start|>`/`<|im_end|>`, so the tokens a chat prompt actually
+        // contains were covered by the four-id list and the rest were not.
+        //
+        // `tokenizer.ggml.token_type` carries the answer per token:
+        // 1 NORMAL, 2 UNKNOWN, 3 CONTROL, 4 USER_DEFINED, 5 UNUSED, 6 BYTE.
+        let mut specials: Vec<AddedToken> = Vec::new();
+        let types = self.token_types();
+        if types.len() == tokens.len() {
+            for (id, ty) in types.iter().enumerate() {
+                if matches!(ty, 3 | 4) {
+                    if let Some(t) = tokens.get(id) {
+                        specials.push(AddedToken::from(t.clone(), true));
+                    }
+                }
+            }
+        }
+        // The four named ids as a floor, in case `token_type` is absent or
+        // disagrees in length with the token list.
+        for key in [
+            "tokenizer.ggml.unknown_token_id",
+            "tokenizer.ggml.bos_token_id",
+            "tokenizer.ggml.eos_token_id",
+            "tokenizer.ggml.padding_token_id",
+        ] {
+            if let Some(t) = self.token_id(key).and_then(|id| tokens.get(id as usize)) {
+                if !specials.iter().any(|a| a.content == *t) {
+                    specials.push(AddedToken::from(t.clone(), true));
+                }
+            }
+        }
         if !specials.is_empty() {
             tokenizer.add_special_tokens(&specials);
         }
@@ -446,7 +487,8 @@ impl Content {
 
     /// `tokenizer.ggml.pre` values whose splitting rule has been verified
     /// id-for-id against a reference. See [`Self::bpe_pre_tokenizer`].
-    const VERIFIED_PRE: &'static [&'static str] = &["smollm"];
+    const VERIFIED_PRE: &'static [&'static str] =
+        &["smollm", "gpt-2", "falcon", "qwen2", "deepseek-coder"];
 
     /// The pre-tokenizer for a `tokenizer.ggml.pre` name, or `None` if this
     /// build has not verified that name.
@@ -455,48 +497,89 @@ impl Content {
     /// splitter for unknown names is exactly the failure this module exists to
     /// prevent: the vocab and merges load, encoding succeeds, and the ids are
     /// wrong in a way nothing reports.
-    fn bpe_pre_tokenizer(pre: &str) -> Option<tokenizers::pre_tokenizers::PreTokenizerWrapper> {
-        use tokenizers::pre_tokenizers::{
-            byte_level::ByteLevel, digits::Digits, sequence::Sequence,
-        };
+    /// The declared pre-tokenizer and normalizer for a `tokenizer.ggml.pre`
+    /// name, as JSON, or `None` if this build has not verified that name.
+    ///
+    /// **These are the checkpoints' OWN declarations, copied verbatim from
+    /// their `tokenizer.json`.** Storing them as JSON rather than hand-building
+    /// the equivalent Rust keeps provenance auditable — each string can be
+    /// diffed against the model's published tokenizer — and removes a whole
+    /// class of transcription error: `qwen2`'s rule is a 130-character regex,
+    /// and one mangled backslash in a hand-written copy produces a tokenizer
+    /// that is wrong in ways only a corpus catches.
+    /// `every_verified_pre_spec_deserializes` gates them at test time.
+    ///
+    /// **A table, not a default.** Returning some general-purpose byte-level
+    /// splitter for unknown names is exactly the failure this module exists to
+    /// prevent: the vocab and merges load, encoding succeeds, and the ids are
+    /// wrong with nothing reporting it.
+    ///
+    /// ⚠️ **Verified against each checkpoint's own `tokenizer.json`, NOT against
+    /// llama.cpp.** llama.cpp is not ground truth here: measured over 130 cases
+    /// on SmolLM2, ours vs the reference disagreed 0 times, ours vs llama.cpp 2,
+    /// and the reference vs llama.cpp the SAME 2. Scoring against it would
+    /// reproduce a reference that differs from the checkpoints.
+    fn bpe_pre_tokenizer(pre: &str) -> Option<(&'static str, &'static str)> {
         match pre {
-            // Verified against `SmolLM2-360M-Instruct/tokenizer.json`, whose
-            // `pre_tokenizer` is a Sequence of `Digits{individual_digits:true}`
-            // then `ByteLevel{add_prefix_space:false}`. The digit split is the
-            // part that distinguishes it from plain GPT-2, which encodes
-            // " 12345" as " 123" + "45"; both halves are load-bearing and
-            // `gguf_bpe_tokenizer_fidelity` fails 1 of 30 cases without the
-            // `Digits`.
-            //
-            // ⚠️ ONE LINK IN THIS CHAIN IS CORROBORATED, NOT PROVEN. The
-            // reference is the 360M build; the corpus files are 135M. Their
-            // VOCAB AND MERGES were verified byte-identical (49152 tokens,
-            // 48900 merges, zero id mismatches), so the vocab substitution is
-            // established. The PRE_TOKENIZER SPEC is taken from the 360M and
-            // ASSUMED SHARED — no 135M `tokenizer.json` was available locally.
-            //
-            // What corroborates it: our output matches llama.cpp on 128 of 130
-            // cases for this checkpoint, and a genuinely different splitting
-            // rule would diverge far more than twice. What would settle it: the
-            // 135M's own `tokenizer.json`. Recorded because an assumption this
-            // load-bearing outlives the person who knew it was one.
-            //
-            // (Separately, and NOT a defect on our side: those 2 divergences
-            // are llama.cpp's. Measured three ways over the same 130 cases —
-            // ours vs the HF reference 0 disagree, ours vs llama.cpp 2, HF vs
-            // llama.cpp THE SAME 2. llama.cpp's SMOLLM regex omits the trailing
-            // `|\s+` alternative that the checkpoint's declared ByteLevel rule
-            // carries; its own source comments the rewrite. We match the
-            // checkpoint, which is the thing the model was trained with.)
-            "smollm" => Some(
-                Sequence::new(vec![
-                    Digits::new(true).into(),
-                    ByteLevel::new(false, true, true).into(),
-                ])
-                .into(),
-            ),
+            // Verified against `SmolLM2-360M-Instruct/tokenizer.json`. See the
+            // caveat below on the 360M/135M substitution.
+            "smollm" => Some((
+                r##"{"type":"Sequence","pretokenizers":[{"type":"Digits","individual_digits":true},{"type":"ByteLevel","add_prefix_space":false,"trim_offsets":true,"use_regex":true}]}"##,
+                r##"null"##,
+            )),
+            // openai-community/gpt2 -- verified 0 of 130 cases against that checkpoint's own
+            // `tokenizer.json`, whose vocab and merges match this GGUF.
+            "gpt-2" => Some((
+                r##"{"type":"ByteLevel","add_prefix_space":false,"trim_offsets":true}"##,
+                r##"null"##,
+            )),
+            // tiiuae/falcon-7b -- verified 0 of 130 cases against that checkpoint's own
+            // `tokenizer.json`, whose vocab and merges match this GGUF.
+            "falcon" => Some((
+                r##"{"type":"Sequence","pretokenizers":[{"type":"Punctuation","behavior":"Contiguous"},{"type":"ByteLevel","add_prefix_space":false,"trim_offsets":true,"use_regex":true},{"type":"Digits","individual_digits":false},{"type":"Split","pattern":{"Regex":"[0-9][0-9][0-9]"},"behavior":"Isolated","invert":false}]}"##,
+                r##"null"##,
+            )),
+            // Qwen/Qwen2-7B -- verified 0 of 130 cases against that checkpoint's own
+            // `tokenizer.json`, whose vocab and merges match this GGUF.
+            "qwen2" => Some((
+                r##"{"type":"Sequence","pretokenizers":[{"type":"Split","pattern":{"Regex":"(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\\r\\n\\p{L}\\p{N}]?\\p{L}+|\\p{N}| ?[^\\s\\p{L}\\p{N}]+[\\r\\n]*|\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+"},"behavior":"Isolated","invert":false},{"type":"ByteLevel","add_prefix_space":false,"trim_offsets":false,"use_regex":false}]}"##,
+                r##"{"type":"NFC"}"##,
+            )),
+            // deepseek-ai/deepseek-coder-6.7b-instruct -- verified 0 of 130 cases against that checkpoint's own
+            // `tokenizer.json`, whose vocab and merges match this GGUF.
+            "deepseek-coder" => Some((
+                r##"{"type":"Sequence","pretokenizers":[{"type":"Split","pattern":{"Regex":"[\r\n]"},"behavior":"Isolated","invert":false},{"type":"Split","pattern":{"Regex":"\\s?\\p{L}+"},"behavior":"Isolated","invert":false},{"type":"Split","pattern":{"Regex":"\\s?\\p{P}+"},"behavior":"Isolated","invert":false},{"type":"Split","pattern":{"Regex":"[一-龥ࠀ-一가-퟿]+"},"behavior":"Isolated","invert":false},{"type":"Digits","individual_digits":true},{"type":"ByteLevel","add_prefix_space":false,"trim_offsets":true,"use_regex":false}]}"##,
+                r##"{"type":"Sequence","normalizers":[]}"##,
+            )),
             _ => None,
         }
+    }
+
+    /// `tokenizer.ggml.token_type`, one entry per vocab token.
+    ///
+    /// Empty when the key is absent or unreadable. **The element type is not
+    /// fixed** — measured as `I32` in the local corpus, and `Value::to_i64()`
+    /// returns `Err` for `I32`, so an accessor that only tries one width
+    /// silently yields an empty list. That is how this array read as "no
+    /// control tokens" the first time: the extraction failed and the failure
+    /// looked like an answer.
+    fn token_types(&self) -> Vec<i64> {
+        let Some(Value::Array(a)) = self.metadata().get("tokenizer.ggml.token_type") else {
+            return Vec::new();
+        };
+        a.iter()
+            .filter_map(|v| match v {
+                Value::I8(x) => Some(*x as i64),
+                Value::U8(x) => Some(*x as i64),
+                Value::I16(x) => Some(*x as i64),
+                Value::U16(x) => Some(*x as i64),
+                Value::I32(x) => Some(*x as i64),
+                Value::U32(x) => Some(*x as i64),
+                Value::I64(x) => Some(*x),
+                Value::U64(x) => Some(*x as i64),
+                _ => None,
+            })
+            .collect()
     }
 
     /// A `tokenizer.ggml.*_token_id` as a `u32`, or `None` if absent or not an
@@ -607,5 +690,47 @@ impl Content {
     ) -> candlelight::core::Result<candlelight::core::quantized::QTensor> {
         // Delegate to Candle's proven tensor loading logic
         self.candle_content.tensor(reader, name, device)
+    }
+}
+
+#[cfg(test)]
+mod bpe_spec_tests {
+    use super::*;
+
+    /// Every allowlisted `tokenizer.ggml.pre` has a spec, and every spec is
+    /// valid JSON that `tokenizers` accepts.
+    ///
+    /// The specs are stored as the checkpoints' own declared JSON rather than
+    /// hand-built Rust, which keeps their provenance auditable — each can be
+    /// diffed against the published `tokenizer.json` — at the cost of moving a
+    /// malformed one from a compile error to a runtime error. **This test is
+    /// what pays that cost back.** It needs no checkpoint and no network, so it
+    /// runs in the ordinary suite rather than behind `#[ignore]`.
+    #[test]
+    fn every_verified_pre_spec_deserializes() {
+        for pre in Content::VERIFIED_PRE {
+            let (pre_json, norm_json) = Content::bpe_pre_tokenizer(pre)
+                .unwrap_or_else(|| panic!("{pre:?} is listed as verified but has no spec"));
+
+            serde_json::from_str::<tokenizers::pre_tokenizers::PreTokenizerWrapper>(pre_json)
+                .unwrap_or_else(|e| panic!("pre-tokenizer spec for {pre:?} does not parse: {e}"));
+
+            serde_json::from_str::<Option<tokenizers::normalizers::NormalizerWrapper>>(norm_json)
+                .unwrap_or_else(|e| panic!("normalizer spec for {pre:?} does not parse: {e}"));
+        }
+    }
+
+    /// And a name that is NOT on the list has no spec.
+    ///
+    /// The necessary pair: without it, the test above is satisfied by a
+    /// `bpe_pre_tokenizer` that returns the same spec for every input, which is
+    /// precisely the "one rule for all checkpoints" failure the table exists to
+    /// prevent.
+    #[test]
+    fn an_unlisted_pre_has_no_spec() {
+        assert!(Content::bpe_pre_tokenizer("llama-bpe").is_none());
+        assert!(Content::bpe_pre_tokenizer("command-r").is_none());
+        assert!(Content::bpe_pre_tokenizer("<absent>").is_none());
+        assert!(Content::bpe_pre_tokenizer("").is_none());
     }
 }
