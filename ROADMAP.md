@@ -142,8 +142,23 @@ Candidate pre-tokenizers were scored against llama.cpp b10757 over the
 ```
 
 At 10 cases `falcon` looked perfect and was not. At 30, `gpt-2` looked perfect
-and was not. At 130 nothing scored perfectly — those values need llama.cpp's own
-per-`pre` regexes, which this crate's `ByteLevel` does not implement.
+and was not. At 130 nothing scored perfectly.
+
+⚠️ **Those scores are against llama.cpp, which is NOT ground truth — read
+`128/130` as an open question, not a near-miss to close.** It is equally
+consistent with *we are wrong on 2 cases* and *llama.cpp is wrong on 2 cases and
+we are right*, and this measurement cannot separate them. The second is not
+hypothetical: measured three ways over the same 130 cases on the SmolLM2 GGUF,
+**ours vs the HF reference 0 disagree, ours vs llama.cpp 2, HF vs llama.cpp the
+SAME 2.** llama.cpp's SMOLLM regex omits the trailing `|\s+` alternative the
+declared `ByteLevel` rule carries, and its own source comments the rewrite.
+
+An earlier version of this block said those values "need llama.cpp's own
+per-`pre` regexes". **That was wrong and is corrected here:** adopting them would
+reproduce a reference measured to differ from the checkpoints, and a perfect
+score against it would be the worst outcome available — wrong exactly where it is
+wrong, while looking like success. Settling any of them needs that checkpoint's
+own `tokenizer.json`, the way `smollm` was settled.
 
 **A tokenizer right 128 times in 130 is exactly the defect this module exists to
 prevent**, and each larger corpus caught a case the previous one called clean.

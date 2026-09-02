@@ -78,6 +78,39 @@ const MISSING: &str = "no GGUF checkpoint. Set LIGHTBULB_GGUF to a .gguf file.";
 /// tests here are already `#[ignore]`d, so requiring the variable costs a
 /// reader nothing and removes the leak. Fixed by deletion rather than by
 /// parameterising: there is no correct default for a 637 MB file.
+/// The BOS/EOS strings THIS GGUF declares, read from its own metadata.
+///
+/// Exists so the assertions in `a_gguf_is_served_with_its_own_template` compare
+/// resolution against the file under test rather than against one checkpoint's
+/// constants. Returns an empty string for a token the checkpoint does not
+/// declare, which is a real and correct answer rather than a failure to read.
+fn declared_special_tokens(path: &Path) -> (String, String) {
+    use candlelight::core::quantized::gguf_file::Value;
+    let content = lightbulb::gguf::Content::read(path).expect("reading the GGUF");
+    let tokens: Vec<String> = match content.metadata().get("tokenizer.ggml.tokens") {
+        Some(Value::Array(a)) => a
+            .iter()
+            .filter_map(|v| match v {
+                Value::String(s) => Some(s.clone()),
+                _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
+    let by_id = |key: &str| -> String {
+        content
+            .metadata()
+            .get(key)
+            .and_then(|v| v.to_u32().ok())
+            .and_then(|id| tokens.get(id as usize).cloned())
+            .unwrap_or_default()
+    };
+    (
+        by_id("tokenizer.ggml.bos_token_id"),
+        by_id("tokenizer.ggml.eos_token_id"),
+    )
+}
+
 fn gguf_path() -> Option<PathBuf> {
     let p = PathBuf::from(std::env::var_os("LIGHTBULB_GGUF")?);
     p.is_file().then_some(p)
@@ -145,15 +178,47 @@ async fn serve_the_fixed_prompt(path: &Path) -> (StatusCode, serde_json::Value) 
 async fn a_gguf_is_served_with_its_own_template() {
     let path = gguf_path().expect(MISSING);
 
-    // 1. The file's own declaration is what resolution used. Exact strings,
-    //    not `!is_empty()`: empty is precisely what the defect produced.
+    // 1. The file's own declaration is what resolution used.
+    //
+    //    COMPARED AGAINST THE FILE, NOT AGAINST HARD-CODED STRINGS. This read
+    //    `assert_eq!(tk.bos, "<s>")` — TinyLlama's declaration — while the
+    //    checkpoint itself comes from `LIGHTBULB_GGUF`. Point that variable at
+    //    any other GGUF and it failed with "BOS did not come from GGUF
+    //    metadata", WHICH IS FALSE: BOS did come from metadata. Measured on
+    //    SmolLM2-135M-Instruct, which this engine now also serves, resolution
+    //    returns exactly what that file declares — `<|im_start|>` / `<|im_end|>`
+    //    — and the old assertion called that a metadata failure purely because
+    //    the strings are not TinyLlama's.
+    //
+    //    A test that reports a resolution failure when resolution SUCCEEDED is
+    //    worse than no test, because it sends the next person to debug a working
+    //    path. Deriving the expectation from the same file under test keeps the
+    //    original property — empty is what the defect produced, and an empty
+    //    result still fails against a file that declares a token — while making
+    //    it true of every checkpoint rather than one.
     let tk = chat_template::special_tokens(&path);
-    assert_eq!(tk.bos, "<s>", "BOS did not come from GGUF metadata");
-    assert_eq!(tk.eos, "</s>", "EOS did not come from GGUF metadata");
+    let (declared_bos, declared_eos) = declared_special_tokens(&path);
+    assert_eq!(
+        tk.bos, declared_bos,
+        "resolved BOS does not match what this GGUF declares"
+    );
+    assert_eq!(
+        tk.eos, declared_eos,
+        "resolved EOS does not match what this GGUF declares"
+    );
     assert_eq!(
         chat_template::resolve(&path).resolved_by,
         Resolution::GgufMetadata,
         "resolution fell through to a guess instead of reading the file"
+    );
+
+    // The remaining assertions pin a string produced by ONE checkpoint's
+    // template, so they state that requirement rather than misattributing a
+    // mismatch to resolution.
+    assert_eq!(
+        (declared_bos.as_str(), declared_eos.as_str()),
+        ("<s>", "</s>"),
+        "the rendered-prompt assertion below is written against TinyLlama-1.1B-Chat; set LIGHTBULB_GGUF to that checkpoint to run it"
     );
 
     // 2. Not just which tier resolved — the exact prompt text it renders for

@@ -33,9 +33,42 @@
 //! **At 10 cases `falcon` looked perfect and was not. At 30, `gpt-2` looked
 //! perfect and was not.** At 130 — the 30 below plus 100 seeded-random strings
 //! (seed 20260902) drawn from an alphabet mixing letters, digits, whitespace,
-//! punctuation and non-Latin scripts — NOTHING scored perfectly. Those values
-//! need llama.cpp's own per-`pre` regexes, which this crate's `ByteLevel` does
-//! not implement, so they stay refused.
+//! punctuation and non-Latin scripts — nothing scored perfectly.
+//!
+//! # ⚠️ THOSE SCORES ARE AGAINST llama.cpp, WHICH IS NOT GROUND TRUTH
+//!
+//! **Read `128/130` as an OPEN QUESTION, not as a near-miss to close.** It is
+//! consistent with two different situations and this measurement cannot tell
+//! them apart:
+//!
+//! - we are wrong on 2 cases, or
+//! - **llama.cpp is wrong on 2 cases and we are right.**
+//!
+//! The second is not hypothetical. Measured three ways over these same 130
+//! cases on the SmolLM2 GGUF:
+//!
+//! ```text
+//!   ours    vs HF reference (tokenizer.json)   0 disagree
+//!   ours    vs llama.cpp                       2 disagree
+//!   HF ref  vs llama.cpp                       2 disagree   <- THE SAME TWO
+//! ```
+//!
+//! **llama.cpp disagrees with the checkpoint's own declared tokenizer, and we
+//! agree with it.** Its SMOLLM regex omits the trailing `|\s+` alternative that
+//! the declared `ByteLevel` rule carries, and its source comments the rewrite
+//! directly (`// original regex from tokenizer.json`, above a rewritten
+//! expression, for the qwen types).
+//!
+//! So the earlier conclusion that these values "need llama.cpp's own per-`pre`
+//! regexes" is WRONG and is corrected here: adopting them would deliberately
+//! reproduce a reference measured to differ from the checkpoints, and a perfect
+//! score against it would be the worst outcome available — wrong in exactly the
+//! places it is wrong, while looking like success.
+//!
+//! **Settling any of these needs that checkpoint's own `tokenizer.json`**, the
+//! way `smollm` was settled. Until then they stay refused, and the reason is
+//! "not verified against an authoritative reference" rather than "does not match
+//! llama.cpp".
 //!
 //! **A tokenizer right 128 times in 130 is the exact failure this module exists
 //! to prevent**, and each larger corpus caught a case the previous one called
