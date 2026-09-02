@@ -399,14 +399,21 @@ fn test_full_multi_gpu_integration() -> Result<()> {
 #[test]
 #[ignore] // Requires 4 GPUs
 fn test_hybrid_parallelism_config() -> Result<()> {
+    // DOUBLE-GATED, AND THE INNER GATE USED TO PASS.
+    //
+    // This test is `#[ignore]`d AND returned `Ok(())` with a "⊘ Skipping"
+    // message below 4 GPUs. Those layers are not equivalent: `#[ignore]` is
+    // honest — it does not run and does not claim to — while a skip that
+    // returns success reports work it declined to do. And the dishonest layer
+    // SURVIVES REMOVING THE HONEST ONE: deleting the `#[ignore]`, which is the
+    // obvious remediation, leaves a green test that asserts nothing and makes
+    // the coverage look improved.
     let topology = DeviceTopology::discover()?;
-    if topology.num_gpus() < 4 {
-        println!(
-            "⊘ Skipping hybrid test (only {} GPUs available)",
-            topology.num_gpus()
-        );
-        return Ok(());
-    }
+    assert!(
+        topology.num_gpus() >= 4,
+        "this test needs 4 GPUs and found {}. It is #[ignore]d, so running it is deliberate and too few GPUs is a setup error rather than a reason to pass.",
+        topology.num_gpus()
+    );
 
     // Create config for 4 GPUs: 2-way tensor parallel × 2-way pipeline parallel
     let config = MultiGPUConfig::manual(
