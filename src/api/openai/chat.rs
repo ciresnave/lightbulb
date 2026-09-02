@@ -363,10 +363,36 @@ pub(crate) fn build_prompt_from_raw(
 
     match template {
         Some(t) => match t.render(raw) {
-            Ok(text) => BuiltPrompt {
-                text,
-                add_special_tokens: false,
-            },
+            Ok(text) => {
+                // THE FLAG MUST ANSWER "DOES *THIS* TEMPLATE EMIT BOS?", NOT
+                // "WAS A TEMPLATE APPLIED?". Those are different questions, and
+                // answering the second removed BOS entirely from every
+                // checkpoint whose template does not emit one.
+                //
+                // Measured on TinyLlama-1.1B-Chat Q4_0, whose template never
+                // references `bos_token`. Prefilled with 22 ids beginning 529,
+                // no `<s>` anywhere, it answered:
+                //     "France| Paris, France</s>"
+                // With BOS present (23 ids, first id 1), same prompt, same
+                // temperature:
+                //     "The French capital of France.</s>"
+                // The leading garbage is gone. A Llama-architecture model
+                // trained with BOS at position 0 degrades without it.
+                //
+                // Testing `text.starts_with(bos)` rather than scanning the
+                // template SOURCE is deliberate: Llama-2's template emits
+                // `bos_token` inside its message loop, so a three-turn
+                // conversation contains three, while a tokenizer post-processor
+                // adds only a leading one. What matters is whether the RENDERED
+                // string already opens with BOS — precisely what a
+                // post-processor would duplicate.
+                let emits_leading_bos =
+                    !t.tokens.bos.is_empty() && text.starts_with(t.tokens.bos.as_str());
+                BuiltPrompt {
+                    text,
+                    add_special_tokens: !emits_leading_bos,
+                }
+            }
             // Per-request and rare, so `warn`: a template that resolved at
             // startup and then failed on a particular message list is a real
             // anomaly worth seeing every time it happens.
@@ -1285,6 +1311,79 @@ mod tests {
             ids.iter().filter(|&&i| i == FIXTURE_BOS_ID).count(),
             1,
             "{ids:?}"
+        );
+    }
+
+    /// A template that does NOT emit `bos_token` must leave the tokenizer to
+    /// supply BOS.
+    ///
+    /// **This is the defect behind the `"France| Paris, France</s>"` artifact.**
+    /// `add_special_tokens` was `false` for *any* rendered template, reasoning
+    /// that templates carry their own BOS. Llama-2's does. TinyLlama's does not
+    /// — so that checkpoint was prefilled with no `<s>` at all and degraded.
+    ///
+    /// Born-red against the old unconditional `false`.
+    #[test]
+    fn a_template_that_omits_bos_leaves_the_tokenizer_to_add_it() {
+        use crate::contracts::validation::RawMessage;
+        let dir = checkpoint_with_template(
+            "omits-bos",
+            // NO RAW NEWLINE. `checkpoint_with_template` embeds this into a JSON
+            // string, and JSON forbids a literal newline inside one — a raw
+            // `\n` here silently breaks tokenizer_config.json, resolution
+            // returns None, and the precondition guard below fires rather than
+            // the assertion under test.
+            "{% for m in messages %}<|user|> {{ m['content'] }}{% endfor %}",
+        );
+        let template = crate::api::chat_template::resolve_for_serving(&dir)
+            .expect("fixture must resolve a template, or this measures the legacy join");
+        let built = build_prompt_from_raw(
+            Some(&template),
+            &[RawMessage {
+                role: "user".into(),
+                content: "hi".into(),
+            }],
+        );
+        assert!(
+            !built.text.starts_with(&template.tokens.bos),
+            "fixture precondition: this template must NOT emit BOS, got {:?}",
+            built.text
+        );
+        assert!(
+            built.add_special_tokens,
+            "a template emitting no BOS must let the tokenizer add one, or the model \
+         is prefilled without it and degrades: {:?}",
+            built.text
+        );
+    }
+
+    /// And a template that DOES emit BOS must still suppress the tokenizer's.
+    ///
+    /// The pair is the point: a single-arm test cannot tell "correct" from
+    /// "constant", and the previous code was the constant `false`.
+    #[test]
+    fn a_template_that_emits_bos_still_suppresses_the_tokenizers() {
+        use crate::contracts::validation::RawMessage;
+        let dir = bos_doubling_checkpoint("emits-bos");
+        let template = crate::api::chat_template::resolve_for_serving(&dir)
+            .expect("fixture must resolve a template");
+        let built = build_prompt_from_raw(
+            Some(&template),
+            &[RawMessage {
+                role: "user".into(),
+                content: "hi".into(),
+            }],
+        );
+        assert!(
+            built.text.starts_with(&template.tokens.bos),
+            "fixture precondition: this template must emit BOS, got {:?}",
+            built.text
+        );
+        assert!(
+            !built.add_special_tokens,
+            "a template already opening with BOS must suppress the tokenizer's, or \
+         the model sees two: {:?}",
+            built.text
         );
     }
 
