@@ -242,36 +242,9 @@ impl Content {
             );
         }
 
-        let tokens = self
-            .get_metadata_string_array("tokenizer.ggml.tokens")
-            .context("Missing tokenizer.ggml.tokens in GGUF metadata")?;
-
-        let merges_raw = self
-            .get_metadata_string_array("tokenizer.ggml.merges")
-            .context(
-                "GGUF has no tokenizer.ggml.merges. This is a SentencePiece-converted checkpoint, \
-             and rebuilding it needs SPM's scored bigram-merge algorithm. Building a Unigram \
-             from tokenizer.ggml.scores instead was measured and does NOT reproduce the \
-             checkpoint's segmentation (29 ids against the reference's 22: `capital` came out \
-             as c+ap+it+al), so it is refused rather than approximated.",
-            )?;
-
-        let vocab: tokenizers::models::bpe::Vocab = tokens
-            .iter()
-            .enumerate()
-            .map(|(id, t)| (t.clone(), id as u32))
-            .collect();
-
-        // GGUF stores each merge as one space-separated pair, exactly as
-        // `tokenizer.json` does.
-        let merges: Vec<(String, String)> = merges_raw
-            .iter()
-            .map(|m| {
-                m.split_once(' ')
-                    .map(|(a, b)| (a.to_string(), b.to_string()))
-                    .ok_or_else(|| anyhow::anyhow!("malformed merge entry {m:?}: no space"))
-            })
-            .collect::<Result<_>>()?;
+        let (tokens, vocab, merges) = self.vocab_and_merges(
+            "GGUF has no tokenizer.ggml.merges. This is a SentencePiece-converted checkpoint, and rebuilding it needs SPM's scored bigram-merge algorithm. Building a Unigram from tokenizer.ggml.scores instead was measured and does NOT reproduce the checkpoint's segmentation (29 ids against the reference's 22: `capital` came out as c+ap+it+al), so it is refused rather than approximated.",
+        )?;
 
         let bpe = BPE::builder()
             .vocab_and_merges(vocab, merges)
@@ -384,26 +357,9 @@ impl Content {
             );
         };
 
-        let tokens = self
-            .get_metadata_string_array("tokenizer.ggml.tokens")
-            .context("Missing tokenizer.ggml.tokens in GGUF metadata")?;
-        let merges_raw = self
-            .get_metadata_string_array("tokenizer.ggml.merges")
-            .context("GGUF declares a `gpt2` tokenizer but carries no tokenizer.ggml.merges; byte-level BPE cannot be rebuilt without them")?;
-
-        let vocab: tokenizers::models::bpe::Vocab = tokens
-            .iter()
-            .enumerate()
-            .map(|(id, t)| (t.clone(), id as u32))
-            .collect();
-        let merges: Vec<(String, String)> = merges_raw
-            .iter()
-            .map(|m| {
-                m.split_once(' ')
-                    .map(|(a, b)| (a.to_string(), b.to_string()))
-                    .ok_or_else(|| anyhow::anyhow!("malformed merge entry {m:?}: no space"))
-            })
-            .collect::<Result<_>>()?;
+        let (tokens, vocab, merges) = self.vocab_and_merges(
+            "GGUF declares a `gpt2` tokenizer but carries no tokenizer.ggml.merges; byte-level BPE cannot be rebuilt without them",
+        )?;
 
         let bpe = BPE::builder()
             .vocab_and_merges(vocab, merges)
@@ -442,6 +398,50 @@ impl Content {
         }
 
         Ok(tokenizer)
+    }
+
+    /// The vocab and merge list, parsed once for both tokenizer families.
+    ///
+    /// Both paths read the SAME two metadata arrays into the SAME two shapes;
+    /// only the message for a missing `merges` differs, which is why that is
+    /// the parameter. This was written out twice, and two copies of a parser
+    /// that must agree is the hazard this module keeps finding elsewhere.
+    ///
+    /// Returns the raw token list too: callers need it to resolve
+    /// `tokenizer.ggml.*_token_id` indices back into token strings.
+    fn vocab_and_merges(
+        &self,
+        missing_merges: &'static str,
+    ) -> Result<(
+        Vec<String>,
+        tokenizers::models::bpe::Vocab,
+        Vec<(String, String)>,
+    )> {
+        let tokens = self
+            .get_metadata_string_array("tokenizer.ggml.tokens")
+            .context("Missing tokenizer.ggml.tokens in GGUF metadata")?;
+        let merges_raw = self
+            .get_metadata_string_array("tokenizer.ggml.merges")
+            .context(missing_merges)?;
+
+        let vocab: tokenizers::models::bpe::Vocab = tokens
+            .iter()
+            .enumerate()
+            .map(|(id, t)| (t.clone(), id as u32))
+            .collect();
+
+        // GGUF stores each merge as one space-separated pair, exactly as
+        // `tokenizer.json` does.
+        let merges: Vec<(String, String)> = merges_raw
+            .iter()
+            .map(|m| {
+                m.split_once(' ')
+                    .map(|(a, b)| (a.to_string(), b.to_string()))
+                    .ok_or_else(|| anyhow::anyhow!("malformed merge entry {m:?}: no space"))
+            })
+            .collect::<Result<_>>()?;
+
+        Ok((tokens, vocab, merges))
     }
 
     /// `tokenizer.ggml.pre` values whose splitting rule has been verified
