@@ -134,30 +134,38 @@ impl DistributedCacheManager {
     ) -> Result<()> {
         match self.sync_strategy {
             CacheSyncStrategy::Replicated => {
-                // Copy K/V tensors to all GPUs
-                for (gpu_id, cache_builder) in self.local_caches.iter_mut().enumerate() {
-                    let device = self
-                        .topology
-                        .device(gpu_id)
-                        .ok_or_else(|| anyhow::anyhow!("GPU {} not found", gpu_id))?;
-
-                    // Transfer tensors to this GPU if needed
-                    // Note: Candle Device doesn't implement PartialEq, so we always transfer
-                    // This is safe but may have minor overhead for same-device transfers
-                    let k_gpu = k_new.to_device(&device)?;
-                    let v_gpu = v_new.to_device(&device)?;
-
-                    // Update the cache builder's position for this batch slot
-                    // Note: ParallelCacheBuilder doesn't have position() getter,
-                    // so we track positions externally in actual integration
-                    // For now, this prepares the infrastructure
-
-                    // Store tensors for later use (would integrate with actual cache in M3.6 Task 6)
-                    // For now, we've prepared the infrastructure
-                    drop(k_gpu);
-                    drop(v_gpu);
-                }
-                Ok(())
+                // NOT IMPLEMENTED, AND IT USED TO SAY OTHERWISE.
+                //
+                // This arm transferred `k_new`/`v_new` to every device, dropped
+                // both, and returned `Ok(())`. A caller had every reason to
+                // believe the cache had been updated on each GPU. Nothing had
+                // been written anywhere — the transfers were performed and the
+                // results discarded, so it paid the cost of the work and kept
+                // none of it.
+                //
+                // Its two siblings below bail. This one lied, which is strictly
+                // worse: a bail tells the caller the strategy is unavailable,
+                // and this told them it had succeeded.
+                //
+                // WHAT IS ACTUALLY MISSING, so the next person does not have to
+                // re-derive it. `ParallelCacheBuilder::append(k, v, iam)` needs
+                // an `IndicesAndMask` — the per-step write plan naming each
+                // slot's live position. `update_cache` receives only
+                // `layer_idx` and `batch_idx` and has no plan, so wiring this up
+                // is a design decision about how the distributed cache obtains
+                // (or constructs) that plan, not a missing function call.
+                //
+                // The comment that stood here blamed something else: "note:
+                // ParallelCacheBuilder doesn't have position() getter, so we
+                // track positions externally". THAT IS FALSE — it has
+                // `position()`, `set_position()`, `positions()` and
+                // `get_position(slot)`, and `parallel_model_manager.rs` calls
+                // the last of those. A justification for not doing something is
+                // a factual claim like any other, and this one had gone stale
+                // while still reading as a considered decision.
+                anyhow::bail!(
+                    "Replicated cache strategy is not implemented: K/V transfer to each device works, but nothing writes them into the per-GPU cache. ParallelCacheBuilder::append needs an IndicesAndMask write plan that update_cache has no way to obtain from (layer_idx, batch_idx) alone."
+                )
             }
             CacheSyncStrategy::Sharded => {
                 // TODO: Shard K/V across GPUs along head dimension
@@ -214,6 +222,96 @@ impl DistributedCacheManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::multi_gpu::topology::InterconnectTopology;
+
+    /// A topology of plain CPU devices.
+    ///
+    /// `DeviceTopology`'s fields are public, so the tests below need no GPU and
+    /// no `discover()`. Every other test in this file is `#[ignore]`d behind
+    /// "requires multi-GPU setup", which is why the defect the next test
+    /// records survived: nothing that could observe it ever ran.
+    fn cpu_topology(n: usize) -> DeviceTopology {
+        DeviceTopology {
+            devices: vec![candlelight::core::Device::Cpu; n],
+            memory_capacity: vec![1 << 30; n],
+            memory_available: vec![1 << 30; n],
+            interconnect: InterconnectTopology::PCIe {
+                bandwidth_gbps: 16.0,
+            },
+            p2p_access: vec![vec![false; n]; n],
+        }
+    }
+
+    fn manager(strategy: CacheSyncStrategy) -> Result<DistributedCacheManager> {
+        DistributedCacheManager::new(
+            cpu_topology(2),
+            strategy,
+            4,
+            2048,
+            candlelight::core::DType::F32,
+        )
+    }
+
+    fn kv() -> Result<(Tensor, Tensor)> {
+        let d = candlelight::core::Device::Cpu;
+        let k = Tensor::zeros((1, 8, 1, 64), candlelight::core::DType::F32, &d)?;
+        let v = Tensor::zeros((1, 8, 1, 64), candlelight::core::DType::F32, &d)?;
+        Ok((k, v))
+    }
+
+    /// **ALL THREE `CacheSyncStrategy` VARIANTS ARE UNIMPLEMENTED, AND ALL
+    /// THREE NOW SAY SO.**
+    ///
+    /// `Replicated` used to transfer K/V to every device, `drop` both, and
+    /// return `Ok(())`. Its siblings bail. That made it the only one of the
+    /// three that lied, and it is a public enum variant a caller can select.
+    ///
+    /// **This test would have caught it and could not have been written before,
+    /// because it needs no GPU.** The one test that did exercise this path,
+    /// `tests/multi_gpu_validation.rs::test_distributed_cache_replication`,
+    /// asserts only that the call returns `Ok` and then prints
+    /// "✓ Cache replication across GPUs successful" — it cannot tell a working
+    /// implementation from a no-op, and it is `#[ignore]`d besides.
+    ///
+    /// **When someone implements `Replicated`, this test goes red.** That is
+    /// intended: it should be replaced with an assertion that the K/V actually
+    /// landed in each device's cache, which is the assertion nothing in this
+    /// repo makes today.
+    #[test]
+    fn every_cache_sync_strategy_reports_that_it_is_unimplemented() -> Result<()> {
+        for (strategy, needle) in [
+            (CacheSyncStrategy::Replicated, "Replicated"),
+            (CacheSyncStrategy::Sharded, "Sharded"),
+            (CacheSyncStrategy::Hybrid, "Hybrid"),
+        ] {
+            let (k, v) = kv()?;
+            let err = manager(strategy)?
+                .update_cache(0, 0, &k, &v)
+                .expect_err("an unimplemented strategy must not report success");
+            let msg = format!("{err:#}");
+            assert!(
+                msg.contains(needle),
+                "the error must name the strategy the caller selected, got: {msg}"
+            );
+            assert!(
+                msg.contains("not implemented") || msg.contains("not yet implemented"),
+                "the error must say it is unimplemented rather than describe a runtime failure, got: {msg}"
+            );
+        }
+        Ok(())
+    }
+
+    /// The manager itself builds fine — the gap is in `update_cache`, not in
+    /// construction. Stated separately so the test above cannot pass merely
+    /// because nothing could be constructed.
+    #[test]
+    fn a_distributed_cache_manager_builds_over_a_cpu_topology() -> Result<()> {
+        let m = manager(CacheSyncStrategy::Replicated)?;
+        assert_eq!(m.num_gpus(), 2);
+        assert!(m.cache_for_gpu(0).is_some());
+        assert!(m.cache_for_gpu(2).is_none());
+        Ok(())
+    }
 
     #[test]
     #[ignore] // Requires multi-GPU setup
@@ -232,33 +330,14 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    #[ignore] // Requires multi-GPU setup
-    fn test_cache_update_replicated() -> Result<()> {
-        let topology = DeviceTopology::discover()?;
-        let mut cache_manager = DistributedCacheManager::new(
-            topology,
-            CacheSyncStrategy::Replicated,
-            4,                             // batch_size
-            2048,                          // context_size
-            candlelight::core::DType::F32, // dtype
-        )?;
-
-        // Create dummy K/V tensors
-        let k_new = Tensor::zeros(
-            (1, 8, 1, 64),
-            candlelight::core::DType::F32,
-            &candlelight::core::Device::Cpu,
-        )?;
-        let v_new = Tensor::zeros(
-            (1, 8, 1, 64),
-            candlelight::core::DType::F32,
-            &candlelight::core::Device::Cpu,
-        )?;
-
-        // Update cache for layer 0, batch slot 0
-        cache_manager.update_cache(0, 0, &k_new, &v_new)?;
-
-        Ok(())
-    }
+    // SUPERSEDED by `every_cache_sync_strategy_reports_that_it_is_unimplemented`.
+    //
+    // This test called `update_cache(...)?` and returned `Ok`. Since the call
+    // itself returned `Ok` while writing nothing, the test asserted only that
+    // the function did not error — which it could not do — and it was
+    // `#[ignore]`d behind a GPU requirement it did not actually need, so it
+    // never ran either way.
+    //
+    // Deleted rather than repaired: the replacement needs no GPU, asserts the
+    // real behaviour of all three strategies, and has an observed red state.
 }
