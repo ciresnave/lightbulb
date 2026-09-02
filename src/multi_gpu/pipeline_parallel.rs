@@ -545,52 +545,104 @@ impl PipelineScheduler {
 mod tests {
     use super::*;
 
+    /// Plain CPU "devices".
+    ///
+    /// The two tests these replace were `#[ignore]`d behind "Requires multi-GPU
+    /// setup" and called `Device::cuda_if_available`, which FALLS BACK to CPU.
+    /// Neither needed a GPU, so neither ever ran — the same mis-gating that hid
+    /// a live defect in `tensor_parallel`.
+    fn cpus(n: usize) -> Vec<Device> {
+        vec![Device::Cpu; n]
+    }
+
+    fn flat(t: &Tensor) -> Vec<f32> {
+        t.flatten_all().unwrap().to_vec1::<f32>().unwrap()
+    }
+
+    /// Layers are distributed across stages.
     #[test]
-    #[ignore] // Requires multi-GPU setup
-    fn test_pipeline_scheduler_creation() -> Result<()> {
-        let devices = vec![
-            Device::cuda_if_available(0)?,
-            Device::cuda_if_available(1)?,
-            Device::cuda_if_available(2)?,
-            Device::cuda_if_available(3)?,
-        ];
-
-        let scheduler = PipelineScheduler::new(
-            4,  // 4 stages
-            80, // 80 layers
-            devices,
-            4, // micro-batch size
-            PipelineStrategy::GPipe,
-        )?;
-
+    fn a_pipeline_scheduler_distributes_layers_across_stages() -> Result<()> {
+        let scheduler = PipelineScheduler::new(4, 80, cpus(4), 4, PipelineStrategy::GPipe)?;
         assert_eq!(scheduler.num_stages(), 4);
-        assert_eq!(scheduler.stage(0).unwrap().num_layers(), 20);
-        assert_eq!(scheduler.stage(1).unwrap().num_layers(), 20);
-        assert_eq!(scheduler.stage(2).unwrap().num_layers(), 20);
-        assert_eq!(scheduler.stage(3).unwrap().num_layers(), 20);
-
+        for stage in 0..4 {
+            assert_eq!(
+                scheduler.stage(stage).unwrap().num_layers(),
+                20,
+                "stage {stage} did not get an equal share of 80 layers"
+            );
+        }
         Ok(())
     }
 
+    /// **The GPipe path must return its input unchanged, VALUE FOR VALUE.**
+    ///
+    /// `PipelineStage::process_micro_batch` is a documented pass-through
+    /// placeholder, so `execute` is split -> identity -> concatenate. That
+    /// composition is the identity, which makes the whole pipeline checkable
+    /// without a model: anything that drops, duplicates or reorders a
+    /// micro-batch shows up here.
+    ///
+    /// The test this replaces asserted `output.dims()` only. Shape survives a
+    /// reordering — two micro-batches concatenated in the wrong order have
+    /// exactly the right shape — so it could not see the failure it was
+    /// nearest to.
     #[test]
-    #[ignore] // Requires multi-GPU setup
-    fn test_pipeline_gpipe_execution() -> Result<()> {
-        let devices = vec![Device::cuda_if_available(0)?, Device::cuda_if_available(1)?];
-
-        let mut scheduler = PipelineScheduler::new(
-            2, // 2 stages
-            4, // 4 layers
-            devices,
-            2, // micro-batch size
-            PipelineStrategy::GPipe,
-        )?;
-
-        // Input: [batch=4, seq=8, hidden=128]
+    fn a_gpipe_pipeline_returns_its_input_unchanged() -> Result<()> {
+        let mut scheduler = PipelineScheduler::new(2, 4, cpus(2), 2, PipelineStrategy::GPipe)?;
         let input = Tensor::randn(0.0f32, 1.0, (4, 8, 128), &Device::Cpu)?;
+        let output = scheduler.execute(input.clone())?;
+        assert_eq!(output.dims(), input.dims());
+        assert_eq!(
+            flat(&output),
+            flat(&input),
+            "the placeholder pipeline is split -> identity -> concat, so it must round-trip"
+        );
+        Ok(())
+    }
 
-        let output = scheduler.execute(input)?;
-        assert_eq!(output.dims(), &[4, 8, 128]);
+    /// And when the batch does NOT divide evenly by the micro-batch size.
+    ///
+    /// The necessary pair. `split_into_micro_batches` clamps the final chunk
+    /// with `.min(batch_size)`; an even split exercises neither the clamp nor
+    /// the short tail, and every fixture that existed before used an even one.
+    #[test]
+    fn a_gpipe_pipeline_round_trips_an_uneven_batch() -> Result<()> {
+        let mut scheduler = PipelineScheduler::new(2, 4, cpus(2), 2, PipelineStrategy::GPipe)?;
+        // batch 5 over micro-batches of 2 -> chunks of 2, 2, 1.
+        let input = Tensor::randn(0.0f32, 1.0, (5, 3, 6), &Device::Cpu)?;
+        let output = scheduler.execute(input.clone())?;
+        assert_eq!(
+            output.dims(),
+            input.dims(),
+            "the short tail changed the shape"
+        );
+        assert_eq!(
+            flat(&output),
+            flat(&input),
+            "an uneven split must still round-trip"
+        );
+        Ok(())
+    }
 
+    /// The two unimplemented strategies are selectable public variants and must
+    /// say so rather than produce something.
+    #[test]
+    fn unimplemented_pipeline_strategies_report_themselves() -> Result<()> {
+        for (strategy, needle) in [
+            (PipelineStrategy::PipeDream, "PipeDream"),
+            (PipelineStrategy::Interleaved1F1B, "1F1B"),
+        ] {
+            let mut scheduler = PipelineScheduler::new(2, 4, cpus(2), 2, strategy)?;
+            let input = Tensor::randn(0.0f32, 1.0, (4, 8, 16), &Device::Cpu)?;
+            let err = match scheduler.execute(input) {
+                Ok(_) => panic!("{strategy:?} is unimplemented and must not return a tensor"),
+                Err(e) => e,
+            };
+            assert!(
+                format!("{err:#}").contains(needle),
+                "the error must name the strategy the caller selected: {err:#}"
+            );
+        }
         Ok(())
     }
 
