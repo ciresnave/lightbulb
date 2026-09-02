@@ -514,6 +514,17 @@ impl Content {
 
     /// `tokenizer.ggml.pre` values whose splitting rule has been verified
     /// id-for-id against a reference. See [`Self::bpe_pre_tokenizer`].
+    /// The `tokenizer.ggml.pre` values this build has verified.
+    ///
+    /// Public so `gguf_bpe_tokenizer_fidelity` can assert that its fixtures
+    /// COVER every one of them. Without that, supplying fewer pairs than there
+    /// are entries narrows the gate silently — and a table of seven entries
+    /// exercised by one checkpoint is six entries wearing the seventh's
+    /// evidence.
+    pub fn verified_pre_values() -> &'static [&'static str] {
+        Self::VERIFIED_PRE
+    }
+
     const VERIFIED_PRE: &'static [&'static str] = &[
         "smollm",
         "gpt-2",

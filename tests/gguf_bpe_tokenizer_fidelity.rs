@@ -184,6 +184,18 @@ const CASES: &[&str] = &[
 /// wearing the fifth's evidence.**
 ///
 /// Falls back to the single-pair variables when it is unset.
+/// The `tokenizer.ggml.pre` a GGUF declares, or `"<absent>"`.
+fn declared_pre(path: &str) -> String {
+    use candlelight::core::quantized::gguf_file::Value;
+    lightbulb::gguf::Content::read(path)
+        .ok()
+        .and_then(|c| match c.metadata().get("tokenizer.ggml.pre") {
+            Some(Value::String(s)) => Some(s.clone()),
+            _ => None,
+        })
+        .unwrap_or_else(|| "<absent>".to_string())
+}
+
 fn pairs() -> Vec<(String, String)> {
     if let Ok(list) = std::env::var("LIGHTBULB_BPE_PAIRS") {
         return list
@@ -220,6 +232,26 @@ fn a_byte_level_ggufs_rebuilt_tokenizer_matches_the_checkpoints_own_ids() {
         !pairs.is_empty(),
         "set LIGHTBULB_BPE_PAIRS to `gguf|tokenizer.json` entries separated by `;`, or the single-pair LIGHTBULB_BPE_GGUF / LIGHTBULB_BPE_REF_TOKENIZER"
     );
+
+    // COVERAGE FIRST, FIDELITY SECOND.
+    //
+    // An unset or short `LIGHTBULB_BPE_PAIRS` used to narrow this gate silently:
+    // it would check whatever it was given, report success, and say nothing
+    // about the allowlist entries it never touched. That is the shape this file
+    // exists to prevent, one level up — a table of seven entries exercised by
+    // one checkpoint is six entries wearing the seventh's evidence.
+    let covered: std::collections::BTreeSet<String> =
+        pairs.iter().map(|(gguf, _)| declared_pre(gguf)).collect();
+    let missing: Vec<&str> = lightbulb::gguf::Content::verified_pre_values()
+        .iter()
+        .copied()
+        .filter(|pre| !covered.contains(*pre))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "these verified `tokenizer.ggml.pre` values have NO fixture in this run, so their entries are unevidenced: {missing:?}. Supplied pairs cover: {covered:?}"
+    );
+
     let mut diffs = Vec::new();
     for (gguf, reference) in &pairs {
         let ours = lightbulb::gguf::Content::read(gguf)
