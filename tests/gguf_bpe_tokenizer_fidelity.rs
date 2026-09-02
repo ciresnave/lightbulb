@@ -99,7 +99,25 @@
 //!   falcon           tiiuae/falcon-7b                          ggml-vocab-falcon.gguf
 //!   qwen2            Qwen/Qwen2-7B                             ggml-vocab-qwen2.gguf
 //!   deepseek-coder   deepseek-ai/deepseek-coder-6.7b-instruct  ggml-vocab-deepseek-coder.gguf
+//!   refact           smallcloudai/Refact-1_6B-fim              ggml-vocab-refact.gguf
+//!   deepseek-llm     deepseek-ai/deepseek-llm-7b-base          ggml-vocab-deepseek-llm.gguf
 //! ```
+//!
+//! # ⚠️ A 0-of-130 result is not automatically evidence
+//!
+//! **`qwen35` scored 0 of 130 and is still REFUSED.** Its obvious reference,
+//! `Qwen/Qwen3-8B`, declares a pre-tokenizer and vocab BYTE-IDENTICAL to
+//! `Qwen/Qwen2-7B` — so it is a reference for `qwen2`, not for that name.
+//! llama.cpp does define a distinct QWEN35 rule (`[\p{L}\p{M}]+` where qwen2
+//! has `\p{L}+`), and **this corpus cannot tell the two apart: measured, they
+//! differ on 0 of 130 cases**, because the qwen2 normalizer is NFC and composes
+//! away the combining marks the difference turns on.
+//!
+//! So the score was real, the corpus was the one used for every other entry,
+//! and the result carried **no information about which rule is correct**. The
+//! gate that would have caught a wrong rule here is blind to this particular
+//! distinction, and a passing score from a blind gate is not evidence.
+//! See `Content::bpe_refusal_reason`.
 //!
 //! **A reference is only admissible once its vocab matches the GGUF's.** All
 //! five were checked before use: `gpt-2` and `falcon` match exactly; `qwen2`
@@ -166,6 +184,18 @@ const CASES: &[&str] = &[
 /// wearing the fifth's evidence.**
 ///
 /// Falls back to the single-pair variables when it is unset.
+/// The `tokenizer.ggml.pre` a GGUF declares, or `"<absent>"`.
+fn declared_pre(path: &str) -> String {
+    use candlelight::core::quantized::gguf_file::Value;
+    lightbulb::gguf::Content::read(path)
+        .ok()
+        .and_then(|c| match c.metadata().get("tokenizer.ggml.pre") {
+            Some(Value::String(s)) => Some(s.clone()),
+            _ => None,
+        })
+        .unwrap_or_else(|| "<absent>".to_string())
+}
+
 fn pairs() -> Vec<(String, String)> {
     if let Ok(list) = std::env::var("LIGHTBULB_BPE_PAIRS") {
         return list
@@ -202,6 +232,26 @@ fn a_byte_level_ggufs_rebuilt_tokenizer_matches_the_checkpoints_own_ids() {
         !pairs.is_empty(),
         "set LIGHTBULB_BPE_PAIRS to `gguf|tokenizer.json` entries separated by `;`, or the single-pair LIGHTBULB_BPE_GGUF / LIGHTBULB_BPE_REF_TOKENIZER"
     );
+
+    // COVERAGE FIRST, FIDELITY SECOND.
+    //
+    // An unset or short `LIGHTBULB_BPE_PAIRS` used to narrow this gate silently:
+    // it would check whatever it was given, report success, and say nothing
+    // about the allowlist entries it never touched. That is the shape this file
+    // exists to prevent, one level up — a table of seven entries exercised by
+    // one checkpoint is six entries wearing the seventh's evidence.
+    let covered: std::collections::BTreeSet<String> =
+        pairs.iter().map(|(gguf, _)| declared_pre(gguf)).collect();
+    let missing: Vec<&str> = lightbulb::gguf::Content::verified_pre_values()
+        .iter()
+        .copied()
+        .filter(|pre| !covered.contains(*pre))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "these verified `tokenizer.ggml.pre` values have NO fixture in this run, so their entries are unevidenced: {missing:?}. Supplied pairs cover: {covered:?}"
+    );
+
     let mut diffs = Vec::new();
     for (gguf, reference) in &pairs {
         let ours = lightbulb::gguf::Content::read(gguf)
