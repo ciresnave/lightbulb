@@ -59,8 +59,24 @@ impl FusedRmsNorm {
 
     /// Forward pass with residual addition - fuses norm + residual on CUDA
     ///
-    /// Computes: `norm(x) + residual` in a single fused kernel on CUDA
-    /// On CPU: equivalent to `norm.forward(x)? + residual`
+    /// # ⚠️ THE TWO ARMS DO NOT COMPUTE THE SAME THING — DO NOT CALL THIS
+    ///
+    /// **This has no callers, which is the only reason it is latent rather
+    /// than a live defect.** Measured 2026-09-02:
+    ///
+    /// - **CPU**: `rms_norm(x)` then `+ residual` — NORMALIZE, THEN ADD.
+    /// - **CUDA**: `fused_add_rms_norm(x, residual, ...)`, which adds first and
+    ///   normalizes the sum — ADD, THEN NORMALIZE.
+    ///
+    /// Those are different operations and they give different results. The
+    /// doc comment that stood here claimed the CPU path was "equivalent to
+    /// `norm.forward(x)? + residual`", which described the CPU arm accurately
+    /// and asserted an equivalence to the CUDA arm that does not hold.
+    ///
+    /// A helper named as though its arms are interchangeable is a trap armed
+    /// for whoever calls it first. **Fix the divergence before adding a
+    /// caller**; pre-norm transformers want the CUDA ordering (add, then
+    /// normalize).
     pub fn forward_with_residual(&self, x: &Tensor, residual: &Tensor) -> Result<(Tensor, Tensor)> {
         #[cfg(feature = "cuda")]
         {

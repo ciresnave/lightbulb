@@ -102,12 +102,53 @@ figures above are re-measured and add up. The gpt2 count is **18**, not 13 — s
 gpt2 support closes more than first reported, not less.)*
 
 **One checkpoint loads** — `TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF` Q4_0, the one
-the tokenizer fix was developed against. Its completion is coherent but carries an
-unexplained artifact (`"France| Paris, France</s>"`).
+the tokenizer fix was developed against.
+
+**The artifact string recorded here was `"France| Paris, France</s>"`. That is
+STALE** — it was measured before the BOS fix (PR #19) and is retained only as
+provenance. **Measured 2026-09-02 at `9763030`, the served completion is
+`"The French capital of France.</s>"`**: still wrong, but wrong differently, and
+quoting the old string would send the next reader hunting a defect that no longer
+presents that way.
+
+**The remaining defect is now localised to the forward pass.** Given input proven
+identical id-for-id across 24 tokens, llama.cpp b10757 predicts `" capital"` and
+this engine predicts `"French"`. Positions are correct at the seam (`23, 24, 25,
+26` on two independently-maintained counters) and a single-pass prefill of 24
+tokens reproduces the decode path's answer exactly, so **the prefill→decode seam
+is ruled out**; intra-pass KV handling is not. The engine agrees with the
+reference at 23 tokens and disagrees at 24 — **input-dependent, not uniformly
+broken.**
+
+**Minimal reproduction is six tokens**, needing no chat template, no BOS
+handling and no cache: `"The capital of France is"` → this engine answers
+`"a"`, llama.cpp answers `" Paris"`. The recorded test carrying this experiment
+and its control arm lands with the diagnosis, not with this entry.
 
 **3. `M5 KV cache compression (COMPLETE)`** is cited as a satisfied dependency by
-CR.1 and CR.2 (lines ~2701, ~2748). `src/cache/kv_compression.rs:446` is a live
-`todo!("Grouped quantization not yet implemented")` — a panic, not a bail.
+CR.1 and CR.2 (lines ~2701, ~2748).
+
+`src/cache/kv_compression.rs`'s `PerGroup` granularity was a live
+`todo!("Grouped quantization not yet implemented")` — **a panic, not a bail**,
+reachable because `PerGroup` is a public enum variant selectable through
+`CompressionPolicy::create_compressor()`. **Fixed 2026-09-02: it now returns an
+`Err`.** Still unimplemented, so it remains in the site count below; it simply
+no longer crashes the caller's process.
+
+**And the claim was contradicted more seriously than by that panic.** Measured
+2026-09-02: `KiviQuantizer` computed `scales = max|x| / (2^bits - 1)`, making
+`x / scale` symmetric about zero, then clamped to `[0, 2^bits - 1]` — **pinning
+every negative value to zero**, which `dequantize` then multiplied back to
+`0.0`. K/V activations are approximately zero-mean, so **roughly half the cache
+was discarded on the way in**, silently, in a publicly re-exported type.
+
+Neither existing test could see it: one checked **byte accounting** and never
+put a tensor through the codec, and the other round-tripped `randn` data but
+bounded relative error at `< 1.0` — **a 100% error budget**, which zeroing half
+of zero-mean data clears at ~0.50. Fixed with a symmetric signed codec
+(`round(x/scale) + 2^(bits-1)`, undone on the way out, so `u8` storage is kept);
+relative error **0.50 → 0.1185**, bound tightened to `0.20`, and
+`kivi_quantization_preserves_sign` was observed RED before the fix.
 
 ### And two unimplemented paths that are NOT claimed complete
 
@@ -119,6 +160,41 @@ closed is an honest gap.** These are open work, not false claims.
   and that claim was not checked here.)
 - **Quantization has open dtype holes** — `src/quantization/mod.rs:245` and `:325`
   bail for unlisted dtypes, on both quantize and dequantize.
+
+### And one class that is neither: parameters accepted and discarded
+
+**Measured 2026-09-02 at `9763030`.** This is listed apart from the bails above
+because **nothing fails**. A bail is loud and a `todo!()` panics; this returns
+`200 OK` with a plausible completion and simply ignores what the caller asked
+for, which is why it survived every gate.
+
+**`temperature`, `top_p` and `top_k` are accepted by the API, carried all the way
+into the request context, and never read.** The live decode path is
+unconditionally greedy:
+
+```
+src/model/parallel_model_manager.rs:1481   logits_slice.argmax(0)?   (decode)
+src/model/parallel_model_manager.rs:1743   logits_slice.argmax(0)?   (decode)
+
+grep -c temperature src/model/parallel_model_manager.rs   ->  0
+grep -rn temperature src/model/                           ->  no matches
+   control: the same command over src/engine/ returns 10 matches, so the
+   query can find the word where it is present.
+```
+
+`src/engine/model_runner.rs:393` writes `ctx.temperature = job.temperature`, and
+**no site reads it back.**
+
+**A working sampler exists and is wired to a different backend.**
+`src/sampling.rs` implements `apply_temperature`, `top_k_filter`, `top_p_filter`
+and `sample_from_logits`; its only caller in the crate is
+`src/model_fuel/engine_model.rs:30-31` — the `fuel-engine` path, not the
+shipping candlelight one. So this is an unconnected wire, not missing code.
+
+**Not counted in the 13 sites below**, deliberately: those are executable
+*unimplemented* sites that fail when reached. This one succeeds while doing
+something other than what was requested, and counting it with them would blur
+the distinction that makes the list useful.
 
 ### And one claim that is unreconciled rather than false
 

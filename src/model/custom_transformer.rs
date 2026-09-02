@@ -363,7 +363,20 @@ impl BatchedTransformer {
                     )
                 }
                 Err(_) => {
-                    // Fall back to tied weights if output.weight doesn't exist
+                    // ⚠️ SILENT FALLBACK. If `output.weight` fails to load for
+                    // ANY reason, this quietly substitutes the EMBEDDING matrix
+                    // for the output projection and the model still serves 200
+                    // with fluent, wrong text. Untied checkpoints (Llama-2 and
+                    // derivatives, including TinyLlama) have genuinely
+                    // different matrices here, so the substitution is not
+                    // harmless — it is a different model.
+                    //
+                    // Verified 2026-09-02 that this arm is NOT taken for
+                    // TinyLlama-1.1B-Chat Q4_0: `output.weight` is present.
+                    // The hazard is that nothing would say so if it were.
+                    // Make this loud (log, or propagate the error when the
+                    // config says weights are untied) next time this file is
+                    // touched.
                     let emb_weight = gguf_content
                         .tensor(file, &embedding_name, device)?
                         .dequantize(device)?;
