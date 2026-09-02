@@ -351,6 +351,15 @@ impl Content {
             .unwrap_or("<absent>");
 
         let Some((pre_json, norm_json)) = Self::bpe_pre_tokenizer(pre) else {
+            // Values that were investigated and deliberately NOT added get their
+            // own reason. A generic "not verified" would send the next person
+            // to repeat work that has already been done and come out negative.
+            if let Some(why) = Self::bpe_refusal_reason(pre) {
+                bail!(
+                    "GGUF tokenizer.ggml.pre is {pre:?}, which this build refuses. {why} Verified values: {verified:?}.",
+                    verified = Self::VERIFIED_PRE
+                );
+            }
             bail!(
                 "GGUF tokenizer.ggml.pre is {pre:?}, which names a pre-tokenizer splitting rule this build has not verified. Byte-level BPE (`gpt2`) is supported, but only for `pre` values checked id-for-id against a reference: {verified:?}. Refusing to substitute a different rule: the vocab and merges would still load and the output would be plausible and wrong.",
                 verified = Self::VERIFIED_PRE
@@ -485,10 +494,35 @@ impl Content {
         Ok((tokens, vocab, merges))
     }
 
+    /// Why a specific `tokenizer.ggml.pre` was investigated and NOT added.
+    ///
+    /// Separate from the generic refusal so that work already done and found
+    /// negative is not silently repeated. Both entries here reached "0 of 130
+    /// cases disagree" against a candidate reference and were STILL refused,
+    /// for reasons a score cannot express.
+    fn bpe_refusal_reason(pre: &str) -> Option<&'static str> {
+        match pre {
+            "qwen35" => Some(
+                r#"No admissible reference exists for it. The obvious candidate, `Qwen/Qwen3-8B`, turns out to declare a pre-tokenizer and vocab BYTE-IDENTICAL to `Qwen/Qwen2-7B`, so it is a reference for `qwen2` and not for this name. llama.cpp does define a distinct QWEN35 rule, matching `[\p{L}\p{M}]+` where the qwen2 rule matches `\p{L}+` — and this build's 130-case corpus CANNOT TELL THE TWO APART: measured, they differ on 0 of 130, because the qwen2 normalizer is NFC and composes away the combining marks that are the only thing the difference turns on. A 0-of-130 result here carries no information about which rule is correct, so adding it would be an entry with vacuous evidence."#,
+            ),
+            "<absent>" => Some(
+                r#"An absent `tokenizer.ggml.pre` is not a name, it is the lack of one, and this table keys on names. The corpus file that omits it (gpt-neox) does verify 0 of 130 against `EleutherAI/gpt-neox-20b`, but keying on absence would apply that one checkpoint's rule to EVERY future GGUF that omits the field — which is precisely the one-rule-for-all-checkpoints failure this table exists to prevent. Re-export the checkpoint with `tokenizer.ggml.pre` set, or add its name here."#,
+            ),
+            _ => None,
+        }
+    }
+
     /// `tokenizer.ggml.pre` values whose splitting rule has been verified
     /// id-for-id against a reference. See [`Self::bpe_pre_tokenizer`].
-    const VERIFIED_PRE: &'static [&'static str] =
-        &["smollm", "gpt-2", "falcon", "qwen2", "deepseek-coder"];
+    const VERIFIED_PRE: &'static [&'static str] = &[
+        "smollm",
+        "gpt-2",
+        "falcon",
+        "qwen2",
+        "deepseek-coder",
+        "refact",
+        "deepseek-llm",
+    ];
 
     /// The pre-tokenizer for a `tokenizer.ggml.pre` name, or `None` if this
     /// build has not verified that name.
@@ -549,6 +583,18 @@ impl Content {
             // `tokenizer.json`, whose vocab and merges match this GGUF.
             "deepseek-coder" => Some((
                 r##"{"type":"Sequence","pretokenizers":[{"type":"Split","pattern":{"Regex":"[\r\n]"},"behavior":"Isolated","invert":false},{"type":"Split","pattern":{"Regex":"\\s?\\p{L}+"},"behavior":"Isolated","invert":false},{"type":"Split","pattern":{"Regex":"\\s?\\p{P}+"},"behavior":"Isolated","invert":false},{"type":"Split","pattern":{"Regex":"[一-龥ࠀ-一가-퟿]+"},"behavior":"Isolated","invert":false},{"type":"Digits","individual_digits":true},{"type":"ByteLevel","add_prefix_space":false,"trim_offsets":true,"use_regex":false}]}"##,
+                r##"{"type":"Sequence","normalizers":[]}"##,
+            )),
+            // smallcloudai/Refact-1_6B-fim -- verified 0 of 130 cases against that checkpoint's own
+            // `tokenizer.json`, whose vocab matches this GGUF (extras at the tail).
+            "refact" => Some((
+                r##"{"type":"Sequence","pretokenizers":[{"type":"Digits","individual_digits":true},{"type":"ByteLevel","add_prefix_space":false,"trim_offsets":true,"use_regex":true}]}"##,
+                r##"null"##,
+            )),
+            // deepseek-ai/deepseek-llm-7b-base -- verified 0 of 130 cases against that checkpoint's own
+            // `tokenizer.json`, whose vocab matches this GGUF (extras at the tail).
+            "deepseek-llm" => Some((
+                r##"{"type":"Sequence","pretokenizers":[{"type":"Split","pattern":{"Regex":"[\r\n]"},"behavior":"Isolated","invert":false},{"type":"Split","pattern":{"Regex":"\\s?[A-Za-zµÀ-ÖØ-öø-ƺƼ-ƿǄ-ʓʕ-ʯͰ-ͳͶͷͻ-ͽͿΆΈ-ΊΌΎ-ΡΣ-ϵϷ-ҁҊ-ԯԱ-ՖႠ-ჅᎠ-Ᏽᏸ-ᏽᲐ-ᲺᲽ-Ჿᴀ-ᴫᵫ-ᵷᵹ-ᶚḀ-ἕἘ-Ἕἠ-ὅὈ-Ὅὐ-ὗὙὛὝὟ-ώᾀ-ᾴᾶ-ᾼιῂ-ῄῆ-ῌῐ-ΐῖ-Ίῠ-Ῥῲ-ῴῶ-ῼℂℇℊ-ℓℕℙ-ℝℤΩℨK-ℭℯ-ℴℹℼ-ℿⅅ-ⅉⅎↃↄⰀ-ⱻⱾ-ⳤⳫ-ⳮⳲⳳꙀ-ꙭꚀ-ꚛꜢ-ꝯꝱ-ꞇꞋ-ꞎꭰ-ꮿﬀ-ﬆﬓ-ﬗＡ-Ｚａ-ｚ𐐀-𐑏𐒰-𐓓𐓘-𐓻𐲀-𐲲𐳀-𐳲𑢠-𑣟𞤀-𞥃]+"},"behavior":"Isolated","invert":false},{"type":"Split","pattern":{"Regex":"\\s?[!-/:-~！-／：-～‘-‟　-。]+"},"behavior":"Isolated","invert":false},{"type":"Split","pattern":{"Regex":"\\s+$"},"behavior":"Isolated","invert":false},{"type":"Split","pattern":{"Regex":"[一-龥ࠀ-一가-퟿]+"},"behavior":"Isolated","invert":false},{"type":"Digits","individual_digits":true},{"type":"ByteLevel","add_prefix_space":false,"trim_offsets":true,"use_regex":false}]}"##,
                 r##"{"type":"Sequence","normalizers":[]}"##,
             )),
             _ => None,

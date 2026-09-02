@@ -99,7 +99,25 @@
 //!   falcon           tiiuae/falcon-7b                          ggml-vocab-falcon.gguf
 //!   qwen2            Qwen/Qwen2-7B                             ggml-vocab-qwen2.gguf
 //!   deepseek-coder   deepseek-ai/deepseek-coder-6.7b-instruct  ggml-vocab-deepseek-coder.gguf
+//!   refact           smallcloudai/Refact-1_6B-fim              ggml-vocab-refact.gguf
+//!   deepseek-llm     deepseek-ai/deepseek-llm-7b-base          ggml-vocab-deepseek-llm.gguf
 //! ```
+//!
+//! # ⚠️ A 0-of-130 result is not automatically evidence
+//!
+//! **`qwen35` scored 0 of 130 and is still REFUSED.** Its obvious reference,
+//! `Qwen/Qwen3-8B`, declares a pre-tokenizer and vocab BYTE-IDENTICAL to
+//! `Qwen/Qwen2-7B` — so it is a reference for `qwen2`, not for that name.
+//! llama.cpp does define a distinct QWEN35 rule (`[\p{L}\p{M}]+` where qwen2
+//! has `\p{L}+`), and **this corpus cannot tell the two apart: measured, they
+//! differ on 0 of 130 cases**, because the qwen2 normalizer is NFC and composes
+//! away the combining marks the difference turns on.
+//!
+//! So the score was real, the corpus was the one used for every other entry,
+//! and the result carried **no information about which rule is correct**. The
+//! gate that would have caught a wrong rule here is blind to this particular
+//! distinction, and a passing score from a blind gate is not evidence.
+//! See `Content::bpe_refusal_reason`.
 //!
 //! **A reference is only admissible once its vocab matches the GGUF's.** All
 //! five were checked before use: `gpt-2` and `falcon` match exactly; `qwen2`

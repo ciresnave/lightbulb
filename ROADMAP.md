@@ -106,16 +106,16 @@ selecting them fails with a reason.
 Measured by `tests/gguf_corpus_sweep.rs` over every local GGUF:
 
 ```
-30 files total = 11 REBUILT + 19 that do not load    (was 1 + 29; re-measured 2026-09-02)
+30 files total = 13 REBUILT + 17 that do not load    (was 1 + 29; re-measured 2026-09-02)
 
- 11  rebuilt
+ 13  rebuilt
         1  SentencePiece   TinyLlama-1.1B-Chat-v1.0 Q4_0
-       10  byte-level BPE  SmolLM2-135M-Instruct x6, plus the gpt-2, falcon,
-                           qwen2 and deepseek-coder vocab files
- 14  refused by the tokenizer
-        8  tokenizer.ggml.model = "gpt2", `pre` NOT YET VERIFIED
-              gpt-neox(absent), mpt, starcoder, refact,
-              command-r, deepseek-llm, llama-bpe, qwen35
+       12  byte-level BPE  SmolLM2-135M-Instruct x6, plus the gpt-2, falcon,
+                           qwen2, deepseek-coder, refact and deepseek-llm vocab files
+ 12  refused by the tokenizer
+        6  tokenizer.ggml.model = "gpt2", `pre` NOT VERIFIED
+              mpt, starcoder, command-r, llama-bpe   (references GATED on HF, 401)
+              qwen35, gpt-neox(absent)               (refused for cause, see below)
         3  model = "llama" but NO merges   (llama-spm, phi-3, baichuan)
         1  bert     1  t5     1  gemma4
   5  unreadable BEFORE the tokenizer is reached
@@ -126,9 +126,31 @@ Measured by `tests/gguf_corpus_sweep.rs` over every local GGUF:
 **Byte-level BPE (`gpt2`) is now supported, but only for `tokenizer.ggml.pre`
 values verified id-for-id against that checkpoint's OWN `tokenizer.json`.** `pre`
 names a splitting rule and llama.cpp keeps a different regex per name; the 18
-`gpt2` files carry 13 distinct values. **Five are verified, each 0 of 130 cases
+`gpt2` files carry 13 distinct values. **Seven are verified, each 0 of 130 cases
 disagreeing with its reference:** `smollm`, `gpt-2`, `falcon`, `qwen2`,
-`deepseek-coder`.
+`deepseek-coder`, `refact`, `deepseek-llm`.
+
+⚠️ **And one scored 0 of 130 and is REFUSED anyway.** `qwen35`'s obvious
+reference, `Qwen/Qwen3-8B`, declares a pre-tokenizer and vocab BYTE-IDENTICAL to
+`Qwen/Qwen2-7B` — so it is a reference for `qwen2`, not for that name. llama.cpp
+defines a distinct QWEN35 rule (`[\p{L}\p{M}]+` where qwen2 has `\p{L}+`), and
+**this corpus cannot tell the two apart: measured, they differ on 0 of 130
+cases**, because the qwen2 normalizer is NFC and composes away the combining
+marks the difference turns on. The score was real, the corpus was the one used
+for every other entry, and the result carried **no information about which rule
+is correct.** A passing score from a gate that is blind to the distinction is
+not evidence.
+
+`gpt-neox` is refused for a different reason: it omits `tokenizer.ggml.pre`
+entirely. It verifies 0 of 130 against `EleutherAI/gpt-neox-20b`, but keying the
+table on ABSENCE would apply that one checkpoint's rule to every future GGUF
+that omits the field — the one-rule-for-all-checkpoints failure the table exists
+to prevent. Both refusals carry their own reason at the point of failure, so the
+work already done and found negative is not silently repeated.
+
+The remaining four — `mpt`, `starcoder`, `command-r`, `llama-bpe` — have
+references GATED on HuggingFace (HTTP 401), so no admissible reference is
+reachable from here.
 
 The table stores each checkpoint's declared pre-tokenizer and normalizer as its
 own JSON, copied verbatim, so provenance is auditable by diffing against the
