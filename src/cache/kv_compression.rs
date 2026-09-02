@@ -426,7 +426,11 @@ impl KiviQuantizer {
     /// For per-head: scale = max(abs(tensor)) / (2^bits - 1)
     /// For per-channel: scale computed per channel within each head
     fn compute_scales(&self, tensor: &Tensor, ctx: &CompressionCtx) -> Result<Tensor> {
-        let max_val = (1 << self.config.bits) - 1;
+        // MAGNITUDE levels, not code levels. `scales` divides a SIGNED value,
+        // so the usable magnitude either side of zero is `2^(bits-1) - 1`;
+        // using `2^bits - 1` here is what made `x / scale` symmetric about
+        // zero while the clamp below expected it to be non-negative.
+        let (max_val, _offset) = Self::codec_params(self.config.bits as u32);
 
         match self.config.granularity {
             QuantGranularity::PerHead => {
@@ -441,23 +445,30 @@ impl KiviQuantizer {
                 abs_max / (max_val as f64)
             }
             QuantGranularity::PerGroup { group_size } => {
-                // Group channels and compute max per group
-                // TODO: Implement grouped quantization
-                todo!("Grouped quantization not yet implemented")
+                // NOT IMPLEMENTED — but a bail, not a panic. `PerGroup` is a
+                // PUBLIC enum variant a caller can select and reach through
+                // `CompressionPolicy::create_compressor`, so a `todo!()` here
+                // was a reachable panic in shipped code.
+                Err(candlelight::core::Error::Msg(format!(
+                    "KIVI grouped quantization (group_size={group_size}) is not implemented; use QuantGranularity::PerHead or PerChannel"
+                )))
             }
         }
     }
 
     /// Quantize tensor to low-bit representation
     fn quantize(&self, tensor: &Tensor, scales: &Tensor) -> Result<Tensor> {
-        let max_val = (1 << self.config.bits) - 1;
+        let (_mag, offset) = Self::codec_params(self.config.bits as u32);
+        let max_code = 2.0 * offset - 1.0;
 
-        // Scale and round: round(tensor / scale)
+        // round(tensor / scale) is SIGNED, spanning roughly [-offset, +offset].
+        // Shifting by `offset` moves it into the unsigned code range so it can
+        // be stored as u8 without discarding the negative half.
         let scaled = tensor.broadcast_div(scales)?;
-        let quantized = scaled.round()?;
+        let quantized = (scaled.round()? + offset)?;
 
-        // Clamp to valid range [0, 2^bits - 1]
-        let clamped = quantized.clamp(0.0, max_val as f64)?;
+        // Clamp to the storable code range [0, 2^bits - 1].
+        let clamped = quantized.clamp(0.0, max_code)?;
 
         // Cast to appropriate integer type
         match self.config.bits {
@@ -474,9 +485,19 @@ impl KiviQuantizer {
 
     /// Dequantize back to floating point
     fn dequantize(&self, quantized: &Tensor, scales: &Tensor, dtype: DType) -> Result<Tensor> {
-        // Convert to float and multiply by scale
-        let float_vals = quantized.to_dtype(dtype)?;
+        // Undo the code-range shift applied by `quantize` BEFORE rescaling —
+        // the stored code is `round(x/scale) + offset`.
+        let (_mag, offset) = Self::codec_params(self.config.bits as u32);
+        let float_vals = (quantized.to_dtype(dtype)? - offset)?;
         float_vals.broadcast_mul(scales)
+    }
+
+    /// `(magnitude_levels, offset)` for a symmetric signed codec stored in an
+    /// unsigned range: values map to `round(x / scale) + offset`, with
+    /// `scale = max|x| / magnitude_levels`.
+    fn codec_params(bits: u32) -> (f64, f64) {
+        let offset = (1u64 << (bits.max(2) - 1)) as f64;
+        (offset - 1.0, offset)
     }
 }
 
@@ -1480,6 +1501,64 @@ mod tests {
     // INTEGRATION TESTS: Full compress → decompress cycles
     // ========================================================================
 
+    /// KIVI quantization must preserve the SIGN of what it stores.
+    ///
+    /// **Born red.** `quantize` computes `scales = max|x| / (2^bits - 1)`, so
+    /// `x / scale` lands in `[-(2^bits - 1), +(2^bits - 1)]` — symmetric about
+    /// zero — and then clamps to `[0, 2^bits - 1]`. Every negative value is
+    /// pinned to 0 and `dequantize` multiplies it straight back to 0.0. K and V
+    /// activations are approximately zero-mean, so roughly half the cache is
+    /// discarded on the way in.
+    ///
+    /// The struct has carried an `Option<(Tensor, Tensor)>` `zero_points` field
+    /// for asymmetric quantization since it was written. It is hard-coded
+    /// `None`.
+    ///
+    /// This went unnoticed because neither existing test could see it:
+    /// `test_kivi_memory_savings_calculation` checks BYTE ACCOUNTING and never
+    /// puts a tensor through the codec at all, and
+    /// `test_kivi_compress_decompress_cycle` bounds relative error at
+    /// `< 1.0` — a 100% error budget, which admits an implementation that
+    /// zeroes half its input at ~0.5. A bound that loose is not a bound, and
+    /// the comment above it explains the looseness rather than questioning it.
+    #[test]
+    fn kivi_quantization_preserves_sign() -> Result<()> {
+        let config = KiviConfig {
+            bits: 4,
+            per_head_scales: true,
+            granularity: QuantGranularity::PerHead,
+            ..Default::default()
+        };
+        let mut quantizer = KiviQuantizer::new(config);
+        let device = Device::Cpu;
+
+        // [batch=1, heads=1, seq=2, dim=2] — two negatives, two positives.
+        let keys = Tensor::from_vec(vec![-1.0f32, -0.5, 0.5, 1.0], (1, 1, 2, 2), &device)?;
+        let mut ctx = CompressionCtx {
+            layer_idx: 0,
+            num_heads: 1,
+            head_dim: 2,
+            seq_len: 2,
+            device: device.clone(),
+            dtype: DType::F32,
+            scales: None,
+            importance: None,
+            redundancy: None,
+        };
+
+        let compressed = quantizer.compress_keys(&keys, &mut ctx)?;
+        let out = quantizer
+            .decompress_keys(&compressed, &ctx)?
+            .flatten_all()?
+            .to_vec1::<f32>()?;
+
+        assert!(
+            out[0] < 0.0 && out[1] < 0.0,
+            "negative inputs must survive the round trip, got {out:?} from [-1.0, -0.5, 0.5, 1.0]"
+        );
+        Ok(())
+    }
+
     #[test]
     fn test_kivi_compress_decompress_cycle() -> Result<()> {
         let config = KiviConfig {
@@ -1529,13 +1608,22 @@ mod tests {
         let original_sum = keys.abs()?.sum_all()?.to_scalar::<f32>()?;
         let relative_error = diff / original_sum;
 
-        println!("KIVI relative error: {:.4}", relative_error);
-        // Simple round-and-clamp quantization has higher error
-        // Real KIVI uses learned codebooks to achieve <15% error
+        println!("KIVI relative error: {relative_error:.4}");
+        // A 100% ERROR BUDGET IS NOT A BOUND. This assertion read
+        // `relative_error < 1.0` and passed for years over a codec that
+        // clamped every negative input to zero — measured at ~0.50 on
+        // zero-mean `randn` data, comfortably inside a budget that permits
+        // total error. The comment that stood here explained the looseness
+        // ("simple round-and-clamp has higher error") instead of questioning
+        // it, which is how the number survived review.
+        //
+        // Measured after the signed-codec fix: 0.1185 at 4 bits, which is
+        // inside the <15% the same comment attributed to real KIVI. The bound
+        // is 0.20 to leave headroom for the unseeded `randn` above while
+        // still excluding the ~0.50 defect this test used to admit.
         assert!(
-            relative_error < 1.0,
-            "Quantization error too high: {}",
-            relative_error
+            relative_error < 0.20,
+            "Quantization error too high: {relative_error}"
         );
 
         Ok(())
