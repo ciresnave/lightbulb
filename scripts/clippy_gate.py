@@ -352,6 +352,23 @@ def main():
         print("      Create one with: python scripts/clippy_gate.py --update")
         return 1
 
+    # AN EMPTY-BUT-PRESENT BASELINE IS A FAIL-OPEN, MEASURED. Every guard in
+    # `verdict` is written `if base_total > 0 and ...`, so a baseline that parses
+    # to no entries -- truncated, emptied, or all comments -- disables the
+    # zero-check AND the plausibility floor at once. Paired with a measurement
+    # that also comes back empty, the gate returns CLEAN over nothing at all.
+    #
+    # A missing file already fails above; a file that exists and says nothing was
+    # the gap between them. An empty ceiling is not a permissive ceiling, it is a
+    # corrupted one.
+    if not base:
+        print("FAIL: the baseline at " + BASELINE + " parsed to ZERO entries.")
+        print("      A present-but-empty baseline disables every guard in verdict(),")
+        print("      because each is conditioned on a non-empty baseline. That is a")
+        print("      truncated or corrupted file, not a permissive ceiling.")
+        print("      Regenerate with: python scripts/clippy_gate.py --update")
+        return 1
+
     outcome, detail = verdict(counts, base)
     for line in render(outcome, detail):
         print(line)
