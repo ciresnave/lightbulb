@@ -59,7 +59,7 @@
 /// The fixed marker every skip notice carries.
 ///
 /// Printable ASCII with no whitespace, so it survives a grep, a CI log viewer
-/// and a regex without quoting. [`notice_token_is_greppable`] asserts that,
+/// and a regex without quoting. `notice_token_is_greppable` asserts that,
 /// because a token that acquires a unicode character or a space would break
 /// every runner reading for it while every test still passed.
 pub const NOTICE_TOKEN: &str = "LIGHTBULB-SKIP";
