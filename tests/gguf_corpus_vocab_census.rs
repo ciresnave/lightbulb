@@ -4,11 +4,17 @@
 //! as a file count. A file count answers a different question from the one a
 //! tokenizer corpus is asked.
 //!
-//! Nine of the files are `SmolLM2-135M-Instruct` at nine quantizations. A
-//! quantization changes the WEIGHTS; it does not change `tokenizer.ggml.tokens`.
-//! So those nine files exercise the tokenizer path once, and a report of "9
-//! files rebuilt" is one model counted nine times. Growing the file count by
-//! adding quantizations grows the number without growing the coverage.
+//! Nine of the files are `SmolLM2-135M-Instruct` at nine quantizations, and a
+//! quantization changes the WEIGHTS while leaving `tokenizer.ggml.tokens`
+//! untouched. So growing the file count by adding quantizations grows the number
+//! without growing the coverage.
+//!
+//! MEASURED, because the sentence above was first written from the filenames and
+//! was wrong in the direction that flattered it: those nine are **six** files
+//! sharing one vocabulary plus **three** that fail to parse at all
+//! (`unknown dtype for tensor N`, the IQ3_XS/IQ4_XS/Q2_K quantizations). So the
+//! shape is not "nine counted as one" but "six counted as one, and three that do
+//! not count." A name is not a measurement, which is the whole point of the file.
 //!
 //! This measures it rather than inferring it from names: two files with
 //! unrelated names can still carry the same vocabulary, and a name is not a
@@ -18,7 +24,7 @@
 //!   LIGHTBULB_GGUF_CORPUS=<dir> cargo test --test gguf_corpus_vocab_census -- --ignored --nocapture
 
 use lightbulb::gguf::{Content, Value};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::PathBuf;
 
@@ -109,22 +115,43 @@ struct VocabGroup {
     files: Vec<FileEntry>,
 }
 
-#[test]
-#[ignore = "needs a local GGUF corpus; set LIGHTBULB_GGUF_CORPUS"]
-fn corpus_is_fewer_vocabularies_than_files() {
-    let files = corpus_files();
-    assert!(
-        !files.is_empty(),
-        "no .gguf files under LIGHTBULB_GGUF_CORPUS={:?}. An empty corpus makes every \
-         count below zero, and zero would be reported as a clean census.",
-        std::env::var("LIGHTBULB_GGUF_CORPUS").unwrap_or_default()
-    );
+impl VocabGroup {
+    fn any_rebuilt(&self) -> bool {
+        self.files.iter().any(|f| f.rebuilt)
+    }
 
-    // digest -> (vocab_len, [(file name, tokenizer rebuilt?)])
+    fn all_rebuilt(&self) -> bool {
+        self.files.iter().all(|f| f.rebuilt)
+    }
+
+    /// Rebuilt for some files in the group and refused for others.
+    fn is_split(&self) -> bool {
+        self.any_rebuilt() && !self.all_rebuilt()
+    }
+
+    /// The distinct `(model, pre)` rules across this group's files. A split with
+    /// exactly one rule is the real defect: identical inputs, different outcomes.
+    fn rules(&self) -> BTreeSet<(&str, &str)> {
+        self.files
+            .iter()
+            .map(|f| (f.model.as_str(), f.pre.as_str()))
+            .collect()
+    }
+}
+
+/// The derivation: one pass over the corpus. No printing, no assertions.
+///
+/// SEPARATED FROM THE REPORT BECAUSE IT WAS NOT, AND THAT MATTERED. The split
+/// list -- the input to this file's central assertion -- used to be accumulated
+/// as a SIDE EFFECT of the printing loop, so the assertion's evidence was
+/// produced by the display code and could not be inspected without running it.
+/// This file's first assertion was WRONG, and that arrangement is why it could
+/// only be discovered by firing.
+fn census(files: &[PathBuf]) -> (BTreeMap<u64, VocabGroup>, Vec<(String, String)>) {
     let mut groups: BTreeMap<u64, VocabGroup> = BTreeMap::new();
     let mut unreadable: Vec<(String, String)> = Vec::new();
 
-    for path in &files {
+    for path in files {
         let name = path.file_name().unwrap().to_string_lossy().into_owned();
         let content = match Content::read(path) {
             Ok(c) => c,
@@ -135,16 +162,12 @@ fn corpus_is_fewer_vocabularies_than_files() {
         };
         match vocab(&content) {
             Ok(tokens) => {
-                let d = vocab_digest(&tokens);
                 // Whether the tokenizer rebuilds is NOT a property of the token
                 // list alone -- it also turns on `pre`, merges and token types.
-                // So two files sharing a vocabulary can disagree here, and if
-                // they do, that is worth knowing: it would mean the rebuild
-                // decision is carrying information the vocabulary does not.
                 let rebuilt = content.extract_tokenizer().is_ok();
                 let (model, pre) = tokenizer_rule(&content);
                 groups
-                    .entry(d)
+                    .entry(vocab_digest(&tokens))
                     .or_insert_with(|| VocabGroup {
                         token_count: tokens.len(),
                         files: Vec::new(),
@@ -160,40 +183,32 @@ fn corpus_is_fewer_vocabularies_than_files() {
             Err(why) => unreadable.push((name, why)),
         }
     }
+    (groups, unreadable)
+}
 
+/// The report: printing only. Nothing an assertion depends on is decided here.
+fn report(files: usize, groups: &BTreeMap<u64, VocabGroup>, unreadable: &[(String, String)]) {
     println!("\n=== GGUF corpus census ===");
-    println!("  files scanned      : {}", files.len());
+    println!("  files scanned        : {files}");
     println!("  distinct vocabularies: {}", groups.len());
-    println!("  no readable vocab  : {}", unreadable.len());
+    println!("  no readable vocab    : {}", unreadable.len());
     println!();
 
-    let mut shared = 0usize;
-    let mut vocabs_rebuilt = 0usize;
-    let mut split_groups: Vec<u64> = Vec::new();
-    for (digest, group) in &groups {
-        let (len, entries) = (group.token_count, &group.files);
-        let any = entries.iter().any(|f| f.rebuilt);
-        let all = entries.iter().all(|f| f.rebuilt);
-        if any {
-            vocabs_rebuilt += 1;
-        }
-        if any && !all {
-            split_groups.push(*digest);
-        }
-        let mark = if all {
+    for (digest, group) in groups {
+        let mark = if group.all_rebuilt() {
             "REBUILT"
-        } else if any {
+        } else if group.any_rebuilt() {
             "SPLIT  "
         } else {
             "refused"
         };
-        if entries.len() > 1 {
-            shared += entries.len() - 1;
+        let len = group.token_count;
+        if group.files.len() > 1 {
             println!(
                 "  {len:>6} tokens  [{digest:016x}]  {mark}  {} FILES SHARE THIS VOCABULARY:",
-                entries.len()
+                group.files.len()
             );
-            for f in entries {
+            for f in &group.files {
                 println!(
                     "           {} {:<38} model={} pre={}",
                     if f.rebuilt { "ok " } else { "no " },
@@ -205,32 +220,62 @@ fn corpus_is_fewer_vocabularies_than_files() {
         } else {
             println!(
                 "  {len:>6} tokens  [{digest:016x}]  {mark}  {}",
-                entries[0].name
+                group.files[0].name
             );
         }
     }
+
     if !unreadable.is_empty() {
         println!("\n  no readable vocabulary (NOT counted as a vocabulary):");
-        for (n, why) in &unreadable {
+        for (n, why) in unreadable {
             println!("    {n:<44} {why}");
         }
     }
+}
+
+#[test]
+#[ignore = "needs a local GGUF corpus; set LIGHTBULB_GGUF_CORPUS"]
+fn corpus_is_fewer_vocabularies_than_files() {
+    let files = corpus_files();
+    assert!(
+        !files.is_empty(),
+        "no .gguf files under LIGHTBULB_GGUF_CORPUS={:?}. An empty corpus makes every \
+         count below zero, and zero would be reported as a clean census.",
+        std::env::var("LIGHTBULB_GGUF_CORPUS").unwrap_or_default()
+    );
+
+    let (groups, unreadable) = census(&files);
+    report(files.len(), &groups, &unreadable);
+
+    // Classification, derived from the groups rather than accumulated while
+    // printing them. Each of these is now readable on its own.
+    let shared: usize = groups.values().map(|g| g.files.len() - 1).sum();
     let files_rebuilt: usize = groups
         .values()
         .map(|g| g.files.iter().filter(|f| f.rebuilt).count())
         .sum();
+    let vocabs_rebuilt = groups.values().filter(|g| g.any_rebuilt()).count();
+    let splits: Vec<u64> = groups
+        .iter()
+        .filter(|(_, g)| g.is_split())
+        .map(|(d, _)| *d)
+        .collect();
+
     println!(
-        "\n  ==> report this corpus as {} files / {} vocabularies ({} files are duplicates \
-         of a vocabulary already present)",
+        "\n  ==> report this corpus as {} files / {} vocabularies ({shared} files are \
+         duplicates of a vocabulary already present)",
         files.len(),
-        groups.len(),
-        shared
+        groups.len()
     );
     println!(
         "  ==> tokenizer rebuild: {files_rebuilt} of {} files, but {vocabs_rebuilt} of {} \
          VOCABULARIES -- the second is the coverage number",
         files.len(),
         groups.len()
+    );
+    println!(
+        "  ==> {} vocabulary group(s) split by a differing pre-tokenizer rule, as designed",
+        splits.len()
     );
 
     // SPLIT GROUPS ARE EXPECTED, AND THE FIRST VERSION OF THIS ASSERTION WAS
@@ -251,28 +296,21 @@ fn corpus_is_fewer_vocabularies_than_files() {
     // by a differing rule". A split where the files carry the SAME (model, pre)
     // and disagree anyway is a real defect: identical inputs, different
     // outcomes.
-    let mut unexplained: Vec<String> = Vec::new();
-    for digest in &split_groups {
-        let rules: std::collections::BTreeSet<(&str, &str)> = groups[digest]
-            .files
-            .iter()
-            .map(|f| (f.model.as_str(), f.pre.as_str()))
-            .collect();
-        if rules.len() == 1 {
-            unexplained.push(format!(
-                "[{digest:016x}] every file carries model/pre {rules:?} yet they disagree"
-            ));
-        }
-    }
+    let unexplained: Vec<String> = splits
+        .iter()
+        .filter(|d| groups[d].rules().len() == 1)
+        .map(|d| {
+            format!(
+                "[{d:016x}] every file carries model/pre {:?} yet they disagree",
+                groups[d].rules()
+            )
+        })
+        .collect();
     assert!(
         unexplained.is_empty(),
         "a vocabulary rebuilt for some files and not others WITH NO DIFFERENCE IN model/pre \
          -- identical inputs, different outcomes:\n{}",
         unexplained.join("\n")
-    );
-    println!(
-        "  ==> {} vocabulary group(s) split by a differing pre-tokenizer rule, as designed",
-        split_groups.len()
     );
 
     // The claim this test exists to keep honest. It is deliberately an
