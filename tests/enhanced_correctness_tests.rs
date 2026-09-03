@@ -340,25 +340,44 @@ fn test_edge_case_max_length() -> Result<()> {
         max_new_tokens: 50, // Will hit context limit
     })];
 
+    // EVERY PATH THROUGH THIS TEST USED TO PASS. An error -- any error, including
+    // an OOM, a shape mismatch or a failed load -- printed "✓ Stopped at context
+    // limit" and returned Ok(()). Completing all 50 tokens without ever hitting
+    // the limit printed "✓ Generated N tokens" and also returned Ok(()). There
+    // was no assertion anywhere, so the edge case this test is named for was
+    // never checked, and an unrelated failure was reported with a checkmark.
     let mut generated = 0;
+    let mut stopped = false;
     for _ in 0..50 {
         match model.forward_batch(&mut batch) {
             Ok(_) => generated += 1,
             Err(e) => {
-                println!(
-                    "✓ Stopped at context limit after {} tokens: {}",
-                    generated, e
-                );
-                return Ok(());
+                // Reported plainly rather than with a checkmark: this branch
+                // cannot tell a context-limit stop from any other failure.
+                // Discriminating the error KIND needs the AWQ checkpoint, which
+                // is why this is left as a report and the real assertion is
+                // after the loop.
+                println!("forward_batch stopped after {generated} tokens: {e}");
+                stopped = true;
+                break;
             }
         }
 
         if !batch[0].should_continue() {
+            stopped = true;
             break;
         }
     }
 
-    println!("✓ Generated {} tokens before stopping", generated);
+    // The actual claim. Running all 50 tokens against a small context means the
+    // max-length edge case never occurred, which used to be indistinguishable
+    // from observing it.
+    assert!(
+        stopped,
+        "generated all 50 tokens against a {context_len}-token context without ever \
+         stopping, so the max-length edge case this test is named for was not exercised"
+    );
+    println!("stopped after {generated} tokens");
     Ok(())
 }
 
