@@ -908,6 +908,16 @@ mod tests {
         let config = SearchConfig::default().with_metadata_filter(filter);
 
         let results = search.search("Rust", &documents, &config).unwrap();
+        // ASSERT THE COLLECTION BEFORE ASSERTING OVER IT.
+        //
+        // The loop below is the whole test, and over an EMPTY `results` it runs
+        // zero times and the test passes. Nothing here establishes that the
+        // filter kept anything, so it cannot tell "only code documents were
+        // returned" from "no documents were returned".
+        assert!(
+            !results.is_empty(),
+            "the code-typed document must survive the metadata filter, or the loop below asserts nothing"
+        );
 
         // Only code documents should be returned
         for result in &results {
@@ -915,7 +925,29 @@ mod tests {
         }
     }
 
+    /// ⚠️ CANNOT RUN YET, AND MUST NOT PASS WHILE IT CANNOT.
+    ///
+    /// `SemanticSearch::search` uses a PLACEHOLDER query embedding — a zero
+    /// vector, `vec![0.0f32; self.embedding_dim]`, with the comment "in
+    /// production, this would call an embedding model". `cosine_similarity` of
+    /// zeros against anything is 0, so ANY `min_score` above 0 filters every
+    /// document out and the result set is always empty.
+    ///
+    /// This test asserted its property inside `for result in &results`, so over
+    /// that empty set it ran zero assertions and reported `ok`. It has never
+    /// exercised the threshold it is named for.
+    ///
+    /// **Not repaired by weakening it.** Making it green would mean either
+    /// restoring the vacuity or asserting that the threshold returns nothing —
+    /// which pins the placeholder as though it were the contract, and forces
+    /// whoever implements real embeddings to delete a passing test to make
+    /// progress.
+    ///
+    /// So it is `#[ignore]`d with the reason, and the `!results.is_empty()`
+    /// guard stays: when a real query embedding lands, remove the `#[ignore]`
+    /// and this becomes the test it was always supposed to be.
     #[test]
+    #[ignore = "SemanticSearch uses a placeholder zero-vector query embedding, so every score is 0 and any threshold returns nothing"]
     fn test_semantic_search_score_threshold() {
         let search = SemanticSearch::new(3);
 
@@ -928,6 +960,16 @@ mod tests {
         let config = SearchConfig::default().with_min_score(0.5);
 
         let results = search.search("query", &documents, &config).unwrap();
+        // ASSERT THE COLLECTION BEFORE ASSERTING OVER IT.
+        //
+        // Over an empty `results` the loop runs zero times and this passes.
+        // "Returns nothing" is precisely what an inverted or over-aggressive
+        // `min_score` produces, so without this the test is blind in the SAME
+        // DIRECTION as the bug it exists to catch.
+        assert!(
+            !results.is_empty(),
+            "the high-relevance document must survive a 0.5 threshold, or the loop below asserts nothing"
+        );
 
         // All results should have score >= 0.5
         for result in &results {
@@ -1019,7 +1061,15 @@ mod tests {
         config.include_explanations = true;
 
         let results = hyde.search("test query", &documents, &config).unwrap();
-        if !results.is_empty() {
+        // THE EMPTINESS CHECK WAS THE GUARD; IT SHOULD HAVE BEEN THE
+        // ASSERTION. Written as `if !results.is_empty()`, this test does
+        // nothing whenever the search returns nothing — and returning
+        // nothing is the failure it would most want to catch.
+        assert!(
+            !results.is_empty(),
+            "the search must return a result, or the assertion below never runs"
+        );
+        {
             assert!(results[0].explanation.is_some());
         }
     }
@@ -1084,7 +1134,15 @@ mod tests {
 
         let results = reranker.search("test", &documents, &config).unwrap();
 
-        if !results.is_empty() {
+        // THE EMPTINESS CHECK WAS THE GUARD; IT SHOULD HAVE BEEN THE
+        // ASSERTION. Written as `if !results.is_empty()`, this test does
+        // nothing whenever the search returns nothing — and returning
+        // nothing is the failure it would most want to catch.
+        assert!(
+            !results.is_empty(),
+            "the search must return a result, or the assertion below never runs"
+        );
+        {
             assert!(results[0].explanation.is_some());
         }
     }
@@ -1123,7 +1181,15 @@ mod tests {
         let results = pipeline.search("Rust", &documents, &config).unwrap();
 
         // Should have combined strategy name
-        if !results.is_empty() {
+        // THE EMPTINESS CHECK WAS THE GUARD; IT SHOULD HAVE BEEN THE
+        // ASSERTION. Written as `if !results.is_empty()`, this test does
+        // nothing whenever the search returns nothing — and returning
+        // nothing is the failure it would most want to catch.
+        assert!(
+            !results.is_empty(),
+            "the search must return a result, or the assertion below never runs"
+        );
+        {
             assert!(results[0].strategy.contains("semantic_search"));
             assert!(results[0].strategy.contains("cross_encoder_rerank"));
         }
@@ -1144,7 +1210,15 @@ mod tests {
 
         let results = pipeline.search("Rust", &documents, &config).unwrap();
 
-        if !results.is_empty() {
+        // THE EMPTINESS CHECK WAS THE GUARD; IT SHOULD HAVE BEEN THE
+        // ASSERTION. Written as `if !results.is_empty()`, this test does
+        // nothing whenever the search returns nothing — and returning
+        // nothing is the failure it would most want to catch.
+        assert!(
+            !results.is_empty(),
+            "the search must return a result, or the assertion below never runs"
+        );
+        {
             // Should have both retrieval and rerank scores
             assert!(results[0].sub_scores.contains_key("retrieval_score"));
             assert!(results[0].sub_scores.contains_key("rerank_score"));

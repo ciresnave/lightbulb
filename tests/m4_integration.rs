@@ -332,6 +332,16 @@ fn test_m4_pipeline_with_metadata_filtering() {
 
     let results = search.search(query, &documents, &config).unwrap();
 
+    // ASSERT THE COLLECTION BEFORE ASSERTING OVER IT.
+    //
+    // The loop below is the whole test. Over an empty `results` it runs zero
+    // times and this passes, so it cannot tell "only the recent document was
+    // returned" from "nothing was returned" — and the second is what a
+    // too-strict filter produces, which is the bug this test exists to catch.
+    assert!(
+        !results.is_empty(),
+        "the 2024 tutorial must survive the filter, or the loop below asserts nothing"
+    );
     // Should only return recent document
     for result in &results {
         assert!(result.document.metadata.created_at.unwrap() >= 1704067200000);

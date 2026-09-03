@@ -276,7 +276,23 @@ mod tests {
 
         println!("Recommended backend: {:?}", backend);
 
-        // Should never recommend a backend we can't use
+        // "Never recommend a backend we cannot use" — stated so it is CHECKED ON
+        // EVERY MACHINE.
+        //
+        // This was `if profile.gpu.is_none() { assert_eq!(backend, Cpu) }`, so on
+        // any machine WITH a GPU the assertion never ran and the test passed
+        // having verified nothing. Its verdict depended on the hardware it
+        // happened to run on, and the development box here has a GPU — so it was
+        // vacuous exactly where it was executed most.
+        //
+        // The property is an implication, and an implication is assertable
+        // unconditionally: recommending a GPU backend REQUIRES a GPU to exist.
+        // On a GPU-less machine this still forces `Cpu`; on a GPU machine it
+        // now forbids the one combination that would be wrong.
+        assert!(
+            backend != InferenceBackend::Cuda || profile.gpu.is_some(),
+            "recommended {backend:?} with no GPU detected"
+        );
         if profile.gpu.is_none() {
             assert_eq!(backend, InferenceBackend::Cpu);
         }
