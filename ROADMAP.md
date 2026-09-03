@@ -190,6 +190,47 @@ Measured by `tests/gguf_corpus_sweep.rs` over every local GGUF:
         3  unknown tensor dtype  (SmolLM2 IQ3_XS, IQ4_XS, Q2_K)
 ```
 
+⚠️ **Every number above counts FILES, and a file count is not the coverage
+number a tokenizer corpus is asked for.** Six of the thirty files are one
+SmolLM2 vocabulary at six quantizations; a quantization changes the weights and
+leaves `tokenizer.ggml.tokens` untouched, so those six exercise the tokenizer
+path once. Adding more quantizations would grow "30" without growing coverage at
+all. Measured by `tests/gguf_corpus_vocab_census.rs` at `C:\Models`, 2026-09-03:
+
+```
+30 files  /  17 vocabularies      (8 files duplicate a vocabulary already present)
+14 of 30 files rebuild  ->  but only 9 of 17 VOCABULARIES
+```
+
+**EQUIVALENCE RELATION, stated because a count whose relation is unstated is a
+number rather than a measurement:** two files are the *same vocabulary* iff their
+`tokenizer.ggml.tokens` arrays are identical — same length, same ordered
+contents. Not tokens+merges, not tokens+special-tokens; those would give
+different totals on these same files.
+
+**The relation is doing work, and here is the control:** `starcoder` and SmolLM2
+both have exactly **49152** tokens and **different** digests. A census keyed on
+vocabulary *size* would have merged them and reported 16.
+
+**Two vocabularies are SPLIT — same tokens, different rebuild outcome — and that
+is the refusal policy working, not a defect:**
+
+```
+151936   qwen2 (pre=qwen2) rebuilds     qwen35 (pre=qwen35) refused
+ 32000   TinyLlama Q4_0 (llama, no pre) rebuilds
+         llama-spm (llama, pre=default) refused
+```
+
+Support is keyed on the *rule*, not the vocabulary, which is the same reasoning
+that refuses `qwen35` below. **So "this vocabulary is supported" is an ill-formed
+claim**; the census asserts only that every split is explained by a differing
+`model`/`pre`, and fails if two files ever share a rule and disagree anyway.
+
+**Also measured, previously only inferred from vocabulary size:** `qwen2` and
+`qwen35` carry byte-identical token lists, as do `gpt-neox` and `mpt`. The
+argument for refusing them is unchanged — vocabulary identity does not imply rule
+identity — but its premise is now measured rather than assumed.
+
 **Byte-level BPE (`gpt2`) is now supported, but only for `tokenizer.ggml.pre`
 values verified id-for-id against that checkpoint's OWN `tokenizer.json`.** `pre`
 names a splitting rule and llama.cpp keeps a different regex per name; the 18
