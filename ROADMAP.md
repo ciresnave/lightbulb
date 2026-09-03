@@ -184,10 +184,25 @@ Measured by `tests/gguf_corpus_sweep.rs` over every local GGUF:
               starcoder, mpt, qwen35, gpt-neox(absent)  (refused for cause, below)
         3  model = "llama" but NO merges   (llama-spm, phi-3, baichuan)
         1  bert     1  t5     1  gemma4
-  5  unreadable BEFORE the tokenizer is reached
+  5  OUR READER cannot open  -- a fact about us, not about the files
         2  header parse failure  (tinyllamas-stories-260k, ggml-vocab-aquila)
         3  unknown tensor dtype  (SmolLM2 IQ3_XS, IQ4_XS, Q2_K)
 ```
+
+⚠️ **That last group used to read "unreadable BEFORE the tokenizer is reached",
+and four of the five are not unreadable at all.** `Content::read` parses tensor
+infos eagerly, so an unknown quantization dtype fails the whole call — but
+`tokenizer.ggml.tokens` lives in the **KV header, ahead of any tensor**. Reading
+those headers directly on 2026-09-03: the three SmolLM2 quantizations each carry
+the full 49152-token vocabulary, digest-identical to the other six, and
+`ggml-vocab-aquila` carries a distinct 100008-token one. Only
+`tinyllamas-stories-260k` genuinely yields nothing.
+
+**So every count in this block is scoped to what the library can currently
+reach**, which is the right scope for a support table and the wrong one for a
+statement about the corpus. `src/gguf/parser.rs` already parses these files'
+metadata without touching tensor dtypes and is simply not exposed; making it
+reachable would serve four of these five files with no tokenizer work at all.
 
 ⚠️ **Every number above counts FILES, and a file count is not the coverage
 number a tokenizer corpus is asked for.** Six of the thirty files are one
