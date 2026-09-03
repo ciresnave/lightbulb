@@ -162,18 +162,30 @@ def write_baseline(counts):
 PLAUSIBLE_FLOOR = 0.5
 
 
+# The four outcomes. Named rather than returned as bare exit codes, so that the
+# selftest asserts WHICH conclusion was reached rather than only whether the
+# process would fail -- "partial measurement" and "regressed" are both exit 1,
+# and a test that cannot tell them apart passes when the gate reaches the right
+# verdict for the wrong reason.
+NOTHING_MEASURED = "nothing_measured"
+PARTIAL = "partial"
+REGRESSED = "regressed"
+CLEAN = "clean"
+
+EXIT_CODE = {NOTHING_MEASURED: 1, PARTIAL: 1, REGRESSED: 1, CLEAN: 0}
+
+
 def verdict(counts, base):
-    """The entire pass/fail decision, in one place. Returns (exit_code, lines).
+    """The pass/fail decision, and nothing else. Returns (outcome, detail).
 
-    Kept separate from `main` so that every path can be enumerated by reading
-    one function, and so the paths can be tested without running cargo.
+    Four conditions, in order:
 
-      new lint kind or increased count        -> 1
-      measured 0 against a non-empty baseline -> 1  (instrument failure)
-      measured implausibly far below baseline -> 1  (partial measurement)
-      otherwise                               -> 0
+      measured 0 against a non-empty baseline -> NOTHING_MEASURED
+      measured at or below the floor          -> PARTIAL
+      new lint kind or increased count        -> REGRESSED
+      otherwise                               -> CLEAN
 
-    THE THIRD CHECK IS THE ONE THAT WAS MISSING, and it is the direction that
+    THE SECOND CHECK IS THE ONE THAT WAS MISSING, and it is the direction that
     matters. The gate ratchets counts DOWN silently, so any measurement that
     sees less than the real amount -- a dropped --all-targets, a feature change,
     a clippy version that reports differently, a target that did not build --
@@ -183,23 +195,46 @@ def verdict(counts, base):
 
     Only the exactly-zero case was caught before, and zero is the one value a
     real partial measurement is least likely to take.
+
+    No message text here. Rendering lives in `render`, so that this function
+    reads as its four conditions -- previously they were interleaved with the
+    comprehensions and f-strings that build the failure output, which made the
+    decision the minority of the function by volume.
     """
     total = sum(counts.values())
     base_total = sum(base.values())
 
     if base_total > 0 and total == 0:
-        return 1, [
-            f"FAIL: measured 0 diagnostics against a baseline of {base_total}.",
-            "      Nothing was measured -- this is an instrument failure, not a",
-            "      clean tree. Zero is not a result here.",
-        ]
+        return NOTHING_MEASURED, {"total": total, "base_total": base_total}
 
     # `<=`, not `<`. Exactly half is not an arbitrary boundary here: --all-targets
     # double-counts code compiled into both lib and test, so dropping it yields
     # almost exactly 50%. The most likely partial measurement lands precisely on
     # the boundary, and a strict `<` would let it through.
     if base_total > 0 and total <= base_total * PLAUSIBLE_FLOOR:
-        return 1, [
+        return PARTIAL, {"total": total, "base_total": base_total}
+
+    new = sorted(k for k in counts if k not in base)
+    worse = sorted((k, base[k], counts[k]) for k in counts if k in base and counts[k] > base[k])
+    if new or worse:
+        return REGRESSED, {"new": new, "worse": worse, "counts": counts}
+
+    better = sorted((k, base[k], counts.get(k, 0)) for k in base if counts.get(k, 0) < base[k])
+    return CLEAN, {"total": total, "lints": len(counts), "better": better}
+
+
+def render(outcome, detail):
+    """Turn a verdict into the lines a reader sees. No decisions here."""
+    if outcome == NOTHING_MEASURED:
+        return [
+            f"FAIL: measured 0 diagnostics against a baseline of {detail['base_total']}.",
+            "      Nothing was measured -- this is an instrument failure, not a",
+            "      clean tree. Zero is not a result here.",
+        ]
+
+    if outcome == PARTIAL:
+        total, base_total = detail["total"], detail["base_total"]
+        return [
             f"FAIL: measured {total} diagnostics against a baseline of {base_total}",
             f"      ({total * 100 // base_total}%), which is too far down to be a",
             "      cleanup. Treated as a PARTIAL MEASUREMENT: a dropped",
@@ -210,26 +245,35 @@ def verdict(counts, base):
             "          python scripts/clippy_gate.py --update",
         ]
 
-    new = sorted(k for k in counts if k not in base)
-    worse = sorted((k, base[k], counts[k]) for k in counts if k in base and counts[k] > base[k])
-    if new or worse:
+    if outcome == REGRESSED:
+        counts = detail["counts"]
         lines = ["FAIL: clippy regressed against scripts/clippy-baseline.tsv"]
-        lines += [f"  NEW LINT   {k}  x{counts[k]}" for k in new]
-        lines += [f"  INCREASED  {k}  {was} -> {now}" for k, was, now in worse]
+        lines += [f"  NEW LINT   {k}  x{counts[k]}" for k in detail["new"]]
+        lines += [f"  INCREASED  {k}  {was} -> {now}" for k, was, now in detail["worse"]]
         lines += [
             "",
             "Fix the new sites. If the increase is genuinely intended, run",
             "    python scripts/clippy_gate.py --update",
             "and say in the commit message why the ceiling went up.",
         ]
-        return 1, lines
+        return lines
 
-    lines = [f"clippy gate OK: {total} diagnostics, {len(counts)} lints, none new or increased"]
-    better = sorted((k, base[k], counts.get(k, 0)) for k in base if counts.get(k, 0) < base[k])
-    if better:
-        lines.append(f"  {len(better)} lint(s) improved -- tighten the ceiling with --update:")
-        lines += [f"    {k}  {was} -> {now}" for k, was, now in better[:10]]
-    return 0, lines
+    if outcome == CLEAN:
+        lines = [
+            f"clippy gate OK: {detail['total']} diagnostics, {detail['lints']} lints, "
+            "none new or increased"
+        ]
+        better = detail["better"]
+        if better:
+            lines.append(f"  {len(better)} lint(s) improved -- tighten the ceiling with --update:")
+            lines += [f"    {k}  {was} -> {now}" for k, was, now in better[:10]]
+        return lines
+
+    # Explicit, because the CLEAN branch used to be the fall-through. Deleting
+    # any earlier branch then routed that outcome here, and the failure surfaced
+    # as `KeyError: 'lints'` from a detail dict shaped for a different verdict --
+    # a real failure wearing a confusing cause. Measured by doing it.
+    raise AssertionError(f"render has no branch for outcome {outcome!r}")
 
 
 def _selftest():
@@ -241,20 +285,31 @@ def _selftest():
     told anyone.
     """
     base = {"a": 100, "b": 100}
+    # Asserted on the OUTCOME, not the exit code. PARTIAL and REGRESSED are both
+    # exit 1, so a test comparing exit codes passes when the gate reaches the
+    # right verdict for the wrong reason -- which is the failure mode this whole
+    # script exists to catch, and it would have been sitting in its own selftest.
     cases = [
-        ("clean", {"a": 100, "b": 100}, 0),
-        ("improved", {"a": 90, "b": 100}, 0),
-        ("new lint", {"a": 100, "b": 100, "c": 1}, 1),
-        ("increased", {"a": 101, "b": 100}, 1),
-        ("measured zero", {}, 1),
-        ("half measured", {"a": 50, "b": 50}, 1),
-        ("just above floor", {"a": 100, "b": 1}, 0),
+        ("clean", {"a": 100, "b": 100}, CLEAN),
+        ("improved", {"a": 90, "b": 100}, CLEAN),
+        ("new lint", {"a": 100, "b": 100, "c": 1}, REGRESSED),
+        ("increased", {"a": 101, "b": 100}, REGRESSED),
+        ("measured zero", {}, NOTHING_MEASURED),
+        ("half measured", {"a": 50, "b": 50}, PARTIAL),
+        ("just above floor", {"a": 100, "b": 1}, CLEAN),
     ]
     for name, counts, want in cases:
-        got, _ = verdict(counts, base)
+        got, detail = verdict(counts, base)
         assert got == want, f"verdict({name}) returned {got}, expected {want}"
+        # Rendering must survive every outcome: an unrenderable verdict would
+        # crash the gate at the moment it had something to report.
+        lines = render(got, detail)
+        assert lines and all(isinstance(x, str) for x in lines), f"render({name}) produced {lines!r}"
     # An empty baseline must not make everything a partial measurement.
-    assert verdict({}, {})[0] == 0, "empty baseline against empty counts must pass"
+    assert verdict({}, {})[0] == CLEAN, "empty baseline against empty counts must pass"
+    # Every outcome must map to an exit code, or the gate cannot report itself.
+    for outcome in (NOTHING_MEASURED, PARTIAL, REGRESSED, CLEAN):
+        assert outcome in EXIT_CODE, f"{outcome} has no exit code"
 
 
 def main():
@@ -297,10 +352,10 @@ def main():
         print("      Create one with: python scripts/clippy_gate.py --update")
         return 1
 
-    code, lines = verdict(counts, base)
-    for line in lines:
+    outcome, detail = verdict(counts, base)
+    for line in render(outcome, detail):
         print(line)
-    return code
+    return EXIT_CODE[outcome]
 
 
 if __name__ == "__main__":
