@@ -278,6 +278,18 @@ fn test_gradual_adjustment_limits() {
     let available_memory = 32 * 1024 * 1024 * 1024u64; // Plenty of memory
     let decision = monitor.should_adjust(20, available_memory);
 
+    // ASSERT THE BRANCH IS TAKEN BEFORE ASSERTING INSIDE IT.
+    //
+    // Everything this test checks — that growth is bounded to ~10% — lives
+    // inside this `if let`. If `should_adjust` returns `None` the test asserts
+    // nothing and passes, and its "✓" line is inside the same branch, so even
+    // `--nocapture` shows silence. The scenario above builds 15 growth-favouring
+    // samples precisely so an adjustment IS produced; if it stops being
+    // produced, that is the thing to find out about.
+    assert!(
+        decision.is_some(),
+        "15 growth-favouring samples must produce an adjustment, or the bound below is never checked"
+    );
     if let Some(new_size) = decision {
         let growth = (new_size as i32 - 20) as f64 / 20.0;
         assert!(
