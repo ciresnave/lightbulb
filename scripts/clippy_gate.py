@@ -157,8 +157,118 @@ def write_baseline(counts):
         fh.write("\n".join(lines) + "\n")
 
 
+# A measured total below this fraction of the baseline is treated as a partial
+# measurement rather than an improvement. See `verdict`.
+PLAUSIBLE_FLOOR = 0.5
+
+
+def verdict(counts, base):
+    """The entire pass/fail decision, in one place. Returns (exit_code, lines).
+
+    Kept separate from `main` so that every path can be enumerated by reading
+    one function, and so the paths can be tested without running cargo.
+
+      new lint kind or increased count        -> 1
+      measured 0 against a non-empty baseline -> 1  (instrument failure)
+      measured implausibly far below baseline -> 1  (partial measurement)
+      otherwise                               -> 0
+
+    THE THIRD CHECK IS THE ONE THAT WAS MISSING, and it is the direction that
+    matters. The gate ratchets counts DOWN silently, so any measurement that
+    sees less than the real amount -- a dropped --all-targets, a feature change,
+    a clippy version that reports differently, a target that did not build --
+    looks exactly like a cleanup. Measured: halving every count passes and
+    prints "52 lints improved". A gate that fails open on the cheap direction is
+    worse than no gate, because it also supplies the reassurance.
+
+    Only the exactly-zero case was caught before, and zero is the one value a
+    real partial measurement is least likely to take.
+    """
+    total = sum(counts.values())
+    base_total = sum(base.values())
+
+    if base_total > 0 and total == 0:
+        return 1, [
+            f"FAIL: measured 0 diagnostics against a baseline of {base_total}.",
+            "      Nothing was measured -- this is an instrument failure, not a",
+            "      clean tree. Zero is not a result here.",
+        ]
+
+    # `<=`, not `<`. Exactly half is not an arbitrary boundary here: --all-targets
+    # double-counts code compiled into both lib and test, so dropping it yields
+    # almost exactly 50%. The most likely partial measurement lands precisely on
+    # the boundary, and a strict `<` would let it through.
+    if base_total > 0 and total <= base_total * PLAUSIBLE_FLOOR:
+        return 1, [
+            f"FAIL: measured {total} diagnostics against a baseline of {base_total}",
+            f"      ({total * 100 // base_total}%), which is too far down to be a",
+            "      cleanup. Treated as a PARTIAL MEASUREMENT: a dropped",
+            "      --all-targets, a feature change, or a target that did not",
+            "      build all look like an improvement to a ratchet.",
+            "",
+            "      If the reduction is real, acknowledge it explicitly:",
+            "          python scripts/clippy_gate.py --update",
+        ]
+
+    new = sorted(k for k in counts if k not in base)
+    worse = sorted((k, base[k], counts[k]) for k in counts if k in base and counts[k] > base[k])
+    if new or worse:
+        lines = ["FAIL: clippy regressed against scripts/clippy-baseline.tsv"]
+        lines += [f"  NEW LINT   {k}  x{counts[k]}" for k in new]
+        lines += [f"  INCREASED  {k}  {was} -> {now}" for k, was, now in worse]
+        lines += [
+            "",
+            "Fix the new sites. If the increase is genuinely intended, run",
+            "    python scripts/clippy_gate.py --update",
+            "and say in the commit message why the ceiling went up.",
+        ]
+        return 1, lines
+
+    lines = [f"clippy gate OK: {total} diagnostics, {len(counts)} lints, none new or increased"]
+    better = sorted((k, base[k], counts.get(k, 0)) for k in base if counts.get(k, 0) < base[k])
+    if better:
+        lines.append(f"  {len(better)} lint(s) improved -- tighten the ceiling with --update:")
+        lines += [f"    {k}  {was} -> {now}" for k, was, now in better[:10]]
+    return 0, lines
+
+
+def _selftest():
+    """Assert every path through `verdict`. Runs on every invocation.
+
+    Microseconds, and it means the decision logic is checked at the moment it is
+    used rather than at some point in the past. The partial-measurement case in
+    particular passed for the gate's whole first life, and nothing would have
+    told anyone.
+    """
+    base = {"a": 100, "b": 100}
+    cases = [
+        ("clean", {"a": 100, "b": 100}, 0),
+        ("improved", {"a": 90, "b": 100}, 0),
+        ("new lint", {"a": 100, "b": 100, "c": 1}, 1),
+        ("increased", {"a": 101, "b": 100}, 1),
+        ("measured zero", {}, 1),
+        ("half measured", {"a": 50, "b": 50}, 1),
+        ("just above floor", {"a": 100, "b": 1}, 0),
+    ]
+    for name, counts, want in cases:
+        got, _ = verdict(counts, base)
+        assert got == want, f"verdict({name}) returned {got}, expected {want}"
+    # An empty baseline must not make everything a partial measurement.
+    assert verdict({}, {})[0] == 0, "empty baseline against empty counts must pass"
+
+
 def main():
+    _selftest()
     update = "--update" in sys.argv
+
+    # A gate that can be disarmed by adding a flag is a gate that still writes
+    # its "I ran" marker. --update rewrites the ceiling and returns 0 for any
+    # input, so in CI it would be a green tick over an unconditional pass.
+    if update and os.environ.get("CI"):
+        print("FAIL: --update rewrites the baseline and always succeeds, so it is")
+        print("      never a gate. Run it locally and commit the result.")
+        return 1
+
     counts, rc, errors, stderr = measure()
     total = sum(counts.values())
 
@@ -187,45 +297,10 @@ def main():
         print("      Create one with: python scripts/clippy_gate.py --update")
         return 1
 
-    # POSITIVE CONTROL. A warm target dir makes cargo skip re-emitting
-    # diagnostics entirely; the result is zero warnings and a clean exit, which
-    # is indistinguishable from a genuinely clean crate. The baseline is
-    # non-empty, so zero here means the measurement did not happen.
-    if sum(base.values()) > 0 and total == 0:
-        print("FAIL: measured 0 diagnostics against a baseline of "
-              + str(sum(base.values())) + ".")
-        print("      That is an instrument failure, not a clean tree: cargo did")
-        print("      not recheck the crate, so nothing was measured. Zero is not")
-        print("      a result here.")
-        return 1
-
-    new = sorted(k for k in counts if k not in base)
-    worse = sorted(
-        (k, base[k], counts[k]) for k in counts if k in base and counts[k] > base[k]
-    )
-
-    if new or worse:
-        print("FAIL: clippy regressed against scripts/clippy-baseline.tsv")
-        for k in new:
-            print("  NEW LINT   " + k + "  x" + str(counts[k]))
-        for k, was, now in worse:
-            print("  INCREASED  " + k + "  " + str(was) + " -> " + str(now))
-        print("")
-        print("Fix the new sites. If the increase is genuinely intended, run")
-        print("    python scripts/clippy_gate.py --update")
-        print("and say in the commit message why the ceiling went up.")
-        return 1
-
-    better = sorted(
-        (k, base[k], counts.get(k, 0)) for k in base if counts.get(k, 0) < base[k]
-    )
-    print("clippy gate OK: " + str(total) + " diagnostics, " + str(len(counts))
-          + " lints, none new or increased")
-    if better:
-        print("  " + str(len(better)) + " lint(s) improved -- tighten the ceiling with --update:")
-        for k, was, now in better[:10]:
-            print("    " + k + "  " + str(was) + " -> " + str(now))
-    return 0
+    code, lines = verdict(counts, base)
+    for line in lines:
+        print(line)
+    return code
 
 
 if __name__ == "__main__":
