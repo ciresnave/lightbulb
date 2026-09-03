@@ -172,16 +172,15 @@ struct's public fields make constructible. Both are errors now.
 Measured by `tests/gguf_corpus_sweep.rs` over every local GGUF:
 
 ```
-30 files total = 14 REBUILT + 16 that do not load    (was 1 + 29; re-measured 2026-09-02)
+30 files total = 15 REBUILT + 15 that do not load    (was 1 + 29; re-measured 2026-09-03)
 
- 14  rebuilt
+ 15  rebuilt
         1  SentencePiece   TinyLlama-1.1B-Chat-v1.0 Q4_0
-       13  byte-level BPE  SmolLM2-135M-Instruct x6, plus the gpt-2, falcon,
-                           qwen2, deepseek-coder, refact, deepseek-llm and
-                           llama-bpe vocab files
- 11  refused by the tokenizer
-        5  tokenizer.ggml.model = "gpt2", `pre` NOT VERIFIED
-              command-r                              (reference GATED on HF, 401)
+       14  byte-level BPE  SmolLM2-135M-Instruct x6, plus the gpt-2, falcon,
+                           qwen2, deepseek-coder, refact, deepseek-llm,
+                           llama-bpe and command-r vocab files
+ 10  refused by the tokenizer
+        4  tokenizer.ggml.model = "gpt2", `pre` NOT VERIFIED
               starcoder, mpt, qwen35, gpt-neox(absent)  (refused for cause, below)
         3  model = "llama" but NO merges   (llama-spm, phi-3, baichuan)
         1  bert     1  t5     1  gemma4
@@ -234,9 +233,22 @@ identity — but its premise is now measured rather than assumed.
 **Byte-level BPE (`gpt2`) is now supported, but only for `tokenizer.ggml.pre`
 values verified id-for-id against that checkpoint's OWN `tokenizer.json`.** `pre`
 names a splitting rule and llama.cpp keeps a different regex per name; the 18
-`gpt2` files carry 13 distinct values. **Seven are verified, each 0 of 130 cases
-disagreeing with its reference:** `smollm`, `gpt-2`, `falcon`, `qwen2`,
-`deepseek-coder`, `refact`, `deepseek-llm`.
+`gpt2` files carry 13 distinct values. **Nine are verified:** `smollm`, `gpt-2`,
+`falcon`, `qwen2`, `deepseek-coder`, `refact`, `deepseek-llm`, `llama-bpe`,
+`command-r`.
+
+The first seven and `llama-bpe` were each verified 0 of 130 cases against their
+reference. **`command-r` was verified 0 of 30** — the in-repo gate, every case it
+has. The other 100 cases live in a verification run outside the repo, and
+reconstructing that generator from a seed and a prose description of its alphabet
+would be a guess wearing a number, so it was not re-run. Stated rather than left
+to be assumed equal.
+
+*(This said **"Seven"** and omitted `llama-bpe` for one release. The code carried
+eight; the doc was stale, not the code — checked against `91e4eb4`'s evidence
+before correcting upward, because a doc/code disagreement does not say which side
+is wrong, and tidying prose to match an implementation is how a weaker
+verification would get laundered into the list.)*
 
 ⚠️ **And one scored 0 of 130 and is REFUSED anyway.** `qwen35`'s obvious
 reference, `Qwen/Qwen3-8B`, declares a pre-tokenizer and vocab BYTE-IDENTICAL to
@@ -277,7 +289,24 @@ which IS verified here against its own model, and llama.cpp groups starcoder wit
 refact and mpt with gpt-2. Those remove a reason for doubt; they do not supply
 the reference.
 
-Only `command-r` remains blocked purely by the gate (HTTP 401).
+`command-r` was the last blocked purely by the gate, and is now verified through
+an **ungated third-party re-upload** — `mlx-community/c4ai-command-r-v01-4bit`,
+anonymous HTTP 200 — by the same route `llama-bpe` took. The canonical repo is
+still 401, and so is Cohere's own 4-bit copy; even authenticated it answers *"you
+are not in the authorized list"*, so the gated original is **not part of the
+verification path** and nothing here depends on one person's accepted licence.
+
+The re-upload is quantized where `llama-bpe`'s mirror was not, and that is
+admissible on a property this repo measured rather than on a judgement: a
+quantization changes the weights and leaves `tokenizer.ggml.tokens` untouched,
+which is why six SmolLM2 quantizations are one vocabulary. **The GGUF is the
+corroboration against the original** — `ggml-vocab-command-r.gguf` was converted
+from the original checkpoint by llama.cpp, independently of this mirror, and a
+different tokenizer could not agree with it on 255000 ids and 253333 merges.
+
+So the remaining four are refused for cause, not for access: `starcoder` and
+`mpt` still have no reference for their own checkpoint, `qwen35` has no corpus
+that can discriminate it, and `gpt-neox` omits the field entirely.
 
 The table stores each checkpoint's declared pre-tokenizer and normalizer as its
 own JSON, copied verbatim, so provenance is auditable by diffing against the
