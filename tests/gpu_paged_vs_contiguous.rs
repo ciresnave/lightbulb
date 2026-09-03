@@ -597,11 +597,8 @@ const DEFAULT_MAX_NEW: usize = 16;
 const BLOCK_SIZE: usize = 16;
 
 fn tinyllama_dir() -> Option<PathBuf> {
-    let p = PathBuf::from(
-        "C:/Users/cires/.cache/huggingface/hub/models--TinyLlama--TinyLlama-1.1B-Chat-v1.0/\
-         snapshots/fe8a4ea1ffedaf415f4da2f062534de366a451e6",
-    );
-    p.join("config.json").is_file().then_some(p)
+    // this test needs only config.json, which is a weaker precondition than the weights
+    lightbulb::test_models::tinyllama_dir_with(lightbulb::test_models::CONFIG_SENTINEL)
 }
 
 fn median(mut v: Vec<Duration>) -> Duration {
