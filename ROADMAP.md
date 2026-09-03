@@ -127,6 +127,47 @@ tests asserted output SHAPE and `Ok`-ness, which a implementation returning
 zeros of the right shape would also satisfy. They now run in the ordinary
 `cargo test --lib`.
 
+### The multi-GPU sweep, five files, three with defects
+
+**Measured 2026-09-02.** The question asked of each file was the same: *is the
+code that CLAIMS to work actually executed by anything?*
+
+```
+distributed_cache   DEFECT   `Replicated` returned Ok(()) while writing nothing
+tensor_parallel     DEFECT   every biased `ShardedLinear` failed at runtime
+pipeline_parallel   clean    GPipe correct
+config              clean    had ZERO tests written; none were needed
+topology            DEFECT   discovery did not terminate; two reachable panics
+```
+
+**The nulls are reported at the same weight as the defects.** Two clean files are
+what make "three defects" a rate rather than three anecdotes, and a sweep that
+only counts when it finds something stops being run.
+
+**`topology.rs` is the worst of the three, because it does not return.**
+`DeviceTopology::discover()` probed devices with `Device::cuda_if_available` and
+broke only on `Err`. That function returns `Ok(Device::Cpu)` when CUDA is
+unavailable and **never consults the ordinal in that path** (candle-core 0.10.2,
+`device.rs:323`), so on any build without the `cuda` feature every iteration
+returned `Ok`, pushed a device and incremented — **unbounded allocation, not a
+quiet spin.** `Cargo.toml` records that `candlelight/cuda` does not build on this
+toolchain, so the non-terminating configuration was the ordinary one.
+
+Confirmed by execution rather than inferred: the termination test run against the
+unfixed code in a bounded subprocess **exited 124 after 25 seconds** having
+printed `running 1 test` and nothing further.
+
+**Why nothing had hung: every caller of `discover()` sits behind an `#[ignore]`d
+test**, so the module's own suite never reached the entry point a consumer of
+multi-GPU would call first. The code with the largest blast radius was the code
+its own tests could not reach.
+
+Also fixed there: `recommend_strategy` called `panic!` when a model exceeded
+total memory — a public method, reachable through `MultiGPUConfig::auto`, for
+the ordinary case of asking about a model larger than the machine — and indexed
+`memory_available[0]` without checking, which panics on the empty topology the
+struct's public fields make constructible. Both are errors now.
+
 **2. `✅ COMPLETE: GGUF/other Candle-supported quant formats usable end-to-end`.**
 Measured by `tests/gguf_corpus_sweep.rs` over every local GGUF:
 

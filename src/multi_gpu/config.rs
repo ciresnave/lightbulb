@@ -96,7 +96,7 @@ impl MultiGPUConfig {
     /// ```
     pub fn auto(model_size_bytes: usize) -> Result<Self> {
         let topology = DeviceTopology::discover()?;
-        let mode = topology.recommend_strategy(model_size_bytes);
+        let mode = topology.recommend_strategy(model_size_bytes)?;
 
         Ok(Self {
             mode,
