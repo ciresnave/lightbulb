@@ -70,6 +70,23 @@ fn every_gguf_either_rebuilds_a_tokenizer_or_refuses_with_a_reason() {
         unreadable_dirs.is_empty(),
         "the corpus walk was incomplete, so any count below understates it: {unreadable_dirs:?}"
     );
+    // ⚠️ AN EMPTY CORPUS MUST NOT PASS.
+    //
+    // The assertions at the end are `silent.is_empty()` and
+    // `ok + refused == files.len()`. Over zero files those are
+    // `[] .is_empty()` and `0 + 0 == 0` — BOTH SATISFIED. Measured
+    // 2026-09-02 by pointing `LIGHTBULB_GGUF_CORPUS` at an empty directory:
+    // "0 files: 0 rebuilt, 0 refused" and `test result: ok`.
+    //
+    // So a typo in the variable, or a moved corpus, produced a green gate that
+    // examined nothing — and this is the gate whose "30 files: N rebuilt"
+    // figure is quoted in ROADMAP.md as the measure of GGUF support.
+    assert!(
+        !files.is_empty(),
+        "no .gguf files under {:?}. An empty corpus satisfies every assertion below, so it must fail here instead of reporting success over nothing.",
+        std::env::var("LIGHTBULB_GGUF_CORPUS").unwrap_or_default()
+    );
+
     let mut ok = 0usize;
     let mut refused = 0usize;
     let mut silent = Vec::new();
