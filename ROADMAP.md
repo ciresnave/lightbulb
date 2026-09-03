@@ -190,19 +190,29 @@ Measured by `tests/gguf_corpus_sweep.rs` over every local GGUF:
 ```
 
 ⚠️ **That last group used to read "unreadable BEFORE the tokenizer is reached",
-and four of the five are not unreadable at all.** `Content::read` parses tensor
-infos eagerly, so an unknown quantization dtype fails the whole call — but
+and NONE of the five is unreadable.** `Content::read` parses tensor infos
+eagerly, so an unknown quantization dtype fails the whole call — but
 `tokenizer.ggml.tokens` lives in the **KV header, ahead of any tensor**. Reading
 those headers directly on 2026-09-03: the three SmolLM2 quantizations each carry
-the full 49152-token vocabulary, digest-identical to the other six, and
-`ggml-vocab-aquila` carries a distinct 100008-token one. Only
-`tinyllamas-stories-260k` genuinely yields nothing.
+the full 49152-token vocabulary, digest-identical to the other six;
+`ggml-vocab-aquila` carries a distinct 100008-token one; and
+`tinyllamas-stories-260k` carries **512 tokens** with `bos_token_id=1` and
+`eos_token_id=2`.
+
+**That last one was called "genuinely yields nothing" in the first version of
+this paragraph, and it is a fact about field widths.** ⚠️ **THE CORPUS IS THREE
+GGUF VERSIONS, NOT ONE** — `tinyllamas-stories-260k` is **v1**, `ggml-vocab-aquila`
+is **v2**, the other 28 are **v3** — and v1 stores counts and string lengths as
+`u32` where v2/v3 use `u64`. A v3-assuming parser reads a v1 count as a garbage
+`u64` and dies allocating, which is exactly what happened and was written down as
+"plausibly genuinely bad".
 
 **So every count in this block is scoped to what the library can currently
 reach**, which is the right scope for a support table and the wrong one for a
 statement about the corpus. `src/gguf/parser.rs` already parses these files'
 metadata without touching tensor dtypes and is simply not exposed; making it
-reachable would serve four of these five files with no tokenizer work at all.
+reachable would serve four of the five, and the fifth needs v1 field widths as
+well.
 
 ⚠️ **Every number above counts FILES, and a file count is not the coverage
 number a tokenizer corpus is asked for.** Six of the thirty files are one
