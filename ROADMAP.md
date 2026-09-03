@@ -172,23 +172,47 @@ struct's public fields make constructible. Both are errors now.
 Measured by `tests/gguf_corpus_sweep.rs` over every local GGUF:
 
 ```
-30 files total = 14 REBUILT + 16 that do not load    (was 1 + 29; re-measured 2026-09-02)
+30 files total = 15 REBUILT + 15 that do not load    (was 1 + 29; re-measured 2026-09-03)
 
- 14  rebuilt
+ 15  rebuilt
         1  SentencePiece   TinyLlama-1.1B-Chat-v1.0 Q4_0
-       13  byte-level BPE  SmolLM2-135M-Instruct x6, plus the gpt-2, falcon,
-                           qwen2, deepseek-coder, refact, deepseek-llm and
-                           llama-bpe vocab files
- 11  refused by the tokenizer
-        5  tokenizer.ggml.model = "gpt2", `pre` NOT VERIFIED
-              command-r                              (reference GATED on HF, 401)
+       14  byte-level BPE  SmolLM2-135M-Instruct x6, plus the gpt-2, falcon,
+                           qwen2, deepseek-coder, refact, deepseek-llm,
+                           llama-bpe and command-r vocab files
+ 10  refused by the tokenizer
+        4  tokenizer.ggml.model = "gpt2", `pre` NOT VERIFIED
               starcoder, mpt, qwen35, gpt-neox(absent)  (refused for cause, below)
         3  model = "llama" but NO merges   (llama-spm, phi-3, baichuan)
         1  bert     1  t5     1  gemma4
-  5  unreadable BEFORE the tokenizer is reached
+  5  OUR READER cannot open  -- a fact about us, not about the files
         2  header parse failure  (tinyllamas-stories-260k, ggml-vocab-aquila)
         3  unknown tensor dtype  (SmolLM2 IQ3_XS, IQ4_XS, Q2_K)
 ```
+
+⚠️ **That last group used to read "unreadable BEFORE the tokenizer is reached",
+and NONE of the five is unreadable.** `Content::read` parses tensor infos
+eagerly, so an unknown quantization dtype fails the whole call — but
+`tokenizer.ggml.tokens` lives in the **KV header, ahead of any tensor**. Reading
+those headers directly on 2026-09-03: the three SmolLM2 quantizations each carry
+the full 49152-token vocabulary, digest-identical to the other six;
+`ggml-vocab-aquila` carries a distinct 100008-token one; and
+`tinyllamas-stories-260k` carries **512 tokens** with `bos_token_id=1` and
+`eos_token_id=2`.
+
+**That last one was called "genuinely yields nothing" in the first version of
+this paragraph, and it is a fact about field widths.** ⚠️ **THE CORPUS IS THREE
+GGUF VERSIONS, NOT ONE** — `tinyllamas-stories-260k` is **v1**, `ggml-vocab-aquila`
+is **v2**, the other 28 are **v3** — and v1 stores counts and string lengths as
+`u32` where v2/v3 use `u64`. A v3-assuming parser reads a v1 count as a garbage
+`u64` and dies allocating, which is exactly what happened and was written down as
+"plausibly genuinely bad".
+
+**So every count in this block is scoped to what the library can currently
+reach**, which is the right scope for a support table and the wrong one for a
+statement about the corpus. `src/gguf/parser.rs` already parses these files'
+metadata without touching tensor dtypes and is simply not exposed; making it
+reachable would serve four of the five, and the fifth needs v1 field widths as
+well.
 
 ⚠️ **Every number above counts FILES, and a file count is not the coverage
 number a tokenizer corpus is asked for.** Six of the thirty files are one
@@ -199,7 +223,7 @@ all. Measured by `tests/gguf_corpus_vocab_census.rs` at `C:\Models`, 2026-09-03:
 
 ```
 30 files  /  17 vocabularies      (8 files duplicate a vocabulary already present)
-14 of 30 files rebuild  ->  but only 9 of 17 VOCABULARIES
+15 of 30 files rebuild  ->  but only 10 of 17 VOCABULARIES
 ```
 
 **EQUIVALENCE RELATION, stated because a count whose relation is unstated is a
@@ -234,9 +258,22 @@ identity — but its premise is now measured rather than assumed.
 **Byte-level BPE (`gpt2`) is now supported, but only for `tokenizer.ggml.pre`
 values verified id-for-id against that checkpoint's OWN `tokenizer.json`.** `pre`
 names a splitting rule and llama.cpp keeps a different regex per name; the 18
-`gpt2` files carry 13 distinct values. **Seven are verified, each 0 of 130 cases
-disagreeing with its reference:** `smollm`, `gpt-2`, `falcon`, `qwen2`,
-`deepseek-coder`, `refact`, `deepseek-llm`.
+`gpt2` files carry 13 distinct values. **Nine are verified:** `smollm`, `gpt-2`,
+`falcon`, `qwen2`, `deepseek-coder`, `refact`, `deepseek-llm`, `llama-bpe`,
+`command-r`.
+
+The first seven and `llama-bpe` were each verified 0 of 130 cases against their
+reference. **`command-r` was verified 0 of 30** — the in-repo gate, every case it
+has. The other 100 cases live in a verification run outside the repo, and
+reconstructing that generator from a seed and a prose description of its alphabet
+would be a guess wearing a number, so it was not re-run. Stated rather than left
+to be assumed equal.
+
+*(This said **"Seven"** and omitted `llama-bpe` for one release. The code carried
+eight; the doc was stale, not the code — checked against `91e4eb4`'s evidence
+before correcting upward, because a doc/code disagreement does not say which side
+is wrong, and tidying prose to match an implementation is how a weaker
+verification would get laundered into the list.)*
 
 ⚠️ **And one scored 0 of 130 and is REFUSED anyway.** `qwen35`'s obvious
 reference, `Qwen/Qwen3-8B`, declares a pre-tokenizer and vocab BYTE-IDENTICAL to
@@ -277,7 +314,24 @@ which IS verified here against its own model, and llama.cpp groups starcoder wit
 refact and mpt with gpt-2. Those remove a reason for doubt; they do not supply
 the reference.
 
-Only `command-r` remains blocked purely by the gate (HTTP 401).
+`command-r` was the last blocked purely by the gate, and is now verified through
+an **ungated third-party re-upload** — `mlx-community/c4ai-command-r-v01-4bit`,
+anonymous HTTP 200 — by the same route `llama-bpe` took. The canonical repo is
+still 401, and so is Cohere's own 4-bit copy; even authenticated it answers *"you
+are not in the authorized list"*, so the gated original is **not part of the
+verification path** and nothing here depends on one person's accepted licence.
+
+The re-upload is quantized where `llama-bpe`'s mirror was not, and that is
+admissible on a property this repo measured rather than on a judgement: a
+quantization changes the weights and leaves `tokenizer.ggml.tokens` untouched,
+which is why six SmolLM2 quantizations are one vocabulary. **The GGUF is the
+corroboration against the original** — `ggml-vocab-command-r.gguf` was converted
+from the original checkpoint by llama.cpp, independently of this mirror, and a
+different tokenizer could not agree with it on 255000 ids and 253333 merges.
+
+So the remaining four are refused for cause, not for access: `starcoder` and
+`mpt` still have no reference for their own checkpoint, `qwen35` has no corpus
+that can discriminate it, and `gpt-neox` omits the field entirely.
 
 The table stores each checkpoint's declared pre-tokenizer and normalizer as its
 own JSON, copied verbatim, so provenance is auditable by diffing against the
