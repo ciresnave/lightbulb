@@ -90,6 +90,25 @@ fn corpus_files() -> Vec<PathBuf> {
     out
 }
 
+/// One file's contribution to a vocabulary group.
+///
+/// A struct rather than a 4-tuple because the tuple tripped
+/// `clippy::type_complexity` in the gate -- correctly. `(String, bool, String,
+/// String)` gives every field the same anonymous shape, and `|(_, r, _, _)|`
+/// closures are only readable if you keep the order in your head.
+struct FileEntry {
+    name: String,
+    rebuilt: bool,
+    model: String,
+    pre: String,
+}
+
+/// Every file sharing one `tokenizer.ggml.tokens` array.
+struct VocabGroup {
+    token_count: usize,
+    files: Vec<FileEntry>,
+}
+
 #[test]
 #[ignore = "needs a local GGUF corpus; set LIGHTBULB_GGUF_CORPUS"]
 fn corpus_is_fewer_vocabularies_than_files() {
@@ -102,7 +121,7 @@ fn corpus_is_fewer_vocabularies_than_files() {
     );
 
     // digest -> (vocab_len, [(file name, tokenizer rebuilt?)])
-    let mut groups: BTreeMap<u64, (usize, Vec<(String, bool, String, String)>)> = BTreeMap::new();
+    let mut groups: BTreeMap<u64, VocabGroup> = BTreeMap::new();
     let mut unreadable: Vec<(String, String)> = Vec::new();
 
     for path in &files {
@@ -126,9 +145,17 @@ fn corpus_is_fewer_vocabularies_than_files() {
                 let (model, pre) = tokenizer_rule(&content);
                 groups
                     .entry(d)
-                    .or_insert_with(|| (tokens.len(), Vec::new()))
-                    .1
-                    .push((name, rebuilt, model, pre));
+                    .or_insert_with(|| VocabGroup {
+                        token_count: tokens.len(),
+                        files: Vec::new(),
+                    })
+                    .files
+                    .push(FileEntry {
+                        name,
+                        rebuilt,
+                        model,
+                        pre,
+                    });
             }
             Err(why) => unreadable.push((name, why)),
         }
@@ -143,9 +170,10 @@ fn corpus_is_fewer_vocabularies_than_files() {
     let mut shared = 0usize;
     let mut vocabs_rebuilt = 0usize;
     let mut split_groups: Vec<u64> = Vec::new();
-    for (digest, (len, entries)) in &groups {
-        let any = entries.iter().any(|(_, r, _, _)| *r);
-        let all = entries.iter().all(|(_, r, _, _)| *r);
+    for (digest, group) in &groups {
+        let (len, entries) = (group.token_count, &group.files);
+        let any = entries.iter().any(|f| f.rebuilt);
+        let all = entries.iter().all(|f| f.rebuilt);
         if any {
             vocabs_rebuilt += 1;
         }
@@ -165,16 +193,19 @@ fn corpus_is_fewer_vocabularies_than_files() {
                 "  {len:>6} tokens  [{digest:016x}]  {mark}  {} FILES SHARE THIS VOCABULARY:",
                 entries.len()
             );
-            for (n, r, model, pre) in entries {
+            for f in entries {
                 println!(
-                    "           {} {n:<38} model={model} pre={pre}",
-                    if *r { "ok " } else { "no " }
+                    "           {} {:<38} model={} pre={}",
+                    if f.rebuilt { "ok " } else { "no " },
+                    f.name,
+                    f.model,
+                    f.pre
                 );
             }
         } else {
             println!(
                 "  {len:>6} tokens  [{digest:016x}]  {mark}  {}",
-                entries[0].0
+                entries[0].name
             );
         }
     }
@@ -186,7 +217,7 @@ fn corpus_is_fewer_vocabularies_than_files() {
     }
     let files_rebuilt: usize = groups
         .values()
-        .map(|(_, e)| e.iter().filter(|(_, r, _, _)| *r).count())
+        .map(|g| g.files.iter().filter(|f| f.rebuilt).count())
         .sum();
     println!(
         "\n  ==> report this corpus as {} files / {} vocabularies ({} files are duplicates \
@@ -222,10 +253,10 @@ fn corpus_is_fewer_vocabularies_than_files() {
     // outcomes.
     let mut unexplained: Vec<String> = Vec::new();
     for digest in &split_groups {
-        let (_, entries) = &groups[digest];
-        let rules: std::collections::BTreeSet<(&str, &str)> = entries
+        let rules: std::collections::BTreeSet<(&str, &str)> = groups[digest]
+            .files
             .iter()
-            .map(|(_, _, m, p)| (m.as_str(), p.as_str()))
+            .map(|f| (f.model.as_str(), f.pre.as_str()))
             .collect();
         if rules.len() == 1 {
             unexplained.push(format!(
