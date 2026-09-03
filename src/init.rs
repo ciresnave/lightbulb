@@ -333,19 +333,32 @@ mod tests {
 
     #[test]
     fn test_auto_detect_config() {
-        // This test requires actual hardware, so we'll skip it in CI
-        // Run manually with: cargo test test_auto_detect_config -- --ignored
-        if std::env::var("CI").is_ok() {
-            return;
-        }
-
+        // Runs everywhere, CI included. This used to `return` early when $CI
+        // was set, which made it pass in 0.00s having asserted nothing --
+        // green precisely where it mattered. The stated reason ("requires
+        // actual hardware") does not hold: `HardwareProfile::detect()`
+        // supports a GPU-less machine and reports CPU mode.
         let model = test_model();
         let config = SystemConfig::auto_detect(model, 2).unwrap();
 
-        assert!(config.slot_pool_size >= 2);
-        assert!(config.slot_pool_size <= 128);
-        assert!(config.chunk_size >= 128);
-        assert!(config.chunk_size <= 2048);
+        // Bounds read from the config rather than repeated as literals: the
+        // old assertions restated `calculate_optimal_batch_size`'s own clamp
+        // constants, so they could not fail while the clamp was doing its job.
+        let limits = BatchSizeConfig::default();
+        assert!(
+            (limits.min_batch_size..=limits.max_batch_size).contains(&config.slot_pool_size),
+            "slot_pool_size {} outside the configured clamp [{}, {}]",
+            config.slot_pool_size,
+            limits.min_batch_size,
+            limits.max_batch_size
+        );
+        // The exact legal set, not a loose range, so a regression in
+        // `calculate_chunk_size` (0, or an unbounded value) is caught.
+        assert!(
+            matches!(config.chunk_size, 256 | 512 | 1024),
+            "chunk_size {} is not a value calculate_chunk_size can return",
+            config.chunk_size
+        );
         assert!(config.enable_monitoring);
     }
 
