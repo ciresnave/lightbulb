@@ -537,6 +537,7 @@ impl Content {
         "refact",
         "deepseek-llm",
         "llama-bpe",
+        "command-r",
     ];
 
     /// The pre-tokenizer for a `tokenizer.ggml.pre` name, or `None` if this
@@ -619,6 +620,54 @@ impl Content {
             "llama-bpe" => Some((
                 r##"{"type":"Sequence","pretokenizers":[{"type":"Split","pattern":{"Regex":"(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\\r\\n\\p{L}\\p{N}]?\\p{L}+|\\p{N}{1,3}| ?[^\\s\\p{L}\\p{N}]+[\\r\\n]*|\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+"},"behavior":"Isolated","invert":false},{"type":"ByteLevel","add_prefix_space":false,"trim_offsets":true,"use_regex":false}]}"##,
                 r##"null"##,
+            )),
+            // CohereForAI/c4ai-command-r-v01, read from the ungated
+            // `mlx-community/c4ai-command-r-v01-4bit` re-upload.
+            //
+            // THE REFERENCE IS A QUANTIZED RE-UPLOAD, admissible on a property
+            // measured in this repo rather than on a judgement: a quantization
+            // changes the WEIGHTS and leaves `tokenizer.ggml.tokens` untouched,
+            // which is why six SmolLM2 quantizations are ONE vocabulary in
+            // `tests/gguf_corpus_vocab_census.rs`. `llama-bpe` above is also a
+            // third-party mirror; the two differ only in the variable that
+            // measurement shows is irrelevant to the tokenizer.
+            //
+            // ⚠️ ITS EVIDENCE DIFFERS FROM THE OTHER EIGHT IN ONE RESPECT, STATED
+            // RATHER THAN LEFT TO BE ASSUMED EQUAL. Those entries record "0 of
+            // 130 cases": the repo's 30 plus 100 randomised strings from a
+            // verification run that lives outside the repo. This entry was
+            // measured at 0 of 30 -- the in-repo gate, every case, against the
+            // reference's own tokenizer. The remaining 100 were NOT re-run,
+            // because the generator that produced them is not in the repo and
+            // reconstructing it from a seed and a prose description of its
+            // alphabet would be a guess wearing a number.
+            //
+            // PROPERTIES, NOT A GRADE, so a later reader can re-check instead of
+            // being told how much to trust it. From
+            // `tests/gguf_reference_admissibility.rs`:
+            //
+            //   prefix identity  OK over ALL 255000 shared ids
+            //   merges           253333 identical
+            //   tail extras      1000, all special (<|START_OF_TURN_TOKEN|>,
+            //                    <|END_OF_TURN_TOKEN|>, <|YES_TOKEN|>, ...)
+            //   tokenizer.json   12777405 bytes, byte-size identical to
+            //                    CohereLabs' own (gated) 4-bit repo
+            //
+            // THE GGUF IS THE CORROBORATION AGAINST THE ORIGINAL, and it is
+            // better than reading the gated repo would have been. That repo is
+            // unreachable even authenticated ("you are not in the authorized
+            // list"), but `ggml-vocab-command-r.gguf` was converted from the
+            // ORIGINAL checkpoint by llama.cpp -- a third party, a different
+            // toolchain, no connection to this mirror. A different tokenizer
+            // could not agree with it on 255000 ids and 253333 merges.
+            //
+            // NOTE the pre-tokenizer is byte-identical to `smollm` and `refact`
+            // while the NORMALIZER differs (NFC where those are null). Three
+            // `pre` names, one splitting rule, different pipelines -- which is
+            // why entries are keyed on the name and not on the rule.
+            "command-r" => Some((
+                r##"{"type":"Sequence","pretokenizers":[{"type":"Digits","individual_digits":true},{"type":"ByteLevel","add_prefix_space":false,"trim_offsets":true,"use_regex":true}]}"##,
+                r##"{"type":"NFC"}"##,
             )),
             _ => None,
         }
@@ -800,9 +849,24 @@ mod bpe_spec_tests {
         // `llama-bpe` was here until it was verified against
         // `meta-llama/Meta-Llama-3-8B` and added, at which point this test went
         // red — which is the pair working: the allowlist grew and its negative
-        // half noticed.
-        assert!(Content::bpe_pre_tokenizer("command-r").is_none());
+        // half noticed. `command-r` has now done the same, verified through the
+        // ungated `mlx-community/c4ai-command-r-v01-4bit` re-upload.
+        //
+        // THE SURVIVORS ARE CHOSEN, NOT LEFTOVERS. Every name below is refused
+        // FOR CAUSE rather than merely unexamined, so this pins the refusals
+        // instead of naming strings that happen to be absent:
+        //
+        //   starcoder  no reference for ITS OWN checkpoint (gated); its vocab is
+        //              byte-identical to another model's, and vocab identity does
+        //              not imply rule identity
+        //   mpt        same shape, against this corpus's own gpt-neox vocab
+        //   qwen35     scores 0 of 130 and is refused anyway: the corpus cannot
+        //              discriminate it from `qwen2`, so the score carries no
+        //              information about which rule is correct
+        //   <absent>   keying the table on ABSENCE would apply one checkpoint's
+        //              rule to every future GGUF that omits the field
         assert!(Content::bpe_pre_tokenizer("starcoder").is_none());
+        assert!(Content::bpe_pre_tokenizer("mpt").is_none());
         assert!(Content::bpe_pre_tokenizer("qwen35").is_none());
         assert!(Content::bpe_pre_tokenizer("<absent>").is_none());
         assert!(Content::bpe_pre_tokenizer("").is_none());
