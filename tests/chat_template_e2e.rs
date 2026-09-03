@@ -43,13 +43,8 @@ use lightbulb::engine::{MemoryAwareConfig, MemoryAwareScheduler, ModelRunner};
 
 /// Locate the checkpoint, preferring `TINYLLAMA_DIR`.
 fn tinyllama_dir() -> Option<PathBuf> {
-    let p = match std::env::var_os("TINYLLAMA_DIR") {
-        Some(v) => PathBuf::from(v),
-        None => PathBuf::from(
-            "C:/Users/cires/.cache/huggingface/hub/models--TinyLlama--TinyLlama-1.1B-Chat-v1.0/snapshots/fe8a4ea1ffedaf415f4da2f062534de366a451e6",
-        ),
-    };
-    p.join("model.safetensors").is_file().then_some(p)
+    // one locator, not twelve copies of an absolute path into one home directory
+    lightbulb::test_models::tinyllama_dir()
 }
 
 const MISSING_CHECKPOINT: &str = "no TinyLlama checkpoint. Set TINYLLAMA_DIR to a \
