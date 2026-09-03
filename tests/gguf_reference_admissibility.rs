@@ -21,18 +21,32 @@
 //!
 //! # What "admissible" means here, precisely
 //!
-//! Three properties, checked in order, each with its own failure message:
-//!
 //! 1. **Prefix identity.** For every id the two have in common, the GGUF's token
 //!    and the reference's token at that id are byte-identical. A single
 //!    disagreement means they are different vocabularies and no score computed
 //!    against that reference means anything.
 //! 2. **Extras only at the tail.** A GGUF may carry MORE tokens than the
-//!    reference — llama.cpp appends the checkpoint's special tokens. Those must
-//!    all sit ABOVE the reference's vocabulary size. Extras interleaved into the
-//!    ordinary range would shift ids and silently change every encoding.
+//!    reference — llama.cpp appends the checkpoint's special tokens. Extras on
+//!    the REFERENCE side fail: it would be describing a vocabulary this file does
+//!    not carry.
 //! 3. **Merge identity.** The merge list drives BPE; two vocabularies with the
-//!    same tokens and different merges tokenise differently.
+//!    same tokens and different merges tokenise differently. One side declaring
+//!    merges while the other does not is a disagreement, and NEITHER side
+//!    declaring them fails too — this gates byte-level BPE references, and a pair
+//!    with no merges cannot support that claim.
+//!
+//! ⚠️ **This list previously opened "three properties, checked in order, each with
+//! its own failure message", and two of the three had no failure path at all.**
+//! Property 2 only printed; property 3 printed `not compared` and passed whenever
+//! either side's merge list was empty. Both were found by enumerating the
+//! function after a complexity finding pointed at its length — not by re-reading
+//! the prose, which was confidently wrong about its own code.
+//!
+//! Interleaved extras, the hazard property 2 names, are in fact caught by
+//! property 1: an extra inside the shared range shifts ids and breaks prefix
+//! identity. That is why the omission never produced a wrong verdict. **A
+//! property that happens to be covered by its neighbour is not a checked
+//! property**, and the doc claiming otherwise is what made it invisible.
 //!
 //! # This reports rather than guesses about the extras
 //!
@@ -198,11 +212,21 @@ fn every_reference_is_admissible_for_its_gguf() {
                 println!("      ... and {} more", extras.len() - 6);
             }
         } else if ref_tokens.len() > gguf_tokens.len() {
+            // A REFERENCE CLAIMING TOKENS THE GGUF LACKS IS NOT THE GGUF'S
+            // TOKENIZER. This branch used to print exactly that gap -- "which
+            // the tail-extras rule does not cover" -- and then pass. Naming a
+            // hole is not covering it.
             println!(
-                "  reference has {} tokens the gguf does not -- the gguf is the SMALLER \
-                 vocabulary, which the tail-extras rule does not cover",
+                "  tail extras     : INVERTED -- the reference has {} tokens the gguf does not",
                 ref_tokens.len() - gguf_tokens.len()
             );
+            failures.push(format!(
+                "{name}: the reference declares {} tokens the GGUF does not have. Extras at \
+                 the GGUF's tail are llama.cpp appending special tokens and are expected; \
+                 extras on the REFERENCE side mean it describes a vocabulary this file does \
+                 not carry",
+                ref_tokens.len() - gguf_tokens.len()
+            ));
         } else {
             println!("  tail extras     : none, sizes are equal");
         }
@@ -212,8 +236,34 @@ fn every_reference_is_admissible_for_its_gguf() {
         let merge_mismatches: Vec<usize> = (0..shared_m)
             .filter(|&i| gguf_merges[i] != ref_merges[i])
             .collect();
-        if gguf_merges.is_empty() || ref_merges.is_empty() {
-            println!("  merges          : one side has none -- not compared");
+        if gguf_merges.is_empty() != ref_merges.is_empty() {
+            // ONE SIDE DECLARES MERGES AND THE OTHER DOES NOT. That is a
+            // disagreement, not an absence of one, and it used to print
+            // "not compared" and pass.
+            println!(
+                "  merges          : ONE SIDE ONLY -- gguf {} / reference {}",
+                gguf_merges.len(),
+                ref_merges.len()
+            );
+            failures.push(format!(
+                "{name}: one side declares merges and the other does not (gguf {} / reference \
+                 {}), which is a disagreement about the tokenizer's structure",
+                gguf_merges.len(),
+                ref_merges.len()
+            ));
+        } else if gguf_merges.is_empty() {
+            // BOTH EMPTY. This file gates BYTE-LEVEL BPE references, and BPE is
+            // driven by merges; a pair with none on either side cannot support
+            // the claim this instrument exists to make. Previously "not
+            // compared", which passed -- a guard conditioned on its subject
+            // being non-trivial, switching itself off when the subject
+            // degenerated.
+            println!("  merges          : NEITHER side declares any");
+            failures.push(format!(
+                "{name}: neither side declares merges, so this pair cannot support a \
+                 byte-level BPE claim -- admissibility here is about BPE references, and \
+                 a SentencePiece pair belongs in gguf_tokenizer_fidelity instead"
+            ));
         } else if merge_mismatches.is_empty() && gguf_merges.len() == ref_merges.len() {
             println!("  merges          : OK, {} identical", gguf_merges.len());
         } else if merge_mismatches.is_empty() {
