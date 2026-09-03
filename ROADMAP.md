@@ -215,16 +215,41 @@ reachable would serve four of the five, and the fifth needs v1 field widths as
 well.
 
 ⚠️ **Every number above counts FILES, and a file count is not the coverage
-number a tokenizer corpus is asked for.** Six of the thirty files are one
-SmolLM2 vocabulary at six quantizations; a quantization changes the weights and
-leaves `tokenizer.ggml.tokens` untouched, so those six exercise the tokenizer
+number a tokenizer corpus is asked for.** **Nine** of the thirty files are one
+SmolLM2 vocabulary at nine quantizations — a quantization changes the weights and
+leaves `tokenizer.ggml.tokens` untouched, so those nine exercise the tokenizer
 path once. Adding more quantizations would grow "30" without growing coverage at
 all. Measured by `tests/gguf_corpus_vocab_census.rs` at `C:\Models`, 2026-09-03:
 
+*(This said **six** on its first landing. All nine carry a byte-identical token
+list; three were miscounted because `Content::read` cannot open them, which is
+the correction below. The first version of this sentence said "nine" from the
+filenames, was corrected to "six" by measurement, and is now "nine" again — the
+measurement was real and ranged over the wrong thing.)*
+
 ```
-30 files  /  17 vocabularies      (8 files duplicate a vocabulary already present)
+30 files  /  17 vocabularies REACHABLE THROUGH Content::read
+                                  (8 files duplicate a vocabulary already present)
 15 of 30 files rebuild  ->  but only 10 of 17 VOCABULARIES
+
+NOT A CORPUS CENSUS.  19 vocabularies are PRESENT and EVERY file has one;
+5 carry a vocabulary this reader cannot open, 1 of them needing v1 field widths.
 ```
+
+⚠️ **The scope in that first line is a correction, not decoration.** This block
+first read "30 files / 17 vocabularies" with five files excluded as having "no
+readable vocabulary" — and four of those five have perfectly good vocabularies.
+`Content::read` parses tensor infos eagerly and dies on an unknown quantization
+dtype, while `tokenizer.ggml.tokens` sits in the KV header **ahead of any
+tensor**. Read directly: the three SmolLM2 quantizations carry the same
+49152-token vocabulary as their six siblings, and `ggml-vocab-aquila` a distinct
+100008-token one.
+
+**The excluding guard was stated as protecting against overstating the corpus. It
+understated it**, by reporting a limitation of the reader as a property of the
+GGUFs — and the exclusions looked audited because each carried an error string,
+where `unreadable: unknown dtype for tensor 21` reads as a fact about the file and
+is a fact about a call.
 
 **EQUIVALENCE RELATION, stated because a count whose relation is unstated is a
 number rather than a measurement:** two files are the *same vocabulary* iff their
