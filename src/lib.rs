@@ -32,15 +32,18 @@ pub mod pruning; // Model pruning utilities (M5)
 pub mod quantization; // GGUF quantization utilities
 pub mod sampling;
 pub mod server;
+// Locating the TinyLlama checkpoint the test suite uses, in one place instead
+// of twelve. Public for the same reason as `test_notice`.
+pub mod test_models;
 // Loud, machine-detectable test skips. Public because integration tests in
 // `tests/` need it too, and `#[cfg(test)]` items are not visible there.
 //
-// PLAIN `//`, NOT `///`, AND THAT IS LOAD-BEARING. An outer doc comment here
-// merges with the module's own `//!` docs, and the merged text resolves its
-// intra-doc links in the scope where the `mod` is DECLARED -- the crate root,
-// where `NOTICE_TOKEN` does not exist. Measured: removing two `///` lines here
-// fixed two "unresolved link" errors that named no source span at all. The
-// `doc links` CI gate catches a recurrence.
+// PLAIN `//`, NOT `///`, ON BOTH OF THESE, AND THAT IS LOAD-BEARING. An outer
+// doc comment here merges with the module's own `//!` docs, and the merged text
+// resolves its intra-doc links in the scope where the `mod` is DECLARED -- the
+// crate root, where `NOTICE_TOKEN` does not exist. Measured: removing three
+// `///` lines here fixed three "unresolved link" errors that named no source
+// span at all. The `doc links` CI gate catches a recurrence.
 pub mod test_notice;
 pub mod tls; // TLS certificate management
 pub mod tools; // Tool registry with capability detection (M5.6)

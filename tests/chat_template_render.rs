@@ -2422,13 +2422,8 @@ fn force_does_not_bypass_the_probes_other_refusals() {
 /// Locate the checkpoint, preferring `TINYLLAMA_DIR`. Same shape as
 /// `tests/chat_template_e2e.rs`'s and `tests/api_result_metadata.rs`'s.
 fn tinyllama_dir() -> Option<std::path::PathBuf> {
-    let p = match std::env::var_os("TINYLLAMA_DIR") {
-        Some(v) => std::path::PathBuf::from(v),
-        None => std::path::PathBuf::from(
-            "C:/Users/cires/.cache/huggingface/hub/models--TinyLlama--TinyLlama-1.1B-Chat-v1.0/snapshots/fe8a4ea1ffedaf415f4da2f062534de366a451e6",
-        ),
-    };
-    p.join("model.safetensors").is_file().then_some(p)
+    // one locator, not twelve copies of an absolute path into one home directory
+    lightbulb::test_models::tinyllama_dir()
 }
 
 /// **A characterization test: it records that the probe's discriminator does
