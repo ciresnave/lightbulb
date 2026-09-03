@@ -9,12 +9,49 @@
 //! untouched. So growing the file count by adding quantizations grows the number
 //! without growing the coverage.
 //!
-//! MEASURED, because the sentence above was first written from the filenames and
-//! was wrong in the direction that flattered it: those nine are **six** files
-//! sharing one vocabulary plus **three** that fail to parse at all
-//! (`unknown dtype for tensor N`, the IQ3_XS/IQ4_XS/Q2_K quantizations). So the
-//! shape is not "nine counted as one" but "six counted as one, and three that do
-//! not count." A name is not a measurement, which is the whole point of the file.
+//! # ⚠️ WHAT THIS COUNTS: vocabularies REACHABLE THROUGH `Content::read`
+//!
+//! Not "vocabularies in the corpus". The distinction is load-bearing and it took
+//! three attempts at one sentence to get right:
+//!
+//! ```text
+//! v1  "nine quantizations, one vocabulary"      read off FILENAMES, unmeasured
+//! v2  "six share one, three fail to parse"      measured -- through OUR READER
+//! v3  nine files, ONE vocabulary, all nine      measured from the KV header
+//!     carry it; three are unreachable here
+//! ```
+//!
+//! v2 was measured and still wrong, which is the instructive part. `Content::read`
+//! parses TENSOR INFOS eagerly and fails with `unknown dtype for tensor N` on the
+//! IQ3_XS / IQ4_XS / Q2_K quantizations — but `tokenizer.ggml.tokens` lives in the
+//! KV header, **ahead of any tensor**. Reading those three files' KV headers
+//! directly shows a full 49152-token vocabulary with a digest identical to the
+//! other six. `ggml-vocab-aquila.gguf`, also reported here as unreadable, carries
+//! a distinct 100008-token vocabulary.
+//!
+//! So `unreadable` was reported as a property of the FILE and is a property of a
+//! CALL. Excluding those files did not guard against overstating the corpus, as
+//! this file previously claimed — **it understated it**, by attributing the
+//! reader's limitation to the GGUF.
+//!
+//! The corrected figures, measured 2026-09-03 at `C:\Models`:
+//!
+//! ```text
+//! reachable through Content::read   17 vocabularies    <- what this test asserts
+//! present in the corpus             18 vocabularies    <- KV headers read directly
+//! genuinely without a vocabulary    1 file             <- tinyllamas-stories-260k
+//! ```
+//!
+//! Both are honest answers to different questions. This test asks the first,
+//! because it gates what the library can actually do; the second is recorded so
+//! the first is never mistaken for it. Making the second reachable is a library
+//! change — the metadata parser in `src/gguf/parser.rs` handles these files fine
+//! and is not exposed — and is tracked separately.
+//!
+//! ⚠️ NONE OF THIS WAS FOUND BY RE-READING. It surfaced because MLMF reported
+//! NINE SmolLM2 files declaring `add_bos`, against this file's six, and the two
+//! numbers could not both be right until someone asked which construct each
+//! ranged over. The cross-lane disagreement was the instrument.
 //!
 //! This measures it rather than inferring it from names: two files with
 //! unrelated names can still carry the same vocabulary, and a name is not a
@@ -31,9 +68,13 @@ use std::path::PathBuf;
 /// The token list, read through the public metadata map.
 ///
 /// Returns `Err` with a reason rather than `None`, because "this file has no
-/// vocabulary" and "we failed to read the vocabulary" are different facts and
-/// collapsing them would understate the corpus in exactly the direction that
-/// flatters it.
+/// vocabulary" and "we failed to read the vocabulary" are different facts.
+///
+/// This comment used to end "collapsing them would understate the corpus in
+/// exactly the direction that flatters it" — and the collapsing was happening one
+/// level up, in `census`, where a `Content::read` failure and a missing token key
+/// shared one bucket. Being right about the distinction here did not prevent it
+/// there.
 fn vocab(content: &Content) -> Result<Vec<String>, String> {
     let Some(v) = content.metadata().get("tokenizer.ggml.tokens") else {
         return Err("no tokenizer.ggml.tokens key".into());
@@ -109,6 +150,23 @@ struct FileEntry {
     pre: String,
 }
 
+/// THREE outcomes, not two, because two of them are facts about different
+/// things and collapsing them is what made this file's headline number wrong.
+///
+///   groups          the file carries a vocabulary
+///   no_vocab_key    it opened and has none          -- a fact about the FILE
+///   reader_failed   `Content::read` could not open it -- a fact about US
+///
+/// The last bucket used to be merged into the second under the label
+/// "unreadable", and its count was then subtracted from the corpus. That
+/// understated the corpus by attributing a reader limitation to the GGUFs.
+#[derive(Default)]
+struct Census {
+    groups: BTreeMap<u64, VocabGroup>,
+    no_vocab_key: Vec<(String, String)>,
+    reader_failed: Vec<(String, String)>,
+}
+
 /// Every file sharing one `tokenizer.ggml.tokens` array.
 struct VocabGroup {
     token_count: usize,
@@ -147,19 +205,26 @@ impl VocabGroup {
 /// produced by the display code and could not be inspected without running it.
 /// This file's first assertion was WRONG, and that arrangement is why it could
 /// only be discovered by firing.
-fn census(files: &[PathBuf]) -> (BTreeMap<u64, VocabGroup>, Vec<(String, String)>) {
-    let mut groups: BTreeMap<u64, VocabGroup> = BTreeMap::new();
-    let mut unreadable: Vec<(String, String)> = Vec::new();
+fn census(files: &[PathBuf]) -> Census {
+    let mut out = Census::default();
 
     for path in files {
         let name = path.file_name().unwrap().to_string_lossy().into_owned();
         let content = match Content::read(path) {
             Ok(c) => c,
             Err(e) => {
-                unreadable.push((name, format!("unreadable: {e}")));
+                // A FACT ABOUT US, NOT ABOUT THE FILE. `Content::read` parses
+                // tensor infos eagerly and fails on a quantization dtype it does
+                // not know -- before reaching metadata that sits AHEAD of any
+                // tensor in the KV header. Three SmolLM2 files and
+                // ggml-vocab-aquila land here while carrying perfectly good
+                // vocabularies. Kept in its own bucket so the count of
+                // vocabularies is never quietly reduced by our own limits.
+                out.reader_failed.push((name, format!("{e}")));
                 continue;
             }
         };
+        let groups = &mut out.groups;
         match vocab(&content) {
             Ok(tokens) => {
                 // Whether the tokenizer rebuilds is NOT a property of the token
@@ -180,18 +245,24 @@ fn census(files: &[PathBuf]) -> (BTreeMap<u64, VocabGroup>, Vec<(String, String)
                         pre,
                     });
             }
-            Err(why) => unreadable.push((name, why)),
+            // A FACT ABOUT THE FILE: it opened, and carries no usable token list.
+            Err(why) => out.no_vocab_key.push((name, why)),
         }
     }
-    (groups, unreadable)
+    out
 }
 
 /// The report: printing only. Nothing an assertion depends on is decided here.
-fn report(files: usize, groups: &BTreeMap<u64, VocabGroup>, unreadable: &[(String, String)]) {
+fn report(files: usize, c: &Census) {
+    let groups = &c.groups;
     println!("\n=== GGUF corpus census ===");
-    println!("  files scanned        : {files}");
-    println!("  distinct vocabularies: {}", groups.len());
-    println!("  no readable vocab    : {}", unreadable.len());
+    println!("  files scanned            : {files}");
+    println!("  vocabularies WE CAN REACH: {}", groups.len());
+    println!("  file has no token list   : {}", c.no_vocab_key.len());
+    println!(
+        "  OUR READER COULD NOT OPEN: {}   <- a fact about us, not the corpus",
+        c.reader_failed.len()
+    );
     println!();
 
     for (digest, group) in groups {
@@ -225,9 +296,22 @@ fn report(files: usize, groups: &BTreeMap<u64, VocabGroup>, unreadable: &[(Strin
         }
     }
 
-    if !unreadable.is_empty() {
-        println!("\n  no readable vocabulary (NOT counted as a vocabulary):");
-        for (n, why) in unreadable {
+    if !c.no_vocab_key.is_empty() {
+        println!("\n  opened, but carries no usable token list (a fact about the FILE):");
+        for (n, why) in &c.no_vocab_key {
+            println!("    {n:<44} {why}");
+        }
+    }
+
+    if !c.reader_failed.is_empty() {
+        println!(
+            "\n  Content::read could not open these (A FACT ABOUT US). Their KV headers\n  \
+             were read directly on 2026-09-03 and they DO carry vocabularies -- the three\n  \
+             SmolLM2 quantizations share the other six's digest exactly, and aquila has a\n  \
+             distinct 100008-token one. They are excluded from the count above because\n  \
+             this test gates what the LIBRARY can reach, not what the corpus holds:"
+        );
+        for (n, why) in &c.reader_failed {
             println!("    {n:<44} {why}");
         }
     }
@@ -244,8 +328,9 @@ fn corpus_is_fewer_vocabularies_than_files() {
         std::env::var("LIGHTBULB_GGUF_CORPUS").unwrap_or_default()
     );
 
-    let (groups, unreadable) = census(&files);
-    report(files.len(), &groups, &unreadable);
+    let c = census(&files);
+    report(files.len(), &c);
+    let groups = &c.groups;
 
     // Classification, derived from the groups rather than accumulated while
     // printing them. Each of these is now readable on its own.
@@ -262,10 +347,12 @@ fn corpus_is_fewer_vocabularies_than_files() {
         .collect();
 
     println!(
-        "\n  ==> report this corpus as {} files / {} vocabularies ({shared} files are \
-         duplicates of a vocabulary already present)",
+        "\n  ==> {} files / {} vocabularies REACHABLE THROUGH Content::read ({shared} files \
+         duplicate a vocabulary already present).\n      NOT a corpus census: {} further \
+         file(s) carry vocabularies this reader cannot open.",
         files.len(),
-        groups.len()
+        groups.len(),
+        c.reader_failed.len()
     );
     println!(
         "  ==> tokenizer rebuild: {files_rebuilt} of {} files, but {vocabs_rebuilt} of {} \
