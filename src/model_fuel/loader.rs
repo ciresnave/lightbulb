@@ -179,10 +179,8 @@ mod tests {
     /// The warm HF cache snapshot `llama-lazy` already populated. Skipped rather
     /// than failed when absent, so the suite stays green on a machine without it.
     fn tinyllama_dir() -> Option<std::path::PathBuf> {
-        let p = std::path::PathBuf::from(
-            "C:/Users/cires/.cache/huggingface/hub/models--TinyLlama--TinyLlama-1.1B-Chat-v1.0/snapshots/fe8a4ea1ffedaf415f4da2f062534de366a451e6",
-        );
-        p.join("model.safetensors").is_file().then_some(p)
+        // one locator, not twelve copies of an absolute path into one home directory
+        crate::test_models::tinyllama_dir()
     }
 
     /// Loads real TinyLlama weights into Fuel from a local directory and checks
