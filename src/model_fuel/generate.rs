@@ -212,7 +212,10 @@ mod tests {
     #[ignore = "needs the TinyLlama checkpoint; ~3.5s/token on CPU"]
     fn generates_coherent_text_end_to_end() -> Result<()> {
         let Some(dir) = tinyllama_dir() else {
-            eprintln!("skipping: no TinyLlama snapshot");
+            crate::test_notice::skip_unless_required(
+                "LIGHTBULB_REQUIRE_MODEL",
+                "no TinyLlama snapshot",
+            );
             return Ok(());
         };
 

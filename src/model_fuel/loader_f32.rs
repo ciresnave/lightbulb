@@ -206,7 +206,10 @@ mod tests {
     #[ignore = "needs the TinyLlama checkpoint; loads ~4.4 GB as f32"]
     fn every_weight_is_f32() -> Result<()> {
         let Some(dir) = tinyllama_dir() else {
-            eprintln!("skipping: no TinyLlama snapshot");
+            crate::test_notice::skip_unless_required(
+                "LIGHTBULB_REQUIRE_MODEL",
+                "no TinyLlama snapshot",
+            );
             return Ok(());
         };
 
@@ -252,7 +255,10 @@ mod tests {
     #[ignore = "needs the checkpoint; runs two full generations on CPU"]
     fn f32_and_stock_loaders_agree() -> Result<()> {
         let Some(dir) = tinyllama_dir() else {
-            eprintln!("skipping: no TinyLlama snapshot");
+            crate::test_notice::skip_unless_required(
+                "LIGHTBULB_REQUIRE_MODEL",
+                "no TinyLlama snapshot",
+            );
             return Ok(());
         };
         let tok = tokenizers::Tokenizer::from_file(dir.join("tokenizer.json"))

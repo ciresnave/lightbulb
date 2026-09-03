@@ -2222,7 +2222,10 @@ mod tests {
     #[ignore = "needs the TinyLlama checkpoint (~4.4 GB as f32); slow on CPU"]
     fn tinyllama_two_prompts_in_one_batch() -> Result<()> {
         let Some(dir) = tinyllama_dir() else {
-            eprintln!("skipping: no TinyLlama snapshot");
+            crate::test_notice::skip_unless_required(
+                "LIGHTBULB_REQUIRE_MODEL",
+                "no TinyLlama snapshot",
+            );
             return Ok(());
         };
         let tok = tokenizers::Tokenizer::from_file(dir.join("tokenizer.json"))

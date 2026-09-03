@@ -195,7 +195,10 @@ mod tests {
     #[ignore = "needs the TinyLlama checkpoint in the HF cache"]
     fn loads_tinyllama_from_local_dir() -> Result<()> {
         let Some(dir) = tinyllama_dir() else {
-            eprintln!("skipping: no TinyLlama snapshot");
+            crate::test_notice::skip_unless_required(
+                "LIGHTBULB_REQUIRE_MODEL",
+                "no TinyLlama snapshot",
+            );
             return Ok(());
         };
 

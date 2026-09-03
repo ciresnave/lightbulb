@@ -1983,25 +1983,35 @@ fn default_feature_set_assumptions_hold() {
     assert!(!cfg!(feature = "cuda-full"), "goldens are CPU-only");
 }
 
-/// If the fixture has been captured, validate everything about it that does not
-/// need the model: codec, derivation, margin guard, loader provenance.
+/// Validate everything about the committed fixture that does not need the
+/// model: codec, derivation, margin guard, loader provenance.
 ///
-/// This is what keeps a committed fixture honest in ordinary CI. It **skips
-/// loudly** while the fixture does not exist yet, which at the time of writing
-/// is the case.
+/// This is what keeps the fixture honest in ordinary CI. It used to skip while
+/// the fixture did not exist yet; it exists and is tracked, so a missing file is
+/// now a failure. The old doc said it "skips **loudly**", which was not
+/// achievable: cargo captures output for passing tests, so the notice was never
+/// shown. See src/test_notice.rs for the measurement.
 #[test]
-fn committed_fixture_is_self_consistent_if_present() {
+fn committed_fixture_is_self_consistent() {
     let path = fixture_path();
-    if !path.is_file() {
-        eprintln!(
-            "SKIPPING: no golden fixture at {}.\n\
-             The tier-3 machinery is present and its controls pass, but the fixture has NOT been \
-             generated. Generate it with:\n  cargo test --release --test model_fuel_golden -- \
-             --ignored --nocapture capture_golden_fixture",
-            path.display()
-        );
-        return;
-    }
+    // THE FIXTURE IS COMMITTED, so this is an assertion rather than a skip.
+    //
+    // It printed "SKIPPING" and returned, which was right when written -- the
+    // doc comment above says the fixture did not exist yet. It exists now and is
+    // tracked by git, which makes the skip branch dead and makes a DELETED
+    // fixture indistinguishable from a passing check.
+    //
+    // The printed notice would not have been visible in any case: cargo captures
+    // stdout and stderr for tests that PASS and shows them only on failure, so
+    // it was written and discarded unless someone passed --nocapture. Measured;
+    // see src/test_notice.rs.
+    assert!(
+        path.is_file(),
+        "no golden fixture at {}. It is COMMITTED to this repo, so its absence is a deletion \
+         rather than a state to skip over. Regenerate with:\n  cargo test --release --test \
+         model_fuel_golden -- --ignored --nocapture capture_golden_fixture",
+        path.display()
+    );
 
     let text = fs::read_to_string(&path).expect("reading the fixture");
     let f: GoldenFile = serde_json::from_str(&text).expect("parsing the fixture");
