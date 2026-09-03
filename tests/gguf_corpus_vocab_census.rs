@@ -21,6 +21,25 @@
 //!     carry it; three are unreachable here
 //! ```
 //!
+//! ⚠️ AND v3 WAS ALSO WRONG, ONE LAYER DOWN. The version above that reads
+//! "three are unreachable here" was itself corrected: `ggml-vocab-aquila.gguf` is
+//! GGUF **v2** and `tinyllamas-stories-260k-f32.gguf` is **v1**, whose counts and
+//! string lengths are u32 rather than u64. A v3-assuming parser reads a v1 count
+//! as a garbage u64 and dies allocating. Parsed with the right widths it carries
+//! a 512-token vocabulary, `bos_token_id=1`, `eos_token_id=2`.
+//!
+//! So EVERY FILE IN THIS CORPUS HAS A VOCABULARY and the corpus holds NINETEEN.
+//! The word to distrust is "genuinely": it appeared at three layers tonight --
+//! "5 unreadable" (a fact about a call), "plausibly genuinely bad" (a fact about
+//! field widths), "1 genuinely without" (a fact about v3 assumptions) -- and each
+//! correction stayed scoped to the tool that made it, so each residue looked like
+//! the irreducible truth.
+//!
+//! The 19 was re-measured over the whole population with a reader handling v1 and
+//! v2/v3, NOT derived by adding the known exclusions back. Two lanes independently
+//! said 18 by adding back only what their own tool had missed; nobody counted the
+//! v1 file's 512-token vocabulary until the population was re-run whole.
+//!
 //! v2 was measured and still wrong, which is the instructive part. `Content::read`
 //! parses TENSOR INFOS eagerly and fails with `unknown dtype for tensor N` on the
 //! IQ3_XS / IQ4_XS / Q2_K quantizations — but `tokenizer.ggml.tokens` lives in the
