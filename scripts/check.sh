@@ -54,6 +54,19 @@ cargo doc --workspace --no-deps >/dev/null 2>&1 \
 echo "── cargo test --lib"
 cargo test $J --lib 2>&1 | grep -E "^test result" || { echo "   FAIL: lib tests"; fail=1; }
 
+
+# The clippy gate. Ratchets per-lint counts against scripts/clippy-baseline.tsv
+# rather than denying all warnings, because this crate emits 620 diagnostics
+# across 52 lints and a gate deferred until that cleanup finishes is a gate that
+# does not exist. Fails on a NEW lint kind or an INCREASED count.
+#
+# It also catches the deny-by-default group for free -- `cargo clippy` exits
+# non-zero on clippy::correctness with no flags. That is not theoretical: clippy
+# was RED on main with clippy::eq_op, and nothing ran clippy, so the red was
+# invisible for as long as it existed.
+echo "-- clippy (per-lint ratchet, see scripts/clippy_gate.py)"
+python scripts/clippy_gate.py || fail=1
+
 echo
 # ── What these gates do NOT cover ────────────────────────────────────────────
 # PRINTED UNCONDITIONALLY, INCLUDING ON SUCCESS. That is the whole point: the

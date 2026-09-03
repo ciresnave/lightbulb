@@ -168,6 +168,50 @@ jobs:
           cargo test --features fuel-engine --tests --no-run
           echo featgate >> .gates-ran
 
+      # NAMED, not ambient. The clippy gate is a Python script, and relying on
+      # whatever interpreter the runner image happens to ship is the same defect
+      # as relying on an unnamed compiler -- a green whose tooling nobody stated.
+      # The Rust toolchain gets this treatment above by being pinned in
+      # rust-toolchain.toml and printed; Python has no such file, so it is named
+      # here.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # CLIPPY RAN NOWHERE UNTIL NOW, AND IT WAS RED THE WHOLE TIME.
+      #
+      # `cargo clippy` was failing on main with a deny-by-default error --
+      # clippy::eq_op at src/engine/reasoning_controls.rs:218 -- and since the
+      # gates were fmt, doc, test and featgate, no gate ever ran it. Every
+      # commit merged without clippy executing once. AN ABSENT GATE AND A
+      # PASSING GATE PRODUCE THE SAME GREEN TICK, which is the same shape as
+      # the empty test binaries documented above.
+      #
+      # WHY A BASELINE INSTEAD OF `-D warnings`. This crate emits 620
+      # diagnostics across 52 lints (52 kinds, of which 5 are ordinary rustc
+      # lints: unused_variables 72, dead_code 39, unused_imports 37,
+      # deprecated 9, unused_mut 7). Denying all warnings means triaging 620
+      # sites before any clippy gate can exist, and a gate deferred until a
+      # cleanup finishes is a gate that does not exist. So scripts/
+      # clippy-baseline.tsv records the per-lint counts and the gate fails on a
+      # NEW lint kind or an INCREASED count. The 620 stay visible and counted.
+      #
+      # The deny-by-default group needs no baseline at all: `cargo clippy`
+      # exits non-zero on clippy::correctness with no flags from us, which is
+      # what the eq_op above did. That arm is free.
+      #
+      # WHAT THIS DOES NOT CATCH: fixing one `collapsible_if` and adding
+      # another leaves the count equal and passes -- it ratchets counts, not
+      # sites. Default features only, same limit as the `test` gate. The counts
+      # are diagnostic INSTANCES, not source sites: --all-targets checks lib and
+      # test separately, so a line in both is counted twice. Full statement in
+      # the scripts/clippy_gate.py docstring.
+      - name: clippy
+        shell: bash
+        run: |
+          python scripts/clippy_gate.py
+          echo clippy >> .gates-ran
+
       # A DELETED STEP IS A SILENTLY DISABLED GATE. Without this, removing the
       # `fmt` step does not turn anything red -- the job simply runs three
       # steps instead of four and reports success. An absent gate and a passing
@@ -181,13 +225,13 @@ jobs:
       # accidental.
       #
       # WHAT THIS DOES NOT CATCH, stated because a guard trusted past its reach
-      # is worse than no guard: the expected list is HARDCODED HERE. Adding a
-      # FOURTH gate and forgetting to add its marker leaves that gate unguarded
+      # is worse than no guard: the expected list is HARDCODED HERE. Adding
+      # ANOTHER gate and forgetting to add its marker leaves that gate unguarded
       # and this check still green. It closes deletion, not omission.
       - name: every gate must have run
         shell: bash
         run: |
-          expected="fmt doc test featgate"
+          expected="fmt doc test featgate clippy"
           test -f .gates-ran || { echo "::error::no gate markers written at all"; exit 1; }
           missing=""
           for g in $expected; do
