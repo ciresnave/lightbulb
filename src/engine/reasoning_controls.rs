@@ -215,7 +215,12 @@ impl OverthinkingDetector {
     fn get_top_prob(&self, logits: &[f32]) -> f32 {
         let max_logit = logits.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
         let exp_sum: f32 = logits.iter().map(|&l| (l - max_logit).exp()).sum();
-        (max_logit - max_logit).exp() / exp_sum
+        // p_max = exp(max - max) / sum(exp(l - max)) = exp(0) / exp_sum,
+        // i.e. simply 1 / exp_sum. Spelling the numerator out as
+        // `(max_logit - max_logit)` mirrors the stable-softmax form above but
+        // is always zero, which trips clippy::eq_op -- a deny-by-default
+        // correctness lint, so it fails `cargo clippy` for the whole crate.
+        1.0 / exp_sum
     }
 
     /// Calculate variance of values
@@ -574,6 +579,23 @@ mod tests {
         assert!(budget.can_continue_chain(0));
         assert!(budget.can_continue_chain(4));
         assert!(!budget.can_continue_chain(5));
+    }
+
+    #[test]
+    fn top_prob_matches_a_plain_softmax_of_the_max_logit() {
+        let detector = OverthinkingDetector::new();
+        let logits = [1.0f32, 3.0, 2.0, -1.0];
+
+        // Reference computed the naive way -- no max subtraction at all -- so
+        // it shares no algebra with the implementation it checks.
+        let denom: f32 = logits.iter().map(|l| l.exp()).sum();
+        let expected = 3.0f32.exp() / denom;
+
+        let got = detector.get_top_prob(&logits);
+        assert!(
+            (got - expected).abs() < 1e-6,
+            "get_top_prob returned {got}, plain softmax says {expected}"
+        );
     }
 
     #[test]
