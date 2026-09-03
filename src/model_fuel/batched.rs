@@ -1184,10 +1184,8 @@ mod tests {
     }
 
     fn tinyllama_dir() -> Option<PathBuf> {
-        let p = PathBuf::from(
-            "C:/Users/cires/.cache/huggingface/hub/models--TinyLlama--TinyLlama-1.1B-Chat-v1.0/snapshots/fe8a4ea1ffedaf415f4da2f062534de366a451e6",
-        );
-        p.join("model.safetensors").is_file().then_some(p)
+        // one locator, not twelve copies of an absolute path into one home directory
+        crate::test_models::tinyllama_dir()
     }
 
     /// All-f32 checkpoint load, for the `#[ignore]`d TinyLlama test only.
