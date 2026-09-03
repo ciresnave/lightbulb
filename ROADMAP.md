@@ -1072,9 +1072,14 @@ M2 — Performance enablers (0.3)
   - References: docs/M3_4_FLASHATTENTION_INTEGRATION.md, tests/flash_attention_tests.rs, examples/benchmark_flashattention.rs
 
 - Quantized model loaders via Candle
-  - ⚠️ **CONTRADICTED (measured 2026-09-01)**: GGUF/other quant formats usable
-    end-to-end — **1 of 30 local GGUF files loads; 29 do not.** See the VERIFIED
-    STATUS block at the top and `tests/gguf_corpus_sweep.rs`.
+  - ⚠️ **CONTRADICTED**: GGUF/other quant formats usable end-to-end.
+    Measured 2026-09-01: **1 of 30 local GGUF files loaded**. Re-measured
+    2026-09-03: **15 of 30**, after the tokenizer was rebuilt from BPE and nine
+    `pre` values were verified. The contradiction stands — half the corpus still
+    does not load, so "usable end-to-end" remains false — but **this line read
+    "1 of 30" for two days after the figure moved by fourteen files**, which is
+    why both dates are now stated rather than one. See the VERIFIED STATUS block
+    at the top and `tests/gguf_corpus_sweep.rs`.
   - Acceptance: ✅ run quantized tiny model locally; parity tests pass
   - References: low-bit LLMs survey; model compression survey
 - Lightning GGUF loader with memory-mapped tensor access
