@@ -213,7 +213,7 @@ all. Measured by `tests/gguf_corpus_vocab_census.rs` at `C:\Models`, 2026-09-03:
 
 ```
 30 files  /  17 vocabularies      (8 files duplicate a vocabulary already present)
-14 of 30 files rebuild  ->  but only 9 of 17 VOCABULARIES
+15 of 30 files rebuild  ->  but only 10 of 17 VOCABULARIES
 ```
 
 **EQUIVALENCE RELATION, stated because a count whose relation is unstated is a
