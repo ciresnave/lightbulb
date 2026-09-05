@@ -301,16 +301,40 @@ impl Content {
             .get("tokenizer.ggml.add_bos_token")
             .and_then(|v| v.to_bool().ok())
             .unwrap_or(true);
-        if add_bos {
-            if let (Some(bos), Some(id)) = (bos_id.and_then(|i| tokens.get(i as usize)), bos_id) {
-                let processor = TemplateProcessing::builder()
-                    .try_single(format!("{bos}:0 $A:0"))
-                    .map_err(|e| anyhow::anyhow!("building the BOS post-processor: {e}"))?
-                    .special_tokens(vec![(bos.clone(), id)])
-                    .build()
-                    .map_err(|e| anyhow::anyhow!("building the BOS post-processor: {e}"))?;
-                tokenizer.with_post_processor(Some(processor));
-            }
+        // `tokenizer.ggml.add_eos_token` defaults to FALSE, unlike its BOS
+        // sibling: llama.cpp appends BOS by default for a `llama` tokenizer and
+        // does not append EOS.
+        //
+        // ⚠️ It was read NOWHERE until now, and the corpus is why that looked
+        // correct. Of the six files that declare it, FIVE say `false` — and
+        // reading nothing produces the same behaviour as reading `false`. The
+        // code was ACCIDENTALLY CORRECT on five of six, so a test written
+        // against those five would have passed against code that reads nothing
+        // at all. The majority value in the population is what hid it.
+        let add_eos = self
+            .metadata()
+            .get("tokenizer.ggml.add_eos_token")
+            .and_then(|v| v.to_bool().ok())
+            .unwrap_or(false);
+
+        let named = |id: Option<u32>| -> Option<(String, u32)> {
+            id.and_then(|i| tokens.get(i as usize).map(|t| (t.clone(), i)))
+        };
+        let prefix = named(bos_id).filter(|_| add_bos);
+        let suffix = named(eos_id).filter(|_| add_eos);
+
+        // ⚠️ Built when EITHER is wanted. The previous version nested the whole
+        // construction inside `if add_bos`, so a checkpoint asking for EOS and
+        // not BOS got NO post-processor at all — there was nowhere for an EOS to
+        // go even once the key was read. Reading the key is only half the fix.
+        if let Some((template, specials)) = post_processor_spec(prefix, suffix) {
+            let processor = TemplateProcessing::builder()
+                .try_single(template)
+                .map_err(|e| anyhow::anyhow!("building the BOS/EOS post-processor: {e}"))?
+                .special_tokens(specials)
+                .build()
+                .map_err(|e| anyhow::anyhow!("building the BOS/EOS post-processor: {e}"))?;
+            tokenizer.with_post_processor(Some(processor));
         }
 
         Ok(tokenizer)
@@ -851,6 +875,99 @@ impl Content {
     ) -> candlelight::core::Result<candlelight::core::quantized::QTensor> {
         // Delegate to Candle's proven tensor loading logic
         self.candle_content.tensor(reader, name, device)
+    }
+}
+
+/// The post-processor's template and special tokens, for whichever of BOS/EOS
+/// the checkpoint asked for. `None` when it asked for neither.
+///
+/// ⚠️ PURE AND SEPARATE BECAUSE THE CORPUS CANNOT EXERCISE THE EOS ARM. Exactly
+/// one file in the corpus declares `tokenizer.ggml.add_eos_token = true`
+/// (`ggml-vocab-nomic-bert-moe.gguf`), and it declares
+/// `tokenizer.ggml.model = "t5"` — which neither rebuild path accepts. So every
+/// checkpoint we can actually load is one where EOS-appending code and
+/// EOS-ignoring code behave identically, and an end-to-end test over the corpus
+/// would pass against either. These unit tests are the only thing that can tell
+/// them apart.
+fn post_processor_spec(
+    prefix: Option<(String, u32)>,
+    suffix: Option<(String, u32)>,
+) -> Option<(String, Vec<(String, u32)>)> {
+    let template = match (&prefix, &suffix) {
+        (Some((b, _)), Some((e, _))) => format!("{b}:0 $A:0 {e}:0"),
+        (Some((b, _)), None) => format!("{b}:0 $A:0"),
+        (None, Some((e, _))) => format!("$A:0 {e}:0"),
+        (None, None) => return None,
+    };
+    // A checkpoint may use one token for both. Registering it twice is not an
+    // error worth risking in a builder we do not own.
+    let mut specials: Vec<(String, u32)> = Vec::new();
+    for t in prefix.iter().chain(suffix.iter()) {
+        if !specials.iter().any(|(_, id)| *id == t.1) {
+            specials.push(t.clone());
+        }
+    }
+    Some((template, specials))
+}
+
+#[cfg(test)]
+mod post_processor_spec_tests {
+    use super::post_processor_spec;
+
+    fn bos() -> Option<(String, u32)> {
+        Some(("<s>".to_string(), 1))
+    }
+    fn eos() -> Option<(String, u32)> {
+        Some(("</s>".to_string(), 2))
+    }
+
+    /// The pre-existing behaviour, unchanged. Every checkpoint lightbulb can
+    /// currently load lands here, so this is the arm the corpus does cover.
+    #[test]
+    fn bos_only_is_the_previous_template_exactly() {
+        let (t, s) = post_processor_spec(bos(), None).expect("BOS alone must build");
+        assert_eq!(t, "<s>:0 $A:0");
+        assert_eq!(s, vec![("<s>".to_string(), 1)]);
+    }
+
+    /// ⚠️ THE ARM THE OLD CODE COULD NOT REACH AT ALL. It nested the whole
+    /// construction inside `if add_bos`, so a checkpoint asking for EOS and not
+    /// BOS got NO post-processor — there was nowhere for an EOS to go even once
+    /// the key was read. Reading `add_eos_token` was only half the fix.
+    #[test]
+    fn eos_without_bos_still_builds_a_post_processor() {
+        let (t, s) = post_processor_spec(None, eos())
+            .expect("EOS alone must build -- the old code produced nothing here");
+        assert_eq!(t, "$A:0 </s>:0");
+        assert_eq!(s, vec![("</s>".to_string(), 2)]);
+    }
+
+    #[test]
+    fn both_wrap_the_sequence() {
+        let (t, s) = post_processor_spec(bos(), eos()).expect("both must build");
+        assert_eq!(t, "<s>:0 $A:0 </s>:0");
+        assert_eq!(s, vec![("<s>".to_string(), 1), ("</s>".to_string(), 2)]);
+    }
+
+    #[test]
+    fn neither_builds_nothing() {
+        assert!(
+            post_processor_spec(None, None).is_none(),
+            "a checkpoint wanting neither must get no post-processor, not an empty one"
+        );
+    }
+
+    /// A checkpoint using one token for both must not register it twice.
+    #[test]
+    fn a_shared_token_is_registered_once() {
+        let same = Some(("<|endoftext|>".to_string(), 0));
+        let (t, s) = post_processor_spec(same.clone(), same).expect("must build");
+        assert_eq!(t, "<|endoftext|>:0 $A:0 <|endoftext|>:0");
+        assert_eq!(
+            s,
+            vec![("<|endoftext|>".to_string(), 0)],
+            "the same id must appear once in the special-token list"
+        );
     }
 }
 
