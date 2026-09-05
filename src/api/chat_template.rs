@@ -429,6 +429,58 @@ fn read_gguf_declaration(model_path: &Path) -> Option<GgufDeclaration> {
         },
     };
 
+    // ⚠️ A GGUF MAY CARRY SEVERAL TEMPLATES AND THIS READER TAKES ONE.
+    //
+    // `tokenizer.chat_template` is the unnamed default. A checkpoint may ALSO
+    // ship `tokenizer.chat_template.<name>` entries and a
+    // `tokenizer.chat_templates` array naming them. Measured on
+    // `ggml-vocab-command-r.gguf`, the one file in the local 30-file corpus that
+    // does this:
+    //
+    //   tokenizer.chat_template            1204 bytes   the default, UNNAMED
+    //   tokenizer.chat_template.rag        3695 bytes
+    //   tokenizer.chat_template.tool_use   3911 bytes
+    //   tokenizer.chat_templates           ["tool_use", "rag"]   NAMES, not bodies
+    //
+    // Note the default is NOT in the names array, so enumerating from that array
+    // alone misses it, and reading only the unnamed key misses the other two.
+    // Trusting either side is lossy in a different direction, which is why both
+    // are read and disagreements are reported rather than reconciled.
+    //
+    // TAKING THE DEFAULT IS THE RIGHT CHOICE HERE -- serving a `rag` template to
+    // an ordinary chat request would be wrong. THE DEFECT WAS THE SILENCE: this
+    // returned one of three and reported no loss, so an operator whose model has
+    // a tool-use template had no way to learn it was never considered.
+    {
+        let present: std::collections::BTreeSet<&str> = md
+            .keys()
+            .filter_map(|k| k.strip_prefix("tokenizer.chat_template."))
+            .collect();
+        let declared: std::collections::BTreeSet<&str> = match md.get("tokenizer.chat_templates") {
+            Some(fuel::quantized::gguf_file::Value::Array(names)) => names
+                .iter()
+                .filter_map(|n| n.to_string().ok())
+                .map(String::as_str)
+                .collect(),
+            _ => Default::default(),
+        };
+        if !present.is_empty() || !declared.is_empty() {
+            let named_but_absent: Vec<&str> = declared.difference(&present).copied().collect();
+            let present_but_unnamed: Vec<&str> = present.difference(&declared).copied().collect();
+            tracing::warn!(
+                "{}: this GGUF declares {} NAMED chat template(s) ({:?}) in addition to the \
+                 unnamed default, and only the default is used. Named templates are not \
+                 selectable here, so any behaviour they encode is unavailable. \
+                 named-but-absent: {:?}; present-but-unnamed: {:?}.",
+                model_path.display(),
+                present.len(),
+                present,
+                named_but_absent,
+                present_but_unnamed
+            );
+        }
+    }
+
     // Byte-exact: the token is rendered into prompt TEXT and the tokenizer must
     // recognise the identical bytes. Never trim or normalize here.
     //
