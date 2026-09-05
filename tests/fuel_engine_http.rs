@@ -222,7 +222,8 @@ async fn fuel_runner_serves_a_coherent_completion_over_http() {
 ///
 /// The gate above pins `"temperature": 0.0` so it can assert exact content
 /// ("paris"). But `ChatCompletionRequest::default_temperature`
-/// (`src/api/openai/chat.rs:538`) fills in **1.0** — not 0.0 — whenever a
+/// (`fn default_temperature` in `src/api/openai/chat.rs`) fills in **1.0** —
+/// not 0.0 — whenever a
 /// request omits `temperature` entirely, and the Fuel path honours it:
 /// `run_inference_once` -> `FuelEngineModel::step_one` -> `select_token`
 /// (`src/model_fuel/engine_model.rs`) runs real multinomial sampling at
@@ -334,7 +335,8 @@ async fn fuel_runner_serves_a_default_temperature_completion() {
 
     // LOAD-BEARING. Without this, the test passes even when `inference_tx`
     // routing is dead and `create_chat_completion` fell through to the
-    // no-model placeholder (`src/api/openai/chat.rs:232-241`) instead of
+    // no-model placeholder (`src/api/openai/chat.rs`, the branch commented
+    // "Fallback: no model runner available") instead of
     // reaching the runner at all — exactly the "gate reports success having
     // verified nothing" failure mode this whole file exists to exclude.
     assert!(
