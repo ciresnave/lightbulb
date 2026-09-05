@@ -1092,12 +1092,18 @@ M2 — Performance enablers (0.3)
 - Quantized model loaders via Candle
   - ⚠️ **CONTRADICTED**: GGUF/other quant formats usable end-to-end.
     Measured 2026-09-01: **1 of 30 local GGUF files loaded**. Re-measured
-    2026-09-03: **15 of 30**, after the tokenizer was rebuilt from BPE and nine
-    `pre` values were verified. The contradiction stands — half the corpus still
-    does not load, so "usable end-to-end" remains false — but **this line read
-    "1 of 30" for two days after the figure moved by fourteen files**, which is
-    why both dates are now stated rather than one. See the VERIFIED STATUS block
-    at the top and `tests/gguf_corpus_sweep.rs`.
+    2026-09-05: **16 of 30**, after the tokenizer was rebuilt from BPE and ten
+    `pre` values were verified. The contradiction stands — nearly half the corpus
+    still does not load, so "usable end-to-end" remains false — but **this line
+    read "1 of 30" for two days after the figure moved by fourteen files**, which
+    is why both dates are stated rather than one. See the VERIFIED STATUS block at
+    the top and `tests/gguf_corpus_sweep.rs`.
+
+    ⚠️ It then read **"15 of 30"** for the length of one PR, because the branch
+    that corrected it and the branch that moved it again were open at the same
+    time and neither touched the other's lines. **A figure appearing twice in one
+    document needs re-deriving whenever either instance changes — the absence of a
+    merge conflict is not evidence of consistency.**
   - Acceptance: ✅ run quantized tiny model locally; parity tests pass
   - References: low-bit LLMs survey; model compression survey
 - Lightning GGUF loader with memory-mapped tensor access
