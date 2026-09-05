@@ -221,7 +221,8 @@ fn the_detector_finds_the_defect_that_motivated_it() {
 /// literals and reports a key nobody wrote.
 #[test]
 fn the_literal_scanner_handles_escapes() {
-    let src = r#"let a = "tokenizer.ggml.tokens"; let b = "say \"hi\""; let c = "general.alignment";"#;
+    let src =
+        r#"let a = "tokenizer.ggml.tokens"; let b = "say \"hi\""; let c = "general.alignment";"#;
     let lits = string_literals(src);
     assert!(lits.contains(&"tokenizer.ggml.tokens".to_string()));
     assert!(
@@ -287,7 +288,10 @@ fn no_key_lightbulb_reads_has_unaccounted_siblings() {
     for (n, why) in &unreadable {
         println!("      not scannable: {n:<44} {why}");
     }
-    println!("  distinct keys across the scanned files: {}", all_keys.len());
+    println!(
+        "  distinct keys across the scanned files: {}",
+        all_keys.len()
+    );
     println!("  keys lightbulb reads (src literals)   : {}", read.len());
 
     assert!(
