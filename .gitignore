@@ -31,3 +31,9 @@ rustc-ice-*.txt
 # that always has one line is a status nobody reads, and an unread status is
 # how uncommitted work survives on one disk.
 supertool
+
+# Python bytecode. The repo ships scripts/clippy_gate.py, and anything that
+# IMPORTS it rather than running it -- a test of its verdict logic, for instance --
+# leaves scripts/__pycache__/ behind as untracked noise.
+__pycache__/
+*.pyc
