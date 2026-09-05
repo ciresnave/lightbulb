@@ -23,11 +23,17 @@
 //!
 //! ```rust,no_run
 //! use lightbulb::quantization::{dequantize_tensor, quantize_tensor, GgmlDType};
-//! use lightbulb::quantization::{NormTweaker, NormTweakingConfig};
-//! use std::path::Path;
-//!
-//! // Dequantize Q4_K weights to F32
-//! let weights_f32 = dequantize_tensor(quantized_data, GgmlDType::Q4K)?;
+//! use lightbulb::quantization::{LayerStats, NormTweaker, NormTweakingConfig};
+//! use candlelight::core::{Device, Tensor};
+//! # fn main() -> anyhow::Result<()> {
+//! # let quantized_data: &[u8] = &[];
+//! # let device = Device::Cpu;
+//! # let calibration_data: Tensor = Tensor::zeros((1, 1), candlelight::core::DType::F32, &device)?;
+//! # let layer_stats: Vec<LayerStats> = Vec::new();
+//! // Dequantize Q4_K weights to F32. `elem_count` is required: a block-quantized
+//! // buffer's length does not determine how many values it decodes to.
+//! let elem_count = 4096;
+//! let weights_f32 = dequantize_tensor(quantized_data, GgmlDType::Q4K, elem_count)?;
 //!
 //! // Re-quantize to Q8_0 (higher quality)
 //! let weights_q8 = quantize_tensor(&weights_f32, GgmlDType::Q8_0)?;
@@ -36,6 +42,9 @@
 //! let config = NormTweakingConfig::default();
 //! let tweaker = NormTweaker::new(config, device);
 //! let adjustments = tweaker.calibrate(&calibration_data, &layer_stats)?;
+//! # let _ = (weights_q8, adjustments);
+//! # Ok(())
+//! # }
 //! ```
 
 pub mod gguf_ops;
