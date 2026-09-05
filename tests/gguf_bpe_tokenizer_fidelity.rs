@@ -79,8 +79,25 @@
 //! `SmolLM2-360M-Instruct/tokenizer.json`, which is stronger evidence than the
 //! llama.cpp differential because the reference DECLARES its pre-tokenizer
 //! (`Sequence[Digits{individual_digits}, ByteLevel{add_prefix_space:false}]`)
-//! rather than only exhibiting it. The 30 cases below are the shipped gate; the
-//! other 100 are randomised and live in the verification run, not in the repo.
+//! rather than only exhibiting it.
+//!
+//! # ⚠️ THE RANDOMISED 100 ARE NOW IN THE REPO, AND THAT IS A NEW CORPUS
+//!
+//! This used to read "the other 100 are randomised and live in the verification
+//! run, not in the repo" — which meant **eight allowlist entries recorded a
+//! number nobody could reproduce.** A seed and a prose description of an alphabet
+//! are not a corpus; they name a stream only the original generator can produce.
+//!
+//! `randomised_cases()` below is committed, deterministic, and dependency-free,
+//! so every future claim over 130 cases is re-runnable by anyone holding this
+//! file.
+//!
+//! **It is NOT the historical corpus.** Those cases are unrecoverable, so the
+//! numbers taken over them stay as they are, annotated with when they were taken.
+//! Restating them against this generator would have produced figures that LOOKED
+//! like the originals and measured something else — the exact substitution this
+//! module exists to refuse. **The eight are not wrong; they are unverifiable, and
+//! those need different words.**
 //!
 //! Both halves of that `Sequence` are load-bearing and the gate proves it:
 //! dropping `Digits` fails 1 of these 30 cases. Under the older 10-case corpus
@@ -132,6 +149,120 @@
 //! LIGHTBULB_BPE_PAIRS="<a>.gguf|<a>.json;<b>.gguf|<b>.json" \
 //!   cargo test --test gguf_bpe_tokenizer_fidelity -- --ignored --nocapture
 //! ```
+
+/// The seed the randomised half of the corpus is generated from.
+///
+/// Stated here rather than in prose because a seed described in a comment is not
+/// a corpus: it names a stream nobody else can produce without the generator.
+const RANDOM_SEED: u64 = 20260902;
+
+/// How many randomised cases accompany the hand-written ones.
+const RANDOM_CASES: usize = 100;
+
+/// The alphabet the randomised cases are drawn from.
+///
+/// Chosen to mix the categories the candidate pre-tokenizer regexes split on:
+/// ASCII letters in both cases, digits, the whitespace shapes, punctuation
+/// including the apostrophes GPT-2's contraction rule keys on, and non-Latin
+/// scripts (Greek, Cyrillic, Arabic-Indic digits, CJK, Hangul, Hebrew, and a
+/// combining mark — the class `qwen35`'s rule would have turned on).
+const ALPHABET: &[char] = &[
+    'a', 'b', 'c', 'd', 'e', 'z', 'A', 'B', 'C', 'D', 'E', 'Z', '0', '1', '2', '7', '9', ' ', ' ',
+    '\t', '\n', '\'', '\u{2019}', '.', ',', '-', '_', '/', '\\', '|', '(', ')', '[', ']', '{', '}',
+    '<', '>', '#', '@', '$', '%', '^', '&', '*', '+', '=', '~', '`', '"', ':', ';', '?', '!',
+    '\u{3b1}', '\u{3c9}', '\u{416}', '\u{44f}', '\u{663}', '\u{664}', '\u{4e00}', '\u{9f9f}',
+    '\u{3042}', '\u{d55c}', '\u{301}', '\u{5d0}',
+];
+
+/// SplitMix64 — a deterministic PRNG written out here so the corpus is
+/// reproducible from this file alone, with no dependency and no ambient RNG.
+fn next_u64(state: &mut u64) -> u64 {
+    *state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    let mut z = *state;
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+
+/// The randomised half of the corpus.
+///
+/// # ⚠️ THIS DOES NOT REPRODUCE THE HISTORICAL 100 CASES
+///
+/// Eight allowlist entries record "0 of 130". That 130 was the 30 below plus 100
+/// randomised strings from a verification run **whose generator was never
+/// committed** — only a seed and a prose description of its alphabet survived.
+/// This is a NEW generator. Its cases are not those cases, and no number it
+/// produces is comparable to a historical one.
+///
+/// Reconstructing the original from a seed and a description would have produced
+/// a number that LOOKED like the others and measured something else, which is
+/// the defect this file exists to prevent. So the historical entries keep their
+/// number with a note about when it was taken, and everything from here forward
+/// is reproducible by anyone holding this file.
+fn randomised_cases() -> Vec<String> {
+    let mut state = RANDOM_SEED;
+    (0..RANDOM_CASES)
+        .map(|_| {
+            // 1..=24 characters: long enough to contain several category
+            // transitions, short enough that a failure names a small string.
+            let len = 1 + (next_u64(&mut state) % 24) as usize;
+            (0..len)
+                .map(|_| ALPHABET[(next_u64(&mut state) % ALPHABET.len() as u64) as usize])
+                .collect()
+        })
+        .collect()
+}
+
+/// The randomised corpus must be able to DISCRIMINATE, or "0 disagreements" over
+/// it means nothing.
+///
+/// A generator emitting 100 empty strings, or 100 copies of one string, passes
+/// the fidelity gate exactly as a good one does. That is the shape this repo
+/// keeps meeting: a clean result from an instrument that could not have produced
+/// a dirty one. So the corpus's own adequacy is asserted rather than assumed.
+///
+/// Born-red verified: fixing the length to 1 collapses it to 50 distinct cases
+/// and this fails.
+#[test]
+fn the_randomised_corpus_can_discriminate() {
+    let cases = randomised_cases();
+    assert_eq!(cases.len(), RANDOM_CASES, "wrong number of cases");
+    assert!(
+        cases.iter().all(|c| !c.is_empty()),
+        "an empty case exercises nothing"
+    );
+
+    let distinct: std::collections::BTreeSet<&String> = cases.iter().collect();
+    assert!(
+        distinct.len() > RANDOM_CASES * 9 / 10,
+        "only {} of {} cases are distinct -- a corpus that repeats itself is smaller \
+         than it claims",
+        distinct.len(),
+        RANDOM_CASES
+    );
+
+    // Every category the candidate pre-tokenizers split on must actually occur,
+    // or the corpus is blind to exactly the distinctions it exists to test.
+    let all: String = cases.concat();
+    for (name, present) in [
+        ("ascii letter", all.chars().any(|c| c.is_ascii_alphabetic())),
+        ("digit", all.chars().any(|c| c.is_ascii_digit())),
+        ("whitespace", all.chars().any(char::is_whitespace)),
+        ("punctuation", all.chars().any(|c| c.is_ascii_punctuation())),
+        ("apostrophe", all.contains('\'') || all.contains('\u{2019}')),
+        ("non-latin", !all.is_ascii()),
+        ("combining mark", all.contains('\u{301}')),
+    ] {
+        assert!(present, "the randomised corpus contains no {name}");
+    }
+
+    // Deterministic across runs and machines: the whole point of committing it.
+    assert_eq!(
+        cases,
+        randomised_cases(),
+        "the generator is not deterministic, so no number taken over it is reproducible"
+    );
+}
 
 /// Deliberately hostile. Each group targets a place where the candidate
 /// pre-tokenizer regexes disagree; a corpus of ordinary prose does not
@@ -260,7 +391,16 @@ fn a_byte_level_ggufs_rebuilt_tokenizer_matches_the_checkpoints_own_ids() {
             .unwrap_or_else(|e| panic!("rebuilding the tokenizer for {gguf}: {e:#}"));
         let reference_tok =
             tokenizers::Tokenizer::from_file(reference).expect("reading the reference");
-        for case in CASES {
+        // The hand-written hostile cases plus the committed randomised ones. The
+        // size is asserted after the loop: a corpus that silently shrinks turns
+        // this gate green over less than it claims.
+        let random = randomised_cases();
+        let all: Vec<&str> = CASES
+            .iter()
+            .copied()
+            .chain(random.iter().map(String::as_str))
+            .collect();
+        for case in &all {
             let got = ours.encode(*case, false).expect("ours").get_ids().to_vec();
             let want = reference_tok
                 .encode(*case, false)
@@ -273,7 +413,19 @@ fn a_byte_level_ggufs_rebuilt_tokenizer_matches_the_checkpoints_own_ids() {
                 ));
             }
         }
-        eprintln!("  checked {} cases against {reference}", CASES.len());
+        assert_eq!(
+            all.len(),
+            CASES.len() + RANDOM_CASES,
+            "the corpus is not the size it claims, so a clean result would be over \
+             fewer cases than reported"
+        );
+        eprintln!(
+            "  checked {} cases ({} hand-written + {} randomised, seed {RANDOM_SEED}) \
+             against {reference}",
+            all.len(),
+            CASES.len(),
+            random.len()
+        );
     }
     assert!(
         diffs.is_empty(),
