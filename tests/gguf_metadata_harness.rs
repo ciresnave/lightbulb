@@ -44,13 +44,20 @@
 //! without fetching either body.
 //!
 //! ⚠️ **An unreadable file is recorded, not skipped.** This reader cannot open
-//! five files in the local corpus whose metadata another reader reads without
-//! difficulty, because `Content::read` parses tensor infos eagerly and dies on an
-//! unknown quantization dtype before reaching a KV block that sits ahead of any
-//! tensor. Dropping those rows would hide the single largest difference between
-//! the two implementations. `status: "unreadable"` with its reason is a claim
-//! about THIS reader, and the comparator treats a status difference as a
-//! first-class disagreement.
+//! **four** files in the local corpus — three because `Content::read` parses
+//! tensor infos eagerly and dies on an unknown quantization dtype before reaching
+//! a KV block that sits ahead of any tensor, and one because it is GGUF v1.
+//! (It was five until #51 accepted v2 and reached `ggml-vocab-aquila.gguf`.)
+//! Dropping those rows would hide the single largest difference between the two
+//! implementations. `status: "unreadable"` with its reason is a claim about THIS
+//! reader, and the comparator treats a status difference as a first-class
+//! disagreement.
+//!
+//! **That ruling was vindicated in the first cross-reader run.** MLMF compared
+//! 26 both-read rows across nine fields and found ZERO disagreements; the only
+//! `status` differences were the three SmolLM2 quantizations above — predicted in
+//! advance, and visible as a capability difference rather than as three missing
+//! rows.
 //!
 //! Run:
 //! ```text
@@ -96,13 +103,36 @@ fn corpus_files(root: &Path) -> Vec<PathBuf> {
     out
 }
 
+/// The `file` key: the path RELATIVE TO THE CORPUS ROOT, with `/` separators.
+///
+/// ⚠️ NOT the basename, which is what this emitted first and which cost a
+/// cross-reader run. MLMF emits relative paths; a naive join of the two dumps
+/// found **30 rows on each side and 0 in common** — populations that matched
+/// exactly and still had nothing to compare. Watching the scan ROOT is
+/// necessary and is not sufficient: the KEY FORMAT is a second, independent way
+/// to produce a diff that is true and meaningless.
+///
+/// Basenames happen to be unique in this corpus (0 collisions, checked on both
+/// sides), so a basename join works today. **That is a property of the corpus,
+/// not of the format** — two `model.gguf` files in different directories would
+/// collide silently, and the row that lost would simply vanish from the report.
+///
+/// ⚠️ SEPARATORS ARE NORMALISED TO `/` DELIBERATELY. Windows yields `\`, MLMF
+/// emits `/`, and without this every row would disagree on `file` — trading one
+/// class of false disagreement for another and looking like progress.
+fn relative_key(root: &Path, path: &Path) -> String {
+    path.strip_prefix(root)
+        .unwrap_or(path)
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
 /// One file's row, read through lightbulb's own public GGUF surface.
-fn row_for(path: &Path) -> J {
+fn row_for(root: &Path, path: &Path) -> J {
     use lightbulb::gguf::{Content, Value};
-    let name = path
-        .file_name()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_default();
+    let name = relative_key(root, path);
 
     let content = match Content::read(path) {
         Ok(c) => c,
@@ -170,7 +200,23 @@ fn row_for(path: &Path) -> J {
 }
 
 fn build_dump(root: &Path) -> J {
-    let files: Vec<J> = corpus_files(root).iter().map(|p| row_for(p)).collect();
+    let mut files: Vec<J> = corpus_files(root)
+        .iter()
+        .map(|p| row_for(root, p))
+        .collect();
+    // ⚠️ Sorted by the EMITTED key, not by the OS path they came from. Those are
+    // not the same order: `corpus_files` sorts `PathBuf`s, which on Windows
+    // contain `\` (0x5C), while the keys use `/` (0x2F) — so a directory name
+    // that is a prefix of a sibling file name orders differently in the two.
+    // `compare` joins by key rather than by position, so this cannot cause a
+    // wrong result; it keeps the artifact self-consistent, so a reader diffing
+    // two dumps by eye sees rows in the order the `file` field implies.
+    files.sort_by(|x, y| {
+        x["file"]
+            .as_str()
+            .unwrap_or_default()
+            .cmp(y["file"].as_str().unwrap_or_default())
+    });
     json!({ "schema": SCHEMA, "producer": "lightbulb", "files": files })
 }
 
@@ -388,5 +434,111 @@ fn compare_metadata_dumps() {
         diffs.len(),
         a["producer"],
         b["producer"]
+    );
+}
+
+/// The `file` key format, pinned because getting it wrong is invisible.
+///
+/// A basename join and a relative-path join both produce a plausible report.
+/// The first silently drops a row when two directories hold the same filename;
+/// the second does not. And a `\`-separated key disagrees with every row of a
+/// `/`-separated dump while both readers are working perfectly.
+#[test]
+fn the_file_key_is_root_relative_with_forward_slashes() {
+    let root = Path::new("C:/Models");
+    assert_eq!(
+        relative_key(
+            root,
+            Path::new("C:/Models/gguf-corpus/llamacpp-vocab/x.gguf")
+        ),
+        "gguf-corpus/llamacpp-vocab/x.gguf",
+        "the key must be relative to the corpus root, not a basename and not absolute"
+    );
+    assert_eq!(
+        relative_key(root, Path::new("C:/Models/x.gguf")),
+        "x.gguf",
+        "a file directly under the root has no directory part"
+    );
+
+    // ⚠️ THE CASE THAT MAKES TWO WORKING READERS DISAGREE ON EVERY ROW.
+    let native = Path::new("C:/Models").join("a").join("b").join("x.gguf");
+    let key = relative_key(root, &native);
+    assert_eq!(
+        key, "a/b/x.gguf",
+        "separators must be normalised to `/`. `Path::join` yields the PLATFORM \n         separator, so on Windows this key is built from backslashes; emitting it \n         unnormalised makes every row disagree with a `/`-separated dump for a \n         reason that is not a finding. Got: {key:?}"
+    );
+
+    // A path outside the root is passed through rather than silently emptied:
+    // an empty key would collide with every other empty key.
+    assert!(
+        !relative_key(root, Path::new("D:/elsewhere/y.gguf")).is_empty(),
+        "a path that is not under the root must not produce an empty key"
+    );
+}
+
+/// ⚠️ A JOIN IS A POPULATION FILTER, AND A PARTIAL ONE MUST NOT BE SILENT.
+///
+/// Raised by MLMF after the basename-vs-path mismatch produced a join of 0 rows:
+///
+/// ```text
+///  0 of 30 joined   LOUD -- obviously wrong, both of us saw it instantly
+/// 18 of 30 joined   the dangerous case: 18 agreements over an unremarked
+///                   subset, reported as a clean run
+/// ```
+///
+/// **The total failure was luck, not a property.** A partial key divergence —
+/// one directory renamed, one file moved, one normalisation difference on a
+/// subset — produces a comparison that is smaller and confident.
+///
+/// They asked whether this comparator asserts `joined == len(A) == len(B)`. It
+/// does not, and it does not need to: `compare` iterates the UNION of both key
+/// sets, so every unjoined row on either side becomes an explicit disagreement
+/// naming the file. A count assertion would say "12 rows did not join"; this
+/// says which twelve, on which side.
+///
+/// This test exists because "it probably does" is exactly how the schema
+/// difference nearly went unnoticed.
+#[test]
+fn a_partial_join_is_reported_row_by_row_not_silently_dropped() {
+    let row = |name: &str| {
+        json!({ "file": name, "status": "read", "architecture": "llama",
+                "tokenizer_model": "llama", "tokenizer_pre": J::Null,
+                "template_default": J::Null, "template_named": json!({}),
+                "template_names_declared": json!([]),
+                "bos": J::Null, "eos": J::Null,
+                "add_bos_declared": J::Null, "add_eos_declared": J::Null })
+    };
+    let dump = |names: &[&str]| {
+        json!({ "schema": SCHEMA, "producer": "t",
+                "files": names.iter().map(|n| row(n)).collect::<Vec<_>>() })
+    };
+
+    // Overlap on one row only; two rows are A-only and two are B-only.
+    let a = dump(&["shared.gguf", "a1.gguf", "a2.gguf"]);
+    let b = dump(&["shared.gguf", "b1.gguf", "b2.gguf"]);
+    let diffs = compare(&a, &b);
+
+    for (name, side) in [
+        ("a1.gguf", "present in A, absent from B"),
+        ("a2.gguf", "present in A, absent from B"),
+        ("b1.gguf", "absent from A, present in B"),
+        ("b2.gguf", "absent from A, present in B"),
+    ] {
+        assert!(
+            diffs.iter().any(|d| d.contains(name) && d.contains(side)),
+            "a row joining on only one side must be named, not dropped: {name}              ({side}) missing from {diffs:?}"
+        );
+    }
+    assert_eq!(
+        diffs.len(),
+        4,
+        "exactly the four unjoined rows should be reported; the shared row agrees          on every field: {diffs:?}"
+    );
+
+    // CONTROL: identical populations must report nothing, or the check above is
+    // satisfied by a comparator that complains about everything.
+    assert!(
+        compare(&a, &a).is_empty(),
+        "a dump compared against itself must produce no disagreements"
     );
 }
