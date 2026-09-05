@@ -270,6 +270,18 @@ impl ParallelModelManager {
             }
         };
 
+        // ⚠️ THIS IS THE LIVE GGUF PATH. Refuse on the DECLARED architecture
+        // rather than on a missing key: a qwen2 checkpoint declares
+        // `qwen2.embedding_length`, so it used to die with
+        // `Missing or invalid metadata key: llama.embedding_length`, which sends
+        // a reader hunting for a corrupt GGUF.
+        //
+        // `loaders::load_gguf_llama` reads GGUF config too and nothing calls it,
+        // so a check written only there would have passed its unit tests and
+        // changed nothing that runs. One helper, both callers. See
+        // `crate::gguf::require_llama_architecture`.
+        crate::gguf::require_llama_architecture(metadata)?;
+
         // Extract LLaMA config from GGUF metadata with intelligent fallbacks
 
         // Hidden size (required)
