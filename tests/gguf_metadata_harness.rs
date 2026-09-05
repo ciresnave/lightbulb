@@ -44,13 +44,20 @@
 //! without fetching either body.
 //!
 //! ⚠️ **An unreadable file is recorded, not skipped.** This reader cannot open
-//! five files in the local corpus whose metadata another reader reads without
-//! difficulty, because `Content::read` parses tensor infos eagerly and dies on an
-//! unknown quantization dtype before reaching a KV block that sits ahead of any
-//! tensor. Dropping those rows would hide the single largest difference between
-//! the two implementations. `status: "unreadable"` with its reason is a claim
-//! about THIS reader, and the comparator treats a status difference as a
-//! first-class disagreement.
+//! **four** files in the local corpus — three because `Content::read` parses
+//! tensor infos eagerly and dies on an unknown quantization dtype before reaching
+//! a KV block that sits ahead of any tensor, and one because it is GGUF v1.
+//! (It was five until #51 accepted v2 and reached `ggml-vocab-aquila.gguf`.)
+//! Dropping those rows would hide the single largest difference between the two
+//! implementations. `status: "unreadable"` with its reason is a claim about THIS
+//! reader, and the comparator treats a status difference as a first-class
+//! disagreement.
+//!
+//! **That ruling was vindicated in the first cross-reader run.** MLMF compared
+//! 26 both-read rows across nine fields and found ZERO disagreements; the only
+//! `status` differences were the three SmolLM2 quantizations above — predicted in
+//! advance, and visible as a capability difference rather than as three missing
+//! rows.
 //!
 //! Run:
 //! ```text
@@ -96,13 +103,36 @@ fn corpus_files(root: &Path) -> Vec<PathBuf> {
     out
 }
 
+/// The `file` key: the path RELATIVE TO THE CORPUS ROOT, with `/` separators.
+///
+/// ⚠️ NOT the basename, which is what this emitted first and which cost a
+/// cross-reader run. MLMF emits relative paths; a naive join of the two dumps
+/// found **30 rows on each side and 0 in common** — populations that matched
+/// exactly and still had nothing to compare. Watching the scan ROOT is
+/// necessary and is not sufficient: the KEY FORMAT is a second, independent way
+/// to produce a diff that is true and meaningless.
+///
+/// Basenames happen to be unique in this corpus (0 collisions, checked on both
+/// sides), so a basename join works today. **That is a property of the corpus,
+/// not of the format** — two `model.gguf` files in different directories would
+/// collide silently, and the row that lost would simply vanish from the report.
+///
+/// ⚠️ SEPARATORS ARE NORMALISED TO `/` DELIBERATELY. Windows yields `\`, MLMF
+/// emits `/`, and without this every row would disagree on `file` — trading one
+/// class of false disagreement for another and looking like progress.
+fn relative_key(root: &Path, path: &Path) -> String {
+    path.strip_prefix(root)
+        .unwrap_or(path)
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
 /// One file's row, read through lightbulb's own public GGUF surface.
-fn row_for(path: &Path) -> J {
+fn row_for(root: &Path, path: &Path) -> J {
     use lightbulb::gguf::{Content, Value};
-    let name = path
-        .file_name()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_default();
+    let name = relative_key(root, path);
 
     let content = match Content::read(path) {
         Ok(c) => c,
@@ -170,7 +200,23 @@ fn row_for(path: &Path) -> J {
 }
 
 fn build_dump(root: &Path) -> J {
-    let files: Vec<J> = corpus_files(root).iter().map(|p| row_for(p)).collect();
+    let mut files: Vec<J> = corpus_files(root)
+        .iter()
+        .map(|p| row_for(root, p))
+        .collect();
+    // ⚠️ Sorted by the EMITTED key, not by the OS path they came from. Those are
+    // not the same order: `corpus_files` sorts `PathBuf`s, which on Windows
+    // contain `\` (0x5C), while the keys use `/` (0x2F) — so a directory name
+    // that is a prefix of a sibling file name orders differently in the two.
+    // `compare` joins by key rather than by position, so this cannot cause a
+    // wrong result; it keeps the artifact self-consistent, so a reader diffing
+    // two dumps by eye sees rows in the order the `file` field implies.
+    files.sort_by(|x, y| {
+        x["file"]
+            .as_str()
+            .unwrap_or_default()
+            .cmp(y["file"].as_str().unwrap_or_default())
+    });
     json!({ "schema": SCHEMA, "producer": "lightbulb", "files": files })
 }
 
@@ -388,5 +434,44 @@ fn compare_metadata_dumps() {
         diffs.len(),
         a["producer"],
         b["producer"]
+    );
+}
+
+/// The `file` key format, pinned because getting it wrong is invisible.
+///
+/// A basename join and a relative-path join both produce a plausible report.
+/// The first silently drops a row when two directories hold the same filename;
+/// the second does not. And a `\`-separated key disagrees with every row of a
+/// `/`-separated dump while both readers are working perfectly.
+#[test]
+fn the_file_key_is_root_relative_with_forward_slashes() {
+    let root = Path::new("C:/Models");
+    assert_eq!(
+        relative_key(
+            root,
+            Path::new("C:/Models/gguf-corpus/llamacpp-vocab/x.gguf")
+        ),
+        "gguf-corpus/llamacpp-vocab/x.gguf",
+        "the key must be relative to the corpus root, not a basename and not absolute"
+    );
+    assert_eq!(
+        relative_key(root, Path::new("C:/Models/x.gguf")),
+        "x.gguf",
+        "a file directly under the root has no directory part"
+    );
+
+    // ⚠️ THE CASE THAT MAKES TWO WORKING READERS DISAGREE ON EVERY ROW.
+    let native = Path::new("C:/Models").join("a").join("b").join("x.gguf");
+    let key = relative_key(root, &native);
+    assert_eq!(
+        key, "a/b/x.gguf",
+        "separators must be normalised to `/`. `Path::join` yields the PLATFORM \n         separator, so on Windows this key is built from backslashes; emitting it \n         unnormalised makes every row disagree with a `/`-separated dump for a \n         reason that is not a finding. Got: {key:?}"
+    );
+
+    // A path outside the root is passed through rather than silently emptied:
+    // an empty key would collide with every other empty key.
+    assert!(
+        !relative_key(root, Path::new("D:/elsewhere/y.gguf")).is_empty(),
+        "a path that is not under the root must not produce an empty key"
     );
 }
