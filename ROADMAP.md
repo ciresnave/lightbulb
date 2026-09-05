@@ -602,6 +602,26 @@ comment referencing one of them).
   a ~2.2 GB checkpoint; there is no GPU runner **by decision (2026-08-27, cost)**.
   CI *compiles* them so they cannot rot, and `scripts/check.sh` prints them in a
   NOT RUN block on every run including successful ones.
+- **⚠️ NO DOCUMENTATION EXAMPLE IN THIS REPO IS EXECUTED.** Measured 2026-09-05:
+
+  ```text
+  80  doctests total
+   0  actually EXECUTED
+   3  compile-checked only (```no_run)
+  77  ```ignore -- not compiled, not run, not checked in any way
+  ```
+
+  `cargo test --doc` was **red on main** until this was measured — two examples
+  had stopped compiling (`PruningStats` fields renamed out from under
+  `pruning::gguf_application`, and `dequantize_tensor` gaining a third parameter
+  under `quantization`). Both are fixed, and `cargo test --doc` is green.
+
+  **A green `cargo test --doc` does not mean the examples are correct.** It means
+  three of eighty compile. The other 77 are in exactly the state the two broken
+  ones were in, and nothing would report it — the same shape as an assertion that
+  passes in both the defective and the correct state. Un-ignoring them is real
+  work (most need a GPU, a checkpoint, or a running server) and is not scheduled;
+  this entry exists so the green is not read as coverage.
 
 ## The real frontier
 
