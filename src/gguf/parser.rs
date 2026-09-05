@@ -147,7 +147,7 @@ pub fn parse_gguf(data: &[u8]) -> Result<GGUFHeader> {
     }
 
     let version = read_u32(data, &mut offset)?;
-    if version != GGUF_VERSION {
+    if !matches!(version, 2 | 3) {
         bail!(
             "Unsupported GGUF version: {} (expected {})",
             version,
