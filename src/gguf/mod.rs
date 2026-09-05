@@ -503,13 +503,13 @@ impl Content {
     fn bpe_refusal_reason(pre: &str) -> Option<&'static str> {
         match pre {
             "qwen35" => Some(
-                r#"No admissible reference exists for it. The obvious candidate, `Qwen/Qwen3-8B`, turns out to declare a pre-tokenizer and vocab BYTE-IDENTICAL to `Qwen/Qwen2-7B`, so it is a reference for `qwen2` and not for this name. llama.cpp does define a distinct QWEN35 rule, matching `[\p{L}\p{M}]+` where the qwen2 rule matches `\p{L}+` — and this build's 130-case corpus CANNOT TELL THE TWO APART: measured, they differ on 0 of 130, because the qwen2 normalizer is NFC and composes away the combining marks that are the only thing the difference turns on. A 0-of-130 result here carries no information about which rule is correct, so adding it would be an entry with vacuous evidence."#,
+                r#"No admissible reference exists for it, and NO CORPUS COULD DISCRIMINATE IT. `ggml-vocab-qwen2.gguf` and `ggml-vocab-qwen35.gguf` are 5928681 and 5928682 bytes, differ first at byte 539, and differ in size by exactly one — the length of "qwen35" over "qwen2". They are THE SAME FILE WITH A DIFFERENT LABEL: identical `general.architecture` (qwen2), identical `general.name`, identical token lists. So the string under test is the only difference between the two inputs, and a disagreement count between them is a logical necessity rather than a measurement. The obvious reference, `Qwen/Qwen3-8B`, declares a pre-tokenizer and vocab BYTE-IDENTICAL to `Qwen/Qwen2-7B`, so it is a reference for `qwen2` and not for this name. llama.cpp does define a distinct QWEN35 rule, matching `[\p{L}\p{M}]+` where the qwen2 rule matches `\p{L}+`. HISTORICAL, and kept because it is how this was first established: the 130-case corpus scored them 0 of 130 apart, because the qwen2 normalizer is NFC and composes away the combining marks the difference turns on. That was an empirical claim about one corpus; the byte-level fact above is structural and cannot rot."#,
             ),
-            "starcoder" | "mpt" => Some(
-                r#"Investigated and refused: no reference exists for THIS checkpoint. Both have a vocab that is byte-identical to another model's — `starcoder` to `bigcode/starcoder2-7b` (49152 tokens, 48872 merges, ZERO mismatches, not even tail extras) and `mpt` to this corpus's own gpt-neox vocab file (tokens and merges identical). Their own references are gated on HuggingFace (HTTP 401). Both score 0 of 130 against the stand-in, and that is NOT sufficient: vocab identity does not imply RULE identity. Measured on this very corpus, `Qwen/Qwen3-8B` has a vocab and pre-tokenizer byte-identical to `Qwen/Qwen2-7B` while llama.cpp assigns those two `pre` names DIFFERENT rules — so an identical vocab is consistent with a different splitting rule, and only the checkpoint's own `tokenizer.json` settles it. Supporting but insufficient: `bigcode/starcoder2-7b` declares the SAME rule as `smallcloudai/Refact-1_6B-fim`, which IS verified here against its own model, and llama.cpp groups starcoder with refact and mpt with gpt-2. Those remove a reason for doubt; they do not supply the reference."#,
+            "mpt" => Some(
+                r#"Investigated and refused: no reference exists for THIS checkpoint. Its vocab is byte-identical to this corpus's own gpt-neox vocab file (tokens and merges identical), and its own reference is gated on HuggingFace — `mosaicml/mpt-7b` returns HTTP 401. It EXISTS and is gated; an earlier note here said "not found", which was a connector rendering an authorization failure as absence. It scores 0 of 130 against the stand-in, and that is NOT sufficient: vocab identity does not imply RULE identity. Measured on this very corpus, `Qwen/Qwen3-8B` has a vocab and pre-tokenizer byte-identical to `Qwen/Qwen2-7B` while llama.cpp assigns those two `pre` names DIFFERENT rules — so an identical vocab is consistent with a different splitting rule, and only the checkpoint's own `tokenizer.json` settles it. RE-MEASURED 2026-09-03 and the premise HOLDS: `ggml-vocab-mpt.gguf` declares `general.architecture = mpt` and `general.name = mpt`, so it really is an MPT file and the gated repo really is the right one. A GGUF or GGML re-upload would not help — those carry the `pre` NAME, not the rule; only a `tokenizer.json` supplies the pre-tokenizer JSON, and no ungated re-upload carrying one has been found."#,
             ),
             "<absent>" => Some(
-                r#"An absent `tokenizer.ggml.pre` is not a name, it is the lack of one, and this table keys on names. The corpus file that omits it (gpt-neox) does verify 0 of 130 against `EleutherAI/gpt-neox-20b`, but keying on absence would apply that one checkpoint's rule to EVERY future GGUF that omits the field — which is precisely the one-rule-for-all-checkpoints failure this table exists to prevent. Re-export the checkpoint with `tokenizer.ggml.pre` set, or add its name here."#,
+                r#"An absent `tokenizer.ggml.pre` is not a name, it is the lack of one, and this table keys on names. The corpus file that omits it (gpt-neox) does verify 0 of 130 against `EleutherAI/gpt-neox-20b`, but keying on absence would apply that one checkpoint's rule to EVERY future GGUF that omits the field — which is precisely the one-rule-for-all-checkpoints failure this table exists to prevent. Re-export the checkpoint with `tokenizer.ggml.pre` set, or add its name here. RE-MEASURED 2026-09-03 and the premise HOLDS: `ggml-vocab-gpt-neox.gguf` declares `general.architecture = gptneox`, `general.name = gpt-neox-20b`, and no `tokenizer.ggml.pre` at all. Note absence is model-dependent — an absent `pre` on a `llama`-model GGUF rebuilds fine, because the SentencePiece path does not consult it; only the byte-level BPE path needs it."#,
             ),
             _ => None,
         }
@@ -538,6 +538,7 @@ impl Content {
         "deepseek-llm",
         "llama-bpe",
         "command-r",
+        "starcoder",
     ];
 
     /// The pre-tokenizer for a `tokenizer.ggml.pre` name, or `None` if this
@@ -668,6 +669,48 @@ impl Content {
             "command-r" => Some((
                 r##"{"type":"Sequence","pretokenizers":[{"type":"Digits","individual_digits":true},{"type":"ByteLevel","add_prefix_space":false,"trim_offsets":true,"use_regex":true}]}"##,
                 r##"{"type":"NFC"}"##,
+            )),
+            // bigcode/starcoder2-7b, ungated (HTTP 200), verified against that
+            // checkpoint's own `tokenizer.json`.
+            //
+            // ⚠️ THIS ENTRY EXISTS BECAUSE A REFUSAL'S PREMISE WAS WRONG, NOT
+            // BECAUSE A NEW REFERENCE APPEARED. `starcoder` was refused with the
+            // reasoning "no reference exists for THIS checkpoint; its vocab is
+            // byte-identical to ANOTHER MODEL'S, `bigcode/starcoder2-7b`, and
+            // vocab identity does not imply rule identity." Every inference in
+            // that was sound. The premise was not.
+            //
+            // `ggml-vocab-starcoder.gguf` declares `general.architecture =
+            // starcoder2`. IT IS A STARCODER2 FILE. So starcoder2-7b is not a
+            // coincidental twin standing in for an unreachable original -- it is
+            // the family the file was converted from, and the gated repo the
+            // refusal was waiting on (bigcode/starcoder, StarCoder-1) is the
+            // WRONG REPO.
+            //
+            // Measured, and the discriminator is the mismatched token NAMES
+            // rather than the count -- a bare "48697 mismatches" would have read
+            // as "wrong reference, refusal stands":
+            //
+            //   vs bigcode/starcoder2-7b   prefix identity over ALL 49152 ids,
+            //                              48872 merges identical, NO tail extras
+            //   vs StarCoder-1             48697 token / 47700 merge mismatches;
+            //     (TheBloke/starcoder-GPTQ, id 5 gguf `<repo_name>` (SC2) against
+            //      an ungated re-upload)   reference `<filename>` (SC1)
+            //
+            // RECORDED AS A PROPERTY, NOT AS A CHECKPOINT CLAIM: exact vocab and
+            // merge identity does not pin WHICH starcoder2 (3b/7b/15b share a
+            // tokenizer). What it establishes is that starcoder2-7b's
+            // `tokenizer.json` IS this GGUF's tokenizer byte for byte, which is
+            // what verifying a splitting rule needs.
+            //
+            // Its declared pre-tokenizer is byte-identical to `smollm`,
+            // `refact` and `command-r` above; the normalizer is null, as
+            // smollm's and refact's are, where command-r's is NFC. FOUR names,
+            // one splitting rule, two pipelines -- which is why the table keys
+            // on the name.
+            "starcoder" => Some((
+                r##"{"type":"Sequence","pretokenizers":[{"type":"Digits","individual_digits":true},{"type":"ByteLevel","add_prefix_space":false,"trim_offsets":true,"use_regex":true}]}"##,
+                r##"null"##,
             )),
             _ => None,
         }
@@ -852,20 +895,29 @@ mod bpe_spec_tests {
         // half noticed. `command-r` has now done the same, verified through the
         // ungated `mlx-community/c4ai-command-r-v01-4bit` re-upload.
         //
-        // THE SURVIVORS ARE CHOSEN, NOT LEFTOVERS. Every name below is refused
-        // FOR CAUSE rather than merely unexamined, so this pins the refusals
-        // instead of naming strings that happen to be absent:
+        // ⚠️ AND `starcoder` HAS NOW LEFT TOO, WHICH IS THE THIRD TIME AND THE
+        // ONLY ONE WHERE THE TEST WAS PINNING A REFUSAL THAT WAS WRONG. Its
+        // reasoning was sound and its PREMISE was false: the GGUF declares
+        // `general.architecture = starcoder2`, so the gated repo the refusal
+        // waited on was the wrong repo. A pinned refusal is only as good as the
+        // fact it rests on, and this test cannot check that fact -- it checks
+        // that the table says no, not that saying no is right.
         //
-        //   starcoder  no reference for ITS OWN checkpoint (gated); its vocab is
-        //              byte-identical to another model's, and vocab identity does
-        //              not imply rule identity
-        //   mpt        same shape, against this corpus's own gpt-neox vocab
-        //   qwen35     scores 0 of 130 and is refused anyway: the corpus cannot
-        //              discriminate it from `qwen2`, so the score carries no
-        //              information about which rule is correct
-        //   <absent>   keying the table on ABSENCE would apply one checkpoint's
-        //              rule to every future GGUF that omits the field
-        assert!(Content::bpe_pre_tokenizer("starcoder").is_none());
+        // THE SURVIVORS ARE CHOSEN, NOT LEFTOVERS. Every name below is refused
+        // FOR CAUSE rather than merely unexamined, and all three premises were
+        // RE-MEASURED on 2026-09-03 rather than carried forward:
+        //
+        //   mpt        `general.architecture = mpt`, so it really is an MPT file
+        //              and `mosaicml/mpt-7b` really is the right reference. It
+        //              returns 401 -- gated, not absent. HOLDS.
+        //   qwen35     `ggml-vocab-qwen2.gguf` and `ggml-vocab-qwen35.gguf` differ
+        //              by ONE BYTE, at the offset where `pre` is stored. The
+        //              string under test is the only difference between the two
+        //              inputs, so no corpus can discriminate them. HOLDS, and is
+        //              now structural rather than empirical.
+        //   <absent>   `general.name = gpt-neox-20b`, no `pre` key at all; keying
+        //              on ABSENCE would apply one checkpoint's rule to every
+        //              future GGUF that omits the field. HOLDS.
         assert!(Content::bpe_pre_tokenizer("mpt").is_none());
         assert!(Content::bpe_pre_tokenizer("qwen35").is_none());
         assert!(Content::bpe_pre_tokenizer("<absent>").is_none());

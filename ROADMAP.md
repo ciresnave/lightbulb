@@ -172,16 +172,16 @@ struct's public fields make constructible. Both are errors now.
 Measured by `tests/gguf_corpus_sweep.rs` over every local GGUF:
 
 ```
-30 files total = 15 REBUILT + 15 that do not load    (was 1 + 29; re-measured 2026-09-03)
+30 files total = 16 REBUILT + 14 that do not load    (was 1 + 29; re-measured 2026-09-05)
 
- 15  rebuilt
+ 16  rebuilt
         1  SentencePiece   TinyLlama-1.1B-Chat-v1.0 Q4_0
-       14  byte-level BPE  SmolLM2-135M-Instruct x6, plus the gpt-2, falcon,
+       15  byte-level BPE  SmolLM2-135M-Instruct x6, plus the gpt-2, falcon,
                            qwen2, deepseek-coder, refact, deepseek-llm,
-                           llama-bpe and command-r vocab files
- 10  refused by the tokenizer
-        4  tokenizer.ggml.model = "gpt2", `pre` NOT VERIFIED
-              starcoder, mpt, qwen35, gpt-neox(absent)  (refused for cause, below)
+                           llama-bpe, command-r and starcoder vocab files
+  9  refused by the tokenizer
+        3  tokenizer.ggml.model = "gpt2", `pre` NOT VERIFIED
+              mpt, qwen35, gpt-neox(absent)  (refused for cause, below)
         3  model = "llama" but NO merges   (llama-spm, phi-3, baichuan)
         1  bert     1  t5     1  gemma4
   5  OUR READER cannot open  -- a fact about us, not about the files
@@ -230,7 +230,7 @@ measurement was real and ranged over the wrong thing.)*
 ```
 30 files  /  17 vocabularies REACHABLE THROUGH Content::read
                                   (8 files duplicate a vocabulary already present)
-15 of 30 files rebuild  ->  but only 10 of 17 VOCABULARIES
+16 of 30 files rebuild  ->  but only 11 of 17 VOCABULARIES
 
 NOT A CORPUS CENSUS.  19 vocabularies are PRESENT and EVERY file has one;
 5 carry a vocabulary this reader cannot open, 1 of them needing v1 field widths.
@@ -283,9 +283,9 @@ identity — but its premise is now measured rather than assumed.
 **Byte-level BPE (`gpt2`) is now supported, but only for `tokenizer.ggml.pre`
 values verified id-for-id against that checkpoint's OWN `tokenizer.json`.** `pre`
 names a splitting rule and llama.cpp keeps a different regex per name; the 18
-`gpt2` files carry 13 distinct values. **Nine are verified:** `smollm`, `gpt-2`,
+`gpt2` files carry 13 distinct values. **Ten are verified:** `smollm`, `gpt-2`,
 `falcon`, `qwen2`, `deepseek-coder`, `refact`, `deepseek-llm`, `llama-bpe`,
-`command-r`.
+`command-r`, `starcoder`.
 
 The first seven and `llama-bpe` were each verified 0 of 130 cases against their
 reference. **`command-r` was verified 0 of 30** — the in-repo gate, every case it
@@ -322,22 +322,39 @@ work already done and found negative is not silently repeated.
 the **NousResearch mirror of the same checkpoint** — a mirror is the same model,
 which is what makes it admissible where a similar model is not.
 
-⚠️ **`starcoder` and `mpt` score 0 of 130 and are REFUSED**, for the same reason
-as `qwen35`. Their own references are gated, but each has a vocab
-**byte-identical to another model's** — `starcoder` to `bigcode/starcoder2-7b`
-(49152 tokens, 48872 merges, zero mismatches, not even tail extras) and `mpt` to
-this corpus's own gpt-neox vocab file (tokens and merges identical). Scoring
-against the stand-in gives 0 of 130, and **that is not sufficient: vocab
-identity does not imply rule identity.** Measured on this very corpus,
-`Qwen/Qwen3-8B` has a vocab AND pre-tokenizer byte-identical to `Qwen/Qwen2-7B`
-while llama.cpp assigns those two `pre` names different rules — so an identical
-vocab is consistent with a different splitting rule.
+⚠️ **`starcoder` WAS refused on that reasoning and the reasoning's PREMISE WAS
+FALSE.** The refusal read: *no reference exists for THIS checkpoint; its vocab is
+byte-identical to ANOTHER MODEL'S, `bigcode/starcoder2-7b`, and vocab identity
+does not imply rule identity.* Every inference in that is sound.
 
-Supporting but insufficient, and recorded so it is not re-derived:
-`bigcode/starcoder2-7b` declares the SAME rule as `smallcloudai/Refact-1_6B-fim`,
-which IS verified here against its own model, and llama.cpp groups starcoder with
-refact and mpt with gpt-2. Those remove a reason for doubt; they do not supply
-the reference.
+But `ggml-vocab-starcoder.gguf` declares **`general.architecture = starcoder2`**.
+**It IS a StarCoder2 file.** So `starcoder2-7b` was never a coincidental twin
+standing in for an unreachable original — it is the family the file was converted
+from, and the gated repo the refusal waited on (`bigcode/starcoder`, StarCoder-**1**)
+is *the wrong repo*.
+
+Measured, and the discriminator is the mismatched token **names**, not the count:
+
+```
+vs bigcode/starcoder2-7b  prefix identity over ALL 49152 ids, 48872 merges
+   (ungated, HTTP 200)    identical, no tail extras
+vs StarCoder-1            48697 token / 47700 merge mismatches
+   (TheBloke/starcoder-    id 5:  gguf "<repo_name>" (SC2)
+    GPTQ, ungated)                reference "<filename>" (SC1)
+```
+
+A bare *"48697 mismatches"* would have read as *wrong reference, refusal stands*.
+
+**`mpt` is unaffected and still refused for cause** — `general.architecture = mpt`,
+so it really is an MPT file, `mosaicml/mpt-7b` really is the right reference, and
+it returns **401: gated, not absent**. A GGUF or GGML re-upload cannot help, since
+those carry the `pre` *name* and not the rule; only a `tokenizer.json` supplies the
+pre-tokenizer JSON, and no ungated one has been found.
+
+⚠️ **The transferable part is why this survived:** the refusal's reasoning was
+checked repeatedly and its **identification** never was. A statement of *what a
+file is* does not read as a claim — and `general.architecture` sat in that file's
+first kilobyte the whole time, four `head -c 1400` invocations away.
 
 `command-r` was the last blocked purely by the gate, and is now verified through
 an **ungated third-party re-upload** — `mlx-community/c4ai-command-r-v01-4bit`,
@@ -354,9 +371,10 @@ corroboration against the original** — `ggml-vocab-command-r.gguf` was convert
 from the original checkpoint by llama.cpp, independently of this mirror, and a
 different tokenizer could not agree with it on 255000 ids and 253333 merges.
 
-So the remaining four are refused for cause, not for access: `starcoder` and
-`mpt` still have no reference for their own checkpoint, `qwen35` has no corpus
-that can discriminate it, and `gpt-neox` omits the field entirely.
+So the remaining three are refused for cause, not for access: `mpt` still has no
+reference for its own checkpoint, `qwen35` cannot be discriminated by ANY corpus
+(the two vocab files differ by one byte, at the offset where `pre` is stored),
+and `gpt-neox` omits the field entirely.
 
 The table stores each checkpoint's declared pre-tokenizer and normalizer as its
 own JSON, copied verbatim, so provenance is auditable by diffing against the

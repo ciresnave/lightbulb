@@ -306,8 +306,32 @@ fn an_unverified_pre_tokenizer_is_refused_by_name() {
         msg.contains("tokenizer.ggml.pre"),
         "the refusal must name the field that caused it: {msg}"
     );
+    // ⚠️ THIS USED TO READ `msg.contains("verified") || msg.contains("Refusing")`
+    // AND PASSED BY ACCIDENT. There are two refusal messages: one for a `pre`
+    // with a recorded reason ("which this build refuses ... Verified values:")
+    // and one for a merely-unknown `pre` ("has not verified ... Refusing to
+    // substitute"). The second satisfies both old substrings; the FIRST
+    // satisfies neither, and matched only because one entry's explanatory prose
+    // happened to contain the phrase "which IS verified here".
+    //
+    // Measured: `qwen35` and `<absent>` have ZERO occurrences of a lowercase
+    // "verified" in their reasons, so pointing this test at either of them
+    // would have failed — and splitting `starcoder` out of the combined
+    // starcoder|mpt reason removed the accidental word and broke it.
+    //
+    // Asserting on what BOTH templates guarantee instead: they say they are
+    // refusing, and they name the set they would have accepted.
+    let says_refusing = msg.to_lowercase().contains("refus");
+    let names_the_allowlist = lightbulb::gguf::Content::verified_pre_values()
+        .iter()
+        .any(|v| msg.contains(v));
     assert!(
-        msg.contains("verified") || msg.contains("Refusing"),
-        "the refusal must say it is declining to approximate: {msg}"
+        says_refusing,
+        "the refusal must say it is declining rather than approximating: {msg}"
+    );
+    assert!(
+        names_the_allowlist,
+        "the refusal must name what it WOULD have accepted, so the reader can see \
+         the gap rather than only the rejection: {msg}"
     );
 }
