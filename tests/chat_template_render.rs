@@ -3201,3 +3201,84 @@ fn a_directory_checkpoint_is_not_run_through_the_gguf_reader() {
          now warn about tensor quantizations for a path that is not a file: {logs}"
     );
 }
+
+/// A GGUF may declare SEVERAL chat templates, and this reader takes one.
+///
+/// ⚠️ Taking the unnamed default is the right choice — serving a `rag` template
+/// to an ordinary chat request would be wrong. **The defect was the silence.**
+/// The reader returned one of three and reported no loss, so an operator whose
+/// checkpoint carries a tool-use template had no way to learn it was never
+/// considered.
+///
+/// Measured on `ggml-vocab-command-r.gguf`, the one file in the local 30-file
+/// corpus that does this:
+///
+/// ```text
+///   tokenizer.chat_template            1204 bytes   the default, UNNAMED
+///   tokenizer.chat_template.rag        3695 bytes
+///   tokenizer.chat_template.tool_use   3911 bytes
+///   tokenizer.chat_templates           ["tool_use", "rag"]   NAMES, not bodies
+/// ```
+///
+/// The fixture below reproduces that shape and adds a third disagreement the
+/// corpus does not contain: a name in the array with no corresponding key.
+/// **Enumerating from either side alone is lossy in a different direction** —
+/// the names array omits the default, and the key set omits nothing but says
+/// nothing about what was promised. So both are read and the disagreement is
+/// reported rather than reconciled.
+#[test]
+fn a_gguf_with_named_chat_templates_says_which_it_discarded() {
+    let p = gguf_fixture_with_tensor(
+        "gguf-named-templates",
+        &[
+            (
+                "tokenizer.chat_template",
+                Kv::Str("DEFAULT {{ eos_token }}"),
+            ),
+            (
+                "tokenizer.chat_template.rag",
+                Kv::Str("RAG {{ eos_token }}"),
+            ),
+            (
+                "tokenizer.chat_template.tool_use",
+                Kv::Str("TOOLS {{ eos_token }}"),
+            ),
+            // The array does NOT name the default, and DOES name one that has no
+            // key — both directions of disagreement in a single fixture.
+            (
+                "tokenizer.chat_templates",
+                Kv::StrArray(vec!["tool_use", "rag", "promised_but_absent"]),
+            ),
+        ],
+        ("blk.0.attn_q.weight", 0u32),
+    );
+
+    let logs = capture_logs(|| {
+        let t = lightbulb::api::chat_template::resolve(&p);
+        assert!(
+            t.source.starts_with("DEFAULT"),
+            "the UNNAMED default must be the one served; a named variant reaching an \
+             ordinary chat request is a worse defect than the silence this test is \
+             about. got: {:?}",
+            t.source
+        );
+    });
+
+    assert!(
+        logs.contains("NAMED chat template"),
+        "the reader discarded two templates and said nothing. An operator whose \
+         checkpoint carries a tool-use template must be able to learn it was never \
+         considered: {logs}"
+    );
+    assert!(
+        logs.contains("rag") && logs.contains("tool_use"),
+        "the warning must NAME the discarded templates, not merely count them -- a \
+         count tells an operator something was lost and not what: {logs}"
+    );
+    assert!(
+        logs.contains("promised_but_absent"),
+        "a name in `tokenizer.chat_templates` with no corresponding key is a \
+         malformed declaration and must be reported; reading only the key set is \
+         blind to it: {logs}"
+    );
+}
