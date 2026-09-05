@@ -32,9 +32,13 @@
 //! When the named variable is set to an ON value — `1`, `true`, `yes` or `on`,
 //! trimmed and case-insensitive — the precondition was supposed to be there, so
 //! its absence is a failure rather than a skip. `0`, `false`, `no`, `off`, empty
-//! and unset are OFF; anything else panics rather than guessing. See
-//! [`armed_by`] for why the OFF list is explicit and why silence in either
-//! direction is the failure.
+//! and unset are OFF, and **anything else panics rather than guessing**.
+//!
+//! The OFF list is enumerated rather than being "anything not on the ON list",
+//! because that last arm is the point: a catch-all OFF arm swallows every typo
+//! silently. `FOO=ture` would leave a gate somebody believes they armed quietly
+//! disarmed, turning every skip back into a pass — which is the exact failure
+//! this module exists to remove. Silence in EITHER direction is the defect.
 //!
 //! # Arming is keyed on PROVISIONING, not on a list of suites
 //!
