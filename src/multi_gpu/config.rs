@@ -277,9 +277,33 @@ mod tests {
             .validate()
             .expect_err("a 4-way config on a 2-device topology must not validate");
         let msg = format!("{err:#}");
+
+        // ⚠️ THIS USED TO BE `msg.contains('4') && msg.contains('2')`, WHICH
+        // COULD NOT CATCH THE MOST LIKELY DEFECT IN THE LINE IT GUARDS.
+        //
+        // The message is built as "requires {} GPUs but only {} available" from
+        // two same-typed arguments. SWAPPING THEM is the obvious mistake, and it
+        // produces "requires 2 GPUs but only 4 available" -- backwards, and
+        // containing both characters, so the old assertion PASSED. Measured, by
+        // swapping them.
+        //
+        // Single-character `contains` is barely an assertion at all: "device 42",
+        // a version, an address or an unrelated count all satisfy it. The subject
+        // was the message CONTRACT and the evidence was two digits appearing
+        // somewhere in one fixture's text.
+        //
+        // Order is what carries the meaning here, so order is what is asserted.
+        let needed_at = msg
+            .find('4')
+            .unwrap_or_else(|| panic!("the error must state how many GPUs were needed: {msg}"));
+        let available_at = msg
+            .find('2')
+            .unwrap_or_else(|| panic!("the error must state how many GPUs exist: {msg}"));
         assert!(
-            msg.contains('4') && msg.contains('2'),
-            "the error should say what was needed and what exists: {msg}"
+            needed_at < available_at,
+            "the error states the counts in the wrong order -- a swapped format argument reads \
+             'requires 2 ... but only 4 available', which is false and which a presence-only \
+             check cannot see: {msg}"
         );
     }
 
