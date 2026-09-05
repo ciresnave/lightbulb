@@ -390,3 +390,56 @@ fn compare_metadata_dumps() {
         b["producer"]
     );
 }
+
+/// ⚠️ A COMPARATOR IS WORTHLESS IF EITHER SIDE IS NONDETERMINISTIC, and
+/// "the two dumps looked the same" is not that check.
+///
+/// `build_dump` iterates `Content::metadata()`, which is a `HashMap` — an
+/// unspecified and deliberately randomised iteration order. Nothing in the
+/// dump's shape guarantees that order cannot reach the output; the named
+/// templates land in a `serde_json::Map` (a `BTreeMap` without
+/// `preserve_order`, so sorted) and the declared names are sorted explicitly.
+/// Both of those are inferences from types. This measures it instead.
+///
+/// Raised by MLMF, who proved the same property on their side before diffing
+/// against ours. A disagreement between two readers is only evidence about the
+/// READERS if each is stable against itself first.
+#[test]
+#[ignore = "needs a local GGUF corpus; set LIGHTBULB_GGUF_CORPUS"]
+fn two_runs_over_one_corpus_are_byte_identical() {
+    let root = std::env::var("LIGHTBULB_GGUF_CORPUS")
+        .expect("set LIGHTBULB_GGUF_CORPUS to the corpus directory");
+    let root = Path::new(&root);
+
+    let a = serde_json::to_string(&build_dump(root)).expect("serialising run A");
+    let b = serde_json::to_string(&build_dump(root)).expect("serialising run B");
+
+    let rows = build_dump(root)["files"]
+        .as_array()
+        .map(Vec::len)
+        .unwrap_or(0);
+    assert!(
+        rows > 0,
+        "no .gguf files under {root:?}. Two empty dumps are byte-identical, which          would pass this test while measuring nothing."
+    );
+
+    assert_eq!(
+        a, b,
+        "two runs over the same corpus produced different bytes, so any diff against          another reader is uninterpretable: a disagreement could be ours alone."
+    );
+
+    // POSITIVE CONTROL: the comparison must be able to see a difference. Without
+    // this, `assert_eq!` on two identical constants would pass just as happily.
+    let mut perturbed: J = serde_json::from_str(&b).expect("reparsing run B");
+    perturbed["producer"] = json!("not-lightbulb");
+    assert_ne!(
+        a,
+        serde_json::to_string(&perturbed).expect("serialising the perturbed dump"),
+        "the byte comparison did not notice a changed field, so its agreement above          carries no information"
+    );
+
+    eprintln!(
+        "  {rows} rows, two runs, byte-identical ({} bytes)",
+        a.len()
+    );
+}
