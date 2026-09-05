@@ -57,7 +57,7 @@
 //! re-measured there 2026-09-05 (30 files, 30 opened, 0 unreadable):
 //!
 //! ```text
-//! reachable through Content::read   17 vocabularies    <- what this test asserts
+//! reachable through Content::read   18 vocabularies    <- REPORTED, not asserted
 //! present in the corpus             19 vocabularies    <- KV headers read directly
 //! without a vocabulary              0 files            <- every file has one
 //! ```
@@ -326,10 +326,11 @@ fn report(files: usize, c: &Census) {
     if !c.reader_failed.is_empty() {
         println!(
             "\n  Content::read could not open these (A FACT ABOUT US). Their KV headers\n  \
-             were read directly on 2026-09-03 and they DO carry vocabularies -- the three\n  \
-             SmolLM2 quantizations share the other six's digest exactly, and aquila has a\n  \
-             distinct 100008-token one. They are excluded from the count above because\n  \
-             this test gates what the LIBRARY can reach, not what the corpus holds:"
+             were read directly and they DO carry vocabularies -- the three SmolLM2\n  \
+             quantizations share the other six's digest exactly, and tinyllamas carries\n  \
+             a 512-token one reachable only with GGUF v1 field widths. They are excluded\n  \
+             from the count above because this test gates what the LIBRARY can reach,\n  \
+             not what the corpus holds:"
         );
         for (n, why) in &c.reader_failed {
             println!("    {n:<44} {why}");
