@@ -85,13 +85,31 @@ fn the_live_loader_refuses_a_qwen2_checkpoint_by_name() {
         err.contains("qwen2"),
         "the refusal must NAME the declared architecture, not a key: {err}"
     );
-    assert!(
-        !err.contains("Missing or invalid metadata key: llama."),
-        "⚠️ the loader is still reporting a missing llama.* key. The key is not \
-         missing -- it is under the qwen2. prefix -- and that message sends a reader \
-         hunting for a corrupt GGUF. This is the exact defect the check exists to \
-         remove: {err}"
-    );
+    // ⚠️ BOTH pre-fix message shapes, because the two config readers phrase the
+    // same defect differently and I got this wrong on the first pass.
+    //
+    // The DEAD path (`loaders::load_gguf_llama`) says
+    //   "Missing or invalid metadata key: llama.embedding_length"
+    // The LIVE path says
+    //   "Could not determine hidden_size (tried: llama.embedding_length, llama.n_embd)"
+    //
+    // My first version asserted only the dead path's wording, which is VACUOUS
+    // here — this test drives the live loader, so that string could never have
+    // appeared whether the fix was present or not. Removing the check and
+    // reading the failure MESSAGE is what surfaced it; the exit code alone would
+    // have shown a healthy born-red and hidden a guard that guards nothing.
+    for stale in [
+        "Missing or invalid metadata key: llama.",
+        "Could not determine hidden_size",
+    ] {
+        assert!(
+            !err.contains(stale),
+            "⚠️ the loader is still reporting a llama.* key problem ({stale:?}). The key \
+             is not missing -- it is under the qwen2. prefix -- and that message sends a \
+             reader hunting for a corrupt GGUF. This is the exact defect the check exists \
+             to remove: {err}"
+        );
+    }
 }
 
 /// The control, and it is not optional: without it the assertion above is
