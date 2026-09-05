@@ -475,3 +475,70 @@ fn the_file_key_is_root_relative_with_forward_slashes() {
         "a path that is not under the root must not produce an empty key"
     );
 }
+
+/// ⚠️ A JOIN IS A POPULATION FILTER, AND A PARTIAL ONE MUST NOT BE SILENT.
+///
+/// Raised by MLMF after the basename-vs-path mismatch produced a join of 0 rows:
+///
+/// ```text
+///  0 of 30 joined   LOUD -- obviously wrong, both of us saw it instantly
+/// 18 of 30 joined   the dangerous case: 18 agreements over an unremarked
+///                   subset, reported as a clean run
+/// ```
+///
+/// **The total failure was luck, not a property.** A partial key divergence —
+/// one directory renamed, one file moved, one normalisation difference on a
+/// subset — produces a comparison that is smaller and confident.
+///
+/// They asked whether this comparator asserts `joined == len(A) == len(B)`. It
+/// does not, and it does not need to: `compare` iterates the UNION of both key
+/// sets, so every unjoined row on either side becomes an explicit disagreement
+/// naming the file. A count assertion would say "12 rows did not join"; this
+/// says which twelve, on which side.
+///
+/// This test exists because "it probably does" is exactly how the schema
+/// difference nearly went unnoticed.
+#[test]
+fn a_partial_join_is_reported_row_by_row_not_silently_dropped() {
+    let row = |name: &str| {
+        json!({ "file": name, "status": "read", "architecture": "llama",
+                "tokenizer_model": "llama", "tokenizer_pre": J::Null,
+                "template_default": J::Null, "template_named": json!({}),
+                "template_names_declared": json!([]),
+                "bos": J::Null, "eos": J::Null,
+                "add_bos_declared": J::Null, "add_eos_declared": J::Null })
+    };
+    let dump = |names: &[&str]| {
+        json!({ "schema": SCHEMA, "producer": "t",
+                "files": names.iter().map(|n| row(n)).collect::<Vec<_>>() })
+    };
+
+    // Overlap on one row only; two rows are A-only and two are B-only.
+    let a = dump(&["shared.gguf", "a1.gguf", "a2.gguf"]);
+    let b = dump(&["shared.gguf", "b1.gguf", "b2.gguf"]);
+    let diffs = compare(&a, &b);
+
+    for (name, side) in [
+        ("a1.gguf", "present in A, absent from B"),
+        ("a2.gguf", "present in A, absent from B"),
+        ("b1.gguf", "absent from A, present in B"),
+        ("b2.gguf", "absent from A, present in B"),
+    ] {
+        assert!(
+            diffs.iter().any(|d| d.contains(name) && d.contains(side)),
+            "a row joining on only one side must be named, not dropped: {name}              ({side}) missing from {diffs:?}"
+        );
+    }
+    assert_eq!(
+        diffs.len(),
+        4,
+        "exactly the four unjoined rows should be reported; the shared row agrees          on every field: {diffs:?}"
+    );
+
+    // CONTROL: identical populations must report nothing, or the check above is
+    // satisfied by a comparator that complains about everything.
+    assert!(
+        compare(&a, &a).is_empty(),
+        "a dump compared against itself must produce no disagreements"
+    );
+}
