@@ -25,11 +25,12 @@
 //! `"<|user|>\nName the capital of France.</s>\n<|assistant|>\n"`, carrying
 //! the end-of-turn marker the pre-fix prompt lacked.
 //!
-//! Despite that, the served completion is STILL garbage of the same shape as
-//! the pre-fix baseline above. See
-//! [`a_gguf_is_served_a_coherent_answer`] for the
-//! measured text, its reproducibility, and why that is a separate, already-
-//! recorded defect rather than something this epic failed to fix.
+//! At that date the served completion was STILL garbage of the same shape as
+//! the pre-fix baseline above. **That is no longer true**, and this paragraph
+//! asserted it for ten days after it stopped being true — see
+//! [`a_gguf_is_served_a_coherent_answer`], which now measures
+//! `"The capital of France is Paris.</s>"` and explains why nothing in this
+//! file was able to notice either the defect or its disappearance.
 //!
 //! **This falsified the spec's root-cause claim, not its observation.**
 //! Spec §1 attributed the garbage output to the rendered prompt carrying no
@@ -282,11 +283,38 @@ async fn a_gguf_is_served_with_its_own_template() {
 /// The rendered prompt had been correct for a week; the ids built from it were
 /// not, and every earlier gate asserted on the string.
 ///
-/// The completion is coherent and terminates on EOS, but it is not pristine:
-/// the leading `"France|"` is an artifact worth a look. It is recorded here
-/// rather than asserted against, because the assertion this test owns is that
-/// the model ANSWERS, and inventing a stricter one to match today's exact bytes
-/// would make an unrelated sampling change look like a regression.
+/// # ⚠️ THAT ARTIFACT IS GONE, AND NOTHING HERE COULD SAY SO
+///
+/// Re-measured 2026-09-05 on the same checkpoint and the same fixed prompt,
+/// byte-identical across two runs:
+///
+/// ```text
+/// completion: "The capital of France is Paris.</s>"
+/// ```
+///
+/// No `"France|"`. The leading artifact stopped reproducing sometime between
+/// 2026-08-26 and now — most plausibly at #25, which fixed special-token
+/// registration, since the `|` that leaked belongs to this template's
+/// `<|user|>` / `<|assistant|>` markers and to nothing else in the prompt.
+/// **That attribution is a hypothesis; it has not been bisected. What is
+/// measured is that the artifact is absent.**
+///
+/// **The defect worth keeping is that this test went on passing through both
+/// states and reported neither.** Its only assertion was `contains("Paris")`,
+/// which is satisfied by `"France| Paris, France</s>"` exactly as well as by
+/// the clean answer above — a check whose success output is indistinguishable
+/// from its failure-to-check output. The artifact was recorded in prose, so
+/// the only thing that could ever notice it was a human re-reading the prose.
+///
+/// The original reason for not asserting was sound and is preserved: pinning
+/// today's exact bytes would make an unrelated sampling change look like a
+/// regression. But the artifact's SIGNATURE is not its bytes. `|` occurs in
+/// this checkpoint's template markers and in nothing a natural answer to this
+/// prompt contains, so a `|` in the completion means prompt structure leaked
+/// into the output — true regardless of what the model samples.
+/// [`leaked_template_marker`] asserts that, and
+/// [`the_marker_check_catches_the_recorded_artifact`] holds it born-red
+/// against the exact string recorded on 2026-08-26.
 #[tokio::test]
 #[ignore = "needs the GGUF checkpoint (637 MB); set LIGHTBULB_GGUF"]
 async fn a_gguf_is_served_a_coherent_answer() {
@@ -303,5 +331,42 @@ async fn a_gguf_is_served_a_coherent_answer() {
         content.contains("Paris"),
         "recorded defect, downstream of chat-template resolution (see this \
          test's doc comment): the model did not answer the question: {content:?}"
+    );
+    assert!(
+        leaked_template_marker(content).is_none(),
+        "a chat-template marker leaked into the completion. `|` belongs to this \
+         checkpoint's <|user|>/<|assistant|> markers and to nothing in a natural \
+         answer, so prompt structure reached the output. This is the 2026-08-26 \
+         \"France|\" artifact, or something shaped like it: {content:?}"
+    );
+}
+
+/// The artifact's signature, separated from the serving test so it can be
+/// checked without a 637 MB checkpoint or a GPU.
+///
+/// Deliberately looks for `|` rather than for the literal `"France|"`: the
+/// defect was prompt structure reaching the completion, and the token that
+/// carries that structure is the marker character, not the word that happened
+/// to precede it in one recorded run.
+fn leaked_template_marker(completion: &str) -> Option<char> {
+    completion.chars().find(|c| *c == '|')
+}
+
+/// Born-red against the REAL recorded string, not against a string invented to
+/// fail. If this check had existed on 2026-08-26 it would have reddened then,
+/// and the artifact would not have needed a human re-reading a doc comment to
+/// be noticed.
+#[test]
+fn the_marker_check_catches_the_recorded_artifact() {
+    assert_eq!(
+        leaked_template_marker("France| Paris, France</s>"),
+        Some('|'),
+        "the check must fire on the completion measured 2026-08-26"
+    );
+    assert_eq!(
+        leaked_template_marker("The capital of France is Paris.</s>"),
+        None,
+        "and must NOT fire on the completion measured 2026-09-05, or it is not \
+         a detector, it is a permanent refusal"
     );
 }
