@@ -26,6 +26,16 @@ J="-j 4"
 echo "── cargo fmt --all --check"
 cargo fmt --all --check >/dev/null 2>&1 || { echo "   FAIL: formatting differs"; fail=1; }
 
+# ⚠️ A manifest/lock mismatch is invisible without `--locked` and does NOT break
+# the build: cargo silently re-resolves and rewrites the lock. The cost lands on
+# a fresh checkout, where the first build leaves Cargo.lock dirty and a dirty
+# Cargo.lock makes `git pull` REFUSE. Mirrored from the CI gate of the same name
+# so a local run and CI cannot diverge on it — a gate that exists in only one of
+# the two is a gate somebody will be surprised by.
+echo "── cargo metadata --locked (Cargo.lock matches the manifests)"
+cargo metadata --locked --format-version 1 >/dev/null 2>&1 \
+  || { echo "   FAIL: Cargo.lock does not match the manifests — run 'cargo metadata' and commit the lock"; fail=1; }
+
 echo "── cargo doc (rustdoc lints only — see note)"
 # The deny lives in src/lib.rs as a CRATE-LEVEL ATTRIBUTE, not here.
 #
