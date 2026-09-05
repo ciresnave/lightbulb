@@ -44,7 +44,14 @@ use std::path::Path;
 ///     &manifest,
 ///     Path::new("model_pruned_f32.gguf"),  // Note: F32 format (larger)
 /// )?;
-/// println!("Pruned {} weights ({:.1}% sparsity)", stats.weights_pruned, stats.sparsity_percent);
+/// // `achieved_sparsity` is a RATIO in 0.0..=1.0, so scale it for the `%`.
+/// println!(
+///     "Pruned {} of {} weights ({:.1}% sparsity) across {} tensors",
+///     stats.pruned_params,
+///     stats.total_params,
+///     stats.achieved_sparsity * 100.0,
+///     stats.tensors_modified,
+/// );
 /// # Ok::<(), anyhow::Error>(())
 /// ```
 pub fn apply_manifest_to_gguf(
