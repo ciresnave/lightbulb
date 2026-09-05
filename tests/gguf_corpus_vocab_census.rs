@@ -53,12 +53,13 @@
 //! this file previously claimed — **it understated it**, by attributing the
 //! reader's limitation to the GGUF.
 //!
-//! The corrected figures, measured 2026-09-03 at `C:\Models`:
+//! The corrected figures, measured 2026-09-03 at the corpus root and
+//! re-measured there 2026-09-05 (30 files, 30 opened, 0 unreadable):
 //!
 //! ```text
 //! reachable through Content::read   17 vocabularies    <- what this test asserts
-//! present in the corpus             18 vocabularies    <- KV headers read directly
-//! genuinely without a vocabulary    1 file             <- tinyllamas-stories-260k
+//! present in the corpus             19 vocabularies    <- KV headers read directly
+//! without a vocabulary              0 files            <- every file has one
 //! ```
 //!
 //! Both are honest answers to different questions. This test asks the first,
