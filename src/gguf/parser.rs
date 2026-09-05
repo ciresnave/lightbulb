@@ -14,8 +14,42 @@ use std::collections::HashMap;
 /// GGUF magic number: "GGUF" at byte level (0x47 0x47 0x55 0x46)
 const GGUF_MAGIC: u32 = 0x46554747;
 
-/// GGUF version 3 (current stable version with big-endian support)
-const GGUF_VERSION: u32 = 3;
+/// The GGUF container versions this parser reads. A SET, not an equality.
+///
+/// # Why v2 is in and v1 is out — they are refused for different reasons
+///
+/// **v2 and v3 share the field widths this parser already implements**: counts
+/// and string lengths are `u64` in both. v3 adds big-endian support and changes
+/// nothing this code reads. So v2 needed no new parsing at all — it was excluded
+/// only because the check was written `version != 3`, an equality where a set
+/// was meant, and a loud specific refusal reads as a considered scope decision.
+///
+/// **v1 is genuinely different**: its counts and string lengths are `u32`.
+/// Measured 2026-09-05 by re-reading the local v1 file with `u64` widths — the
+/// KV count comes out as `7308890738324930580`, and a v3-assuming parser dies
+/// allocating against it.
+///
+/// # ⚠️ Refusing v1 is NOT a claim that the file is bad
+///
+/// `tinyllamas-stories-260k-f32.gguf` is a perfectly good GGUF: 48 tensors, 18
+/// KV pairs, a 512-token vocabulary, `bos_token_id=1`, `eos_token_id=2`. It was
+/// called "unreadable" by three separate lanes in one exchange, and it is only
+/// unreadable *by builds that assume u64*. The distinction matters because
+/// "1 file has no vocabulary" made the corpus census read 18 when it is 19.
+///
+/// # What supporting v1 would actually cost, and who asked
+///
+/// **Not a change to this constant.** Every count and every string length would
+/// need width-switching at each read site, so the parser gains a second parse
+/// path rather than one more accepted value. **Nobody has asked** — the only v1
+/// file in the local corpus is a 260k-parameter toy, and mlmf refuses v1
+/// deliberately for the same reason, so widening here would make two independent
+/// readers agree by moving one of them rather than by finding anything.
+///
+/// Recorded because a bare constant cannot carry any of this, and a correct
+/// constant with no reasoning beside it is indistinguishable from an
+/// unconsidered one — which is precisely how `version != 3` survived.
+const SUPPORTED_VERSIONS: &[u32] = &[2, 3];
 
 /// Default alignment (used if general.alignment not specified)
 const DEFAULT_ALIGNMENT: u64 = 32;
@@ -147,11 +181,16 @@ pub fn parse_gguf(data: &[u8]) -> Result<GGUFHeader> {
     }
 
     let version = read_u32(data, &mut offset)?;
-    if !matches!(version, 2 | 3) {
+    if !SUPPORTED_VERSIONS.contains(&version) {
+        // ⚠️ The message names what is ACCEPTED, derived from the constant. The
+        // previous version read "(expected 3)" while the check accepted 2 or 3 —
+        // stale from the moment v2 was added, and an error that misreports the
+        // accepted set sends a reader to the wrong question.
         bail!(
-            "Unsupported GGUF version: {} (expected {})",
-            version,
-            GGUF_VERSION
+            "Unsupported GGUF version: {version} (this parser reads {SUPPORTED_VERSIONS:?}). \
+             v1 uses u32 counts and string lengths where v2/v3 use u64, so it needs a second \
+             parse path rather than one more accepted value; see SUPPORTED_VERSIONS. This is \
+             a limit of this reader, not a statement that the file is malformed."
         );
     }
 
@@ -383,5 +422,66 @@ mod tests {
         let mut offset = 0;
         assert_eq!(read_string(&data, &mut offset).unwrap(), "hello");
         assert_eq!(offset, 8 + 5);
+    }
+}
+
+#[cfg(test)]
+mod version_gate_tests {
+    use super::{SUPPORTED_VERSIONS, parse_gguf};
+
+    fn header_declaring(version: u32) -> Vec<u8> {
+        let mut b = Vec::new();
+        b.extend_from_slice(b"GGUF");
+        b.extend_from_slice(&version.to_le_bytes());
+        // Zero tensors and zero KV pairs: enough for an ACCEPTED version to get
+        // past the gate, so the test discriminates the gate from a parse failure.
+        b.extend_from_slice(&0u64.to_le_bytes());
+        b.extend_from_slice(&0u64.to_le_bytes());
+        b
+    }
+
+    /// ⚠️ THE MESSAGE MUST NAME THE ACCEPTED SET, AND MUST DERIVE IT.
+    ///
+    /// It previously read "(expected 3)" while the check accepted 2 or 3 — stale
+    /// from the moment v2 was added, because the message named a constant that
+    /// was no longer the rule. An error that misreports the accepted set sends a
+    /// reader to the wrong question: they go looking for a corrupt file.
+    #[test]
+    fn a_refused_version_is_told_what_is_accepted() {
+        let err = parse_gguf(&header_declaring(1))
+            .expect_err("v1 must be refused")
+            .to_string();
+        assert!(
+            err.contains('1'),
+            "the error must name the version it saw: {err}"
+        );
+        for v in SUPPORTED_VERSIONS {
+            assert!(
+                err.contains(&v.to_string()),
+                "the error must name every accepted version, so it cannot go stale                  against the constant: {v} missing from {err}"
+            );
+        }
+        // Asserted POSITIVELY. The first version of this was
+        // `!err.contains("malformed")`, which FAILS on a message that uses the
+        // word in a negation: the assertion's FORM did not match its intent, and
+        // a substring check cannot see a "not".
+        assert!(
+            err.contains("limit of this reader"),
+            "refusing a version is a limit of THIS READER, and the message must say \n             so -- three lanes called this same file 'unreadable' in one exchange, \n             which is how a 512-token vocabulary went uncounted: {err}"
+        );
+    }
+
+    /// The control. Without it the assertion above is satisfied by a parser that
+    /// refuses everything, and "v1 is refused" would carry no information.
+    #[test]
+    fn every_supported_version_gets_past_the_gate() {
+        for v in SUPPORTED_VERSIONS {
+            let parsed = parse_gguf(&header_declaring(*v));
+            assert!(
+                parsed.is_ok(),
+                "version {v} is in SUPPORTED_VERSIONS and must not be refused: {:?}",
+                parsed.err()
+            );
+        }
     }
 }
