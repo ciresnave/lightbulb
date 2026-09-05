@@ -121,21 +121,42 @@ impl Content {
         &self.candle_content.tensor_infos
     }
 
-    /// Extract tokenizer from GGUF metadata
-    ///
-    /// This method extracts tokenizer data from GGUF metadata fields and builds
-    /// a tokenizers::Tokenizer compatible with the HuggingFace tokenizers library.
-    ///
-    /// Expected metadata fields:
-    /// - tokenizer.ggml.tokens: Array of token strings
-    /// - tokenizer.ggml.scores: Array of token scores (optional)
-    /// - tokenizer.ggml.token_type: Array of token types (optional)
-    /// - tokenizer.ggml.bos_token_id: Beginning-of-sequence token ID (optional)
-    /// - tokenizer.ggml.eos_token_id: End-of-sequence token ID (optional)
-    ///
-    /// # Returns
-    /// A tokenizers::Tokenizer instance ready for encoding/decoding
     /// Rebuild the checkpoint's own tokenizer from GGUF metadata.
+    ///
+    /// # Which `tokenizer.ggml.*` keys this reads, and which it deliberately does not
+    ///
+    /// ```text
+    /// tokens             READ      the vocabulary
+    /// merges             READ      REQUIRED -- see below; absence is a refusal
+    /// model, pre         READ      select and gate the rebuild path
+    /// token_type         READ      special-token registration
+    /// bos/eos_token_id   READ      post-processor + special tokens
+    /// add_bos_token      READ      whether to prepend BOS
+    /// add_eos_token      READ      whether to append EOS
+    ///
+    /// scores             NOT READ  deliberately -- see "merges is required" below
+    /// add_space_prefix   NOT READ  deliberately -- see below
+    /// ```
+    ///
+    /// ⚠️ **A superseded doc block used to sit above this one listing `scores` as
+    /// an "expected metadata field".** It was left behind when this function was
+    /// rewritten, so the first thing a reader saw claimed a key was read that is
+    /// deliberately refused — the correct account was thirty lines further down
+    /// and lost to whichever came first.
+    ///
+    /// ## `add_space_prefix` is not read, and a fix could not be verified here
+    ///
+    /// Measured 2026-09-05 across the local corpus: 11 files declare it, and it
+    /// **varies** (10 `false`, 1 `true`). That variation is not usable evidence.
+    /// Every file where it could matter is either `gpt2` — byte-level BPE, where
+    /// a SentencePiece space prefix is not a concept — or an architecture no
+    /// rebuild path accepts (`gemma4`, `t5`). **The 5 `llama`-model files, the
+    /// only ones where it would apply, do not declare it at all.**
+    ///
+    /// So implementing it would be a change no fixture in this corpus can
+    /// distinguish from doing nothing. **Declined for that reason, recorded here
+    /// rather than in a planning document, because a decline in a roadmap is
+    /// invisible to the next person reading this code and wondering.**
     ///
     /// **A GGUF carries everything needed to reconstruct the reference
     /// tokenizer exactly, and an earlier version of this function threw all of
