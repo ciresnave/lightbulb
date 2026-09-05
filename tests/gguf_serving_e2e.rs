@@ -25,11 +25,12 @@
 //! `"<|user|>\nName the capital of France.</s>\n<|assistant|>\n"`, carrying
 //! the end-of-turn marker the pre-fix prompt lacked.
 //!
-//! Despite that, the served completion is STILL garbage of the same shape as
-//! the pre-fix baseline above. See
-//! [`a_gguf_is_served_a_coherent_answer`] for the
-//! measured text, its reproducibility, and why that is a separate, already-
-//! recorded defect rather than something this epic failed to fix.
+//! At that date the served completion was STILL garbage of the same shape as
+//! the pre-fix baseline above. **That is no longer true**, and this paragraph
+//! asserted it for ten days after it stopped being true — see
+//! [`a_gguf_is_served_a_coherent_answer`], which now measures
+//! `"The capital of France is Paris.</s>"` and explains why nothing in this
+//! file was able to notice either the defect or its disappearance.
 //!
 //! **This falsified the spec's root-cause claim, not its observation.**
 //! Spec §1 attributed the garbage output to the rendered prompt carrying no
