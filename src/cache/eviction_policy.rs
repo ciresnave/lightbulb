@@ -131,11 +131,30 @@ impl VotingAggregator {
 
             for &(slot, score) in scores {
                 if !score.is_finite() {
-                    // Handle special cases: NEG_INFINITY means "never evict"
+                    // NEG_INFINITY means "never evict" and is accumulated.
                     if score.is_infinite() && score.is_sign_negative() {
                         *aggregated.entry(slot).or_insert(0.0) += f32::NEG_INFINITY;
                     }
-                    // POS_INFINITY is handled normally (high eviction priority)
+                    // ⚠️ EVERY OTHER NON-FINITE SCORE — INCLUDING `+INFINITY` —
+                    // GETS NO ENTRY IN `aggregated` AT ALL. The `continue` below
+                    // skips the insert, so the slot drops out of the ranking
+                    // entirely rather than sorting first.
+                    //
+                    // That matters because `+INFINITY` is precisely the
+                    // "never attended / not in any span — evict me first" signal
+                    // that `H2OPolicy` and `SegmentedEvictionPolicy` emit, so the
+                    // aggregator silently discards the best eviction candidates.
+                    // `model_fuel::policies` documents this as the reason it calls
+                    // the policies directly and does its own aggregation.
+                    //
+                    // ⚠️ THIS COMMENT READ "POS_INFINITY is handled normally
+                    // (high eviction priority)" until 2026-09-06. It described
+                    // the opposite of the line beneath it, and it is why the
+                    // behaviour survived: a reader at this site saw the case
+                    // declared handled. The true account lived in
+                    // `model_fuel/policies.rs` — a module they had no reason to
+                    // open. Behaviour deliberately unchanged here; only the claim
+                    // is corrected.
                     continue;
                 }
 
