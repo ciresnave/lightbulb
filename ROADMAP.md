@@ -617,11 +617,45 @@ comment referencing one of them).
   under `quantization`). Both are fixed, and `cargo test --doc` is green.
 
   **A green `cargo test --doc` does not mean the examples are correct.** It means
-  three of eighty compile. The other 77 are in exactly the state the two broken
-  ones were in, and nothing would report it — the same shape as an assertion that
-  passes in both the defective and the correct state. Un-ignoring them is real
-  work (most need a GPU, a checkpoint, or a running server) and is not scheduled;
-  this entry exists so the green is not read as coverage.
+  three of eighty compile.
+
+  ### ⚠️ The 77 are not stale — they are not claims. Measured 2026-09-05.
+
+  An earlier version of this entry said the 77 were "in exactly the state the two
+  broken ones were in". **That was wrong, and measuring it is what showed so.**
+  All 77 `ignore` fences were flipped to `no_run` and compiled:
+
+  ```text
+  E0425  195   cannot find value in this scope     <- undeclared local bindings
+  E0433   88   unresolved module / unlinked crate  <- missing `use`
+  E0277   18   trait bound not satisfied
+  E0599    3   no method found
+  ```
+
+  **Zero are stale API usage.** They are illustrative snippets that reference
+  variables never declared and omit their imports. The three `E0599`s — the
+  clearest drift signal available — all dissolved on inspection: two call a
+  method on an un-unwrapped `Option`/`Result`, and `WandaScorer::score_and_prune`
+  *exists*, as a `PruningScorer` trait method the example does not import.
+  Positive control for that null: the same compile run **did** surface the real
+  drift in the two `no_run` examples, so the instrument detects what is being
+  reported absent.
+
+  **`ignore` on a prose snippet is the honest fence for what it is.** Those blocks
+  never asserted they compile, so there is nothing for them to have drifted from.
+  The population that makes a claim is the three `no_run` blocks:
+
+  ```text
+  claims compilable    3   of which broken   2      <- 67%
+  makes no claim      77   of which stale    0
+  ```
+
+  **So the risk was never that 77 examples went unchecked. It is that almost
+  nothing here claims to compile, leaving the surface where drift is detectable
+  three examples wide.** Converting the 77 is not a fix — it is authoring 77 new
+  compilable examples, each needing hidden setup and imports. Not scheduled, and
+  if it is ever done it should be deliberate, for the APIs people actually call,
+  rather than manufactured by flipping fences on prose.
 
 ## The real frontier
 
