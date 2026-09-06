@@ -227,18 +227,41 @@ the correction below. The first version of this sentence said "nine" from the
 filenames, was corrected to "six" by measurement, and is now "nine" again — the
 measurement was real and ranged over the wrong thing.)*
 
+**Measured 2026-09-06 at `main` `3a7c4bf`**, and re-derived on every run of
+`tests/gguf_corpus_vocab_census.rs` — so these are a record of a run, not a
+standing claim, and the test is what to believe if they disagree.
+
 ```
-30 files  /  17 vocabularies REACHABLE THROUGH Content::read
+30 files  /  18 vocabularies REACHABLE THROUGH Content::read
                                   (8 files duplicate a vocabulary already present)
-16 of 30 files rebuild  ->  but only 11 of 17 VOCABULARIES
+16 of 30 files rebuild  ->  but only 11 of 18 VOCABULARIES
 
 NOT A CORPUS CENSUS.  19 vocabularies are PRESENT and EVERY file has one;
-5 carry a vocabulary this reader cannot open, 1 of them needing v1 field widths.
+4 carry a vocabulary this reader cannot open, 1 of them needing v1 field widths.
 ```
+
+⚠️ **These read `17`, `11 of 17` and `5` until 2026-09-06, and they were correct
+when written.** #51 taught `parse_gguf` to accept GGUF **v2**, which reached
+`ggml-vocab-aquila.gguf` — so reachable vocabularies went 17 → 18 and the
+unopenable count 5 → 4. **My own change invalidated my own documentation, and
+nothing marked the transition**: the figures carried no ref, so they read as
+current for as long as they were wrong. That is the whole argument for stamping
+them, and #50 had already corrected two *different* stale numbers in this same
+block without touching these, because these were still true that morning.
+
+The four this reader still cannot open are `tinyllamas-stories-260k-f32.gguf`
+(GGUF v1 — u32 counts and string lengths, a second parse path rather than one
+more accepted version) and three SmolLM2 quantizations (`IQ3_XS`, `IQ4_XS`,
+`Q2_K` — unknown dtype).
 
 ⚠️ **The scope in that first line is a correction, not decoration.** This block
 first read "30 files / 17 vocabularies" with five files excluded as having "no
-readable vocabulary" — and four of those five have perfectly good vocabularies.
+readable vocabulary" — and **all five** have perfectly good vocabularies. (This
+sentence said "four of those five" until 2026-09-06, holding out the GGUF v1 file
+as genuinely vocabulary-less. It is not: read with u32 field widths it carries a
+512-token vocabulary, which is why the corpus is 19 and not 18. #50 corrected the
+figures in the block above and left this sentence, so the retracted belief
+survived one paragraph away from its own correction.)
 `Content::read` parses tensor infos eagerly and dies on an unknown quantization
 dtype, while `tokenizer.ggml.tokens` sits in the KV header **ahead of any
 tensor**. Read directly: the three SmolLM2 quantizations carry the same
