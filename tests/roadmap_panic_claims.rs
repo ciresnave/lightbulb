@@ -311,6 +311,40 @@ fn resolve(root: &Path, index: &HashMap<String, PathBuf>, cited: &str) -> Option
     index.get(cited).cloned()
 }
 
+/// Verify ONE claim against the file it names. `None` when the claim is true.
+///
+/// Split out of the test body after Codacy flagged it at 53 lines against a 50
+/// limit. Enumerating what the body did showed a real second job living inside
+/// the first — *walk the corpus* and *adjudicate one claim* — so this is a split
+/// rather than an appeasement of a number.
+fn violation_for(
+    root: &Path,
+    index: &HashMap<String, PathBuf>,
+    at: &str,
+    claim: &(usize, String, String),
+) -> Option<String> {
+    let (line_no, cited, mac) = claim;
+    let Some(target) = resolve(root, index, cited) else {
+        return Some(format!(
+            "{at}:{line_no} claims a live `{mac}!()` in `{cited}`, which does not \
+             resolve to a file in this repo"
+        ));
+    };
+    let src = std::fs::read_to_string(&target)
+        .unwrap_or_else(|e| panic!("cannot read {} — {e}", target.display()));
+    if !live_macro_lines(&src, mac).is_empty() {
+        return None;
+    }
+    let textual = src
+        .lines()
+        .filter(|l| l.contains(&format!("{mac}!(")))
+        .count();
+    Some(format!(
+        "{at}:{line_no} says `{cited}` has a live `{mac}!()`, but it has none \
+         ({textual} textual occurrence(s), all in comments)"
+    ))
+}
+
 #[test]
 fn no_document_claims_a_panic_that_is_not_live() {
     let root = repo_root();
@@ -332,28 +366,10 @@ fn no_document_claims_a_panic_that_is_not_live() {
         let Ok(body) = std::fs::read_to_string(doc) else {
             continue; // non-UTF-8 is not a document
         };
-        for (line_no, cited, mac) in liveness_claims(doc, &body) {
+        let at = doc.strip_prefix(&root).unwrap_or(doc).display().to_string();
+        for claim in liveness_claims(doc, &body) {
             examined += 1;
-            let rel = doc.strip_prefix(&root).unwrap_or(doc).display();
-            let Some(target) = resolve(&root, &index, &cited) else {
-                violations.push(format!(
-                    "{rel}:{line_no} claims a live `{mac}!()` in `{cited}`, which does not \
-                     resolve to a file in this repo"
-                ));
-                continue;
-            };
-            let src = std::fs::read_to_string(&target)
-                .unwrap_or_else(|e| panic!("cannot read {} — {e}", target.display()));
-            if live_macro_lines(&src, &mac).is_empty() {
-                let textual = src
-                    .lines()
-                    .filter(|l| l.contains(&format!("{mac}!(")))
-                    .count();
-                violations.push(format!(
-                    "{rel}:{line_no} says `{cited}` has a live `{mac}!()`, but it has none \
-                     ({textual} textual occurrence(s), all in comments)"
-                ));
-            }
+            violations.extend(violation_for(&root, &index, &at, &claim));
         }
     }
 
