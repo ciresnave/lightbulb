@@ -121,21 +121,42 @@ impl Content {
         &self.candle_content.tensor_infos
     }
 
-    /// Extract tokenizer from GGUF metadata
-    ///
-    /// This method extracts tokenizer data from GGUF metadata fields and builds
-    /// a tokenizers::Tokenizer compatible with the HuggingFace tokenizers library.
-    ///
-    /// Expected metadata fields:
-    /// - tokenizer.ggml.tokens: Array of token strings
-    /// - tokenizer.ggml.scores: Array of token scores (optional)
-    /// - tokenizer.ggml.token_type: Array of token types (optional)
-    /// - tokenizer.ggml.bos_token_id: Beginning-of-sequence token ID (optional)
-    /// - tokenizer.ggml.eos_token_id: End-of-sequence token ID (optional)
-    ///
-    /// # Returns
-    /// A tokenizers::Tokenizer instance ready for encoding/decoding
     /// Rebuild the checkpoint's own tokenizer from GGUF metadata.
+    ///
+    /// # Which `tokenizer.ggml.*` keys this reads, and which it deliberately does not
+    ///
+    /// ```text
+    /// tokens             READ      the vocabulary
+    /// merges             READ      REQUIRED -- see below; absence is a refusal
+    /// model, pre         READ      select and gate the rebuild path
+    /// token_type         READ      special-token registration
+    /// bos/eos_token_id   READ      post-processor + special tokens
+    /// add_bos_token      READ      whether to prepend BOS
+    /// add_eos_token      READ      whether to append EOS
+    ///
+    /// scores             NOT READ  deliberately -- see "merges is required" below
+    /// add_space_prefix   NOT READ  deliberately -- see below
+    /// ```
+    ///
+    /// ⚠️ **A superseded doc block used to sit above this one listing `scores` as
+    /// an "expected metadata field".** It was left behind when this function was
+    /// rewritten, so the first thing a reader saw claimed a key was read that is
+    /// deliberately refused — the correct account was thirty lines further down
+    /// and lost to whichever came first.
+    ///
+    /// ## `add_space_prefix` is not read, and a fix could not be verified here
+    ///
+    /// Measured 2026-09-05 across the local corpus: 11 files declare it, and it
+    /// **varies** (10 `false`, 1 `true`). That variation is not usable evidence.
+    /// Every file where it could matter is either `gpt2` — byte-level BPE, where
+    /// a SentencePiece space prefix is not a concept — or an architecture no
+    /// rebuild path accepts (`gemma4`, `t5`). **The 5 `llama`-model files, the
+    /// only ones where it would apply, do not declare it at all.**
+    ///
+    /// So implementing it would be a change no fixture in this corpus can
+    /// distinguish from doing nothing. **Declined for that reason, recorded here
+    /// rather than in a planning document, because a decline in a roadmap is
+    /// invisible to the next person reading this code and wondering.**
     ///
     /// **A GGUF carries everything needed to reconstruct the reference
     /// tokenizer exactly, and an earlier version of this function threw all of
@@ -967,6 +988,129 @@ mod post_processor_spec_tests {
             s,
             vec![("<|endoftext|>".to_string(), 0)],
             "the same id must appear once in the special-token list"
+        );
+    }
+}
+
+/// Refuse a GGUF whose declared architecture this project's loaders cannot read.
+///
+/// ⚠️ REFUSE ON THE DECLARATION, NOT ON A MISSING KEY. Every GGUF declares
+/// `general.architecture` — 30 of 30 in the local corpus — and both GGUF config
+/// readers ignored it, hardcoding the `llama.` prefix at seventeen literals with
+/// no fallback. A qwen2 checkpoint declares `qwen2.embedding_length`, so it died
+/// with:
+///
+/// ```text
+/// Missing or invalid metadata key: llama.embedding_length
+/// ```
+///
+/// which sends a reader hunting for a corrupt GGUF. **The refusal was loud and
+/// specific, which is exactly what made it read as a considered decision rather
+/// than an oversight** — the same shape as `if version != GGUF_VERSION`.
+///
+/// # Why this does not substitute the prefix
+///
+/// The `llama::Config` and the tensor mapping built downstream are llama-shaped.
+/// Reading `qwen2.*` into them would trade a misleading error for a silently
+/// wrong model, which is worse. Widening support needs a loadable non-llama
+/// checkpoint, and the corpus does not have one — every file it holds with
+/// tensors declares `llama`.
+///
+/// # One implementation because there are two callers
+///
+/// `loaders::load_gguf_llama` and
+/// `model::parallel_model_manager::ParallelModelManager::load_gguf` both read
+/// GGUF config, and only the second is reachable — `load_gguf_llama`'s own doc
+/// comment says so. A check written into the first alone would pass its tests
+/// and change nothing that runs, which is the failure that function's doc
+/// comment warns about in as many words: *a correct fix applied to the wrong
+/// caller is indistinguishable from a wrong fix.*
+pub(crate) fn require_llama_architecture(metadata: &HashMap<String, Value>) -> Result<()> {
+    let architecture = match metadata.get("general.architecture") {
+        Some(Value::String(s)) => s.clone(),
+        _ => bail!(
+            "this GGUF declares no `general.architecture`, so the architecture cannot be \
+             checked before reading llama-specific keys. Every GGUF in the reference corpus \
+             declares it; a file without it is malformed or truncated."
+        ),
+    };
+    if architecture != "llama" {
+        bail!(
+            "this GGUF declares `general.architecture = {architecture:?}`; this loader reads \
+             `llama` only. Its hyperparameters are under the `{architecture}.` prefix, not \
+             `llama.`, and the config and tensor mapping built here are llama-shaped, so \
+             reading them would produce a wrong model rather than a missing key."
+        );
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod architecture_gate_tests {
+    use super::{Value, require_llama_architecture};
+    use std::collections::HashMap;
+
+    fn declaring(arch: &str) -> HashMap<String, Value> {
+        let mut m = HashMap::new();
+        m.insert(
+            "general.architecture".to_string(),
+            Value::String(arch.to_string()),
+        );
+        m
+    }
+
+    /// The control: llama must pass, or this is a permanent refusal rather than
+    /// a gate.
+    #[test]
+    fn llama_is_accepted() {
+        assert!(require_llama_architecture(&declaring("llama")).is_ok());
+    }
+
+    /// ⚠️ The thirteen architectures the LOCAL corpus actually declares, so a
+    /// spec rename makes this stale visibly rather than leaving it passing
+    /// against invented names.
+    #[test]
+    fn every_non_llama_architecture_is_refused_by_name() {
+        for arch in [
+            "qwen2",
+            "phi3",
+            "falcon",
+            "command-r",
+            "starcoder2",
+            "gemma4",
+            "baichuan",
+            "refact",
+            "mpt",
+            "gptneox",
+            "gpt2",
+            "bert",
+            "nomic-bert-moe",
+        ] {
+            let err = require_llama_architecture(&declaring(arch))
+                .expect_err("a non-llama architecture must be refused")
+                .to_string();
+            assert!(
+                err.contains(arch),
+                "the refusal must NAME the declared architecture: {err}"
+            );
+            assert!(
+                !err.contains("Missing or invalid metadata key"),
+                "the refusal must not report a missing key -- the key is not missing, it is \
+                 under the {arch}. prefix, and the key-shaped message IS the defect: {err}"
+            );
+        }
+    }
+
+    /// An absent declaration is a fact about the FILE, and is reported as one
+    /// rather than as a missing hyperparameter.
+    #[test]
+    fn an_absent_declaration_says_so() {
+        let err = require_llama_architecture(&HashMap::new())
+            .expect_err("no architecture must be refused")
+            .to_string();
+        assert!(
+            err.contains("general.architecture"),
+            "the error must name the key that is genuinely absent: {err}"
         );
     }
 }
