@@ -1213,18 +1213,18 @@ mod architecture_gate_tests {
     /// **To remove this test:** read the geometry keys (at all nine
     /// `hidden_size / num_heads` sites, and note gemma4 needs more than one
     /// head_dim), then delete it. It has no other purpose.
-    #[test]
-    fn the_head_dim_assumption_is_still_guarded_by_the_refusal() {
-        let refuses_non_llama = require_llama_architecture(&declaring("gptneox")).is_err();
-
-        // A source ENUMERATION, not a lookup for a name we expect: walk src/ and
-        // ask what it mentions. Prose does not count -- this very file discusses
-        // both keys, so only a real string literal is a read.
-        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
-        let mut reads_geometry = false;
-        let mut stack = vec![root];
-        while let Some(p) = stack.pop() {
-            let Ok(entries) = std::fs::read_dir(&p) else {
+    /// Walk `src/` and report whether any Rust file contains one of `needles`.
+    ///
+    /// ⚠️ SEPARATED FROM THE DECISION so the decision is one line, and given a
+    /// POSITIVE CONTROL at its call site — because a scan that finds nothing and
+    /// a scan that never ran are indistinguishable. If `CARGO_MANIFEST_DIR` were
+    /// wrong or `src/` unreadable, this returns `false`, the detector passes
+    /// while the refusal stands, and it is silently blind until the day the
+    /// refusal is lifted — when it would fire for the wrong reason.
+    fn src_mentions(needles: &[&str]) -> bool {
+        let mut stack = vec![std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src")];
+        while let Some(dir) = stack.pop() {
+            let Ok(entries) = std::fs::read_dir(&dir) else {
                 continue;
             };
             for e in entries.flatten() {
@@ -1233,13 +1233,27 @@ mod architecture_gate_tests {
                     stack.push(path);
                 } else if path.extension().is_some_and(|x| x == "rs")
                     && let Ok(text) = std::fs::read_to_string(&path)
-                    && (text.contains("rope.dimension_count\")")
-                        || text.contains("attention.key_length\")"))
+                    && needles.iter().any(|n| text.contains(n))
                 {
-                    reads_geometry = true;
+                    return true;
                 }
             }
         }
+        false
+    }
+
+    #[test]
+    fn the_head_dim_assumption_is_still_guarded_by_the_refusal() {
+        // ⚠️ POSITIVE CONTROL FIRST. `general.architecture` is demonstrably read
+        // by `require_llama_architecture` a few hundred lines above, so a scan
+        // that cannot find it is broken rather than reporting an absence.
+        assert!(
+            src_mentions(&["general.architecture\")"]),
+            "the source scan found no literal for a key this crate demonstrably reads, so              the scan itself is broken. Without this control a broken scan reports              \"geometry keys unread\" forever, which is indistinguishable from the truth              while the refusal stands."
+        );
+
+        let refuses_non_llama = require_llama_architecture(&declaring("gptneox")).is_err();
+        let reads_geometry = src_mentions(&["rope.dimension_count\")", "attention.key_length\")"]);
 
         assert!(
             refuses_non_llama || reads_geometry,
