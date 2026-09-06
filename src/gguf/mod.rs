@@ -1057,23 +1057,38 @@ mod post_processor_spec_tests {
 /// a model that is quietly wrong on any gptneox-family checkpoint. The prefix is
 /// the visible half; these two keys are not.
 ///
-/// ## ⚠️ And the fix is not one line: the division is at NINE live sites
+/// ## ⚠️ And the fix is not one line: FIVE production sites
 ///
-/// `head_dim = hidden_size / num_heads` is computed independently at nine places,
-/// including `parallel_model_manager.rs:424` on the live serving path:
+/// `head_dim = hidden_size / num_heads` is computed independently at five
+/// production sites, including `parallel_model_manager.rs:424` on the live
+/// serving path:
 ///
 /// ```text
-/// model/awq_qwen3.rs:207
-/// model/custom_attention.rs:207, :274, :1134
-/// model/custom_transformer_block.rs:442, :510, :594
-/// model/custom_transformer.rs:391          (positional, not a binding)
-/// model/parallel_model_manager.rs:424      <- the live loader
+/// PRODUCTION
+///   model/awq_qwen3.rs:207                  fn new
+///   model/custom_attention.rs:207           fn new
+///   model/custom_attention.rs:274           fn from_gguf
+///   model/custom_transformer.rs:391         fn from_gguf  (positional)
+///   model/parallel_model_manager.rs:424     fn load_gguf  <- the live loader
+///
+/// UNDER #[cfg(test)] -- fixture arithmetic, not a checkpoint read
+///   model/custom_attention.rs:1134          test_attention_dimensions
+///   model/custom_transformer_block.rs:442   test_batched_transformer_block_shapes
+///   model/custom_transformer_block.rs:510   ..._single_token
+///   model/custom_transformer_block.rs:594   ..._dimension_validation
 /// ```
+///
+/// ⚠️ **AN EARLIER VERSION OF THIS BLOCK SAID "NINE LIVE SITES" AND COUNTED THE
+/// FOUR TEST FUNCTIONS AMONG THEM.** The grep that produced it excluded comments
+/// and nothing else, so "live" was a word in the sentence rather than a measured
+/// property — and it was the load-bearing word, since the whole point is how much
+/// production code a fix has to reach. Corrected by resolving each line to its
+/// enclosing `fn` and checking for a `#[cfg(test)]` above it.
 ///
 /// **So this is not "read `key_length` instead of dividing" at one accessor.**
 /// MLMF hit the same defect in their `config.rs` and theirs is a single
-/// `head_dim()` method; ours is scattered, and a fix that misses one site is
-/// silent everywhere that site is used.
+/// `head_dim()` method; ours is five, and a fix that misses one is silent
+/// everywhere that site is used.
 ///
 /// ## ⚠️ AND A SINGLE `head_dim` IS THE WRONG SHAPE FOR SOME ARCHITECTURES
 ///
@@ -1210,9 +1225,11 @@ mod architecture_gate_tests {
     /// exactly the change that would otherwise produce silently wrong numbers on
     /// a gptneox-family checkpoint.
     ///
-    /// **To remove this test:** read the geometry keys (at all nine
-    /// `hidden_size / num_heads` sites, and note gemma4 needs more than one
-    /// head_dim), then delete it. It has no other purpose.
+    /// **To remove this test:** read the geometry keys at all FIVE production
+    /// `hidden_size / num_heads` sites (the other four are under `#[cfg(test)]`
+    /// and compute fixture arithmetic), and note that gemma4 needs more than one
+    /// head_dim because it declares separate sliding-window geometry. Then delete
+    /// this test. It has no other purpose.
     /// Walk `src/` and report whether any Rust file contains one of `needles`.
     ///
     /// ⚠️ SEPARATED FROM THE DECISION so the decision is one line, and given a
@@ -1263,7 +1280,7 @@ mod architecture_gate_tests {
 
              Deferring these was safe only while every architecture that differs was              refused. That is no longer true, so a gptneox-family checkpoint now loads              and produces WRONG NUMBERS RATHER THAN AN ERROR.
 
-             See `require_llama_architecture`: nine sites compute head_dim by division,              and gemma4 needs more than one head_dim because it declares separate              sliding-window geometry."
+             See `require_llama_architecture`: five production sites compute head_dim by division,              and gemma4 needs more than one head_dim because it declares separate              sliding-window geometry."
         );
     }
 }
