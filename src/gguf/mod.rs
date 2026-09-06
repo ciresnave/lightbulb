@@ -37,8 +37,24 @@ pub struct Content {
     /// Memory-mapped file (must be kept alive for zero-copy access)
     mmap: Arc<Mmap>,
 
-    /// Parsed GGUF header with metadata and tensor offsets
-    header: GGUFHeader,
+    /// Our own parser's header, ABSENT when our parser refuses the file.
+    ///
+    /// ⚠️ SYMMETRIC TO `candle_content`, AND FOR THE SAME REASON POINTED THE
+    /// OTHER WAY. `parser::parse_gguf` reads GGUF v2/v3 only: v1 stores counts
+    /// and string lengths as `u32` where v2/v3 use `u64`, so it is a different
+    /// layout rather than one more accepted version number.
+    ///
+    /// Candle reads v1 (`VersionedMagic::GgufV1`). So the two parsers refuse
+    /// DIFFERENT files, and before this was optional the call failed whenever
+    /// EITHER refused -- an `AND` over two readers with complementary gaps,
+    /// which throws away the union of their coverage and reports it as a shared
+    /// limitation. Measured on `C:\Models`: candle reads the one v1 file with
+    /// 18 metadata keys, 48 tensor infos and 512 tokenizer entries, and never
+    /// got the chance because our parser had already failed the call.
+    header: Option<GGUFHeader>,
+
+    /// Why our parser refused, when it did.
+    header_refusal: Option<String>,
 
     /// Candle's parsed content, ABSENT when candle refuses the file.
     ///
@@ -145,9 +161,12 @@ impl Content {
 
         let mmap = Arc::new(mmap);
 
-        // Parse GGUF header directly from mmap (zero-copy)
-        let header = parser::parse_gguf(&mmap)
-            .with_context(|| format!("Failed to parse GGUF header from: {}", path.display()))?;
+        // Parse GGUF header directly from mmap (zero-copy). A refusal is
+        // recorded, not propagated -- see the `header` field.
+        let (header, header_refusal) = match parser::parse_gguf(&mmap) {
+            Ok(h) => (Some(h), None),
+            Err(e) => (None, Some(e.to_string())),
+        };
 
         // ⚠️ CANDLE'S PARSE IS A SECOND, REDUNDANT READ OF THE SAME BYTES, AND
         // ITS FAILURE USED TO SINK THE WHOLE CALL.
@@ -174,29 +193,62 @@ impl Content {
                 Err(e) => (None, Some(e.to_string())),
             };
 
-        // Built only when candle refused. Nothing is copied on the common path.
-        let fallback_metadata = match &candle_content {
-            Some(_) => HashMap::new(),
-            None => metadata_from_header(&header),
+        // ⚠️ THE ONLY FATAL CASE IS BOTH READERS REFUSING. Either alone leaves
+        // the file readable, and naming BOTH reasons matters: the two parsers
+        // fail for unrelated causes, so one message would send the reader after
+        // the wrong one.
+        if header.is_none() && candle_content.is_none() {
+            anyhow::bail!(
+                "neither GGUF reader could parse {}. Ours: {}. Candle: {}.",
+                path.display(),
+                header_refusal.as_deref().unwrap_or("(no reason recorded)"),
+                candle_refusal.as_deref().unwrap_or("(no reason recorded)")
+            );
+        }
+
+        // Built only when candle refused AND ours succeeded. Nothing is copied
+        // on the common path.
+        let fallback_metadata = match (&candle_content, &header) {
+            (Some(_), _) => HashMap::new(),
+            (None, Some(h)) => metadata_from_header(h),
+            (None, None) => unreachable!("the both-refused case bailed above"),
         };
 
         Ok(Self {
             mmap,
             header,
+            header_refusal,
             candle_content,
             candle_refusal,
             fallback_metadata,
         })
     }
 
+    /// Our parser's own header, or why it is absent.
+    ///
+    /// ⚠️ Errors rather than returning an empty value. Our parser reads GGUF
+    /// v2/v3 only, so on a v1 file this is genuinely unavailable -- and an
+    /// empty header would be indistinguishable from a file with no tensors.
+    fn require_header(&self) -> Result<&GGUFHeader> {
+        match &self.header {
+            Some(h) => Ok(h),
+            None => bail!(
+                "this crate's own GGUF parser did not read this file: {}. Metadata IS available through `metadata()`, served by candle. Only the zero-copy mmap accessors need this parser.",
+                self.header_refusal
+                    .as_deref()
+                    .unwrap_or("no reason recorded")
+            ),
+        }
+    }
+
     /// Get metadata from Lightning parser
-    pub fn lightning_metadata(&self) -> &HashMap<String, parser::MetadataValue> {
-        &self.header.metadata
+    pub fn lightning_metadata(&self) -> Result<&HashMap<String, parser::MetadataValue>> {
+        Ok(&self.require_header()?.metadata)
     }
 
     /// Get tensor infos from Lightning parser
-    pub fn lightning_tensor_infos(&self) -> &[parser::TensorInfo] {
-        &self.header.tensor_infos
+    pub fn lightning_tensor_infos(&self) -> Result<&[parser::TensorInfo]> {
+        Ok(&self.require_header()?.tensor_infos)
     }
 
     /// Get raw memory-mapped bytes (for low-level tensor access)
@@ -205,8 +257,8 @@ impl Content {
     }
 
     /// Get tensor data offset (start of tensor data section)
-    pub fn tensor_data_offset(&self) -> u64 {
-        self.header.tensor_data_offset
+    pub fn tensor_data_offset(&self) -> Result<u64> {
+        Ok(self.require_header()?.tensor_data_offset)
     }
 
     /// Get metadata (Candle-shaped, whichever parser produced it).
@@ -948,9 +1000,12 @@ impl Content {
     /// // Parse quantized data from bytes (Q4_K, Q8_0, etc.)
     /// ```
     pub fn get_tensor_data(&self, name: &str) -> Result<&[u8]> {
+        // Zero-copy access is our parser's alone: the offsets come from ITS
+        // header, so a file it did not read has no offsets to slice by.
+        let header = self.require_header()?;
+
         // Find tensor index and info
-        let (tensor_idx, tensor_info) = self
-            .header
+        let (tensor_idx, tensor_info) = header
             .tensor_infos
             .iter()
             .enumerate()
@@ -958,14 +1013,14 @@ impl Content {
             .with_context(|| format!("Tensor '{}' not found in GGUF file", name))?;
 
         // Calculate start offset (absolute position in file)
-        let start = (self.header.tensor_data_offset + tensor_info.offset) as usize;
+        let start = (header.tensor_data_offset + tensor_info.offset) as usize;
 
         // Calculate end offset:
         // If there's a next tensor, use its offset
         // Otherwise, use the file size
-        let end = if tensor_idx + 1 < self.header.tensor_infos.len() {
-            let next_tensor = &self.header.tensor_infos[tensor_idx + 1];
-            (self.header.tensor_data_offset + next_tensor.offset) as usize
+        let end = if tensor_idx + 1 < header.tensor_infos.len() {
+            let next_tensor = &header.tensor_infos[tensor_idx + 1];
+            (header.tensor_data_offset + next_tensor.offset) as usize
         } else {
             self.mmap.len()
         };
@@ -1444,6 +1499,12 @@ mod reader_agreement_tests {
     /// are the reason this code exists and they have no second opinion, so they
     /// cannot be compared and must not be counted as agreement.
     ///
+    /// ⚠️ ALL FOUR ARE NOW READABLE THROUGH `Content::read`, AND STILL SKIPPED
+    /// HERE. Readable and comparable are different properties: a file one reader
+    /// refuses has a metadata map from the other and nothing to check it
+    /// against. Counting them as agreement would let the corpus grow while the
+    /// evidence stayed the same size.
+    ///
     /// ⚠️ THE COMPARED COUNT IS 26 OF 30 AND PLANNED WORK DOES NOT RAISE IT.
     /// Letting candle serve the GGUF v1 file -- the next change to this area --
     /// gives CANDLE a reading and leaves OURS with none, so the overlap is
@@ -1462,11 +1523,15 @@ mod reader_agreement_tests {
                 out.skipped += 1;
                 continue;
             };
-            let Some(candle) = content.candle_content.as_ref() else {
+            // A file needs BOTH readings to be comparable. Either one alone is
+            // exactly the case this code exists for, and has no second opinion.
+            let (Some(candle), Some(header)) =
+                (content.candle_content.as_ref(), content.header.as_ref())
+            else {
                 out.skipped += 1;
                 continue;
             };
-            let ours = metadata_from_header(&content.header);
+            let ours = metadata_from_header(header);
             out.compared += 1;
             let name = path.file_name().unwrap_or_default().to_string_lossy();
             out.mismatches

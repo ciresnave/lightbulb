@@ -23,7 +23,7 @@ pub fn extract_tensor_bytes<'a>(
 ) -> Result<(&'a [u8], GgmlDType, Vec<u64>)> {
     // Find tensor info
     let tensor_info = content
-        .lightning_tensor_infos()
+        .lightning_tensor_infos()?
         .iter()
         .find(|t| t.name == tensor_name)
         .with_context(|| format!("Tensor not found: {}", tensor_name))?;
@@ -41,7 +41,7 @@ pub fn extract_tensor_bytes<'a>(
 
     // Extract bytes from mmap
     let mmap = content.raw_mmap();
-    let start = content.tensor_data_offset() as usize + tensor_info.offset as usize;
+    let start = content.tensor_data_offset()? as usize + tensor_info.offset as usize;
     let end = start + tensor_size_bytes;
 
     if end > mmap.len() {
@@ -110,19 +110,19 @@ pub fn apply_mask_inplace(weights: &mut [f32], mask: &[bool]) -> Result<usize> {
 }
 
 /// Get list of all tensor names in GGUF
-pub fn list_tensor_names(content: &Content) -> Vec<String> {
-    content
-        .lightning_tensor_infos()
+pub fn list_tensor_names(content: &Content) -> Result<Vec<String>> {
+    Ok(content
+        .lightning_tensor_infos()?
         .iter()
         .map(|t| t.name.clone())
-        .collect()
+        .collect())
 }
 
 /// Get total model size in bytes
-pub fn calculate_model_size(content: &Content) -> usize {
+pub fn calculate_model_size(content: &Content) -> Result<usize> {
     let mut total_bytes = 0;
 
-    for tensor_info in content.lightning_tensor_infos() {
+    for tensor_info in content.lightning_tensor_infos()? {
         if let Some(dtype) = GgmlDType::from_u32(tensor_info.tensor_type) {
             let elem_count: usize = tensor_info.dimensions.iter().product::<u64>() as usize;
             let block_size = dtype.block_size();
@@ -132,7 +132,7 @@ pub fn calculate_model_size(content: &Content) -> usize {
         }
     }
 
-    total_bytes
+    Ok(total_bytes)
 }
 
 /// Tensor metadata for inspection
@@ -146,9 +146,9 @@ pub struct TensorMetadata {
 }
 
 /// Get metadata for all tensors in GGUF
-pub fn get_all_tensor_metadata(content: &Content) -> Vec<TensorMetadata> {
-    content
-        .lightning_tensor_infos()
+pub fn get_all_tensor_metadata(content: &Content) -> Result<Vec<TensorMetadata>> {
+    Ok(content
+        .lightning_tensor_infos()?
         .iter()
         .filter_map(|tensor_info| {
             let dtype = GgmlDType::from_u32(tensor_info.tensor_type)?;
@@ -166,7 +166,7 @@ pub fn get_all_tensor_metadata(content: &Content) -> Vec<TensorMetadata> {
                 size_bytes,
             })
         })
-        .collect()
+        .collect())
 }
 
 #[cfg(test)]
