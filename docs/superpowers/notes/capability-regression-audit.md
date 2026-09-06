@@ -205,10 +205,18 @@ proxy. TODO: Replace with proper SVD when available in Candle"* — and returns
 **The input tensor is discarded.** It is not an approximation of anything; it is noise with the
 right shape.
 
-**[verified] KIVI's `PerGroup` granularity panics.** `todo!("Grouped quantization not yet
-implemented")` (`:446`). `PerHead` and `PerChannel` are real. **`PerGroup` is precisely the
-option that made our config look richer than Fuel's `bits`-only `KiviConfig`** — and it is the
-one I recommended upstreaming.
+**[verified, and since REMEDIED] KIVI's `PerGroup` granularity panicked.** It held a
+`todo!("Grouped quantization not yet implemented")` when this was audited. `PerHead` and
+`PerChannel` are real. **`PerGroup` is precisely the option that made our config look richer
+than Fuel's `bits`-only `KiviConfig`** — and it is the one I recommended upstreaming. **It is
+still unimplemented; it no longer panics.**
+
+> ⚠️ **DISCHARGED 2026-09-06.** This read *"KIVI's `PerGroup` granularity **panics**"*, present
+> tense, in bold, under a `[verified]` tag. **Fixed 2026-09-02** — the arm returns an `Err`
+> instead. Measured at `4524c1d`: `src/` holds **zero** live `todo!` / `unimplemented!` /
+> `unreachable!`, and line 446 is now the brace closing the `PerChannel` arm. The finding's
+> substance is unchanged and the upstreaming withdrawal below still stands on it; only the
+> failure MODE moved, from a panic to a bail.
 
 **[verified] KIVI has a suspected correctness bug in the real path too.** `compute_scales`
 derives a symmetric scale (`abs().max / (2^bits − 1)`), so `tensor / scale` spans
@@ -379,8 +387,17 @@ Run because `kv_compression`'s surface overstated its implementation badly enoug
 two upstreaming offers, and the obvious worry was that the same error sat in other verdicts.
 **It does not.**
 
-**Gate zero across all of `src/`**: exactly **one** `todo!()`/`unimplemented!()` — the known
-`QuantGranularity::PerGroup` in `kv_compression.rs:446`.
+**Gate zero across all of `src/`**, as audited on 2026-07-29: exactly **one**
+`todo!()`/`unimplemented!()` — the known `QuantGranularity::PerGroup` in `kv_compression.rs:446`.
+**That count is now zero**; see the discharge under the KIVI finding above.
+
+> ⚠️ **DISCHARGED 2026-09-06.** This read *"Gate zero across all of `src/`: exactly **one**
+> `todo!()`/`unimplemented!()` — the known … in `kv_compression.rs:446`"* with no date attached
+> to the figure. **Measured at `4524c1d`: the live count is ZERO.** Two textual `todo!(`
+> occurrences remain in `src/` and both are comments — `kv_compression.rs:450`, which explains
+> that the macro *used to* be there, and `policies.rs:25`. ⚠️ **A count is the part of an audit
+> a reader lifts out without its date**, which is why this one is restated in place rather than
+> left to the header three hundred lines up.
 
 **But gate zero is a weak probe, because the worst case wasn't one.** Low-rank compression is
 not a `todo!()`; it is a function that computes its input, discards it, and returns
