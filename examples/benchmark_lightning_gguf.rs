@@ -67,13 +67,13 @@ fn benchmark_model(model_path: &PathBuf) -> Result<BenchmarkResult> {
     println!("  ✓ Lightning loaded in {} ms", lightning_load_ms);
 
     // Get tensor counts from both methods
-    let lightning_tensor_count = lightning_content.lightning_tensor_infos().len();
+    let lightning_tensor_count = lightning_content.lightning_tensor_infos()?.len();
     let candle_tensor_count = candle_content.tensor_infos()?.len();
 
     // Verify correctness: Compare metadata and tensors
     println!("  🔍 Verifying correctness...");
     let candle_metadata = candle_content.metadata();
-    let lightning_metadata = lightning_content.lightning_metadata();
+    let lightning_metadata = lightning_content.lightning_metadata()?;
 
     let mut verified = true;
 
@@ -89,7 +89,7 @@ fn benchmark_model(model_path: &PathBuf) -> Result<BenchmarkResult> {
     }
 
     // Sample verification: Check that we can access tensors via Lightning
-    let lightning_tensors = lightning_content.lightning_tensor_infos();
+    let lightning_tensors = lightning_content.lightning_tensor_infos()?;
     if !lightning_tensors.is_empty() {
         let sample_tensor = &lightning_tensors[0];
         let sample_name = &sample_tensor.name;

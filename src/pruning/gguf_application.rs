@@ -65,7 +65,7 @@ pub fn apply_manifest_to_gguf(
 
     // Load GGUF model
     let content = Content::read(input_path)?;
-    let tensor_infos = content.lightning_tensor_infos();
+    let tensor_infos = content.lightning_tensor_infos()?;
 
     // Build dynamic name mapper
     let tensor_names: Vec<String> = tensor_infos.iter().map(|t| t.name.clone()).collect();
@@ -190,7 +190,7 @@ pub fn apply_manifest_to_gguf(
 fn write_gguf_header(content: &Content, output: &mut File) -> Result<()> {
     // Copy the entire header section from input to output
     let mmap = content.raw_mmap();
-    let header_size = content.tensor_data_offset() as usize;
+    let header_size = content.tensor_data_offset()? as usize;
     let header_bytes = &mmap[0..header_size];
     output
         .write_all(header_bytes)
