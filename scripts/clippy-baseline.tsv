@@ -5,7 +5,7 @@
 # docstring in clippy_gate.py for what this gate does and does not catch.
 #
 # count	lint
-137	clippy::collapsible_if
+135	clippy::collapsible_if
 72	unused_variables
 39	dead_code
 37	unused_imports

@@ -91,6 +91,34 @@ jobs:
           cargo fmt --all --check
           echo fmt >> .gates-ran
 
+      - name: Cargo.lock matches the manifests
+        # ⚠️ A MANIFEST/LOCK MISMATCH IS INVISIBLE WITHOUT `--locked`, AND IT DOES
+        # NOT BREAK THE BUILD. Cargo silently re-resolves and REWRITES the lock on
+        # every run, so a dependency added to a manifest and never locked compiles
+        # green forever. The cost lands somewhere else entirely: the first build in
+        # a fresh checkout leaves Cargo.lock dirty, and a dirty Cargo.lock is enough
+        # to make `git pull` REFUSE — which surfaces as an unrelated-looking failure,
+        # long after the commit that caused it.
+        #
+        # Found by MLMF in their own tree: `sha2 = "0.10"` declared in a member
+        # manifest since their #19, absent from Cargo.lock along with six transitive
+        # crates, and nothing ever failed. They had already paid for it once, as a
+        # `git pull ... 2>/dev/null` whose refusal went to a discarded stderr and
+        # produced work written against a stale main.
+        #
+        # Measured here at origin/main 6483848: no mismatch today. This step exists
+        # so that stays true — the class was possible and NOTHING WOULD HAVE CAUGHT
+        # IT, since no cargo invocation in this workflow passes `--locked`.
+        #
+        # A DEDICATED STEP rather than `--locked` sprinkled on `cargo test`, so a
+        # lockfile problem fails BY NAME. Adding the flag to the test step would make
+        # a dependency-hygiene defect present itself as a test failure, which is the
+        # wrong first question for whoever reads the log.
+        shell: bash
+        run: |
+          cargo metadata --locked --format-version 1 > /dev/null
+          echo lockfile >> .gates-ran
+
       - name: doc links
         # Scoped to rustdoc's OWN lints, NOT `-D warnings`. With `-D warnings`,
         # any ordinary rustc lint aborts the run BEFORE rustdoc reaches link
@@ -231,7 +259,7 @@ jobs:
       - name: every gate must have run
         shell: bash
         run: |
-          expected="fmt doc test featgate clippy"
+          expected="fmt lockfile doc test featgate clippy"
           test -f .gates-ran || { echo "::error::no gate markers written at all"; exit 1; }
           missing=""
           for g in $expected; do

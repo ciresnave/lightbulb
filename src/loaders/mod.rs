@@ -237,6 +237,16 @@ fn extract_llama_config_from_metadata(
         }
     };
 
+    // Refuse on the DECLARED architecture rather than on a missing key. See
+    // `crate::gguf::require_llama_architecture` for why this is not a prefix
+    // substitution and why the check has one implementation.
+    //
+    // ⚠️ THIS FUNCTION IS ON THE UNREACHABLE PATH — `load_gguf_llama`'s own doc
+    // comment says nothing calls it, and the live GGUF config read is in
+    // `parallel_model_manager::load_gguf`. Both call the same helper, so a
+    // future edit cannot fix one and silently leave the other.
+    crate::gguf::require_llama_architecture(metadata)?;
+
     // Extract standard LLaMA config fields from GGUF metadata
     // GGUF uses different key naming than HuggingFace config.json
     let hidden_size = get_u64("llama.embedding_length")? as usize;
@@ -244,7 +254,30 @@ fn extract_llama_config_from_metadata(
     let num_hidden_layers = get_u64("llama.block_count")? as usize;
     let num_attention_heads = get_u64("llama.attention.head_count")? as usize;
     let num_key_value_heads = get_u64("llama.attention.head_count_kv")? as usize;
-    let vocab_size = get_u64("llama.vocab_size")? as usize;
+
+    // ⚠️ `llama.vocab_size` IS ABSENT ON TINYLLAMA, this repo's primary
+    // checkpoint, and reading it with `?` made this function fail on the one
+    // GGUF the project actually serves. Measured 2026-09-05 over the local
+    // corpus: absent on tinyllama-1.1b-chat-v1.0.Q4_0 and
+    // tinyllamas-stories-260k, present on all nine SmolLM2 builds. It is also
+    // absent under EVERY non-llama prefix in a 13-architecture sample, so a
+    // prefix substitution alone would have relocated the failure rather than
+    // ending it.
+    //
+    // The fallback chain mirrors the working one in
+    // `src/model/parallel_model_manager.rs`, which is why serving TinyLlama
+    // succeeds while this path did not: same job, two implementations, one of
+    // them correct.
+    let vocab_size = get_u64("llama.vocab_size")
+        .or_else(|_| get_u64("llama.n_vocab"))
+        .map(|v| v as usize)
+        .or_else(|_| match metadata.get("tokenizer.ggml.tokens") {
+            Some(Value::Array(tokens)) => Ok(tokens.len()),
+            _ => bail!(
+                "could not determine vocab_size: tried llama.vocab_size, llama.n_vocab, \
+                 and counting tokenizer.ggml.tokens"
+            ),
+        })?;
 
     let rms_norm_eps = get_f32("llama.attention.layer_norm_rms_epsilon").unwrap_or(1e-5);
 
@@ -465,5 +498,118 @@ mod tests {
             err.to_string().contains("fp16"),
             "error must name the rejected string, got: {err}"
         );
+    }
+}
+
+#[cfg(test)]
+mod gguf_config_tests {
+    use super::extract_llama_config_from_metadata;
+    use candlelight::core::quantized::gguf_file::Value;
+    use std::collections::HashMap;
+
+    /// A minimal llama header: every key the extractor requires, and nothing
+    /// else. `llama.vocab_size` is deliberately ABSENT, because that is the
+    /// shape TinyLlama actually has.
+    fn llama_header() -> HashMap<String, Value> {
+        let mut m = HashMap::new();
+        m.insert("general.architecture".into(), Value::String("llama".into()));
+        m.insert("llama.embedding_length".into(), Value::U32(2048));
+        m.insert("llama.feed_forward_length".into(), Value::U32(5632));
+        m.insert("llama.block_count".into(), Value::U32(22));
+        m.insert("llama.attention.head_count".into(), Value::U32(32));
+        m.insert("llama.attention.head_count_kv".into(), Value::U32(4));
+        m
+    }
+
+    /// ⚠️ BORN-RED AGAINST THE REPO'S OWN PRIMARY CHECKPOINT.
+    ///
+    /// `llama.vocab_size` is absent on `tinyllama-1.1b-chat-v1.0.Q4_0.gguf` --
+    /// measured over the local corpus, absent there and on
+    /// tinyllamas-stories-260k, present on all nine SmolLM2 builds. Reading it
+    /// with `?` made this PUBLIC loader fail on the one GGUF the project
+    /// actually serves, and nothing noticed because `load_gguf_llama` has no
+    /// caller anywhere in the repo.
+    #[test]
+    fn vocab_size_falls_back_to_the_token_count() {
+        let mut m = llama_header();
+        m.insert(
+            "tokenizer.ggml.tokens".into(),
+            Value::Array(vec![Value::String("a".into()); 32000]),
+        );
+        let config = extract_llama_config_from_metadata(&m)
+            .expect("a llama header without llama.vocab_size must still load");
+        assert_eq!(
+            config.vocab_size, 32000,
+            "vocab_size must fall back to the length of tokenizer.ggml.tokens"
+        );
+    }
+
+    /// And when there is no token list either, the failure names all three
+    /// things it tried rather than one key.
+    #[test]
+    fn an_underivable_vocab_size_names_every_source_it_tried() {
+        let err = extract_llama_config_from_metadata(&llama_header())
+            .expect_err("no vocab_size and no token list cannot succeed")
+            .to_string();
+        for expected in ["llama.vocab_size", "llama.n_vocab", "tokenizer.ggml.tokens"] {
+            assert!(
+                err.contains(expected),
+                "the error must name {expected}, so a reader knows what was tried: {err}"
+            );
+        }
+    }
+
+    /// ⚠️ THE REFUSAL MUST NAME THE ARCHITECTURE, NOT A MISSING KEY.
+    ///
+    /// Before this change a qwen2 header died with
+    /// `Missing or invalid metadata key: llama.embedding_length`, which sends a
+    /// reader hunting for a corrupt GGUF. The old message is asserted ABSENT so
+    /// a regression to key-shaped reporting reddens here.
+    #[test]
+    fn a_non_llama_architecture_is_refused_by_name() {
+        let mut m = HashMap::new();
+        m.insert("general.architecture".into(), Value::String("qwen2".into()));
+        m.insert("qwen2.embedding_length".into(), Value::U32(896));
+        m.insert("qwen2.block_count".into(), Value::U32(24));
+        let err = extract_llama_config_from_metadata(&m)
+            .expect_err("a qwen2 header must be refused")
+            .to_string();
+        assert!(
+            err.contains("qwen2"),
+            "the refusal must name the declared architecture: {err}"
+        );
+        assert!(
+            !err.contains("Missing or invalid metadata key"),
+            "the refusal must not report a missing key -- the key is not missing, it is \
+             under a different prefix, and the key-shaped message is the defect: {err}"
+        );
+    }
+
+    /// An absent declaration is a fact about the FILE and is reported as one.
+    #[test]
+    fn a_header_with_no_architecture_says_so() {
+        let mut m = llama_header();
+        m.remove("general.architecture");
+        let err = extract_llama_config_from_metadata(&m)
+            .expect_err("no architecture must be refused")
+            .to_string();
+        assert!(
+            err.contains("general.architecture"),
+            "the error must name the key that is genuinely absent: {err}"
+        );
+    }
+
+    /// The control: a complete llama header still reads exactly as before, so
+    /// the architecture gate is not rejecting the case it must accept.
+    #[test]
+    fn a_llama_header_still_loads() {
+        let mut m = llama_header();
+        m.insert("llama.vocab_size".into(), Value::U32(32000));
+        let config = extract_llama_config_from_metadata(&m).expect("llama must still load");
+        assert_eq!(config.hidden_size, 2048);
+        assert_eq!(config.num_hidden_layers, 22);
+        assert_eq!(config.num_attention_heads, 32);
+        assert_eq!(config.num_key_value_heads, 4);
+        assert_eq!(config.vocab_size, 32000);
     }
 }

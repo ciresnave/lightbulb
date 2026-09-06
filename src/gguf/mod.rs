@@ -121,21 +121,42 @@ impl Content {
         &self.candle_content.tensor_infos
     }
 
-    /// Extract tokenizer from GGUF metadata
-    ///
-    /// This method extracts tokenizer data from GGUF metadata fields and builds
-    /// a tokenizers::Tokenizer compatible with the HuggingFace tokenizers library.
-    ///
-    /// Expected metadata fields:
-    /// - tokenizer.ggml.tokens: Array of token strings
-    /// - tokenizer.ggml.scores: Array of token scores (optional)
-    /// - tokenizer.ggml.token_type: Array of token types (optional)
-    /// - tokenizer.ggml.bos_token_id: Beginning-of-sequence token ID (optional)
-    /// - tokenizer.ggml.eos_token_id: End-of-sequence token ID (optional)
-    ///
-    /// # Returns
-    /// A tokenizers::Tokenizer instance ready for encoding/decoding
     /// Rebuild the checkpoint's own tokenizer from GGUF metadata.
+    ///
+    /// # Which `tokenizer.ggml.*` keys this reads, and which it deliberately does not
+    ///
+    /// ```text
+    /// tokens             READ      the vocabulary
+    /// merges             READ      REQUIRED -- see below; absence is a refusal
+    /// model, pre         READ      select and gate the rebuild path
+    /// token_type         READ      special-token registration
+    /// bos/eos_token_id   READ      post-processor + special tokens
+    /// add_bos_token      READ      whether to prepend BOS
+    /// add_eos_token      READ      whether to append EOS
+    ///
+    /// scores             NOT READ  deliberately -- see "merges is required" below
+    /// add_space_prefix   NOT READ  deliberately -- see below
+    /// ```
+    ///
+    /// ⚠️ **A superseded doc block used to sit above this one listing `scores` as
+    /// an "expected metadata field".** It was left behind when this function was
+    /// rewritten, so the first thing a reader saw claimed a key was read that is
+    /// deliberately refused — the correct account was thirty lines further down
+    /// and lost to whichever came first.
+    ///
+    /// ## `add_space_prefix` is not read, and a fix could not be verified here
+    ///
+    /// Measured 2026-09-05 across the local corpus: 11 files declare it, and it
+    /// **varies** (10 `false`, 1 `true`). That variation is not usable evidence.
+    /// Every file where it could matter is either `gpt2` — byte-level BPE, where
+    /// a SentencePiece space prefix is not a concept — or an architecture no
+    /// rebuild path accepts (`gemma4`, `t5`). **The 5 `llama`-model files, the
+    /// only ones where it would apply, do not declare it at all.**
+    ///
+    /// So implementing it would be a change no fixture in this corpus can
+    /// distinguish from doing nothing. **Declined for that reason, recorded here
+    /// rather than in a planning document, because a decline in a roadmap is
+    /// invisible to the next person reading this code and wondering.**
     ///
     /// **A GGUF carries everything needed to reconstruct the reference
     /// tokenizer exactly, and an earlier version of this function threw all of
@@ -301,16 +322,40 @@ impl Content {
             .get("tokenizer.ggml.add_bos_token")
             .and_then(|v| v.to_bool().ok())
             .unwrap_or(true);
-        if add_bos {
-            if let (Some(bos), Some(id)) = (bos_id.and_then(|i| tokens.get(i as usize)), bos_id) {
-                let processor = TemplateProcessing::builder()
-                    .try_single(format!("{bos}:0 $A:0"))
-                    .map_err(|e| anyhow::anyhow!("building the BOS post-processor: {e}"))?
-                    .special_tokens(vec![(bos.clone(), id)])
-                    .build()
-                    .map_err(|e| anyhow::anyhow!("building the BOS post-processor: {e}"))?;
-                tokenizer.with_post_processor(Some(processor));
-            }
+        // `tokenizer.ggml.add_eos_token` defaults to FALSE, unlike its BOS
+        // sibling: llama.cpp appends BOS by default for a `llama` tokenizer and
+        // does not append EOS.
+        //
+        // ⚠️ It was read NOWHERE until now, and the corpus is why that looked
+        // correct. Of the six files that declare it, FIVE say `false` — and
+        // reading nothing produces the same behaviour as reading `false`. The
+        // code was ACCIDENTALLY CORRECT on five of six, so a test written
+        // against those five would have passed against code that reads nothing
+        // at all. The majority value in the population is what hid it.
+        let add_eos = self
+            .metadata()
+            .get("tokenizer.ggml.add_eos_token")
+            .and_then(|v| v.to_bool().ok())
+            .unwrap_or(false);
+
+        let named = |id: Option<u32>| -> Option<(String, u32)> {
+            id.and_then(|i| tokens.get(i as usize).map(|t| (t.clone(), i)))
+        };
+        let prefix = named(bos_id).filter(|_| add_bos);
+        let suffix = named(eos_id).filter(|_| add_eos);
+
+        // ⚠️ Built when EITHER is wanted. The previous version nested the whole
+        // construction inside `if add_bos`, so a checkpoint asking for EOS and
+        // not BOS got NO post-processor at all — there was nowhere for an EOS to
+        // go even once the key was read. Reading the key is only half the fix.
+        if let Some((template, specials)) = post_processor_spec(prefix, suffix) {
+            let processor = TemplateProcessing::builder()
+                .try_single(template)
+                .map_err(|e| anyhow::anyhow!("building the BOS/EOS post-processor: {e}"))?
+                .special_tokens(specials)
+                .build()
+                .map_err(|e| anyhow::anyhow!("building the BOS/EOS post-processor: {e}"))?;
+            tokenizer.with_post_processor(Some(processor));
         }
 
         Ok(tokenizer)
@@ -851,6 +896,222 @@ impl Content {
     ) -> candlelight::core::Result<candlelight::core::quantized::QTensor> {
         // Delegate to Candle's proven tensor loading logic
         self.candle_content.tensor(reader, name, device)
+    }
+}
+
+/// The post-processor's template and special tokens, for whichever of BOS/EOS
+/// the checkpoint asked for. `None` when it asked for neither.
+///
+/// ⚠️ PURE AND SEPARATE BECAUSE THE CORPUS CANNOT EXERCISE THE EOS ARM. Exactly
+/// one file in the corpus declares `tokenizer.ggml.add_eos_token = true`
+/// (`ggml-vocab-nomic-bert-moe.gguf`), and it declares
+/// `tokenizer.ggml.model = "t5"` — which neither rebuild path accepts. So every
+/// checkpoint we can actually load is one where EOS-appending code and
+/// EOS-ignoring code behave identically, and an end-to-end test over the corpus
+/// would pass against either. These unit tests are the only thing that can tell
+/// them apart.
+fn post_processor_spec(
+    prefix: Option<(String, u32)>,
+    suffix: Option<(String, u32)>,
+) -> Option<(String, Vec<(String, u32)>)> {
+    let template = match (&prefix, &suffix) {
+        (Some((b, _)), Some((e, _))) => format!("{b}:0 $A:0 {e}:0"),
+        (Some((b, _)), None) => format!("{b}:0 $A:0"),
+        (None, Some((e, _))) => format!("$A:0 {e}:0"),
+        (None, None) => return None,
+    };
+    // A checkpoint may use one token for both. Registering it twice is not an
+    // error worth risking in a builder we do not own.
+    let mut specials: Vec<(String, u32)> = Vec::new();
+    for t in prefix.iter().chain(suffix.iter()) {
+        if !specials.iter().any(|(_, id)| *id == t.1) {
+            specials.push(t.clone());
+        }
+    }
+    Some((template, specials))
+}
+
+#[cfg(test)]
+mod post_processor_spec_tests {
+    use super::post_processor_spec;
+
+    fn bos() -> Option<(String, u32)> {
+        Some(("<s>".to_string(), 1))
+    }
+    fn eos() -> Option<(String, u32)> {
+        Some(("</s>".to_string(), 2))
+    }
+
+    /// The pre-existing behaviour, unchanged. Every checkpoint lightbulb can
+    /// currently load lands here, so this is the arm the corpus does cover.
+    #[test]
+    fn bos_only_is_the_previous_template_exactly() {
+        let (t, s) = post_processor_spec(bos(), None).expect("BOS alone must build");
+        assert_eq!(t, "<s>:0 $A:0");
+        assert_eq!(s, vec![("<s>".to_string(), 1)]);
+    }
+
+    /// ⚠️ THE ARM THE OLD CODE COULD NOT REACH AT ALL. It nested the whole
+    /// construction inside `if add_bos`, so a checkpoint asking for EOS and not
+    /// BOS got NO post-processor — there was nowhere for an EOS to go even once
+    /// the key was read. Reading `add_eos_token` was only half the fix.
+    #[test]
+    fn eos_without_bos_still_builds_a_post_processor() {
+        let (t, s) = post_processor_spec(None, eos())
+            .expect("EOS alone must build -- the old code produced nothing here");
+        assert_eq!(t, "$A:0 </s>:0");
+        assert_eq!(s, vec![("</s>".to_string(), 2)]);
+    }
+
+    #[test]
+    fn both_wrap_the_sequence() {
+        let (t, s) = post_processor_spec(bos(), eos()).expect("both must build");
+        assert_eq!(t, "<s>:0 $A:0 </s>:0");
+        assert_eq!(s, vec![("<s>".to_string(), 1), ("</s>".to_string(), 2)]);
+    }
+
+    #[test]
+    fn neither_builds_nothing() {
+        assert!(
+            post_processor_spec(None, None).is_none(),
+            "a checkpoint wanting neither must get no post-processor, not an empty one"
+        );
+    }
+
+    /// A checkpoint using one token for both must not register it twice.
+    #[test]
+    fn a_shared_token_is_registered_once() {
+        let same = Some(("<|endoftext|>".to_string(), 0));
+        let (t, s) = post_processor_spec(same.clone(), same).expect("must build");
+        assert_eq!(t, "<|endoftext|>:0 $A:0 <|endoftext|>:0");
+        assert_eq!(
+            s,
+            vec![("<|endoftext|>".to_string(), 0)],
+            "the same id must appear once in the special-token list"
+        );
+    }
+}
+
+/// Refuse a GGUF whose declared architecture this project's loaders cannot read.
+///
+/// ⚠️ REFUSE ON THE DECLARATION, NOT ON A MISSING KEY. Every GGUF declares
+/// `general.architecture` — 30 of 30 in the local corpus — and both GGUF config
+/// readers ignored it, hardcoding the `llama.` prefix at seventeen literals with
+/// no fallback. A qwen2 checkpoint declares `qwen2.embedding_length`, so it died
+/// with:
+///
+/// ```text
+/// Missing or invalid metadata key: llama.embedding_length
+/// ```
+///
+/// which sends a reader hunting for a corrupt GGUF. **The refusal was loud and
+/// specific, which is exactly what made it read as a considered decision rather
+/// than an oversight** — the same shape as `if version != GGUF_VERSION`.
+///
+/// # Why this does not substitute the prefix
+///
+/// The `llama::Config` and the tensor mapping built downstream are llama-shaped.
+/// Reading `qwen2.*` into them would trade a misleading error for a silently
+/// wrong model, which is worse. Widening support needs a loadable non-llama
+/// checkpoint, and the corpus does not have one — every file it holds with
+/// tensors declares `llama`.
+///
+/// # One implementation because there are two callers
+///
+/// `loaders::load_gguf_llama` and
+/// `model::parallel_model_manager::ParallelModelManager::load_gguf` both read
+/// GGUF config, and only the second is reachable — `load_gguf_llama`'s own doc
+/// comment says so. A check written into the first alone would pass its tests
+/// and change nothing that runs, which is the failure that function's doc
+/// comment warns about in as many words: *a correct fix applied to the wrong
+/// caller is indistinguishable from a wrong fix.*
+pub(crate) fn require_llama_architecture(metadata: &HashMap<String, Value>) -> Result<()> {
+    let architecture = match metadata.get("general.architecture") {
+        Some(Value::String(s)) => s.clone(),
+        _ => bail!(
+            "this GGUF declares no `general.architecture`, so the architecture cannot be \
+             checked before reading llama-specific keys. Every GGUF in the reference corpus \
+             declares it; a file without it is malformed or truncated."
+        ),
+    };
+    if architecture != "llama" {
+        bail!(
+            "this GGUF declares `general.architecture = {architecture:?}`; this loader reads \
+             `llama` only. Its hyperparameters are under the `{architecture}.` prefix, not \
+             `llama.`, and the config and tensor mapping built here are llama-shaped, so \
+             reading them would produce a wrong model rather than a missing key."
+        );
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod architecture_gate_tests {
+    use super::{Value, require_llama_architecture};
+    use std::collections::HashMap;
+
+    fn declaring(arch: &str) -> HashMap<String, Value> {
+        let mut m = HashMap::new();
+        m.insert(
+            "general.architecture".to_string(),
+            Value::String(arch.to_string()),
+        );
+        m
+    }
+
+    /// The control: llama must pass, or this is a permanent refusal rather than
+    /// a gate.
+    #[test]
+    fn llama_is_accepted() {
+        assert!(require_llama_architecture(&declaring("llama")).is_ok());
+    }
+
+    /// ⚠️ The thirteen architectures the LOCAL corpus actually declares, so a
+    /// spec rename makes this stale visibly rather than leaving it passing
+    /// against invented names.
+    #[test]
+    fn every_non_llama_architecture_is_refused_by_name() {
+        for arch in [
+            "qwen2",
+            "phi3",
+            "falcon",
+            "command-r",
+            "starcoder2",
+            "gemma4",
+            "baichuan",
+            "refact",
+            "mpt",
+            "gptneox",
+            "gpt2",
+            "bert",
+            "nomic-bert-moe",
+        ] {
+            let err = require_llama_architecture(&declaring(arch))
+                .expect_err("a non-llama architecture must be refused")
+                .to_string();
+            assert!(
+                err.contains(arch),
+                "the refusal must NAME the declared architecture: {err}"
+            );
+            assert!(
+                !err.contains("Missing or invalid metadata key"),
+                "the refusal must not report a missing key -- the key is not missing, it is \
+                 under the {arch}. prefix, and the key-shaped message IS the defect: {err}"
+            );
+        }
+    }
+
+    /// An absent declaration is a fact about the FILE, and is reported as one
+    /// rather than as a missing hyperparameter.
+    #[test]
+    fn an_absent_declaration_says_so() {
+        let err = require_llama_architecture(&HashMap::new())
+            .expect_err("no architecture must be refused")
+            .to_string();
+        assert!(
+            err.contains("general.architecture"),
+            "the error must name the key that is genuinely absent: {err}"
+        );
     }
 }
 
