@@ -123,12 +123,18 @@ fn unaccounted_siblings(read: &BTreeSet<String>, present: &BTreeSet<String>) -> 
         if k.ends_with('.') {
             continue;
         }
+        // ⚠️ `reads_family` is LOOP-INVARIANT and used to sit inside the inner
+        // condition, re-evaluated per element and obscuring the rule. Reading
+        // `"K."` accounts for every sibling under K at once, so the whole scan
+        // is skippable — hoisting says that, rather than re-deciding it per `p`.
         let family = format!("{k}.");
-        let reads_family = read.contains(&family);
-        for p in present {
-            if p.starts_with(&family) && !read.contains(p) && !reads_family {
-                out.push(p.clone());
-            }
+        if !read.contains(&family) {
+            out.extend(
+                present
+                    .iter()
+                    .filter(|p| p.starts_with(&family) && !read.contains(*p))
+                    .cloned(),
+            );
         }
         // The plural-array form: `tokenizer.chat_templates` beside
         // `tokenizer.chat_template`. A different shape of the same hazard --
