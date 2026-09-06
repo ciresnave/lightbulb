@@ -248,6 +248,14 @@ fn no_key_lightbulb_reads_has_unaccounted_siblings() {
         std::env::var("LIGHTBULB_GGUF_CORPUS").unwrap_or_default()
     );
 
+    // ⚠️ NAME THE SUBJECT. A tool that prints only figures is
+    // indistinguishable from the same tool run against a different root, and
+    // every number below is quoted elsewhere without this line attached.
+    eprintln!(
+        "  SUBJECT: LIGHTBULB_GGUF_CORPUS={:?}  ({} .gguf files)",
+        std::env::var("LIGHTBULB_GGUF_CORPUS").unwrap_or_default(),
+        files.len()
+    );
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let read = keys_lightbulb_reads(&root);
     assert!(

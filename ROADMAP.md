@@ -3269,7 +3269,9 @@ curl http://localhost:8080/v1/completions \
 
 **Status**: PLANNED (research-grade capabilities building on M5 KV cache infrastructure)
 
-**Dependencies**: M5 KV cache compression (⚠️ **claimed COMPLETE, but `src/cache/kv_compression.rs:446` is a live `todo!()` — see VERIFIED STATUS**), segmented KV cache with tiered storage (COMPLETE), M4.B state persistence (COMPLETE)
+**Dependencies**: M5 KV cache compression (⚠️ **COMPLETE with one unimplemented granularity: `PerGroup` returns an `Err`, not a panic — see VERIFIED STATUS**), segmented KV cache with tiered storage (COMPLETE), M4.B state persistence (COMPLETE)
+
+> ⚠ **DISCHARGED 2026-09-06.** This dependency read *“claimed COMPLETE, but `src/cache/kv_compression.rs:446` is a live `todo!()`”* until today. **There is no live `todo!()` in `src/` at all** — both textual occurrences are comments, one of them explaining that the macro used to be there. The VERIFIED STATUS block this line points at already said so: *“Fixed 2026-09-02: it now returns an `Err`.”* **The stale claim cited the document that refutes it**, so a reader who followed the pointer got the truth and a reader who stopped here did not. The cited line number was also wrong — the arm is at ~447-453. `tests/roadmap_panic_claims.rs` now fails if ROADMAP asserts a live panic macro at a path that has none.
 
 **Origin**: Design session March-April 2026, consolidated from multi-session architecture exploration
 
