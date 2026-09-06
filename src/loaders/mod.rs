@@ -180,7 +180,7 @@ pub fn load_gguf_llama(
 
     // Build name mapper for architecture-agnostic tensor loading
     use crate::pruning::name_mapping::TensorNameMapper;
-    let tensor_names: Vec<String> = gguf_content.tensor_infos().keys().cloned().collect();
+    let tensor_names: Vec<String> = gguf_content.tensor_infos()?.keys().cloned().collect();
     let name_mapper = match TensorNameMapper::from_tensor_names(&tensor_names) {
         Ok(mapper) => {
             println!("🔍 Detected model architecture: {:?}", mapper.architecture);

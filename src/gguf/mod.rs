@@ -40,8 +40,78 @@ pub struct Content {
     /// Parsed GGUF header with metadata and tensor offsets
     header: GGUFHeader,
 
-    /// Candle's parsed content (for backward compatibility)
-    candle_content: candlelight::core::quantized::gguf_file::Content,
+    /// Candle's parsed content, ABSENT when candle refuses the file.
+    ///
+    /// ⚠️ Candle's `TensorInfo` embeds a `GgmlDType`, and `GgmlDType::from_u32`
+    /// (candle-core 0.10.2, `src/quantized/mod.rs:293`) rejects the whole IQ
+    /// codebook family — IQ4_NL (20), IQ3_S (21), IQ4_XS (23) among them. So a
+    /// checkpoint carrying one cannot be represented in candle's types AT ALL,
+    /// and this is `None` rather than a partially-filled value.
+    ///
+    /// It is needed only to LOAD TENSORS. Everything metadata-shaped is served
+    /// from `header`, which our own parser produced before this was attempted.
+    candle_content: Option<candlelight::core::quantized::gguf_file::Content>,
+
+    /// Why candle refused, when it did. Carried so the error names the real
+    /// cause at the point of use rather than "unavailable".
+    candle_refusal: Option<String>,
+
+    /// Our own parser's metadata, in candle's shape — populated ONLY when candle
+    /// refused the file, and empty otherwise.
+    ///
+    /// ⚠️ EMPTY IS THE COMMON CASE AND IT IS NOT A GAP. When candle parsed, the
+    /// map it already owns is returned directly and this stays empty. An earlier
+    /// version of this field held `c.metadata.clone()` so one field could serve
+    /// both paths — which cloned every model's metadata on load, and metadata
+    /// includes `tokenizer.ggml.tokens`: 32 000 heap `String`s on TinyLlama.
+    /// A convenience for the accessor, paid for on every load of every model.
+    ///
+    /// `reader_agreement_tests` proves the two sources agree on every corpus
+    /// file both readers can read.
+    fallback_metadata: HashMap<String, Value>,
+}
+
+/// Convert our own parser's metadata into candle's `Value` shape.
+///
+/// ⚠️ EXISTS BECAUSE CANDLE CANNOT ALWAYS PARSE A FILE WE CAN. Both enums are
+/// the GGUF spec's thirteen metadata types, so this is a relabelling and not an
+/// interpretation — every arm is total and there is no fallback.
+///
+/// ⚠️ THIS IS A SECOND IMPLEMENTATION OF A HEADER LAYOUT, WHICH IS THE THING
+/// THE AUGUST SPEC DECLINED TO BUILD: "a hand-rolled partial parser is a second
+/// implementation of the header layout -- the one nobody reviews."
+///
+/// The objection is real and it is answered by proof rather than by care:
+/// `tests/gguf_metadata_reader_agreement.rs` runs BOTH readers over the corpus
+/// and asserts key-for-key equality on every file candle can also read. A
+/// second implementation that is continuously shown to agree with the first is
+/// not the one nobody reviews; it is the one that reviews itself on every run.
+fn to_candle_value(v: &parser::MetadataValue) -> Value {
+    use parser::MetadataValue as M;
+    match v {
+        M::UInt8(x) => Value::U8(*x),
+        M::Int8(x) => Value::I8(*x),
+        M::UInt16(x) => Value::U16(*x),
+        M::Int16(x) => Value::I16(*x),
+        M::UInt32(x) => Value::U32(*x),
+        M::Int32(x) => Value::I32(*x),
+        M::Float32(x) => Value::F32(*x),
+        M::Bool(x) => Value::Bool(*x),
+        M::String(x) => Value::String(x.clone()),
+        M::Array(xs) => Value::Array(xs.iter().map(to_candle_value).collect()),
+        M::UInt64(x) => Value::U64(*x),
+        M::Int64(x) => Value::I64(*x),
+        M::Float64(x) => Value::F64(*x),
+    }
+}
+
+/// Our parser's metadata, in candle's shape.
+fn metadata_from_header(header: &GGUFHeader) -> HashMap<String, Value> {
+    header
+        .metadata
+        .iter()
+        .map(|(k, v)| (k.clone(), to_candle_value(v)))
+        .collect()
 }
 
 impl Content {
@@ -79,15 +149,43 @@ impl Content {
         let header = parser::parse_gguf(&mmap)
             .with_context(|| format!("Failed to parse GGUF header from: {}", path.display()))?;
 
-        // Also parse using Candle's API for backward compatibility
-        // (Can be removed once all code uses Lightning GGUF)
+        // ⚠️ CANDLE'S PARSE IS A SECOND, REDUNDANT READ OF THE SAME BYTES, AND
+        // ITS FAILURE USED TO SINK THE WHOLE CALL.
+        //
+        // `parser::parse_gguf` above already produced the metadata AND the
+        // tensor directory, and it stores `tensor_type` as a plain `u32`
+        // without consulting any dtype table. Candle's read then re-parsed the
+        // file and bailed on `GgmlDType::from_u32` for the IQ family.
+        //
+        // Measured 2026-09-06 on `C:\Models`: three SmolLM2 quantizations were
+        // reported `unreadable` for this reason alone, while carrying complete
+        // 49152-token vocabularies in the KV header -- which sits AHEAD of any
+        // tensor. `unreadable` was a property of THIS CALL and was read as a
+        // property of the FILE, understating the corpus in every census built
+        // on it.
+        //
+        // So a refusal here is recorded, not propagated. Metadata comes from
+        // our own parser; only tensor LOADING still requires candle, and a file
+        // it cannot type is a file whose tensors it could not have loaded.
         let mut file = File::open(path)?;
-        let candle_content = candlelight::core::quantized::gguf_file::Content::read(&mut file)?;
+        let (candle_content, candle_refusal) =
+            match candlelight::core::quantized::gguf_file::Content::read(&mut file) {
+                Ok(c) => (Some(c), None),
+                Err(e) => (None, Some(e.to_string())),
+            };
+
+        // Built only when candle refused. Nothing is copied on the common path.
+        let fallback_metadata = match &candle_content {
+            Some(_) => HashMap::new(),
+            None => metadata_from_header(&header),
+        };
 
         Ok(Self {
             mmap,
             header,
             candle_content,
+            candle_refusal,
+            fallback_metadata,
         })
     }
 
@@ -111,14 +209,33 @@ impl Content {
         self.header.tensor_data_offset
     }
 
-    /// Get metadata (Candle compatibility)
+    /// Get metadata (Candle-shaped, whichever parser produced it).
+    ///
+    /// Borrows candle's own map when candle parsed, so the common path copies
+    /// nothing; falls back to ours only for a file candle refused.
     pub fn metadata(&self) -> &HashMap<String, Value> {
-        &self.candle_content.metadata
+        match &self.candle_content {
+            Some(c) => &c.metadata,
+            None => &self.fallback_metadata,
+        }
     }
 
-    /// Get all tensor infos
-    pub fn tensor_infos(&self) -> &HashMap<String, TensorInfo> {
-        &self.candle_content.tensor_infos
+    /// Get all tensor infos.
+    ///
+    /// ⚠️ Errors when candle refused the file, rather than returning an empty
+    /// map. Candle's `TensorInfo` cannot represent an IQ-quantized tensor, so
+    /// "no tensors" and "tensors this type cannot describe" would be the same
+    /// value -- and the caller uses this to decide which weights to load.
+    pub fn tensor_infos(&self) -> Result<&HashMap<String, TensorInfo>> {
+        match &self.candle_content {
+            Some(c) => Ok(&c.tensor_infos),
+            None => bail!(
+                "this GGUF's tensor directory cannot be represented: {}. Metadata IS available: the tokenizer, architecture and hyperparameters all read normally; only tensor loading is refused. This is analysed in docs/superpowers/specs/2026-08-14-gguf-metadata-chat-template-design.md, under the heading naming `GgmlDType::from_u32` -- the IQ codebook family is rejected by candle AND by fuel, so it is not a missing table entry. Read that before re-deriving it.",
+                self.candle_refusal
+                    .as_deref()
+                    .unwrap_or("candle refused the file")
+            ),
+        }
     }
 
     /// Rebuild the checkpoint's own tokenizer from GGUF metadata.
@@ -894,8 +1011,16 @@ impl Content {
         name: &str,
         device: &candlelight::core::Device,
     ) -> candlelight::core::Result<candlelight::core::quantized::QTensor> {
-        // Delegate to Candle's proven tensor loading logic
-        self.candle_content.tensor(reader, name, device)
+        // Delegate to Candle's proven tensor loading logic.
+        match &self.candle_content {
+            Some(c) => c.tensor(reader, name, device),
+            None => Err(candlelight::core::Error::Msg(format!(
+                "cannot load tensor {name:?}: {}",
+                self.candle_refusal
+                    .as_deref()
+                    .unwrap_or("candle refused this file")
+            ))),
+        }
     }
 }
 
@@ -1222,6 +1347,266 @@ pub(crate) fn require_llama_architecture(metadata: &HashMap<String, Value>) -> R
         );
     }
     Ok(())
+}
+
+/// Proof that our metadata reader agrees with candle's, on every corpus file
+/// both can read.
+///
+/// ⚠️ THIS MODULE IS THE PRICE OF `metadata_from_header` EXISTING. The August
+/// design spec declined to write a second header reader, and its reason has not
+/// expired: *"a hand-rolled partial parser is a second implementation of the
+/// header layout -- the one nobody reviews."*
+///
+/// The premise that justified declining DID expire — it said "our checkpoints
+/// do not hit the case", and three corpus files now hit it — but the objection
+/// is separate from the premise and survives it. A second implementation is
+/// dangerous because it DIVERGES, and divergence is detectable on the OVERLAP:
+/// 27 of 30 corpus files are read by both. So the answer is proof, not care.
+#[cfg(test)]
+mod reader_agreement_tests {
+    use super::*;
+
+    /// Structural equality through derived `Debug`, because candle's `Value`
+    /// derives only `Debug, Clone` — there is no `PartialEq` to call.
+    ///
+    /// Debug is the right comparison rather than a weaker substitute: it is
+    /// derived, so it prints the variant and its payload, and two values with
+    /// the same Debug string are the same value. It also makes NaN compare
+    /// EQUAL to NaN, which `==` would not — and structural identity is what
+    /// this test is about, not IEEE semantics.
+    fn same(a: &Value, b: &Value) -> bool {
+        format!("{a:?}") == format!("{b:?}")
+    }
+
+    /// Every way two metadata maps can disagree, as reader-facing lines.
+    ///
+    /// ⚠️ BOTH DIRECTIONS ARE CHECKED ON PURPOSE. Comparing only over candle s
+    /// keys would pass a reader that INVENTS keys candle never saw; comparing
+    /// only over ours would pass a reader that silently DROPS them. The two
+    /// failure modes are opposite and neither sweep alone sees both.
+    fn disagreements(
+        name: &str,
+        ours: &HashMap<String, Value>,
+        candle: &HashMap<String, Value>,
+    ) -> Vec<String> {
+        let mut out = Vec::new();
+        for (k, cv) in candle {
+            match ours.get(k) {
+                None => out.push(format!("{name}: {k:?} MISSING from ours")),
+                Some(ov) if !same(ov, cv) => out.push(format!(
+                    "{name}: {k:?} differs\n     ours: {ov:?}\n   candle: {cv:?}"
+                )),
+                Some(_) => {}
+            }
+        }
+        for k in ours.keys() {
+            if !candle.contains_key(k) {
+                out.push(format!("{name}: {k:?} EXTRA in ours"));
+            }
+        }
+        out
+    }
+
+    fn corpus_files() -> Vec<std::path::PathBuf> {
+        let Some(root) = std::env::var_os("LIGHTBULB_GGUF_CORPUS") else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        let mut stack = vec![std::path::PathBuf::from(root)];
+        while let Some(dir) = stack.pop() {
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for e in entries.flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    stack.push(p);
+                } else if p.extension().is_some_and(|x| x == "gguf") {
+                    out.push(p);
+                }
+            }
+        }
+        out.sort();
+        out
+    }
+
+    /// What one pass over the corpus found.
+    struct Sweep {
+        compared: usize,
+        skipped: usize,
+        mismatches: Vec<String>,
+    }
+
+    /// Read every file with both parsers and collect where they disagree.
+    ///
+    /// `skipped` counts files only ONE reader could parse -- the three IQ
+    /// checkpoints candle refuses, and the one GGUF v1 file ours refuses. They
+    /// are the reason this code exists and they have no second opinion, so they
+    /// cannot be compared and must not be counted as agreement.
+    ///
+    /// ⚠️ THE COMPARED COUNT IS 26 OF 30 AND PLANNED WORK DOES NOT RAISE IT.
+    /// Letting candle serve the GGUF v1 file -- the next change to this area --
+    /// gives CANDLE a reading and leaves OURS with none, so the overlap is
+    /// unchanged. Stated because a figure that stays put for a non-obvious
+    /// reason reads as stale: the next reader sees v1 land, expects 27,
+    /// measures 26, and goes hunting a regression that is not there.
+    /// Only implementing v1 widths in OUR parser would move it.
+    fn sweep(files: &[std::path::PathBuf]) -> Sweep {
+        let mut out = Sweep {
+            compared: 0,
+            skipped: 0,
+            mismatches: Vec::new(),
+        };
+        for path in files {
+            let Ok(content) = Content::read(path) else {
+                out.skipped += 1;
+                continue;
+            };
+            let Some(candle) = content.candle_content.as_ref() else {
+                out.skipped += 1;
+                continue;
+            };
+            let ours = metadata_from_header(&content.header);
+            out.compared += 1;
+            let name = path.file_name().unwrap_or_default().to_string_lossy();
+            out.mismatches
+                .extend(disagreements(&name, &ours, &candle.metadata));
+        }
+        out
+    }
+
+    /// THE DIFFERENTIAL TEST. Both readers, every file both can read, key for key.
+    #[test]
+    #[ignore = "needs a local GGUF corpus; set LIGHTBULB_GGUF_CORPUS"]
+    fn our_metadata_agrees_with_candles_on_every_file_both_can_read() {
+        let files = corpus_files();
+        assert!(
+            !files.is_empty(),
+            "no .gguf files under LIGHTBULB_GGUF_CORPUS. An empty corpus makes this test pass while comparing nothing, which is indistinguishable from agreement."
+        );
+        eprintln!(
+            "  SUBJECT: LIGHTBULB_GGUF_CORPUS={:?}  ({} .gguf files)",
+            std::env::var("LIGHTBULB_GGUF_CORPUS").unwrap_or_default(),
+            files.len()
+        );
+
+        let Sweep {
+            compared,
+            skipped,
+            mismatches,
+        } = sweep(&files);
+
+        // ⚠️ POSITIVE CONTROL. Without it, a corpus where every file fails to
+        // open reports zero mismatches, and zero mismatches reads as agreement.
+        assert!(
+            compared >= 2,
+            "compared {compared} files (skipped {skipped}). This test proves nothing below two, and the overlap between the two readers is its whole purpose."
+        );
+        eprintln!(
+            "  compared {compared} files, skipped {skipped}, mismatches {}",
+            mismatches.len()
+        );
+        assert!(
+            mismatches.is_empty(),
+            "the two metadata readers DISAGREE on {} entries:\n  {}",
+            mismatches.len(),
+            mismatches.join("\n  ")
+        );
+    }
+
+    /// ⚠️ BORN-RED ARM. Without this the agreement above is unfalsifiable: a
+    /// comparator returning `true` for everything produces the same passing
+    /// output as a correct one.
+    #[test]
+    fn the_comparator_detects_a_single_altered_field() {
+        let a = Value::U32(4096);
+        assert!(
+            same(&a, &Value::U32(4096)),
+            "identical values must compare equal"
+        );
+        assert!(
+            !same(&a, &Value::U32(4097)),
+            "one changed digit must be detected"
+        );
+        assert!(
+            !same(&a, &Value::U64(4096)),
+            "same number, different WIDTH must be detected"
+        );
+        assert!(
+            !same(
+                &Value::String("llama".into()),
+                &Value::String("llama ".into())
+            ),
+            "a trailing space must be detected"
+        );
+        assert!(
+            !same(
+                &Value::Array(vec![Value::U32(1), Value::U32(2)]),
+                &Value::Array(vec![Value::U32(1), Value::U32(3)])
+            ),
+            "a difference INSIDE an array must be detected -- vocabularies are arrays"
+        );
+    }
+
+    /// The refusal message's citation still resolves.
+    ///
+    /// ⚠️ A REFERENCE FROM CODE INTO A DOC ROTS SILENTLY. `tensor_infos()` tells
+    /// the reader where the IQ-dtype analysis lives, so that a refusal points at
+    /// its own recorded decision instead of sending them to re-derive it — which
+    /// is what happened on 2026-09-06, when that spec already held every answer
+    /// and nothing pointed at it from the symptom.
+    ///
+    /// The citation names a HEADING rather than a line number on purpose: PR #71
+    /// existed because four line references in a shipped rustdoc had drifted by
+    /// exactly twenty.
+    #[test]
+    fn the_refusal_citation_resolves() {
+        let spec = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("docs/superpowers/specs/2026-08-14-gguf-metadata-chat-template-design.md");
+        let text = std::fs::read_to_string(&spec).unwrap_or_else(|e| {
+            panic!(
+                "the refusal message cites {}, which cannot be read: {e}",
+                spec.display()
+            )
+        });
+        assert!(
+            text.contains("GgmlDType::from_u32"),
+            "the refusal cites this spec for the heading naming `GgmlDType::from_u32`, and that anchor is no longer in the file. Either restore it or change the citation; a refusal pointing at nothing is worse than one pointing nowhere."
+        );
+    }
+
+    /// The conversion is total: every one of the GGUF spec's thirteen metadata
+    /// types converts into candle's shape with its value intact.
+    #[test]
+    fn every_metadata_type_converts_with_its_value_intact() {
+        use parser::MetadataValue as M;
+        let cases: Vec<(M, Value)> = vec![
+            (M::UInt8(7), Value::U8(7)),
+            (M::Int8(-7), Value::I8(-7)),
+            (M::UInt16(700), Value::U16(700)),
+            (M::Int16(-700), Value::I16(-700)),
+            (M::UInt32(70000), Value::U32(70000)),
+            (M::Int32(-70000), Value::I32(-70000)),
+            (M::Float32(1.5), Value::F32(1.5)),
+            (M::Bool(true), Value::Bool(true)),
+            (M::String("llama".into()), Value::String("llama".into())),
+            (M::UInt64(1 << 40), Value::U64(1 << 40)),
+            (M::Int64(-(1 << 40)), Value::I64(-(1 << 40))),
+            (M::Float64(2.5), Value::F64(2.5)),
+            (
+                M::Array(vec![M::UInt32(1), M::String("x".into())]),
+                Value::Array(vec![Value::U32(1), Value::String("x".into())]),
+            ),
+        ];
+        assert_eq!(cases.len(), 13, "the GGUF spec has thirteen metadata types");
+        for (ours, expected) in &cases {
+            let got = to_candle_value(ours);
+            assert!(
+                same(&got, expected),
+                "converting {ours:?} produced {got:?}, expected {expected:?}"
+            );
+        }
+    }
 }
 
 #[cfg(test)]

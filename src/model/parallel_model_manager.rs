@@ -399,7 +399,7 @@ impl ParallelModelManager {
 
         // Build name mapper for architecture-agnostic tensor loading
         use crate::pruning::name_mapping::TensorNameMapper;
-        let tensor_names: Vec<String> = content.tensor_infos().keys().cloned().collect();
+        let tensor_names: Vec<String> = content.tensor_infos()?.keys().cloned().collect();
         let name_mapper = TensorNameMapper::from_tensor_names(&tensor_names)
             .context("Failed to build tensor name mapper")?;
 
