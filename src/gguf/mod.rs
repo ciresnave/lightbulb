@@ -1414,6 +1414,29 @@ mod architecture_gate_tests {
     /// while the refusal stands, and it is silently blind until the day the
     /// refusal is lifted — when it would fire for the wrong reason.
     fn src_mentions(needles: &[&str]) -> bool {
+        // ⚠️ A COMMENT MENTIONING THE CODE IS NOT A READ, AND TREATING IT AS
+        // ONE SILENTLY DISARMS THIS GUARD. Measured 2026-09-06 against the
+        // merged version: with the architecture refusal LIFTED and the geometry
+        // keys still UNREAD, a single line
+        //
+        //     // DISCHARGED: this used to call metadata.get("...dimension_count")
+        //
+        // made this test PASS. The failure direction is the dangerous one — the
+        // detector goes quiet rather than loud, and a DISCHARGED note quoting
+        // retired code is exactly the thing this repo writes on purpose.
+        //
+        // So a line whose first non-whitespace is `//` (covering `//`, `///` and
+        // `//!`) cannot count as a read. That also skips a literal sharing a line
+        // with a trailing comment — UNDER-counting reads, which makes the guard
+        // fire when it might not need to. That is the safe direction: a false
+        // alarm is read; a false silence is not.
+        //
+        // Found by the Claim Auditor's polarity-blindness finding on their own
+        // citation-anchored predicate, applied here rather than taken on trust.
+        let is_reading_line = |line: &str| {
+            let t = line.trim_start();
+            !t.starts_with("//") && needles.iter().any(|n| line.contains(n))
+        };
         let mut stack = vec![std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src")];
         while let Some(dir) = stack.pop() {
             let Ok(entries) = std::fs::read_dir(&dir) else {
@@ -1425,7 +1448,7 @@ mod architecture_gate_tests {
                     stack.push(path);
                 } else if path.extension().is_some_and(|x| x == "rs")
                     && let Ok(text) = std::fs::read_to_string(&path)
-                    && needles.iter().any(|n| text.contains(n))
+                    && text.lines().any(is_reading_line)
                 {
                     return true;
                 }
