@@ -46,6 +46,10 @@ fn corpus_file(name: &str) -> Option<PathBuf> {
             if p.is_dir() {
                 stack.push(p);
             } else if p.file_name().is_some_and(|f| f == name) {
+                // ⚠️ NAME THE SUBJECT: which file on disk the verdict below is about.
+                eprintln!("  SUBJECT: {}", p.display());
+                return Some(p);
+            } else if p.file_name().is_some_and(|f| f == name) {
                 return Some(p);
             }
         }

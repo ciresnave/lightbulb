@@ -390,6 +390,9 @@ fn emit_metadata_dump() {
         .expect("set LIGHTBULB_GGUF_CORPUS to the corpus directory");
     let out = std::env::var("LIGHTBULB_METADATA_DUMP")
         .expect("set LIGHTBULB_METADATA_DUMP to the output path");
+    // ⚠️ NAME THE SUBJECT. Figures alone are identical whichever root
+    // produced them, and these get quoted far from this run.
+    eprintln!("  SUBJECT: LIGHTBULB_GGUF_CORPUS={root:?}");
     let dump = build_dump(Path::new(&root));
 
     let n = dump["files"].as_array().map(Vec::len).unwrap_or(0);
@@ -561,6 +564,9 @@ fn a_partial_join_is_reported_row_by_row_not_silently_dropped() {
 fn two_runs_over_one_corpus_are_byte_identical() {
     let root = std::env::var("LIGHTBULB_GGUF_CORPUS")
         .expect("set LIGHTBULB_GGUF_CORPUS to the corpus directory");
+    // ⚠️ NAME THE SUBJECT. Figures alone are identical whichever root
+    // produced them, and these get quoted far from this run.
+    eprintln!("  SUBJECT: LIGHTBULB_GGUF_CORPUS={root:?}");
     let root = Path::new(&root);
 
     let a = serde_json::to_string(&build_dump(root)).expect("serialising run A");
