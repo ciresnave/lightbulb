@@ -1016,6 +1016,95 @@ mod post_processor_spec_tests {
 /// checkpoint, and the corpus does not have one — every file it holds with
 /// tensors declares `llama`.
 ///
+/// # ⚠️ TWO ATTENTION-GEOMETRY KEYS GO UNREAD, AND THIS REFUSAL IS WHY THAT IS SAFE
+///
+/// Whoever lifts this refusal must read them, because nothing else will notice.
+/// Measured 2026-09-06 over the local corpus; re-derivable by walking the KV
+/// headers for `<arch>.rope.dimension_count` and `<arch>.attention.key_length`.
+///
+/// **`<arch>.rope.dimension_count`** — declared by 20 files, read at zero sites.
+/// RoPE is applied to this many dimensions, which is **not always the whole
+/// head**:
+///
+/// ```text
+/// gptneox   head_dim 96, dimension_count 24   = 0.25x  <- PARTIAL RoPE
+/// every other file                            = head_dim exactly
+/// ```
+///
+/// A reader assuming the full head rotates 96 dimensions where the checkpoint
+/// says 24. That produces **wrong numbers, not an error** — the classic silent
+/// case, and the same family as the `f16`/`bf16` swap `parse_dtype` guards.
+///
+/// **`<arch>.attention.key_length`** — declared by gemma4 and read at zero sites.
+/// It gives head_dim **directly**, and where it is present `embedding_length /
+/// head_count` is the wrong formula:
+///
+/// ```text
+/// gemma4   key_length 512, but 2816 / 16 = 176   <- a 2.9x error, silently
+/// ```
+///
+/// (That one caught me while measuring this: my first pass reported gemma4 as a
+/// second partial-RoPE case. It is not — my *formula* was wrong, not the file.)
+///
+/// **Why this is currently harmless, stated as a scope rather than a reassurance:
+/// 16 llama files declare these keys and ZERO have a `key_length` or a
+/// `dimension_count` that differs from `embedding_length / head_count`.** So the
+/// assumption is exactly right for every architecture this loader accepts —
+/// *because* it accepts only `llama`.
+///
+/// ⚠️ **The hazard is that widening support looks like a prefix change.** Someone
+/// replacing `llama.` with the declared architecture gets a config that loads and
+/// a model that is quietly wrong on any gptneox-family checkpoint. The prefix is
+/// the visible half; these two keys are not.
+///
+/// ## ⚠️ And the fix is not one line: FIVE production sites
+///
+/// `head_dim = hidden_size / num_heads` is computed independently at five
+/// production sites, including `parallel_model_manager.rs:424` on the live
+/// serving path:
+///
+/// ```text
+/// PRODUCTION
+///   model/awq_qwen3.rs:207                  fn new
+///   model/custom_attention.rs:207           fn new
+///   model/custom_attention.rs:274           fn from_gguf
+///   model/custom_transformer.rs:391         fn from_gguf  (positional)
+///   model/parallel_model_manager.rs:424     fn load_gguf  <- the live loader
+///
+/// UNDER #[cfg(test)] -- fixture arithmetic, not a checkpoint read
+///   model/custom_attention.rs:1134          test_attention_dimensions
+///   model/custom_transformer_block.rs:442   test_batched_transformer_block_shapes
+///   model/custom_transformer_block.rs:510   ..._single_token
+///   model/custom_transformer_block.rs:594   ..._dimension_validation
+/// ```
+///
+/// ⚠️ **AN EARLIER VERSION OF THIS BLOCK SAID "NINE LIVE SITES" AND COUNTED THE
+/// FOUR TEST FUNCTIONS AMONG THEM.** The grep that produced it excluded comments
+/// and nothing else, so "live" was a word in the sentence rather than a measured
+/// property — and it was the load-bearing word, since the whole point is how much
+/// production code a fix has to reach. Corrected by resolving each line to its
+/// enclosing `fn` and checking for a `#[cfg(test)]` above it.
+///
+/// **So this is not "read `key_length` instead of dividing" at one accessor.**
+/// MLMF hit the same defect in their `config.rs` and theirs is a single
+/// `head_dim()` method; ours is five, and a fix that misses one is silent
+/// everywhere that site is used.
+///
+/// ## ⚠️ AND A SINGLE `head_dim` IS THE WRONG SHAPE FOR SOME ARCHITECTURES
+///
+/// gemma4 declares **two** attention geometries in one checkpoint — full layers
+/// and sliding-window layers, with different dimensions:
+///
+/// ```text
+/// gemma4.attention.key_length       512    gemma4.rope.dimension_count      512
+/// gemma4.attention.key_length_swa   256    gemma4.rope.dimension_count_swa  256
+/// ```
+///
+/// **A reader holding one `head_dim` cannot represent that model however it
+/// derives the value** — not by division, and not by reading `key_length`
+/// either. The shape is wrong, not just the arithmetic. Recorded because
+/// "read the declared key" is the obvious remedy and it is insufficient here.
+///
 /// # One implementation because there are two callers
 ///
 /// `loaders::load_gguf_llama` and
@@ -1111,6 +1200,87 @@ mod architecture_gate_tests {
         assert!(
             err.contains("general.architecture"),
             "the error must name the key that is genuinely absent: {err}"
+        );
+    }
+
+    /// ⚠️ A DETECTOR FOR A DEFERRAL, WHICH REDDENS WHEN THE DEFERRAL GOES LIVE
+    /// AND NAMES ITS OWN REMOVAL.
+    ///
+    /// `require_llama_architecture`'s doc records that
+    /// `<arch>.rope.dimension_count` and `<arch>.attention.key_length` are read
+    /// nowhere, and that this is safe **only** because every architecture where
+    /// they differ is refused. **That safety is a CONJUNCTION, and a doc comment
+    /// cannot enforce a conjunction** — a reader who lifts the refusal has no
+    /// reason to open this file.
+    ///
+    /// So this asserts the conjunction directly:
+    ///
+    /// ```text
+    /// EITHER we still refuse non-llama
+    /// OR     src/ reads the geometry keys
+    /// ```
+    ///
+    /// It is DORMANT while the refusal stands, and fires the moment someone
+    /// widens architecture support without also reading the geometry — which is
+    /// exactly the change that would otherwise produce silently wrong numbers on
+    /// a gptneox-family checkpoint.
+    ///
+    /// **To remove this test:** read the geometry keys at all FIVE production
+    /// `hidden_size / num_heads` sites (the other four are under `#[cfg(test)]`
+    /// and compute fixture arithmetic), and note that gemma4 needs more than one
+    /// head_dim because it declares separate sliding-window geometry. Then delete
+    /// this test. It has no other purpose.
+    /// Walk `src/` and report whether any Rust file contains one of `needles`.
+    ///
+    /// ⚠️ SEPARATED FROM THE DECISION so the decision is one line, and given a
+    /// POSITIVE CONTROL at its call site — because a scan that finds nothing and
+    /// a scan that never ran are indistinguishable. If `CARGO_MANIFEST_DIR` were
+    /// wrong or `src/` unreadable, this returns `false`, the detector passes
+    /// while the refusal stands, and it is silently blind until the day the
+    /// refusal is lifted — when it would fire for the wrong reason.
+    fn src_mentions(needles: &[&str]) -> bool {
+        let mut stack = vec![std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src")];
+        while let Some(dir) = stack.pop() {
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for e in entries.flatten() {
+                let path = e.path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else if path.extension().is_some_and(|x| x == "rs")
+                    && let Ok(text) = std::fs::read_to_string(&path)
+                    && needles.iter().any(|n| text.contains(n))
+                {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    #[test]
+    fn the_head_dim_assumption_is_still_guarded_by_the_refusal() {
+        // ⚠️ POSITIVE CONTROL FIRST. `general.architecture` is demonstrably read
+        // by `require_llama_architecture` a few hundred lines above, so a scan
+        // that cannot find it is broken rather than reporting an absence.
+        assert!(
+            src_mentions(&["general.architecture\")"]),
+            "the source scan found no literal for a key this crate demonstrably reads, so              the scan itself is broken. Without this control a broken scan reports              \"geometry keys unread\" forever, which is indistinguishable from the truth              while the refusal stands."
+        );
+
+        let refuses_non_llama = require_llama_architecture(&declaring("gptneox")).is_err();
+        let reads_geometry = src_mentions(&["rope.dimension_count\")", "attention.key_length\")"]);
+
+        assert!(
+            refuses_non_llama || reads_geometry,
+            "THE ARCHITECTURE REFUSAL HAS BEEN LIFTED AND THE GEOMETRY KEYS ARE STILL              UNREAD.
+
+             `<arch>.rope.dimension_count` says how many dimensions RoPE covers and it              is NOT always the whole head: gptneox declares 24 against a head_dim of 96.              `<arch>.attention.key_length` gives head_dim directly, and where present              `embedding_length / head_count` is the wrong formula (gemma4: 512 declared,              176 computed).
+
+             Deferring these was safe only while every architecture that differs was              refused. That is no longer true, so a gptneox-family checkpoint now loads              and produces WRONG NUMBERS RATHER THAN AN ERROR.
+
+             See `require_llama_architecture`: five production sites compute head_dim by division,              and gemma4 needs more than one head_dim because it declares separate              sliding-window geometry."
         );
     }
 }
