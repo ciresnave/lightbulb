@@ -59,6 +59,28 @@ fn live_macro_lines(src: &str, macro_name: &str) -> Vec<usize> {
 /// Keyed on the present-tense assertion `is a live` / `are live`, never on the
 /// macro alone — ROADMAP legitimately discusses removed macros in the past tense,
 /// and flagging those would push people to delete the history that explains them.
+/// Backticked `path.rs` / `path.rs:NNN` tokens in one line, as repo-relative paths.
+///
+/// Split out of `present_tense_claims` so the two concerns — *is this sentence a
+/// present-tense claim* and *which file does it name* — are separately testable.
+/// Codacy flagged the merged version at cyclomatic complexity 10; enumerating the
+/// branches showed the path scan really was a second job living inside the first,
+/// so this is a split rather than a number-appeasement.
+fn backticked_rs_paths(line: &str) -> Vec<String> {
+    line.split('`')
+        .filter_map(|tok| {
+            let c = tok.split(':').next().unwrap_or(tok).trim();
+            (c.ends_with(".rs") && c.contains('/')).then(|| c.to_string())
+        })
+        .collect()
+}
+
+/// Does this lowercased line assert a live `mac!` in the present tense?
+fn asserts_live(lower: &str, mac: &str) -> bool {
+    (lower.contains("is a live") || lower.contains("are live"))
+        && lower.contains(&format!("{mac}!"))
+}
+
 fn present_tense_claims(roadmap: &str) -> Vec<(usize, String, String)> {
     let mut out = Vec::new();
     for (i, line) in roadmap.lines().enumerate() {
@@ -71,19 +93,12 @@ fn present_tense_claims(roadmap: &str) -> Vec<(usize, String, String)> {
             continue;
         }
         let lower = line.to_ascii_lowercase();
-        if !(lower.contains("is a live") || lower.contains("are live")) {
-            continue;
-        }
         for mac in ["todo", "unimplemented", "unreachable"] {
-            if !lower.contains(&format!("{mac}!")) {
+            if !asserts_live(&lower, mac) {
                 continue;
             }
-            // Backticked `path.rs` or `path.rs:NNN` in the same sentence.
-            for tok in line.split('`') {
-                let candidate = tok.split(':').next().unwrap_or(tok).trim();
-                if candidate.ends_with(".rs") && candidate.contains('/') {
-                    out.push((i + 1, candidate.to_string(), mac.to_string()));
-                }
+            for path in backticked_rs_paths(line) {
+                out.push((i + 1, path, mac.to_string()));
             }
         }
     }
@@ -174,6 +189,22 @@ fn past_tense_is_not_flagged_and_comments_are_not_live() {
     assert!(
         present_tense_claims(discharged).is_empty(),
         "a quoted retraction was counted as the document's own claim"
+    );
+
+    // The two split-out halves, now separately testable — the point of the split.
+    assert_eq!(
+        backticked_rs_paths("see `src/a/b.rs:446` and `src/c.rs`"),
+        vec!["src/a/b.rs", "src/c.rs"]
+    );
+    assert!(
+        backticked_rs_paths("no backticked path here, and `notapath` either").is_empty(),
+        "a non-path backtick was read as a file"
+    );
+    assert!(asserts_live("x is a live `todo!()`", "todo"));
+    assert!(!asserts_live("x was a live `todo!()`", "todo"));
+    assert!(
+        !asserts_live("x is a live `todo!()`", "unimplemented"),
+        "a claim about one macro was attributed to another"
     );
 
     // The distinction the whole check rests on.
