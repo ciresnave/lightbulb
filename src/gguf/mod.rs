@@ -1187,6 +1187,71 @@ mod architecture_gate_tests {
             "the error must name the key that is genuinely absent: {err}"
         );
     }
+
+    /// ⚠️ A DETECTOR FOR A DEFERRAL, WHICH REDDENS WHEN THE DEFERRAL GOES LIVE
+    /// AND NAMES ITS OWN REMOVAL.
+    ///
+    /// `require_llama_architecture`'s doc records that
+    /// `<arch>.rope.dimension_count` and `<arch>.attention.key_length` are read
+    /// nowhere, and that this is safe **only** because every architecture where
+    /// they differ is refused. **That safety is a CONJUNCTION, and a doc comment
+    /// cannot enforce a conjunction** — a reader who lifts the refusal has no
+    /// reason to open this file.
+    ///
+    /// So this asserts the conjunction directly:
+    ///
+    /// ```text
+    /// EITHER we still refuse non-llama
+    /// OR     src/ reads the geometry keys
+    /// ```
+    ///
+    /// It is DORMANT while the refusal stands, and fires the moment someone
+    /// widens architecture support without also reading the geometry — which is
+    /// exactly the change that would otherwise produce silently wrong numbers on
+    /// a gptneox-family checkpoint.
+    ///
+    /// **To remove this test:** read the geometry keys (at all nine
+    /// `hidden_size / num_heads` sites, and note gemma4 needs more than one
+    /// head_dim), then delete it. It has no other purpose.
+    #[test]
+    fn the_head_dim_assumption_is_still_guarded_by_the_refusal() {
+        let refuses_non_llama = require_llama_architecture(&declaring("gptneox")).is_err();
+
+        // A source ENUMERATION, not a lookup for a name we expect: walk src/ and
+        // ask what it mentions. Prose does not count -- this very file discusses
+        // both keys, so only a real string literal is a read.
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut reads_geometry = false;
+        let mut stack = vec![root];
+        while let Some(p) = stack.pop() {
+            let Ok(entries) = std::fs::read_dir(&p) else {
+                continue;
+            };
+            for e in entries.flatten() {
+                let path = e.path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else if path.extension().is_some_and(|x| x == "rs")
+                    && let Ok(text) = std::fs::read_to_string(&path)
+                    && (text.contains("rope.dimension_count\")")
+                        || text.contains("attention.key_length\")"))
+                {
+                    reads_geometry = true;
+                }
+            }
+        }
+
+        assert!(
+            refuses_non_llama || reads_geometry,
+            "THE ARCHITECTURE REFUSAL HAS BEEN LIFTED AND THE GEOMETRY KEYS ARE STILL              UNREAD.
+
+             `<arch>.rope.dimension_count` says how many dimensions RoPE covers and it              is NOT always the whole head: gptneox declares 24 against a head_dim of 96.              `<arch>.attention.key_length` gives head_dim directly, and where present              `embedding_length / head_count` is the wrong formula (gemma4: 512 declared,              176 computed).
+
+             Deferring these was safe only while every architecture that differs was              refused. That is no longer true, so a gptneox-family checkpoint now loads              and produces WRONG NUMBERS RATHER THAN AN ERROR.
+
+             See `require_llama_architecture`: nine sites compute head_dim by division,              and gemma4 needs more than one head_dim because it declares separate              sliding-window geometry."
+        );
+    }
 }
 
 #[cfg(test)]
