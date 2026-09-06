@@ -393,10 +393,15 @@ impl Content {
     ///
     /// ⚠️ **THE SECOND SHAPE IS NO LONGER UNIVERSALLY REFUSED, AND THE OLD TEXT
     /// HERE STATED A REQUIREMENT THAT IS NOT ONE.** It said rebuilding needed
-    /// "SPM's scored bigram-merge algorithm". It needs the token list. **A merge
-    /// is a split into two vocabulary tokens, so the merge SET is a function of
-    /// the vocabulary** — see `derive_merges`, which reads no scores and
-    /// reproduces a real 61249-entry list exactly.
+    /// "SPM's scored bigram-merge algorithm". It needs the token list: for
+    /// **llama.cpp's SentencePiece export specifically**, enumerating every
+    /// split of a token into two vocabulary tokens reproduces the declared
+    /// 61249-entry list exactly, reading no scores at all.
+    ///
+    /// ⚠️ **That is a property of THAT EXPORT FORMAT, not of vocabularies.** On
+    /// byte-level BPE the same enumeration is ~2.2x too large — a learned merge
+    /// list is a trained SEQUENCE, and most splits were never merges. Measured
+    /// over six vocabularies in `derive_merges`, where the numbers are.
     ///
     /// What is still unknown is the ORDER, which BPE is sensitive to. Token-id
     /// order is empirically sufficient on the one vocabulary with an oracle and
@@ -492,7 +497,7 @@ impl Content {
                     Self::derive_merges(&tokens)
                 } else {
                     bail!(
-                        "GGUF has no tokenizer.ggml.merges, and this vocabulary's derived merges have not been checked against an oracle. The merge SET is derivable from the token list alone -- a merge is a split into two vocab tokens, and for the 32000-token Llama vocabulary the derived list is SET-IDENTICAL to a real one (61249, 0 extra, 0 missing). But BPE is ORDER-sensitive and token-id order is only EMPIRICALLY sufficient: it was verified on that one vocabulary and nothing shows it generalises. To retire this refusal, find a checkpoint with this same token list (sha256 {digest}) that DOES declare merges, compare the derived list to it, and add the digest to `spm_derivation_warrant`. Building a Unigram from tokenizer.ggml.scores instead was measured and does NOT reproduce the segmentation (29 ids against the reference's 22: `capital` came out as c+ap+it+al), so that is not the way round it."
+                        "GGUF has no tokenizer.ggml.merges, and this vocabulary's derived merges have not been checked against an oracle. Merges CAN sometimes be recovered from the token list alone by enumerating every split into two vocabulary tokens: for the 32000-token Llama vocabulary that reproduces a real list exactly (61249, 0 extra, 0 missing). It is not a general property -- measured over six vocabularies, the enumeration never MISSES a declared merge but on byte-level BPE it is ~2.2x too large, so it is exact only for llama.cpp's SentencePiece export. And BPE is ORDER-sensitive, where token-id order is only EMPIRICALLY sufficient on that one vocabulary. To retire this refusal, find a checkpoint with this same token list (sha256 {digest}) that DOES declare merges, compare the derived list to it, and add the digest to `spm_derivation_warrant`. Building a Unigram from tokenizer.ggml.scores instead was measured and does NOT reproduce the segmentation (29 ids against the reference's 22: `capital` came out as c+ap+it+al), so that is not the way round it."
                     );
                 }
             }
@@ -849,22 +854,42 @@ impl Content {
 
     /// Every split of every vocab token into two vocab tokens, in token-id order.
     ///
-    /// # A merge is a split, so the merge SET is a function of the vocabulary
+    /// # It yields a SUPERSET of the declared merges, exact only for llama.cpp's SPM
     ///
-    /// This reads **no scores at all**. Measured 2026-09-06 against
-    /// `tinyllama-1.1b-chat-v1.0.Q4_0.gguf`, which carries the real list:
+    /// This reads **no scores at all**. Measured 2026-09-06 across every corpus
+    /// vocabulary that declares a merge list, so the claim ranges over more than
+    /// the one file this is used on:
     ///
     /// ```text
-    /// derived     61249 merges
-    /// declared    61249 merges
-    /// set equality  TRUE      0 derived-only, 0 declared-only
+    /// file                          tokens  declared   derived  extra  MISSED
+    /// tinyllama Q4_0    (llama/SPM)  32000     61249     61249      0       0
+    /// SmolLM2 Q4_0      (gpt2)       49152     48900    107441  58541       0
+    /// ggml-vocab-gpt-neox (gpt2)     50432     50009    117101  67092       0
+    /// ggml-vocab-qwen2    (gpt2)    151936    151387    294166 142779       0
+    /// ggml-vocab-starcoder(gpt2)     49152     48872    107610  58738       0
+    /// ggml-vocab-falcon   (gpt2)     65024     64784    146829  82045       0
     /// ```
     ///
-    /// The 61249 exceeds the 32000 vocabulary because a token can be split more
-    /// than one way and llama.cpp's converter emits every valid split: the list
-    /// produces only 29612 DISTINCT tokens.
+    /// ⚠️ **AN EARLIER VERSION OF THIS COMMENT SAID "a merge IS a split, so the
+    /// merge SET is a function of the vocabulary". THAT IS FALSE IN GENERAL** and
+    /// the table is why: on byte-level BPE the derivation is roughly 2.2x too
+    /// large. A learned BPE merge list is a SEQUENCE that was trained; many
+    /// splits into two vocab tokens were never merges. The structural-sounding
+    /// argument happened to hold for **one export format** and was stated as a
+    /// property of vocabularies.
     ///
-    /// ## ⚠️ The ORDER is not the SET, and this is the part that is empirical
+    /// **What DOES hold across all six: the derivation never MISSES a declared
+    /// merge — the `MISSED` column is 0 everywhere.** It over-generates, and it
+    /// over-generates by nothing at all only for llama.cpp's SentencePiece
+    /// export, which emits every valid split (hence 61249 for a 32000-token
+    /// vocabulary, yielding only 29612 distinct products).
+    ///
+    /// ⚠️ So `spm_derivation_warrant` is NECESSARY, not merely prudent. The SPM
+    /// path is already gated on `general.architecture`-style model kind, so a
+    /// byte-level vocabulary cannot reach this function today — but the reason
+    /// it must not is measured above rather than assumed.
+    ///
+    /// ## ⚠️ And the ORDER is not the SET either
     ///
     /// BPE merge priority is order-sensitive, so a correct set in the wrong
     /// order is still a wrong tokenizer. Token-id order is not exactly the
@@ -874,8 +899,7 @@ impl Content {
     ///
     /// **It nonetheless produces identical tokenization on every input tried.**
     /// That is a measurement, not a proof: order-sensitivity did not bite on
-    /// this vocabulary and nothing here shows it cannot on another. Which is
-    /// why `spm_derivation_warrant` is an allowlist rather than a rule.
+    /// this vocabulary and nothing here shows it cannot on another.
     fn derive_merges(tokens: &[String]) -> Vec<(String, String)> {
         let index: std::collections::HashSet<&str> = tokens.iter().map(|s| s.as_str()).collect();
         let mut out = Vec::new();
@@ -2271,6 +2295,68 @@ mod spm_derivation_tests {
             r.difference(&d).count()
         );
         assert_eq!(d, r, "the derived merge SET differs from the declared one");
+    }
+
+    /// ⚠️ WHY THE ALLOWLIST IS NECESSARY AND NOT MERELY PRUDENT.
+    ///
+    /// The derivation is exact for llama.cpp's SentencePiece export and is a
+    /// strict SUPERSET everywhere else. An earlier version of this work called
+    /// that a structural property of vocabularies; it is a property of one
+    /// export format, and this test is what makes the difference falsifiable
+    /// rather than a sentence in a comment.
+    ///
+    /// It never MISSES a declared merge — that half does hold across every
+    /// vocabulary measured — so the assertions below pin BOTH directions.
+    #[test]
+    #[ignore = "needs a local GGUF corpus; set LIGHTBULB_GGUF_CORPUS"]
+    fn the_derivation_over_generates_on_byte_level_bpe() {
+        let mut checked = 0usize;
+        for name in [
+            "SmolLM2-135M-Instruct-Q4_0.gguf",
+            "ggml-vocab-qwen2.gguf",
+            "ggml-vocab-starcoder.gguf",
+        ] {
+            let Some(path) = corpus_file(name) else {
+                continue;
+            };
+            let c = Content::read(&path).expect("read");
+            let VocabAndMerges { tokens, merges, .. } =
+                c.vocab_and_optional_merges().expect("vocab");
+            let Some(declared) = merges else {
+                panic!("{name} is a byte-level BPE file and must declare merges")
+            };
+            let derived: std::collections::HashSet<_> =
+                Content::derive_merges(&tokens).into_iter().collect();
+            let declared: std::collections::HashSet<_> = declared.into_iter().collect();
+
+            let missed = declared.difference(&derived).count();
+            let extra = derived.difference(&declared).count();
+            eprintln!(
+                "  {name:<38} declared {:>6}  derived {:>6}  extra {:>6}  MISSED {missed}",
+                declared.len(),
+                derived.len(),
+                extra
+            );
+
+            // The half that HOLDS everywhere.
+            assert_eq!(
+                missed, 0,
+                "{name}: the derivation missed a declared merge, which it has never done"
+            );
+            // The half that does NOT, and is the reason for the allowlist.
+            assert!(
+                extra > declared.len() / 2,
+                "{name}: the derivation is no longer substantially over-generating on byte-level BPE ({extra} extra against {} declared). If that is a real change, the allowlist's justification needs re-deriving, not updating.",
+                declared.len()
+            );
+            checked += 1;
+        }
+        // ⚠️ POSITIVE CONTROL: without it a corpus missing all three files
+        // passes while asserting nothing.
+        assert!(
+            checked >= 2,
+            "checked {checked} byte-level vocabularies; below two this test proves nothing"
+        );
     }
 
     /// The digest the allowlist names is the one this vocabulary actually has.
