@@ -1016,6 +1016,47 @@ mod post_processor_spec_tests {
 /// checkpoint, and the corpus does not have one — every file it holds with
 /// tensors declares `llama`.
 ///
+/// # ⚠️ TWO ATTENTION-GEOMETRY KEYS GO UNREAD, AND THIS REFUSAL IS WHY THAT IS SAFE
+///
+/// Whoever lifts this refusal must read them, because nothing else will notice.
+/// Measured 2026-09-06 over the local corpus; re-derivable by walking the KV
+/// headers for `<arch>.rope.dimension_count` and `<arch>.attention.key_length`.
+///
+/// **`<arch>.rope.dimension_count`** — declared by 20 files, read at zero sites.
+/// RoPE is applied to this many dimensions, which is **not always the whole
+/// head**:
+///
+/// ```text
+/// gptneox   head_dim 96, dimension_count 24   = 0.25x  <- PARTIAL RoPE
+/// every other file                            = head_dim exactly
+/// ```
+///
+/// A reader assuming the full head rotates 96 dimensions where the checkpoint
+/// says 24. That produces **wrong numbers, not an error** — the classic silent
+/// case, and the same family as the `f16`/`bf16` swap `parse_dtype` guards.
+///
+/// **`<arch>.attention.key_length`** — declared by gemma4 and read at zero sites.
+/// It gives head_dim **directly**, and where it is present `embedding_length /
+/// head_count` is the wrong formula:
+///
+/// ```text
+/// gemma4   key_length 512, but 2816 / 16 = 176   <- a 2.9x error, silently
+/// ```
+///
+/// (That one caught me while measuring this: my first pass reported gemma4 as a
+/// second partial-RoPE case. It is not — my *formula* was wrong, not the file.)
+///
+/// **Why this is currently harmless, stated as a scope rather than a reassurance:
+/// 16 llama files declare these keys and ZERO have a `key_length` or a
+/// `dimension_count` that differs from `embedding_length / head_count`.** So the
+/// assumption is exactly right for every architecture this loader accepts —
+/// *because* it accepts only `llama`.
+///
+/// ⚠️ **The hazard is that widening support looks like a prefix change.** Someone
+/// replacing `llama.` with the declared architecture gets a config that loads and
+/// a model that is quietly wrong on any gptneox-family checkpoint. The prefix is
+/// the visible half; these two keys are not.
+///
 /// # One implementation because there are two callers
 ///
 /// `loaders::load_gguf_llama` and
