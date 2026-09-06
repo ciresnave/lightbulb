@@ -253,22 +253,14 @@ impl ParallelModelManager {
         // Extract config from GGUF metadata
         let metadata = content.metadata();
 
-        // Helper to get u64 from metadata
-        let get_u64 = |key: &str| -> Result<u64> {
-            match metadata.get(key) {
-                Some(Value::U64(v)) => Ok(*v),
-                Some(Value::U32(v)) => Ok(*v as u64),
-                _ => anyhow::bail!("Missing or invalid metadata key: {}", key),
-            }
-        };
-
-        // Helper to get f32 from metadata
-        let get_f32 = |key: &str| -> Result<f32> {
-            match metadata.get(key) {
-                Some(Value::F32(v)) => Ok(*v),
-                _ => anyhow::bail!("Missing or invalid metadata key: {}", key),
-            }
-        };
+        // ⚠️ These delegate rather than matching inline, so ABSENT and WRONG TYPE
+        // stay distinguishable. Both used to collapse into
+        // `"Missing or invalid metadata key: {key}"`, which reports a key that is
+        // PRESENT-but-an-array as missing. THIS IS THE LIVE PATH, so it is the
+        // copy a reader actually sees. See `crate::gguf::metadata_u64` for the
+        // gemma4 per-layer-array case.
+        let get_u64 = |key: &str| -> Result<u64> { crate::gguf::metadata_u64(metadata, key) };
+        let get_f32 = |key: &str| -> Result<f32> { crate::gguf::metadata_f32(metadata, key) };
 
         // ⚠️ THIS IS THE LIVE GGUF PATH. Refuse on the DECLARED architecture
         // rather than on a missing key: a qwen2 checkpoint declares

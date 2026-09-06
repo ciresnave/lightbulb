@@ -992,6 +992,96 @@ mod post_processor_spec_tests {
     }
 }
 
+/// Name a metadata value's kind, so an error can say what was found rather than
+/// only what was wanted.
+fn value_kind(v: &Value) -> &'static str {
+    match v {
+        Value::U8(_) => "u8",
+        Value::I8(_) => "i8",
+        Value::U16(_) => "u16",
+        Value::I16(_) => "i16",
+        Value::U32(_) => "u32",
+        Value::I32(_) => "i32",
+        Value::U64(_) => "u64",
+        Value::I64(_) => "i64",
+        Value::F32(_) => "f32",
+        Value::F64(_) => "f64",
+        Value::Bool(_) => "bool",
+        Value::String(_) => "string",
+        Value::Array(_) => "ARRAY",
+    }
+}
+
+/// Read an integer-valued metadata key, distinguishing ABSENT from WRONG TYPE.
+///
+/// ⚠️ THE PREVIOUS FORM COLLAPSED THOSE TWO STATES into one message, at four
+/// sites across two files:
+///
+/// ```text
+/// _ => bail!("Missing or invalid metadata key: {key}")
+/// ```
+///
+/// A key that is **present but the wrong type** is reported as missing, which
+/// sends a reader looking for a truncated file. That is the same defect this
+/// subsystem has now produced three times — #57's `llama.embedding_length`
+/// naming a key when the cause was the architecture, and #61's version message
+/// naming `expected 3` when the parser accepted 2 or 3. **A loud, specific,
+/// correct-looking message that names the wrong cause.**
+///
+/// # ⚠️ The case that is not hypothetical: a per-layer ARRAY
+///
+/// `ggml-vocab-gemma-4.gguf` declares
+///
+/// ```text
+/// gemma4.attention.head_count_kv = [8, 8, 8, 8, 8, 2, 8, 8, 8, 8, 8, 2, ...]
+/// ```
+///
+/// **a 30-element per-layer array, not a scalar** — GQA grouping varies by
+/// layer, aligned with that file's `attention.sliding_window_pattern`. Measured
+/// by MLMF on their corpus and confirmed here.
+///
+/// So a reader holding `num_key_value_heads: usize` cannot represent it **at
+/// all** — not wrong by a factor, *unrepresentable*. This does not fix that;
+/// it makes the refusal say so instead of claiming the key is absent.
+///
+/// Latent today: `require_llama_architecture` refuses gemma4 before any of these
+/// reads run.
+pub(crate) fn metadata_u64(metadata: &HashMap<String, Value>, key: &str) -> Result<u64> {
+    match metadata.get(key) {
+        Some(Value::U64(v)) => Ok(*v),
+        Some(Value::U32(v)) => Ok(u64::from(*v)),
+        Some(Value::Array(a)) => bail!(
+            "`{key}` is declared as an ARRAY of {} element(s), not a single integer. Some \
+             checkpoints vary this per layer -- gemma4 declares \
+             `attention.head_count_kv` as a 30-element array whose entries alternate with \
+             its sliding-window pattern. A scalar cannot represent that, so this is a \
+             limit of this reader rather than a malformed file.",
+            a.len()
+        ),
+        Some(other) => bail!(
+            "`{key}` is declared as {}, not an integer. The key is PRESENT -- this is a \
+             type mismatch, not a missing key.",
+            value_kind(other)
+        ),
+        None => bail!("`{key}` is not declared by this GGUF."),
+    }
+}
+
+/// Read a float-valued metadata key, distinguishing ABSENT from WRONG TYPE.
+///
+/// Same rationale as [`metadata_u64`].
+pub(crate) fn metadata_f32(metadata: &HashMap<String, Value>, key: &str) -> Result<f32> {
+    match metadata.get(key) {
+        Some(Value::F32(v)) => Ok(*v),
+        Some(other) => bail!(
+            "`{key}` is declared as {}, not an f32. The key is PRESENT -- this is a type \
+             mismatch, not a missing key.",
+            value_kind(other)
+        ),
+        None => bail!("`{key}` is not declared by this GGUF."),
+    }
+}
+
 /// Refuse a GGUF whose declared architecture this project's loaders cannot read.
 ///
 /// ⚠️ REFUSE ON THE DECLARATION, NOT ON A MISSING KEY. Every GGUF declares
@@ -1132,6 +1222,91 @@ pub(crate) fn require_llama_architecture(metadata: &HashMap<String, Value>) -> R
         );
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod metadata_accessor_tests {
+    use super::{Value, metadata_f32, metadata_u64};
+    use std::collections::HashMap;
+
+    fn with(key: &str, v: Value) -> HashMap<String, Value> {
+        let mut m = HashMap::new();
+        m.insert(key.to_string(), v);
+        m
+    }
+
+    /// The control: the accepted types still read, or every assertion below is
+    /// satisfied by a function that refuses everything.
+    #[test]
+    fn the_accepted_types_still_read() {
+        assert_eq!(metadata_u64(&with("k", Value::U32(7)), "k").unwrap(), 7);
+        assert_eq!(metadata_u64(&with("k", Value::U64(9)), "k").unwrap(), 9);
+        assert!(
+            (metadata_f32(&with("k", Value::F32(1.5)), "k").unwrap() - 1.5).abs() < f32::EPSILON
+        );
+    }
+
+    /// ABSENT and WRONG TYPE were one message. They are now two, and the
+    /// wrong-type one must say the key is PRESENT — that is the whole fix.
+    #[test]
+    fn absent_and_wrong_type_are_distinguishable() {
+        let absent = metadata_u64(&HashMap::new(), "llama.block_count")
+            .expect_err("an absent key must fail")
+            .to_string();
+        let wrong = metadata_u64(
+            &with("llama.block_count", Value::String("22".into())),
+            "llama.block_count",
+        )
+        .expect_err("a string where an integer is wanted must fail")
+        .to_string();
+
+        assert!(
+            absent.contains("not declared"),
+            "an absent key must say so: {absent}"
+        );
+        assert!(
+            wrong.contains("PRESENT") && wrong.contains("string"),
+            "a wrong-type key must say it is PRESENT and name what was found: {wrong}"
+        );
+        assert_ne!(
+            absent, wrong,
+            "⚠️ the two states must not produce the same text — collapsing them is the \
+             defect this fix removes, and identical messages would restore it"
+        );
+        for m in [&absent, &wrong] {
+            assert!(
+                !m.contains("Missing or invalid metadata key"),
+                "the old collapsed wording must not survive: {m}"
+            );
+        }
+    }
+
+    /// ⚠️ The case that is not hypothetical. `ggml-vocab-gemma-4.gguf` declares
+    /// `attention.head_count_kv` as a 30-element per-layer array, so a scalar
+    /// read of it is UNREPRESENTABLE rather than merely wrong — and the message
+    /// has to say that instead of claiming the key is absent.
+    #[test]
+    fn a_per_layer_array_is_named_as_an_array_with_its_length() {
+        let layers: Vec<Value> = (0..30)
+            .map(|i| Value::U32(if i % 6 == 5 { 2 } else { 8 }))
+            .collect();
+        let err = metadata_u64(
+            &with("gemma4.attention.head_count_kv", Value::Array(layers)),
+            "gemma4.attention.head_count_kv",
+        )
+        .expect_err("an array where a scalar is wanted must fail")
+        .to_string();
+
+        assert!(err.contains("ARRAY"), "must name the kind found: {err}");
+        assert!(
+            err.contains("30"),
+            "must give the element count, so a reader knows it is per-layer: {err}"
+        );
+        assert!(
+            err.contains("limit of this reader"),
+            "an array-valued key is a limit of THIS READER, not a malformed file: {err}"
+        );
+    }
 }
 
 #[cfg(test)]
