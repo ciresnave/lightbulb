@@ -349,6 +349,14 @@ fn corpus_is_fewer_vocabularies_than_files() {
         std::env::var("LIGHTBULB_GGUF_CORPUS").unwrap_or_default()
     );
 
+    // ⚠️ NAME THE SUBJECT. A tool that prints only figures is
+    // indistinguishable from the same tool run against a different root, and
+    // every number below is quoted elsewhere without this line attached.
+    eprintln!(
+        "  SUBJECT: LIGHTBULB_GGUF_CORPUS={:?}  ({} .gguf files)",
+        std::env::var("LIGHTBULB_GGUF_CORPUS").unwrap_or_default(),
+        files.len()
+    );
     let c = census(&files);
     report(files.len(), &c);
     let groups = &c.groups;
