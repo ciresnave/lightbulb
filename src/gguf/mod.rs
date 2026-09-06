@@ -1468,7 +1468,64 @@ mod architecture_gate_tests {
         );
 
         let refuses_non_llama = require_llama_architecture(&declaring("gptneox")).is_err();
-        let reads_geometry = src_mentions(&["rope.dimension_count\")", "attention.key_length\")"]);
+        // ⚠️ THE NEEDLES ARE SPLIT BECAUSE THIS SCAN READS THIS FILE.
+        //
+        // `src_mentions` walks `src/`, and `src/gguf/mod.rs` is in `src/`. A
+        // needle written as one literal here sits on a NON-comment line, so the
+        // comment-skip above does not reach it: the scan would find ITSELF,
+        // report the geometry keys as read, and `refuses_non_llama ||
+        // reads_geometry` would be `_ || true` — passing unconditionally,
+        // forever, silently.
+        //
+        // Measured 2026-09-06 at `fb6af4be`. As merged, the literals were
+        // `"rope.dimension_count\")"`, whose ON-DISK bytes carry a backslash
+        // that the runtime needle does not:
+        //
+        //     in source   rope.dimension_count\")
+        //     at runtime  rope.dimension_count")
+        //
+        // A BACKSLASH WAS THE ENTIRE GUARD. Respelling them as raw strings —
+        // `r#"rope.dimension_count")"#`, which rustc treats as identical —
+        // flipped `reads_geometry` false -> true. Confirmed by running the
+        // test with the refusal lifted: it PASSED, when firing is its only
+        // purpose. Nobody would flag that respelling in review.
+        //
+        // ⚠️ The obvious tidier fix REINTRODUCES the bug. A helper reads
+        // `needle("rope.dimension_count")` — and the call's own closing `")`
+        // completes the needle, so that line self-matches too. Verified.
+        //
+        // ⚠️ AND THIS COMMENT NAMES THE NEEDLE FOUR TIMES, SO IT IS ITSELF
+        // DISARMING TEXT — safe only because #72 taught the scan to skip lines
+        // beginning `//`. This fix DEPENDS on that one. Revert #72 and the
+        // paragraph explaining the trap becomes the trap. Third time tonight
+        // that prose about a hazard turned out to contain it.
+        //
+        // `concat!` assembles exactly the runtime needle while no contiguous run
+        // of source bytes equals it.
+        //
+        // ⚠️ BE PRECISE ABOUT WHAT THIS BUYS, BECAUSE IT IS LESS THAN IT LOOKS.
+        // It does NOT remove the hazard mechanically. Measured: rewriting these
+        // two lines as `r#"rope.dimension_count")"#` still kills the guard, split
+        // or no split. What it removes is the INNOCENT path — before, an ordinary
+        // readability refactor of an escaped literal was enough; now it takes
+        // deleting a `concat!` that this comment explicitly says not to delete.
+        // The mechanical vulnerability is unchanged; the social one is not.
+        //
+        // A mechanical fix needs the scan to know which lines are test code, and
+        // the parser that would do it is rejected below.
+        const ROPE_DIMS: &str = concat!("rope.dimension_", "count\")");
+        const KEY_LENGTH: &str = concat!("attention.key_", "length\")");
+
+        // ⚠️ KNOWN AND MEASURED LIMITATION, LEFT OPEN DELIBERATELY: a mention
+        // inside `#[cfg(test)]` still counts as a production read. So a future
+        // test fixture that names `rope.dimension_count")` would disarm this
+        // guard the same silent way. A brace-tracking `#[cfg(test)]` skipper was
+        // written and REJECTED — it was defeated by its own explanatory comment,
+        // which contained a `}` and closed the test region 48 lines early,
+        // reclassifying the whole test module as production. Recorded rather
+        // than half-fixed: a parser that mis-parses this file is worse than a
+        // documented gap, because it fails in the same silent direction.
+        let reads_geometry = src_mentions(&[ROPE_DIMS, KEY_LENGTH]);
 
         assert!(
             refuses_non_llama || reads_geometry,
