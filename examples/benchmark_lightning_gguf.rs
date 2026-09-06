@@ -68,7 +68,7 @@ fn benchmark_model(model_path: &PathBuf) -> Result<BenchmarkResult> {
 
     // Get tensor counts from both methods
     let lightning_tensor_count = lightning_content.lightning_tensor_infos().len();
-    let candle_tensor_count = candle_content.tensor_infos().len();
+    let candle_tensor_count = candle_content.tensor_infos()?.len();
 
     // Verify correctness: Compare metadata and tensors
     println!("  🔍 Verifying correctness...");
@@ -101,7 +101,7 @@ fn benchmark_model(model_path: &PathBuf) -> Result<BenchmarkResult> {
             println!("    Lightning data size: {} bytes", lightning_data.len());
 
             // Verify the Candle API also knows about this tensor
-            if !candle_content.tensor_infos().contains_key(sample_name) {
+            if !candle_content.tensor_infos()?.contains_key(sample_name) {
                 println!("  ❌ Candle doesn't know about tensor '{}'", sample_name);
                 verified = false;
             }
