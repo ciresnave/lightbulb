@@ -75,6 +75,21 @@
 // family from a LINEAR one, so Marlin and NF4 collapse onto one descriptor —
 // "there is no scale for which a linear dequant reproduces NF4."
 //
+// ⚠️ RE-MEASURED 2026-09-06 at fuel's `origin/main` 0656f2c6, because this is a
+// RELAYED, 17-day-old claim about a fast-moving external repo AND it is the
+// justification for keeping this file. A reason for not doing something reads as
+// judgement rather than as a factual claim, so it escapes the review its facts
+// would get. All three still hold:
+//
+//   fuel-cuda-backend/src/baracuda/quant_w4a16.rs      747 lines, unchanged
+//   `marlin` / `awq` cargo features                    still not declared
+//   `enum QuantFormat`                                 still 0 definitions
+//                                                      (control: `enum DType` -> 3,
+//                                                       so the search can see)
+//
+// Re-derive with `gh api repos/ciresnave/fuel/contents/<path>` and a code search;
+// do not read a local fuel checkout, which was measured 65 commits behind today.
+//
 // So this scaffolding is kept deliberately, not by neglect: it is our own code,
 // it carries no licence exposure now that `kernels/` is gone, and it retires
 // with candlelight along with the rest of that path.
