@@ -1057,6 +1057,39 @@ mod post_processor_spec_tests {
 /// a model that is quietly wrong on any gptneox-family checkpoint. The prefix is
 /// the visible half; these two keys are not.
 ///
+/// ## ⚠️ And the fix is not one line: the division is at NINE live sites
+///
+/// `head_dim = hidden_size / num_heads` is computed independently at nine places,
+/// including `parallel_model_manager.rs:424` on the live serving path:
+///
+/// ```text
+/// model/awq_qwen3.rs:207
+/// model/custom_attention.rs:207, :274, :1134
+/// model/custom_transformer_block.rs:442, :510, :594
+/// model/custom_transformer.rs:391          (positional, not a binding)
+/// model/parallel_model_manager.rs:424      <- the live loader
+/// ```
+///
+/// **So this is not "read `key_length` instead of dividing" at one accessor.**
+/// MLMF hit the same defect in their `config.rs` and theirs is a single
+/// `head_dim()` method; ours is scattered, and a fix that misses one site is
+/// silent everywhere that site is used.
+///
+/// ## ⚠️ AND A SINGLE `head_dim` IS THE WRONG SHAPE FOR SOME ARCHITECTURES
+///
+/// gemma4 declares **two** attention geometries in one checkpoint — full layers
+/// and sliding-window layers, with different dimensions:
+///
+/// ```text
+/// gemma4.attention.key_length       512    gemma4.rope.dimension_count      512
+/// gemma4.attention.key_length_swa   256    gemma4.rope.dimension_count_swa  256
+/// ```
+///
+/// **A reader holding one `head_dim` cannot represent that model however it
+/// derives the value** — not by division, and not by reading `key_length`
+/// either. The shape is wrong, not just the arithmetic. Recorded because
+/// "read the declared key" is the obvious remedy and it is insufficient here.
+///
 /// # One implementation because there are two callers
 ///
 /// `loaders::load_gguf_llama` and
