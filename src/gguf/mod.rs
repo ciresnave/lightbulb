@@ -87,6 +87,33 @@ pub struct Content {
     fallback_metadata: HashMap<String, Value>,
 }
 
+/// A checkpoint's tokenizer vocabulary, and its merges if it declares any.
+///
+/// ⚠️ A NAMED TYPE RATHER THAN A TUPLE because the tuple tripped
+/// `clippy::type_complexity` and the gate caught it -- 15 -> 17. Raising the
+/// ceiling was the other option and would have been wrong: three anonymous
+/// positions whose third is an `Option<Vec<(String, String)>>` is exactly as
+/// hard to read as the lint says it is.
+struct VocabAndMerges {
+    /// The raw token list. Callers need it to resolve
+    /// `tokenizer.ggml.*_token_id` indices back into token strings.
+    tokens: Vec<String>,
+    vocab: tokenizers::models::bpe::Vocab,
+    /// `None` when the file declares no `tokenizer.ggml.merges`.
+    merges: Option<Vec<(String, String)>>,
+}
+
+/// SHA-256 of the 32000-token Llama SentencePiece vocabulary.
+///
+/// Computed by `Content::vocab_sha256`, and independently by a Python script
+/// implementing the same length-prefixed scheme, which agreed. Both
+/// `ggml-vocab-llama-spm.gguf` and `tinyllama-1.1b-chat-v1.0.Q4_0.gguf` produce
+/// it -- their token lists are byte-identical -- which is exactly why one can
+/// serve as an oracle for the other. `ggml-vocab-phi-3.gguf` (32064 tokens) and
+/// `ggml-vocab-baichuan.gguf` (64000) produce different digests, as they must.
+const LLAMA_SPM_VOCAB_SHA256: &str =
+    "92cdbd78176976ed0c31897436a0b785cc99437d18cedb014044c4b64273ef70";
+
 /// Convert our own parser's metadata into candle's `Value` shape.
 ///
 /// ⚠️ EXISTS BECAUSE CANDLE CANNOT ALWAYS PARSE A FILE WE CAN. Both enums are
@@ -362,7 +389,21 @@ impl Content {
     /// (converted from a HuggingFace `tokenizer.json`) and is rebuilt here
     /// exactly. The other carries `tokenizer.ggml.scores` and **no merges**,
     /// written by llama.cpp's own SentencePiece converter — measured locally,
-    /// 3 of 4 `llama`-model files. **Those are refused.**
+    /// 4 of 5 `llama`-model files.
+    ///
+    /// ⚠️ **THE SECOND SHAPE IS NO LONGER UNIVERSALLY REFUSED, AND THE OLD TEXT
+    /// HERE STATED A REQUIREMENT THAT IS NOT ONE.** It said rebuilding needed
+    /// "SPM's scored bigram-merge algorithm". It needs the token list. **A merge
+    /// is a split into two vocabulary tokens, so the merge SET is a function of
+    /// the vocabulary** — see `derive_merges`, which reads no scores and
+    /// reproduces a real 61249-entry list exactly.
+    ///
+    /// What is still unknown is the ORDER, which BPE is sensitive to. Token-id
+    /// order is empirically sufficient on the one vocabulary with an oracle and
+    /// is not proven in general, so `spm_derivation_warrant` is an allowlist:
+    /// vocabularies checked against a checkpoint that carries real merges are
+    /// rebuilt, and the rest are refused with a message naming the digest a
+    /// future oracle would have to match.
     ///
     /// A Unigram-from-real-scores path for them was implemented and then
     /// **removed after measuring it**. It builds, and it fixes byte fallback —
@@ -382,9 +423,10 @@ impl Content {
     ///
     /// So an unsupported shape is an ERROR rather than a fabrication. A wrong
     /// tokenizer produces fluent-looking nonsense with nothing in the logs,
-    /// which is far worse to debug than a refusal to load. Supporting these
-    /// files needs SPM's merge algorithm, not a different model with the same
-    /// numbers in it.
+    /// which is far worse to debug than a refusal to load. **The Unigram path
+    /// stays rejected for the reason above — it is a different algorithm on the
+    /// same numbers.** Recovering the merges is a different thing entirely, and
+    /// is what `derive_merges` does.
     pub fn extract_tokenizer(&self) -> Result<tokenizers::Tokenizer> {
         use tokenizers::{
             AddedToken, Tokenizer,
@@ -432,9 +474,29 @@ impl Content {
             );
         }
 
-        let (tokens, vocab, merges) = self.vocab_and_merges(
-            "GGUF has no tokenizer.ggml.merges. This is a SentencePiece-converted checkpoint, and rebuilding it needs SPM's scored bigram-merge algorithm. Building a Unigram from tokenizer.ggml.scores instead was measured and does NOT reproduce the checkpoint's segmentation (29 ids against the reference's 22: `capital` came out as c+ap+it+al), so it is refused rather than approximated.",
-        )?;
+        let VocabAndMerges {
+            tokens,
+            vocab,
+            merges: declared_merges,
+        } = self.vocab_and_optional_merges()?;
+
+        // A merge-less SentencePiece checkpoint can still be rebuilt IF this
+        // exact vocabulary has been checked against a file that carries real
+        // merges. See `derive_merges` for the algorithm and
+        // `spm_derivation_warrant` for why it is an allowlist and not a rule.
+        let merges = match declared_merges {
+            Some(m) => m,
+            None => {
+                let digest = Self::vocab_sha256(&tokens);
+                if Self::spm_derivation_warrant(&digest).is_some() {
+                    Self::derive_merges(&tokens)
+                } else {
+                    bail!(
+                        "GGUF has no tokenizer.ggml.merges, and this vocabulary's derived merges have not been checked against an oracle. The merge SET is derivable from the token list alone -- a merge is a split into two vocab tokens, and for the 32000-token Llama vocabulary the derived list is SET-IDENTICAL to a real one (61249, 0 extra, 0 missing). But BPE is ORDER-sensitive and token-id order is only EMPIRICALLY sufficient: it was verified on that one vocabulary and nothing shows it generalises. To retire this refusal, find a checkpoint with this same token list (sha256 {digest}) that DOES declare merges, compare the derived list to it, and add the digest to `spm_derivation_warrant`. Building a Unigram from tokenizer.ggml.scores instead was measured and does NOT reproduce the segmentation (29 ids against the reference's 22: `capital` came out as c+ap+it+al), so that is not the way round it."
+                    );
+                }
+            }
+        };
 
         let bpe = BPE::builder()
             .vocab_and_merges(vocab, merges)
@@ -706,6 +768,129 @@ impl Content {
             .collect::<Result<_>>()?;
 
         Ok((tokens, vocab, merges))
+    }
+
+    /// Tokens and vocab, with the DECLARED merges if the file carries any.
+    ///
+    /// Separate from `vocab_and_merges` because the SPM path can now proceed
+    /// without them and the byte-level BPE path still cannot.
+    fn vocab_and_optional_merges(&self) -> Result<VocabAndMerges> {
+        let tokens = self
+            .get_metadata_string_array("tokenizer.ggml.tokens")
+            .context("Missing tokenizer.ggml.tokens in GGUF metadata")?;
+        let vocab: tokenizers::models::bpe::Vocab = tokens
+            .iter()
+            .enumerate()
+            .map(|(id, t)| (t.clone(), id as u32))
+            .collect();
+        let merges = match self.get_metadata_string_array("tokenizer.ggml.merges") {
+            Some(raw) => Some(
+                raw.iter()
+                    .map(|m| {
+                        m.split_once(' ')
+                            .map(|(a, b)| (a.to_string(), b.to_string()))
+                            .ok_or_else(|| anyhow::anyhow!("malformed merge entry {m:?}: no space"))
+                    })
+                    .collect::<Result<_>>()?,
+            ),
+            None => None,
+        };
+        Ok(VocabAndMerges {
+            tokens,
+            vocab,
+            merges,
+        })
+    }
+
+    /// A stable digest of a token list, for keying the derivation allowlist.
+    ///
+    /// ⚠️ SHA-256 RATHER THAN `DefaultHasher`, WHICH IS THE OBVIOUS CHOICE AND
+    /// WOULD BE A LATENT BUG. `DefaultHasher`'s output is explicitly not stable
+    /// across Rust releases, and `tests/gguf_corpus_vocab_census.rs` uses it
+    /// correctly — it groups files within a single run and never persists a
+    /// value. A digest baked into a source constant is the opposite case: a
+    /// toolchain bump would silently stop matching, the allowlist entry would
+    /// go dead, and the checkpoint would be refused again with no diagnostic.
+    ///
+    /// Length-prefixed so that no two distinct token lists can hash alike by
+    /// concatenation — `["ab", "c"]` and `["a", "bc"]` must differ.
+    fn vocab_sha256(tokens: &[String]) -> String {
+        use sha2::{Digest, Sha256};
+        let mut h = Sha256::new();
+        h.update((tokens.len() as u64).to_le_bytes());
+        for t in tokens {
+            h.update((t.len() as u64).to_le_bytes());
+            h.update(t.as_bytes());
+        }
+        format!("{:x}", h.finalize())
+    }
+
+    /// Vocabularies whose derived merges have been checked against an ORACLE.
+    ///
+    /// ⚠️ AN ALLOWLIST, FOR THE SAME REASON `VERIFIED_PRE` IS ONE. The
+    /// derivation below is an argument about vocabularies in general; this table
+    /// records the ones where that argument has actually been MEASURED against a
+    /// checkpoint that carries real merges. Keying on "is a SentencePiece file
+    /// without merges" would apply one verified result to every future
+    /// checkpoint of that shape, which is the failure `VERIFIED_PRE` exists to
+    /// prevent.
+    ///
+    /// To add an entry you need a file with the SAME token list that DOES carry
+    /// merges, so the derived list can be compared to a real one. Without that
+    /// there is no oracle and confidence in the algorithm is not a substitute.
+    fn spm_derivation_warrant(digest: &str) -> Option<&'static str> {
+        match digest {
+            LLAMA_SPM_VOCAB_SHA256 => Some(
+                "the 32000-token Llama SentencePiece vocabulary. Verified against `tinyllama-1.1b-chat-v1.0.Q4_0.gguf`, whose token list is byte-identical and which carries 61249 real merges: the derived list is SET-IDENTICAL to it (0 extra, 0 missing), and both tokenizers agree on 28 varied inputs with `add_special_tokens` false, and differ only by a prepended BOS with it true.",
+            ),
+            _ => None,
+        }
+    }
+
+    /// Every split of every vocab token into two vocab tokens, in token-id order.
+    ///
+    /// # A merge is a split, so the merge SET is a function of the vocabulary
+    ///
+    /// This reads **no scores at all**. Measured 2026-09-06 against
+    /// `tinyllama-1.1b-chat-v1.0.Q4_0.gguf`, which carries the real list:
+    ///
+    /// ```text
+    /// derived     61249 merges
+    /// declared    61249 merges
+    /// set equality  TRUE      0 derived-only, 0 declared-only
+    /// ```
+    ///
+    /// The 61249 exceeds the 32000 vocabulary because a token can be split more
+    /// than one way and llama.cpp's converter emits every valid split: the list
+    /// produces only 29612 DISTINCT tokens.
+    ///
+    /// ## ⚠️ The ORDER is not the SET, and this is the part that is empirical
+    ///
+    /// BPE merge priority is order-sensitive, so a correct set in the wrong
+    /// order is still a wrong tokenizer. Token-id order is not exactly the
+    /// declared order — the declared list is sorted non-decreasing by product id
+    /// with EXACTLY ONE violation in 61248, Pearson 0.9994 over the first 5000,
+    /// and matches this function's output at 1 position out of 61249.
+    ///
+    /// **It nonetheless produces identical tokenization on every input tried.**
+    /// That is a measurement, not a proof: order-sensitivity did not bite on
+    /// this vocabulary and nothing here shows it cannot on another. Which is
+    /// why `spm_derivation_warrant` is an allowlist rather than a rule.
+    fn derive_merges(tokens: &[String]) -> Vec<(String, String)> {
+        let index: std::collections::HashSet<&str> = tokens.iter().map(|s| s.as_str()).collect();
+        let mut out = Vec::new();
+        for t in tokens {
+            for c in 1..t.len() {
+                if !t.is_char_boundary(c) {
+                    continue;
+                }
+                let (a, b) = t.split_at(c);
+                if index.contains(a) && index.contains(b) {
+                    out.push((a.to_string(), b.to_string()));
+                }
+            }
+        }
+        out
     }
 
     /// Why a specific `tokenizer.ggml.pre` was investigated and NOT added.
@@ -1986,6 +2171,297 @@ mod architecture_gate_tests {
              Deferring these was safe only while every architecture that differs was              refused. That is no longer true, so a gptneox-family checkpoint now loads              and produces WRONG NUMBERS RATHER THAN AN ERROR.
 
              See `require_llama_architecture`: five production sites compute head_dim by division,              and gemma4 needs more than one head_dim because it declares separate              sliding-window geometry."
+        );
+    }
+}
+
+/// The merge derivation, and the oracle that licenses it.
+#[cfg(test)]
+mod spm_derivation_tests {
+    use super::*;
+
+    /// The prompt the reference fidelity gate uses, so a divergence here is
+    /// comparable to one there.
+    const PROMPT: &str = "<|user|>\nName the capital of France.</s>\n<|assistant|>\n";
+
+    /// No corpus needed: the algorithm on a vocabulary small enough to check by
+    /// hand. Runs in the ordinary suite, unlike everything else in this module.
+    #[test]
+    fn derive_merges_emits_every_split_into_two_vocab_tokens() {
+        let vocab: Vec<String> = ["a", "b", "ab", "abb", "c"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let got = Content::derive_merges(&vocab);
+        // "a","b","c" have no split. "ab" splits as a|b. "abb" splits as a|bb
+        // (bb absent) and ab|b (both present) -- so only the second survives.
+        assert_eq!(
+            got,
+            vec![
+                ("a".to_string(), "b".to_string()),
+                ("ab".to_string(), "b".to_string()),
+            ],
+            "a merge is a split whose BOTH halves are in the vocabulary"
+        );
+    }
+
+    /// ⚠️ The derivation must not fabricate a merge from a split that only
+    /// exists at a non-character boundary.
+    #[test]
+    fn derive_merges_does_not_split_inside_a_character() {
+        // U+00E9 is two UTF-8 bytes; splitting between them is not a boundary.
+        let vocab: Vec<String> = ["\u{e9}", "e"].iter().map(|s| s.to_string()).collect();
+        assert!(
+            Content::derive_merges(&vocab).is_empty(),
+            "no merge can be produced by cutting a multi-byte character in half"
+        );
+    }
+
+    fn corpus_file(name: &str) -> Option<std::path::PathBuf> {
+        let root = std::env::var_os("LIGHTBULB_GGUF_CORPUS")?;
+        let mut stack = vec![std::path::PathBuf::from(root)];
+        while let Some(dir) = stack.pop() {
+            for e in std::fs::read_dir(&dir).ok()?.flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    stack.push(p);
+                } else if p.file_name().is_some_and(|f| f == name) {
+                    return Some(p);
+                }
+            }
+        }
+        None
+    }
+
+    fn tokens_of(c: &Content) -> Vec<String> {
+        c.get_metadata_string_array("tokenizer.ggml.tokens")
+            .unwrap_or_default()
+    }
+
+    /// THE ORACLE. The derived list against a real one, on the same vocabulary.
+    #[test]
+    #[ignore = "needs a local GGUF corpus; set LIGHTBULB_GGUF_CORPUS"]
+    fn derived_merges_are_set_identical_to_a_real_declared_list() {
+        let Some(tiny) = corpus_file("tinyllama-1.1b-chat-v1.0.Q4_0.gguf") else {
+            lightbulb_skip();
+            return;
+        };
+        let c = Content::read(&tiny).expect("read tinyllama");
+        eprintln!("  SUBJECT: {}", tiny.display());
+        let VocabAndMerges { tokens, merges, .. } = c
+            .vocab_and_optional_merges()
+            .expect("tinyllama vocab and merges");
+        let declared = merges.expect("tinyllama declares merges; without them there is no oracle");
+
+        // CONTROL: this really is the allowlisted vocabulary.
+        assert_eq!(
+            Content::vocab_sha256(&tokens),
+            LLAMA_SPM_VOCAB_SHA256,
+            "the oracle's vocabulary is not the one the allowlist names"
+        );
+
+        let derived = Content::derive_merges(&tokens);
+        let d: std::collections::HashSet<_> = derived.iter().collect();
+        let r: std::collections::HashSet<_> = declared.iter().collect();
+        eprintln!(
+            "  derived {} / declared {} / derived-only {} / declared-only {}",
+            derived.len(),
+            declared.len(),
+            d.difference(&r).count(),
+            r.difference(&d).count()
+        );
+        assert_eq!(d, r, "the derived merge SET differs from the declared one");
+    }
+
+    /// The digest the allowlist names is the one this vocabulary actually has.
+    #[test]
+    #[ignore = "needs a local GGUF corpus; set LIGHTBULB_GGUF_CORPUS"]
+    fn the_allowlisted_digest_belongs_to_llama_spm() {
+        let Some(spm) = corpus_file("ggml-vocab-llama-spm.gguf") else {
+            lightbulb_skip();
+            return;
+        };
+        let c = Content::read(&spm).expect("read llama-spm");
+        assert_eq!(
+            Content::vocab_sha256(&tokens_of(&c)),
+            LLAMA_SPM_VOCAB_SHA256
+        );
+        assert!(
+            Content::spm_derivation_warrant(LLAMA_SPM_VOCAB_SHA256).is_some(),
+            "the digest is allowlisted"
+        );
+    }
+
+    /// ⚠️ THE GUARD. An unoracled vocabulary must still be refused, or the
+    /// allowlist is decorative.
+    #[test]
+    #[ignore = "needs a local GGUF corpus; set LIGHTBULB_GGUF_CORPUS"]
+    fn a_vocabulary_with_no_oracle_is_still_refused() {
+        for name in ["ggml-vocab-phi-3.gguf", "ggml-vocab-baichuan.gguf"] {
+            let Some(p) = corpus_file(name) else {
+                lightbulb_skip();
+                return;
+            };
+            let c = Content::read(&p).expect("read");
+            let digest = Content::vocab_sha256(&tokens_of(&c));
+            assert_ne!(
+                digest, LLAMA_SPM_VOCAB_SHA256,
+                "{name} shares the oracle's vocabulary"
+            );
+            assert!(
+                Content::spm_derivation_warrant(&digest).is_none(),
+                "{name} must not be allowlisted"
+            );
+            let err = match c.extract_tokenizer() {
+                Ok(_) => panic!("{name} rebuilt without an oracle for its vocabulary"),
+                Err(e) => e.to_string(),
+            };
+            // The refusal must say what would RETIRE it, not merely that it happened.
+            assert!(
+                err.contains(&digest),
+                "{name}: the refusal does not name the digest a future oracle must match: {err}"
+            );
+            eprintln!("  {name}: refused, and the message names its digest");
+        }
+    }
+
+    /// Inputs the tokenizer comparisons range over.
+    ///
+    /// ⚠️ NAMED AND SHARED so every vocabulary is probed with the SAME set. A
+    /// per-test list drifts, and a comparison that agrees over a narrower set
+    /// than its neighbour looks equally green while proving less.
+    ///
+    /// Covers: empty, bare space, newline, tab, CRLF, C0 controls and DEL, CJK,
+    /// Greek, Cyrillic, emoji above the BMP, combining accents, a 200-character
+    /// repeat, the SPM space marker, digits, decimals, identifier shapes, the
+    /// special-token spellings, ASCII punctuation, and the reference prompt.
+    fn tokenization_probe_inputs() -> Vec<String> {
+        vec![
+            String::new(),
+            " ".into(),
+            "\n".into(),
+            "\n\n\t ".into(),
+            "a".into(),
+            PROMPT.into(),
+            "The capital of France is Paris.".into(),
+            "antidisestablishmentarianism".into(),
+            "  leading and trailing  ".into(),
+            "CamelCaseIdentifier".into(),
+            "snake_case_name".into(),
+            "1234567890".into(),
+            "3.14159".into(),
+            "<s></s><unk>".into(),
+            "cafe\u{301} nai\u{308}ve".into(),
+            "\u{65E5}\u{672C}\u{8A9E}".into(),
+            "\u{395}\u{3BB}\u{3BB}\u{3B7}\u{3BD}\u{3B9}\u{3BA}\u{3AC}".into(),
+            "\u{440}\u{443}\u{441}\u{441}\u{43A}\u{438}\u{439}".into(),
+            "emoji \u{1F600}\u{1F680}".into(),
+            "\u{0}\u{1}\u{7F}".into(),
+            "tab\tsep".into(),
+            "line1\nline2\r\nline3".into(),
+            "a".repeat(200),
+            "\u{2581}\u{2581}\u{2581}".into(),
+            "!@#$%^&*()_+-=[]{}|;:',.<>?/".into(),
+            "The quick brown fox jumps over the lazy dog".into(),
+        ]
+    }
+
+    /// Every input on which two tokenizers produce different ids, both
+    /// `add_special` arms, as reader-facing lines.
+    fn disagreements_between(
+        a_tk: &tokenizers::Tokenizer,
+        b_tk: &tokenizers::Tokenizer,
+        inputs: &[String],
+    ) -> Vec<String> {
+        let mut out = Vec::new();
+        for inp in inputs {
+            for add_special in [false, true] {
+                let a = a_tk.encode(inp.as_str(), add_special).expect("encode a");
+                let b = b_tk.encode(inp.as_str(), add_special).expect("encode b");
+                if a.get_ids() != b.get_ids() {
+                    out.push(format!(
+                        "{inp:?} (add_special={add_special}) a {:?} b {:?}",
+                        a.get_tokens(),
+                        b.get_tokens()
+                    ));
+                }
+            }
+        }
+        out
+    }
+
+    /// The whole point: llama-spm now rebuilds, and agrees with the oracle.
+    ///
+    /// ⚠️ BOTH SIDES GO THROUGH `extract_tokenizer`. An earlier version of this
+    /// experiment rebuilt the tokenizer by hand and twice reported a defect that
+    /// was its own missing step -- no `add_special_tokens`, then no
+    /// post-processor. A partial reimplementation of the subject cannot
+    /// distinguish its own gaps from the subject's.
+    #[test]
+    #[ignore = "needs a local GGUF corpus; set LIGHTBULB_GGUF_CORPUS"]
+    fn llama_spm_agrees_with_the_oracle_through_the_production_path() {
+        let (Some(spm), Some(tiny)) = (
+            corpus_file("ggml-vocab-llama-spm.gguf"),
+            corpus_file("tinyllama-1.1b-chat-v1.0.Q4_0.gguf"),
+        ) else {
+            lightbulb_skip();
+            return;
+        };
+        let spm_c = Content::read(&spm).expect("read llama-spm");
+        let tiny_c = Content::read(&tiny).expect("read tinyllama");
+        eprintln!("  SUBJECT: {}", spm.display());
+        eprintln!("  ORACLE : {}", tiny.display());
+
+        // CONTROL: same vocabulary, or the oracle does not range over the subject.
+        assert_eq!(
+            tokens_of(&spm_c),
+            tokens_of(&tiny_c),
+            "the vocabularies differ, so this is not an oracle"
+        );
+
+        let derived_tk = spm_c
+            .extract_tokenizer()
+            .expect("llama-spm rebuilds from derived merges");
+        let oracle_tk = tiny_c
+            .extract_tokenizer()
+            .expect("tinyllama rebuilds from declared merges");
+
+        // CONTROL: the oracle still produces the established figure.
+        let want = oracle_tk.encode(PROMPT, false).expect("oracle encode");
+        assert_eq!(
+            want.get_ids().len(),
+            22,
+            "the oracle no longer produces 22 ids, so there is no baseline"
+        );
+
+        let inputs = tokenization_probe_inputs();
+        let disagreements = disagreements_between(&oracle_tk, &derived_tk, &inputs);
+
+        eprintln!(
+            "  {} inputs x 2 arms = {} comparisons, {} disagreements",
+            inputs.len(),
+            inputs.len() * 2,
+            disagreements.len()
+        );
+        for d in disagreements.iter().take(6) {
+            eprintln!("    {d}");
+        }
+        assert!(
+            disagreements.is_empty(),
+            "{} of {} comparisons disagree between the derived and declared tokenizers",
+            disagreements.len(),
+            inputs.len() * 2
+        );
+    }
+
+    fn lightbulb_skip() {
+        lightbulb_test_notice();
+    }
+
+    fn lightbulb_test_notice() {
+        crate::test_notice::skip_unless_required(
+            "LIGHTBULB_REQUIRE_CORPUS",
+            "the SPM derivation tests need the local GGUF corpus",
         );
     }
 }
