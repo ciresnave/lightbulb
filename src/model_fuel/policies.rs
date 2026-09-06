@@ -21,12 +21,30 @@
 //! # Policies EXCLUDED from this adapter, and why
 //!
 //! * **`crate::cache::kv_compression`** (`LowRankCompressor`, grouped
-//!   quantization) — **gate-zero failure**. `kv_compression.rs:446` is a live
-//!   `todo!("Grouped quantization not yet implemented")`, and
-//!   `LowRankCompressor::compute_low_rank` (`:1070`) computes `reshaped` from its
-//!   input at `:1085`, never uses it, and returns `Tensor::randn` projections
-//!   (`:1092`, `:1099`) — outside `#[cfg(test)]`. It has a rich API and returns
-//!   noise. Not wired, not stubbed here.
+//!   quantization) — **the exclusion stands; one of its two stated reasons went
+//!   stale.** `LowRankCompressor::compute_low_rank` computes `reshaped` from its
+//!   input, never uses it, and returns `Tensor::randn` projections — outside
+//!   `#[cfg(test)]`, which begins well below them. It has a rich API and returns
+//!   noise. Grouped quantization is still unimplemented; it now returns an `Err`
+//!   rather than panicking. Not wired, not stubbed here.
+//!
+//!   ⚠️ **DISCHARGED 2026-09-06:** this entry read *"`kv_compression.rs:446` is
+//!   a live `todo!("Grouped quantization not yet implemented")`"*. **That was
+//!   fixed on 2026-09-02** — it returns an `Err` now, `src/` contains zero live
+//!   `todo!`/`unimplemented!`/`unreachable!`, and line 446 today is a closing
+//!   brace. The exclusion was never in doubt (the `randn` half still carries it),
+//!   but **a reader who checked `:446` found nothing and could not tell whether
+//!   the exclusion still held.** Found by the Claim Auditor four days after the
+//!   fix, in three places at once; `ROADMAP.md` had already been corrected in one
+//!   place and not the others.
+//!
+//!   ⚠️ **And the surviving half cited four line numbers that had ALL drifted by
+//!   exactly 20** (`:1070 :1085 :1092 :1099`). They are gone rather than
+//!   renumbered: `.github/workflows/ci.yml` already states the rule — *"named by
+//!   SYMBOL, not by line — a line number in a comment moves silently on any
+//!   insertion above it, and this comment is meant to be read long after it was
+//!   written."* Renumbering would have restored the same defect with a fresh
+//!   date on it.
 //! * **`crate::cache::eviction_policy::VotingAggregator`** — real code, but
 //!   defective for exactly this use. `compute_aggregated_scores`
 //!   (`eviction_policy.rs:132-140`) `continue`s past every non-finite score after
