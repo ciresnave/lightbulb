@@ -2318,6 +2318,105 @@ mod spm_derivation_tests {
         assert_eq!(d, r, "the derived merge SET differs from the declared one");
     }
 
+    /// Rebuild two checkpoints' tokenizers and report where they disagree.
+    ///
+    /// ⚠️ BOTH SIDES GO THROUGH `extract_tokenizer`. An earlier experiment
+    /// rebuilt one side by hand and twice reported a defect that was its own
+    /// missing step — no `add_special_tokens`, then no post-processor. A partial
+    /// reimplementation of the subject cannot distinguish its own gaps from the
+    /// subject's, and the fix was not a better harness but NO harness.
+    ///
+    /// Returns the two `Content`s as well, because every caller then needs to
+    /// ask something about the checkpoints to explain what it found.
+    fn compare_rebuilt(a_name: &str, b_name: &str) -> Option<(Content, Content, Vec<String>)> {
+        let (a_c, b_c) = (read_corpus(a_name)?, read_corpus(b_name)?);
+        let a_tk = a_c
+            .extract_tokenizer()
+            .unwrap_or_else(|e| panic!("{a_name} does not rebuild: {e}"));
+        let b_tk = b_c
+            .extract_tokenizer()
+            .unwrap_or_else(|e| panic!("{b_name} does not rebuild: {e}"));
+        let inputs = tokenization_probe_inputs();
+        let disagreements = disagreements_between(&a_tk, &b_tk, &inputs);
+        eprintln!(
+            "  {a_name} vs {b_name}: {} inputs x 2 arms, {} disagreements",
+            inputs.len(),
+            disagreements.len()
+        );
+        for d in disagreements.iter().take(6) {
+            eprintln!("    {d}");
+        }
+        Some((a_c, b_c, disagreements))
+    }
+
+    /// Read one corpus checkpoint, or `None` when the corpus is absent.
+    ///
+    /// Shared so the comparison tests open their subjects identically — a
+    /// per-test loader is a place for one of them to quietly read something
+    /// else while still reporting agreement.
+    fn read_corpus(name: &str) -> Option<Content> {
+        let path = corpus_file(name)?;
+        Some(Content::read(&path).unwrap_or_else(|e| panic!("reading {name}: {e}")))
+    }
+
+    /// Assert `shorter` is a byte-identical PREFIX of `longer`, returning the
+    /// tail that extends it.
+    ///
+    /// ⚠️ This is the relation a digest comparison cannot express. Equality is
+    /// what hashing tests; CONTAINMENT is what licenses one file's oracle to
+    /// cover another, and the sweep that reported these two unrelated was
+    /// answering the first question with its control passing.
+    fn assert_prefix_and_tail<'a>(shorter: &[String], longer: &'a [String]) -> &'a [String] {
+        assert!(
+            longer.len() > shorter.len(),
+            "the second list is not longer, so it cannot extend the first"
+        );
+        assert_eq!(
+            &longer[..shorter.len()],
+            shorter,
+            "the leading ids are not byte-identical, so the shorter file's oracle does not carry"
+        );
+        &longer[shorter.len()..]
+    }
+
+    /// The special tokens a checkpoint actually registers, resolved from its
+    /// declared `tokenizer.ggml.*_token_id` fields to the token strings.
+    ///
+    /// Shared, because two checkpoints over one vocabulary can register
+    /// DIFFERENT specials — and the symmetric difference of these sets is the
+    /// only admissible explanation for a tokenization disagreement between them.
+    fn registered_specials(c: &Content) -> Vec<String> {
+        let toks = tokens_of(c);
+        [
+            "tokenizer.ggml.unknown_token_id",
+            "tokenizer.ggml.bos_token_id",
+            "tokenizer.ggml.eos_token_id",
+        ]
+        .iter()
+        .filter_map(|k| match c.metadata().get(*k) {
+            Some(Value::U32(v)) => Some(*v as usize),
+            Some(Value::U64(v)) => Some(*v as usize),
+            Some(Value::I32(v)) => Some(*v as usize),
+            _ => None,
+        })
+        .filter_map(|id| toks.get(id).cloned())
+        .collect()
+    }
+
+    /// A checkpoint's DECLARED merge list as a set, for use as an oracle.
+    ///
+    /// Panics rather than returning empty: a file with no declared merges is
+    /// not a weak oracle, it is not an oracle, and an empty set would compare
+    /// equal to nothing and silently pass a subset test.
+    fn declared_merges(c: &Content) -> std::collections::HashSet<(String, String)> {
+        let VocabAndMerges { merges, .. } =
+            c.vocab_and_optional_merges().expect("vocab and merges");
+        merges
+            .expect("this checkpoint declares no merges, so it cannot serve as an oracle")
+            .into_iter()
+            .collect()
+    }
+
     /// ⚠️ THE ENABLING FACT, WHICH A DIGEST SWEEP CANNOT SEE.
     ///
     /// Phi-3's vocabulary EXTENDS the Llama SentencePiece one rather than
@@ -2327,25 +2426,16 @@ mod spm_derivation_tests {
     #[test]
     #[ignore = "needs a local GGUF corpus; set LIGHTBULB_GGUF_CORPUS"]
     fn phi3_extends_the_llama_vocabulary_and_inherits_its_oracle() {
-        let (Some(phi3), Some(spm), Some(tiny)) = (
-            corpus_file("ggml-vocab-phi-3.gguf"),
-            corpus_file("ggml-vocab-llama-spm.gguf"),
-            corpus_file("tinyllama-1.1b-chat-v1.0.Q4_0.gguf"),
+        let (Some(phi3_c), Some(spm_c), Some(tiny_c)) = (
+            read_corpus("ggml-vocab-phi-3.gguf"),
+            read_corpus("ggml-vocab-llama-spm.gguf"),
+            read_corpus("tinyllama-1.1b-chat-v1.0.Q4_0.gguf"),
         ) else {
             lightbulb_skip();
             return;
         };
-        let phi3_c = Content::read(&phi3).expect("read phi-3");
-        let spm_c = Content::read(&spm).expect("read llama-spm");
-        let tiny_c = Content::read(&tiny).expect("read tinyllama");
-
         let phi3_tokens = tokens_of(&phi3_c);
         let spm_tokens = tokens_of(&spm_c);
-        eprintln!(
-            "  phi-3 {} tokens, llama-spm {} tokens",
-            phi3_tokens.len(),
-            spm_tokens.len()
-        );
 
         // The digests DIFFER -- which is what hid the relation.
         assert_ne!(
@@ -2355,21 +2445,12 @@ mod spm_derivation_tests {
         );
         assert_eq!(Content::vocab_sha256(&phi3_tokens), PHI3_VOCAB_SHA256);
 
-        // ...and phi-3 is a strict EXTENSION.
-        assert!(
-            phi3_tokens.len() > spm_tokens.len(),
-            "phi-3 is expected to be the longer list"
-        );
-        assert_eq!(
-            &phi3_tokens[..spm_tokens.len()],
-            &spm_tokens[..],
-            "phi-3's leading ids are no longer byte-identical to llama-spm's, so it does not inherit that oracle"
-        );
-
-        // The extra tokens contribute no merges, which is why the lists coincide.
-        let extra = &phi3_tokens[spm_tokens.len()..];
+        // ...and phi-3 is a strict EXTENSION whose tail adds no merges.
+        let extra = assert_prefix_and_tail(&spm_tokens, &phi3_tokens);
         eprintln!(
-            "  extra {} tokens: {:?}",
+            "  phi-3 {} = llama-spm {} + {} extra: {:?}",
+            phi3_tokens.len(),
+            spm_tokens.len(),
             extra.len(),
             &extra[..4.min(extra.len())]
         );
@@ -2382,13 +2463,7 @@ mod spm_derivation_tests {
         );
 
         // THE ORACLE: TinyLlama's DECLARED list, on a vocabulary it shares.
-        let VocabAndMerges { merges, .. } = tiny_c
-            .vocab_and_optional_merges()
-            .expect("tinyllama vocab and merges");
-        let declared: std::collections::HashSet<_> = merges
-            .expect("tinyllama declares merges; without them there is no oracle")
-            .into_iter()
-            .collect();
+        let declared = declared_merges(&tiny_c);
         let derived: std::collections::HashSet<_> = derived_phi3.into_iter().collect();
         eprintln!(
             "  phi-3 derived {} vs TinyLlama declared {} -- extra {}, MISSED {}",
@@ -2407,32 +2482,13 @@ mod spm_derivation_tests {
     #[test]
     #[ignore = "needs a local GGUF corpus; set LIGHTBULB_GGUF_CORPUS"]
     fn phi3_agrees_with_the_oracle_through_the_production_path() {
-        let (Some(phi3), Some(tiny)) = (
-            corpus_file("ggml-vocab-phi-3.gguf"),
-            corpus_file("tinyllama-1.1b-chat-v1.0.Q4_0.gguf"),
+        let Some((tiny_c, phi3_c, disagreements)) = compare_rebuilt(
+            "tinyllama-1.1b-chat-v1.0.Q4_0.gguf",
+            "ggml-vocab-phi-3.gguf",
         ) else {
             lightbulb_skip();
             return;
         };
-        let phi3_tk = Content::read(&phi3)
-            .expect("read phi-3")
-            .extract_tokenizer()
-            .expect("phi-3 rebuilds from derived merges");
-        let oracle_tk = Content::read(&tiny)
-            .expect("read tinyllama")
-            .extract_tokenizer()
-            .expect("tinyllama rebuilds from declared merges");
-
-        let inputs = tokenization_probe_inputs();
-        let disagreements = disagreements_between(&oracle_tk, &phi3_tk, &inputs);
-        eprintln!(
-            "  phi-3 vs oracle: {} inputs x 2 arms, {} disagreements",
-            inputs.len(),
-            disagreements.len()
-        );
-        for d in disagreements.iter().take(6) {
-            eprintln!("    {d}");
-        }
 
         // ⚠️ NOT ASSERTED EQUAL TO ZERO, AND MY FIRST FILTER LOOKED THE WRONG WAY.
         //
@@ -2447,27 +2503,10 @@ mod spm_derivation_tests {
         // phi-3's real configuration rather than a defect. An earlier version of
         // this test filtered on phi-3's EXTRA tokens and missed that the cause
         // was a token the oracle has and phi-3 does not.
-        let specials_of = |c: &Content| -> Vec<String> {
-            let toks = tokens_of(c);
-            [
-                "tokenizer.ggml.unknown_token_id",
-                "tokenizer.ggml.bos_token_id",
-                "tokenizer.ggml.eos_token_id",
-            ]
-            .iter()
-            .filter_map(|k| match c.metadata().get(*k) {
-                Some(Value::U32(v)) => Some(*v as usize),
-                Some(Value::U64(v)) => Some(*v as usize),
-                Some(Value::I32(v)) => Some(*v as usize),
-                _ => None,
-            })
-            .filter_map(|id| toks.get(id).cloned())
-            .collect()
-        };
-        let phi3_c = Content::read(&phi3).expect("read phi-3");
-        let tiny_c = Content::read(&tiny).expect("read tinyllama");
-        let a: std::collections::HashSet<String> = specials_of(&tiny_c).into_iter().collect();
-        let b: std::collections::HashSet<String> = specials_of(&phi3_c).into_iter().collect();
+        let a: std::collections::HashSet<String> =
+            registered_specials(&tiny_c).into_iter().collect();
+        let b: std::collections::HashSet<String> =
+            registered_specials(&phi3_c).into_iter().collect();
         let only_one: Vec<&String> = a.symmetric_difference(&b).collect();
         eprintln!("  special to exactly one checkpoint: {only_one:?}");
         assert!(
@@ -2481,17 +2520,9 @@ mod spm_derivation_tests {
             .collect();
         assert!(
             unexplained.is_empty(),
-            "{} disagreements involve no token that is special to exactly one checkpoint:
-  {}",
+            "{} disagreements involve no token special to exactly one checkpoint: {:?}",
             unexplained.len(),
             unexplained
-                .iter()
-                .map(|s| s.as_str())
-                .collect::<Vec<_>>()
-                .join(
-                    "
-  "
-                )
         );
     }
 
@@ -2690,17 +2721,13 @@ mod spm_derivation_tests {
     #[test]
     #[ignore = "needs a local GGUF corpus; set LIGHTBULB_GGUF_CORPUS"]
     fn llama_spm_agrees_with_the_oracle_through_the_production_path() {
-        let (Some(spm), Some(tiny)) = (
-            corpus_file("ggml-vocab-llama-spm.gguf"),
-            corpus_file("tinyllama-1.1b-chat-v1.0.Q4_0.gguf"),
+        let Some((tiny_c, spm_c, disagreements)) = compare_rebuilt(
+            "tinyllama-1.1b-chat-v1.0.Q4_0.gguf",
+            "ggml-vocab-llama-spm.gguf",
         ) else {
             lightbulb_skip();
             return;
         };
-        let spm_c = Content::read(&spm).expect("read llama-spm");
-        let tiny_c = Content::read(&tiny).expect("read tinyllama");
-        eprintln!("  SUBJECT: {}", spm.display());
-        eprintln!("  ORACLE : {}", tiny.display());
 
         // CONTROL: same vocabulary, or the oracle does not range over the subject.
         assert_eq!(
@@ -2709,26 +2736,23 @@ mod spm_derivation_tests {
             "the vocabularies differ, so this is not an oracle"
         );
 
-        let derived_tk = spm_c
-            .extract_tokenizer()
-            .expect("llama-spm rebuilds from derived merges");
-        let oracle_tk = tiny_c
-            .extract_tokenizer()
-            .expect("tinyllama rebuilds from declared merges");
-
         // CONTROL: the oracle still produces the established figure.
-        let want = oracle_tk.encode(PROMPT, false).expect("oracle encode");
+        let oracle_tk = tiny_c.extract_tokenizer().expect("tinyllama rebuilds");
         assert_eq!(
-            want.get_ids().len(),
+            oracle_tk
+                .encode(PROMPT, false)
+                .expect("oracle encode")
+                .get_ids()
+                .len(),
             22,
             "the oracle no longer produces 22 ids, so there is no baseline"
         );
 
-        let inputs = tokenization_probe_inputs();
         // ⚠️ THE WARRANT STRING QUOTES THIS COUNT AND NOTHING CHECKED IT. It
         // said 28 while this test ran 26 -- the 28 came from a throwaway
         // experiment and never matched. A figure in prose beside a figure in
         // code drifts silently; this makes them the same figure.
+        let inputs = tokenization_probe_inputs();
         let warrant = Content::spm_derivation_warrant(LLAMA_SPM_VOCAB_SHA256)
             .expect("the llama-spm vocabulary is allowlisted");
         assert!(
@@ -2737,17 +2761,6 @@ mod spm_derivation_tests {
             inputs.len()
         );
 
-        let disagreements = disagreements_between(&oracle_tk, &derived_tk, &inputs);
-
-        eprintln!(
-            "  {} inputs x 2 arms = {} comparisons, {} disagreements",
-            inputs.len(),
-            inputs.len() * 2,
-            disagreements.len()
-        );
-        for d in disagreements.iter().take(6) {
-            eprintln!("    {d}");
-        }
         assert!(
             disagreements.is_empty(),
             "{} of {} comparisons disagree between the derived and declared tokenizers",
