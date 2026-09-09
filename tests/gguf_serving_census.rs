@@ -35,13 +35,30 @@
 use lightbulb::gguf::{Content, Value};
 use std::path::PathBuf;
 
-fn corpus() -> Option<Vec<PathBuf>> {
+/// The corpus files, plus any directory that could not be read.
+///
+/// ⚠️ THE SECOND RETURN VALUE IS LOAD-BEARING AND THE FIRST VERSION OF THIS
+/// FILE DROPPED IT. This walker was written from `gguf_corpus_sweep.rs`, whose
+/// version collects unreadable directories so the caller can refuse to report a
+/// count taken over a PARTIAL walk. Reimplementing it here, I kept the traversal
+/// and silently `continue`d on an unreadable directory -- so a permissions error
+/// would have SHRUNK the denominator and still reported success, which is the
+/// exact defect this file exists to measure, committed by the file itself.
+///
+/// A partial walk under-counts `with_weights`, and an under-counted denominator
+/// is a serving claim that looks better than the truth.
+fn corpus() -> Option<(Vec<PathBuf>, Vec<String>)> {
     let root = PathBuf::from(std::env::var_os("LIGHTBULB_GGUF_CORPUS")?);
     let mut out = Vec::new();
+    let mut unreadable = Vec::new();
     let mut stack = vec![root];
     while let Some(d) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&d) else {
-            continue;
+        let entries = match std::fs::read_dir(&d) {
+            Ok(e) => e,
+            Err(e) => {
+                unreadable.push(format!("{}: {e}", d.display()));
+                continue;
+            }
         };
         for e in entries.flatten() {
             let p = e.path();
@@ -56,7 +73,7 @@ fn corpus() -> Option<Vec<PathBuf>> {
         }
     }
     out.sort();
-    Some(out)
+    Some((out, unreadable))
 }
 
 /// Why a file is or is not a serving candidate. The order of these variants is
@@ -219,13 +236,17 @@ impl Census {
 #[test]
 #[ignore = "needs a local GGUF corpus; set LIGHTBULB_GGUF_CORPUS"]
 fn the_servable_population_is_measured_rather_than_assumed() {
-    let Some(files) = corpus() else {
+    let Some((files, unreadable_dirs)) = corpus() else {
         lightbulb::test_notice::skip_unless_required(
             "LIGHTBULB_REQUIRE_CORPUS",
             "set LIGHTBULB_GGUF_CORPUS to a directory containing .gguf files",
         );
         return;
     };
+    assert!(
+        unreadable_dirs.is_empty(),
+        "the corpus walk was incomplete, so the denominator below understates it: {unreadable_dirs:?}"
+    );
     assert!(
         !files.is_empty(),
         "an empty corpus satisfies every assertion below, so it fails here instead"
