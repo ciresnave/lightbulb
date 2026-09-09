@@ -368,6 +368,52 @@ impl Content {
         }
     }
 
+    /// The warrant under which this file's SentencePiece merges are DERIVED
+    /// from its vocabulary, or `None` if nothing is being derived.
+    ///
+    /// `Some(w)` means all three of: this is a `llama`-model GGUF, it declares
+    /// NO `tokenizer.ggml.merges`, and its vocabulary digest is on
+    /// `spm_derivation_warrant`'s allowlist. So
+    /// [`Self::extract_tokenizer`] will reconstruct the merge list with
+    /// `derive_merges`, and `w` is the evidence that this exact
+    /// vocabulary's reconstruction was checked against a file carrying real
+    /// merges.
+    ///
+    /// ⚠️ **`None` is not "unwarranted".** It is the union of three unrelated
+    /// cases — a file that DECLARES its merges and needs no warrant, a non-SPM
+    /// file that takes a different code path entirely, and an SPM file whose
+    /// vocabulary nobody has checked, which is the one that gets refused. A
+    /// caller wanting to tell those apart must ask [`Self::extract_tokenizer`],
+    /// whose error names which.
+    ///
+    /// Public so `gguf_corpus_sweep` can state an OBLIGATION rather than print
+    /// a summary: **a file carrying a warrant must rebuild.** That sweep's
+    /// `ok + refused == files.len()` is a conservation law — true under every
+    /// redistribution between the two terms, and therefore blind to the very
+    /// count it reports (issue #80). Same reason [`Self::verified_pre_values`]
+    /// is public.
+    pub fn derived_merge_warrant(&self) -> Option<&'static str> {
+        let model_kind = self
+            .metadata()
+            .get("tokenizer.ggml.model")
+            .and_then(|v| match v {
+                Value::String(s) => Some(s.as_str()),
+                _ => None,
+            });
+        if model_kind != Some("llama") {
+            return None;
+        }
+        // ⚠️ Reads through the SAME accessor `extract_tokenizer` uses, rather
+        // than re-deriving tokens from metadata. A second implementation would
+        // drift, and its drift would show up as an obligation firing on a file
+        // that is perfectly fine.
+        let VocabAndMerges { tokens, merges, .. } = self.vocab_and_optional_merges().ok()?;
+        if merges.is_some() {
+            return None;
+        }
+        Self::spm_derivation_warrant(&Self::vocab_sha256(&tokens))
+    }
+
     /// Rebuild the checkpoint's own tokenizer from GGUF metadata.
     ///
     /// # Which `tokenizer.ggml.*` keys this reads, and which it deliberately does not
