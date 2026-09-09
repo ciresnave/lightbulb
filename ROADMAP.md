@@ -172,21 +172,23 @@ struct's public fields make constructible. Both are errors now.
 Measured by `tests/gguf_corpus_sweep.rs` over every local GGUF:
 
 ```
-30 files total = 16 REBUILT + 14 that do not load    (was 1 + 29; re-measured 2026-09-05)
+30 files total = 23 REBUILT + 7 refused   (was 16 + 14; re-measured 2026-09-09
+                                          at `main` c495852, after #83)
 
- 16  rebuilt
-        1  SentencePiece   TinyLlama-1.1B-Chat-v1.0 Q4_0
-       15  byte-level BPE  SmolLM2-135M-Instruct x6, plus the gpt-2, falcon,
-                           qwen2, deepseek-coder, refact, deepseek-llm,
-                           llama-bpe, command-r and starcoder vocab files
-  9  refused by the tokenizer
-        3  tokenizer.ggml.model = "gpt2", `pre` NOT VERIFIED
-              mpt, qwen35, gpt-neox(absent)  (refused for cause, below)
-        3  model = "llama" but NO merges   (llama-spm, phi-3, baichuan)
-        1  bert     1  t5     1  gemma4
-  5  OUR READER cannot open  -- a fact about us, not about the files
-        2  header parse failure  (tinyllamas-stories-260k, ggml-vocab-aquila)
-        3  unknown tensor dtype  (SmolLM2 IQ3_XS, IQ4_XS, Q2_K)
+ 23  rebuilt
+        1  SentencePiece, merges DECLARED   TinyLlama-1.1B-Chat-v1.0 Q4_0
+        4  SentencePiece, merges DERIVED    llama-spm, phi-3, baichuan,
+                                            tinyllamas-stories-260k (GGUF v1)
+       18  byte-level BPE                   SmolLM2-135M-Instruct x9, plus the
+                                            gpt-2, falcon, qwen2, deepseek-coder,
+                                            refact, deepseek-llm, llama-bpe,
+                                            command-r and starcoder vocab files
+  7  refused by the tokenizer
+        4  tokenizer.ggml.model = "gpt2", `pre` NOT VERIFIED
+              mpt, qwen35 (named, unverified);  aquila, gpt-neox (absent)
+        3  a tokenizer model this build does not construct
+              bert (bert-bge)   t5 (nomic-bert-moe)   gemma4 (gemma-4)
+  0  OUR READER cannot open   -- this group was 5 and is now EMPTY
 ```
 
 ⚠️ **That last group used to read "unreadable BEFORE the tokenizer is reached",
@@ -214,6 +216,20 @@ metadata without touching tensor dtypes and is simply not exposed; making it
 reachable would serve four of the five, and the fifth needs v1 field widths as
 well.
 
+⚠️ **DONE, AND THE PARAGRAPH ABOVE IS NOW HISTORY RATHER THAN A PLAN.** Both
+halves landed across #73–#76: a metadata read stopped depending on candle being
+able to type the tensors, which recovered the three IQ-dtype SmolLM2 files, and
+the two parsers stopped cancelling each other out, which reached the v1 file.
+**The "OUR READER cannot open" group went 5 → 0**, and `ggml-vocab-aquila` moved
+from *unopenable* to *opened and refused for an absent `tokenizer.ggml.pre`* —
+a different and much more informative outcome.
+
+The diagnosis above is kept because it is how the group was understood, not
+because any of it is outstanding. ⚠️ **A closed defect written up in open-defect
+prose reads exactly like an open one, and nothing errors when it goes stale** —
+which is why the count it refers to now carries its own assertion (see
+`tests/gguf_corpus_sweep.rs` and issue #80).
+
 ⚠️ **Every number above counts FILES, and a file count is not the coverage
 number a tokenizer corpus is asked for.** **Nine** of the thirty files are one
 SmolLM2 vocabulary at nine quantizations — a quantization changes the weights and
@@ -232,12 +248,13 @@ measurement was real and ranged over the wrong thing.)*
 standing claim, and the test is what to believe if they disagree.
 
 ```
-30 files  /  18 vocabularies REACHABLE THROUGH Content::read
-                                  (8 files duplicate a vocabulary already present)
-16 of 30 files rebuild  ->  but only 11 of 18 VOCABULARIES
+30 files  /  19 vocabularies REACHABLE THROUGH Content::read
+                                 (11 files duplicate a vocabulary already present)
+23 of 30 files rebuild  ->  but only 14 of 19 VOCABULARIES
 
-NOT A CORPUS CENSUS.  19 vocabularies are PRESENT and EVERY file has one;
-4 carry a vocabulary this reader cannot open, 1 of them needing v1 field widths.
+REACHABLE NOW EQUALS PRESENT.  19 vocabularies are present, every file has one,
+and 0 carry a vocabulary this reader cannot open -- so the caveat that used to
+sit here has been retired by measurement rather than by argument.
 ```
 
 ⚠️ **These read `17`, `11 of 17` and `5` until 2026-09-06, and they were correct
@@ -1170,11 +1187,24 @@ M2 — Performance enablers (0.3)
   - ⚠️ **CONTRADICTED**: GGUF/other quant formats usable end-to-end.
     Measured 2026-09-01: **1 of 30 local GGUF files loaded**. Re-measured
     2026-09-05: **16 of 30**, after the tokenizer was rebuilt from BPE and ten
-    `pre` values were verified. The contradiction stands — nearly half the corpus
-    still does not load, so "usable end-to-end" remains false — but **this line
-    read "1 of 30" for two days after the figure moved by fourteen files**, which
-    is why both dates are stated rather than one. See the VERIFIED STATUS block at
-    the top and `tests/gguf_corpus_sweep.rs`.
+    `pre` values were verified. Re-measured 2026-09-09 at `main` c495852:
+    **23 of 30**, after GGUF v1 and the IQ dtypes became reachable and four
+    SentencePiece vocabularies had their merges derived under an oracle.
+    **This line read "1 of 30" for two days after the figure moved by fourteen
+    files**, which is why every date is stated rather than one.
+
+    ⚠️ **The clause "nearly half the corpus still does not load" was true at 16
+    and is FALSE at 23** — it is 7 of 30, and all seven are deliberate refusals
+    (three tokenizer models this build does not construct, four `gpt2` files
+    whose splitting rule is unverified), not failures to load.
+
+    ⚠️ **The contradiction nevertheless STANDS, on different grounds, and the
+    grounds matter more than the number.** `tests/gguf_corpus_sweep.rs` measures
+    whether a TOKENIZER REBUILDS. It does not serve a token. End-to-end serving
+    is exercised by `tests/gguf_serving_e2e.rs` against **one** checkpoint named
+    by `LIGHTBULB_GGUF`, so "23 of 30" is not evidence for "usable end-to-end"
+    and must not be quoted as if it were. That figure has NOT been re-measured
+    in this pass.
 
     ⚠️ It then read **"15 of 30"** for the length of one PR, because the branch
     that corrected it and the branch that moved it again were open at the same
