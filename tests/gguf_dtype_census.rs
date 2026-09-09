@@ -112,6 +112,132 @@ fn dtype_histogram(c: &Content) -> Option<BTreeMap<u32, usize>> {
     Some(h)
 }
 
+/// What one corpus file turned out to be. Each variant is a DIFFERENT fact,
+/// and the tally keeps them apart so no bucket absorbs another.
+enum Row {
+    /// `Content::read` refused.
+    Unreadable,
+    /// Carries weights but our parser cannot type them (it refuses GGUF v1).
+    /// NOT a silent skip -- reported, because it is a fact about OUR reader and
+    /// would otherwise vanish from a census whose subject is a population.
+    NoHistogram(String),
+    /// Zero tensors: a vocabulary fixture, nothing to type.
+    VocabOnly,
+    Accepted(String),
+    Refused(String, Vec<u32>),
+}
+
+/// Read one file, print its histogram, and say which row it is.
+///
+/// The per-file ASSERTIONS live HERE rather than in the tally, at the point
+/// where both facts are in hand: what candle said, and what the file actually
+/// contains. Separating them would mean carrying candle's message through the
+/// `Row` type purely so the check could happen elsewhere.
+///
+/// ⚠️ 47 code lines against Codacy's limit of 50 — three lines of headroom.
+/// The next thing added here goes in a new function, not on the end of this
+/// one.
+fn row_for(path: &PathBuf) -> Row {
+    let name = path.file_name().unwrap().to_string_lossy().into_owned();
+    let Ok(c) = Content::read(path) else {
+        return Row::Unreadable;
+    };
+    let Some(hist) = dtype_histogram(&c) else {
+        return Row::NoHistogram(name);
+    };
+    if hist.is_empty() {
+        return Row::VocabOnly;
+    }
+    let unsupported: Vec<u32> = hist
+        .keys()
+        .copied()
+        .filter(|d| !CANDLE_ACCEPTS.contains(d))
+        .collect();
+    let shown: Vec<String> = hist.iter().map(|(d, n)| format!("{d}:{n}")).collect();
+    println!(
+        "  {name:<38} {:>4} tensors  {}  unsupported={unsupported:?}",
+        hist.values().sum::<usize>(),
+        shown.join(" ")
+    );
+    match c.tensor_infos().err().map(|e| e.to_string()) {
+        None => {
+            assert!(
+                unsupported.is_empty(),
+                "{name} was ACCEPTED by candle while carrying dtypes it does not list: {unsupported:?}"
+            );
+            Row::Accepted(name)
+        }
+        Some(msg) => {
+            assert!(
+                !unsupported.is_empty(),
+                "{name} was REFUSED while every dtype it carries is in candle's table -- the refusal is about something else: {msg}"
+            );
+            // ⚠️ THE CLAIM THIS FILE EXISTS FOR. The number candle prints is a
+            // DTYPE, so it must appear in the unsupported set. Under the
+            // "tensor index" misreading there is no reason it would.
+            let reported: Vec<u32> = msg
+                .split_whitespace()
+                .filter_map(|w| w.trim_end_matches('.').parse::<u32>().ok())
+                .collect();
+            assert!(
+                reported.iter().any(|r| unsupported.contains(r)),
+                "candle's refusal for {name} names no dtype from its unsupported set {unsupported:?}; numbers seen in the message were {reported:?}. Either the message changed or the number is not a dtype after all: {msg}"
+            );
+            Row::Refused(name, unsupported)
+        }
+    }
+}
+
+#[derive(Default)]
+struct Census {
+    accepted: Vec<String>,
+    refused: Vec<(String, Vec<u32>)>,
+    no_histogram: Vec<String>,
+    vocab_only: usize,
+    unreadable_file: usize,
+}
+
+impl Census {
+    fn of(files: &[PathBuf]) -> Self {
+        let mut c = Census::default();
+        for path in files {
+            match row_for(path) {
+                Row::Unreadable => c.unreadable_file += 1,
+                Row::NoHistogram(n) => c.no_histogram.push(n),
+                Row::VocabOnly => c.vocab_only += 1,
+                Row::Accepted(n) => c.accepted.push(n),
+                Row::Refused(n, u) => c.refused.push((n, u)),
+            }
+        }
+        c
+    }
+
+    fn total(&self) -> usize {
+        self.accepted.len()
+            + self.refused.len()
+            + self.no_histogram.len()
+            + self.vocab_only
+            + self.unreadable_file
+    }
+
+    fn report(&self) {
+        println!(
+            "
+  accepted by candle: {}",
+            self.accepted.len()
+        );
+        println!(
+            "  no histogram:       {}  {:?}",
+            self.no_histogram.len(),
+            self.no_histogram
+        );
+        println!("  refused:            {}", self.refused.len());
+        for (n, u) in &self.refused {
+            println!("      {n}  unsupported dtypes {u:?}");
+        }
+    }
+}
+
 #[test]
 #[ignore = "needs a local GGUF corpus; set LIGHTBULB_GGUF_CORPUS"]
 fn the_refused_number_is_a_dtype_code_and_not_a_tensor_index() {
@@ -128,84 +254,8 @@ fn the_refused_number_is_a_dtype_code_and_not_a_tensor_index() {
     );
     assert!(!files.is_empty(), "an empty corpus proves nothing here");
 
-    // The two arms this test discriminates between. Both must be non-empty or
-    // the comparison below is one-sided and vacuous.
-    let mut accepted = Vec::new();
-    let mut refused = Vec::new();
-    // Weighted files this census cannot describe -- a fact about OUR parser
-    // (it refuses GGUF v1), reported rather than dropped from a population.
-    let mut no_histogram: Vec<String> = Vec::new();
-    let mut vocab_only = 0usize;
-    let mut unreadable_file = 0usize;
-
-    for path in &files {
-        let name = path.file_name().unwrap().to_string_lossy().into_owned();
-        let Ok(c) = Content::read(path) else {
-            unreadable_file += 1;
-            continue;
-        };
-        let Some(hist) = dtype_histogram(&c) else {
-            // NOT A SILENT SKIP: a v1 file carries weights and has no
-            // histogram here, and would otherwise vanish from a census whose
-            // entire subject is a population.
-            no_histogram.push(name);
-            continue;
-        };
-        if hist.is_empty() {
-            vocab_only += 1;
-            continue; // vocabulary-only; no tensors to type
-        }
-        let unsupported: Vec<u32> = hist
-            .keys()
-            .copied()
-            .filter(|d| !CANDLE_ACCEPTS.contains(d))
-            .collect();
-        let candle = c.tensor_infos().err().map(|e| e.to_string());
-        let shown: Vec<String> = hist.iter().map(|(d, n)| format!("{d}:{n}")).collect();
-        println!(
-            "  {name:<38} {:>4} tensors  {}  unsupported={unsupported:?}",
-            hist.values().sum::<usize>(),
-            shown.join(" ")
-        );
-
-        match candle {
-            None => {
-                assert!(
-                    unsupported.is_empty(),
-                    "{name} was ACCEPTED by candle while carrying dtypes it does not list: {unsupported:?}"
-                );
-                accepted.push(name);
-            }
-            Some(msg) => {
-                assert!(
-                    !unsupported.is_empty(),
-                    "{name} was REFUSED while every dtype it carries is in candle's table -- the refusal is about something else: {msg}"
-                );
-                // ⚠️ THE CLAIM THIS FILE EXISTS FOR. The number candle prints is
-                // a DTYPE, so it must appear in the unsupported set. Under the
-                // "tensor index" misreading there is no reason it would.
-                let reported: Vec<u32> = msg
-                    .split_whitespace()
-                    .filter_map(|w| w.trim_end_matches('.').parse::<u32>().ok())
-                    .collect();
-                assert!(
-                    reported.iter().any(|r| unsupported.contains(r)),
-                    "candle's refusal for {name} names no dtype from its unsupported set {unsupported:?}; numbers seen in the message were {reported:?}. Either the message changed or the number is not a dtype after all: {msg}"
-                );
-                refused.push((name, unsupported));
-            }
-        }
-    }
-
-    println!("\n  accepted by candle: {}", accepted.len());
-    println!(
-        "  no histogram:       {}  {no_histogram:?}",
-        no_histogram.len()
-    );
-    println!("  refused:            {}", refused.len());
-    for (n, u) in &refused {
-        println!("      {n}  unsupported dtypes {u:?}");
-    }
+    let c = Census::of(&files);
+    c.report();
 
     // ⚠️ BOTH ARMS OR NOTHING. A corpus where every file is accepted makes the
     // refusal assertion unreachable, and one where every file is refused makes
@@ -213,21 +263,21 @@ fn the_refused_number_is_a_dtype_code_and_not_a_tensor_index() {
     // having compared nothing -- and a one-sided population is the shape that
     // let the original misreading stand.
     assert!(
-        !accepted.is_empty(),
+        !c.accepted.is_empty(),
         "no file was accepted, so the acceptance arm never ran and this test compared nothing"
     );
+    assert!(
+        !c.refused.is_empty(),
+        "no file was refused, so the dtype-code assertion never ran -- the claim this file exists to hold is untested on this corpus"
+    );
+
     // Every file lands in exactly one bucket. A conservation law is not a
     // coverage assertion -- see issue #80 -- but it does catch a file being
     // silently dropped by some future `continue`, which is how a population
     // shrinks without anything going red.
     assert_eq!(
-        accepted.len() + refused.len() + no_histogram.len() + vocab_only + unreadable_file,
+        c.total(),
         files.len(),
         "some corpus file reached none of the buckets, so the census lost it"
-    );
-
-    assert!(
-        !refused.is_empty(),
-        "no file was refused, so the dtype-code assertion never ran -- the claim this file exists to hold is untested on this corpus"
     );
 }
