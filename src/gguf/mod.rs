@@ -2751,7 +2751,26 @@ mod spm_derivation_tests {
         // ⚠️ THE WARRANT STRING QUOTES THIS COUNT AND NOTHING CHECKED IT. It
         // said 28 while this test ran 26 -- the 28 came from a throwaway
         // experiment and never matched. A figure in prose beside a figure in
-        // code drifts silently; this makes them the same figure.
+        // code drifts silently; this binds them.
+        //
+        // ⚠️ THIS IS A DETECTOR, NOT AN IMPOSSIBILITY, AND THAT WAS A DECISION.
+        //
+        // The stronger form would FORMAT the count into the warrant, so the two
+        // could not disagree at all. It is declined deliberately: the warrant is
+        // a production `&'static str` that a user reads in a REFUSAL MESSAGE,
+        // and the count is a TEST-ONLY fact. Formatting one from the other would
+        // make a shipped error message depend on a test fixture's length --
+        // unreadable without running the test that defines it, and editable by
+        // anyone changing the fixture without knowing they had touched a
+        // user-facing string.
+        //
+        // Recorded here because a DECLINED CHECK HAS NO COMPLAINANT: no red, no
+        // file, no row. Without this paragraph the missing binding reads as an
+        // oversight in six weeks and someone "fixes" it.
+        //
+        // Forced rather than reasoned: changing the prose to "27" while leaving
+        // this code at 26 turns the assertion below RED, and the failure message
+        // quotes the offending warrant back.
         let inputs = tokenization_probe_inputs();
         let warrant = Content::spm_derivation_warrant(LLAMA_SPM_VOCAB_SHA256)
             .expect("the llama-spm vocabulary is allowlisted");
