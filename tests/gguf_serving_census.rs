@@ -145,6 +145,77 @@ fn classify(path: &PathBuf) -> Verdict {
     }
 }
 
+/// The tally, extracted so the test body stays readable and under Codacy's
+/// 50-line limit. Counting and asserting are different jobs and the split makes
+/// the assertions visible in one screen.
+#[derive(Default)]
+struct Census {
+    unreadable: usize,
+    vocab_only: usize,
+    foreign: usize,
+    loads: usize,
+    unsupported: Vec<(String, String)>,
+    failed: Vec<(String, String)>,
+}
+
+impl Census {
+    fn of(files: &[PathBuf]) -> Self {
+        let mut c = Census::default();
+        for path in files {
+            let name = path.file_name().unwrap().to_string_lossy().into_owned();
+            let v = classify(path);
+            println!("  {name:<38} {v:?}");
+            match v {
+                Verdict::Unreadable => c.unreadable += 1,
+                Verdict::VocabularyOnly => c.vocab_only += 1,
+                Verdict::ForeignArchitecture(_) => c.foreign += 1,
+                Verdict::Loads => c.loads += 1,
+                Verdict::UnsupportedQuantization(e) => c.unsupported.push((name, e)),
+                Verdict::LoadFailed(e) => c.failed.push((name, e)),
+            }
+        }
+        c
+    }
+
+    /// Files that could in principle be served. ⚠️ THE DENOMINATOR, and the
+    /// whole point of the file: it is not the corpus size.
+    fn with_weights(&self, total: usize) -> usize {
+        total - self.vocab_only - self.unreadable
+    }
+
+    fn report(&self, total: usize) {
+        println!(
+            "
+  {total} files"
+        );
+        println!(
+            "  {:>3}  vocabulary-only -- CANNOT be served by construction",
+            self.vocab_only
+        );
+        println!("  {:>3}  unreadable", self.unreadable);
+        println!(
+            "  {:>3}  carry weights   <- THE SERVING DENOMINATOR",
+            self.with_weights(total)
+        );
+        println!("  {:>3}    of those, a foreign architecture", self.foreign);
+        println!(
+            "  {:>3}    of those, accepted by the live loader",
+            self.loads
+        );
+        println!(
+            "  {:>3}    of those, an unrepresentable tensor dtype (documented)",
+            self.unsupported.len()
+        );
+        println!(
+            "  {:>3}    of those, refused for some OTHER reason",
+            self.failed.len()
+        );
+        for (n, _) in &self.unsupported {
+            println!("         unsupported quantization: {n}");
+        }
+    }
+}
+
 #[test]
 #[ignore = "needs a local GGUF corpus; set LIGHTBULB_GGUF_CORPUS"]
 fn the_servable_population_is_measured_rather_than_assumed() {
@@ -160,51 +231,14 @@ fn the_servable_population_is_measured_rather_than_assumed() {
         "an empty corpus satisfies every assertion below, so it fails here instead"
     );
 
-    let mut unreadable = 0usize;
-    let mut vocab_only = 0usize;
-    let mut foreign = 0usize;
-    let mut loads = 0usize;
-    let mut unsupported = Vec::new();
-    let mut failed = Vec::new();
-
-    for path in &files {
-        let name = path.file_name().unwrap().to_string_lossy().into_owned();
-        let v = classify(path);
-        println!("  {name:<38} {v:?}");
-        match v {
-            Verdict::Unreadable => unreadable += 1,
-            Verdict::VocabularyOnly => vocab_only += 1,
-            Verdict::ForeignArchitecture(_) => foreign += 1,
-            Verdict::Loads => loads += 1,
-            Verdict::UnsupportedQuantization(e) => unsupported.push((name, e)),
-            Verdict::LoadFailed(e) => failed.push((name, e)),
-        }
-    }
-
-    let with_weights = files.len() - vocab_only - unreadable;
-    println!("\n  {} files", files.len());
-    println!("  {vocab_only:>3}  vocabulary-only -- CANNOT be served by construction");
-    println!("  {unreadable:>3}  unreadable");
-    println!("  {with_weights:>3}  carry weights   <- THE SERVING DENOMINATOR");
-    println!("  {foreign:>3}    of those, a foreign architecture");
-    println!("  {loads:>3}    of those, accepted by the live loader");
-    println!(
-        "  {:>3}    of those, an unrepresentable tensor dtype (documented)",
-        unsupported.len()
-    );
-    println!(
-        "  {:>3}    of those, refused for some OTHER reason",
-        failed.len()
-    );
-    for (n, _) in &unsupported {
-        println!("         unsupported quantization: {n}");
-    }
+    let c = Census::of(&files);
+    c.report(files.len());
 
     // ⚠️ THE POPULATION MUST NOT BE EMPTY. Every assertion here is satisfied by
     // a corpus of thirty vocabulary files, which is the shape this corpus very
     // nearly has -- so the guard is not hypothetical.
     assert!(
-        with_weights > 0,
+        c.with_weights(files.len()) > 0,
         "no corpus file carries weights, so this census measured nothing about serving"
     );
 
@@ -212,14 +246,15 @@ fn the_servable_population_is_measured_rather_than_assumed() {
     // by a corpus whose every weighted file is refused, which would make the
     // serving claim vacuous while this test stayed green.
     assert!(
-        loads > 0,
+        c.loads > 0,
         "every weighted file was refused, so nothing here supports a serving claim"
     );
 
     // A refusal for a reason OTHER than an unrepresentable dtype is a defect
     // and must be named rather than absorbed into a ratio.
     assert!(
-        failed.is_empty(),
-        "llama checkpoints with weights that the live loader refused for an          unexplained reason: {failed:#?}"
+        c.failed.is_empty(),
+        "llama checkpoints with weights that the live loader refused for an unexplained reason: {:#?}",
+        c.failed
     );
 }
