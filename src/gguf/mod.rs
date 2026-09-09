@@ -145,6 +145,26 @@ const PHI3_VOCAB_SHA256: &str = "45715642b43ea2169115398dc8853cc6e8b70c969e42574
 const BAICHUAN_VOCAB_SHA256: &str =
     "392ea9d92bd1c32d3dee2ce425d501eb9ab91eb27636a9e0a69af4651292034e";
 
+/// SHA-256 of the 512-token vocabulary in `tinyllamas-stories-260k-f32.gguf`.
+///
+/// ⚠️ THE SMALLEST POPULATION IN THE CORPUS, AND THE CLEANEST. No oracle: no
+/// file shares or extends this vocabulary. Its warrant is the same shape as
+/// Baichuan's and rests on far fewer observations — 164 adjacent pairs against
+/// Baichuan's 54803.
+///
+/// ⚠️ SMALL IS NOT THE SAME AS WEAK, AND THE DISTINCTION IS MEASURED. Of those
+/// 164 pairs, 150 carry order information and only 14 are ties — 8.5%, the
+/// LOWEST tie fraction of the three allowlisted vocabularies (Baichuan 44.4%,
+/// the Llama reference 51.7%). So this file's limitation is population SIZE
+/// alone, not population QUALITY. Those are separately actionable: size is
+/// fixed by more data, quality by a better measurement, and conflating them
+/// would discount the wrong thing.
+///
+/// This is also the only GGUF **v1** file here. Our own parser refuses v1 and
+/// candle reads it, which is why it is readable at all — see `Content::read`.
+const V1_TOY_VOCAB_SHA256: &str =
+    "7a2789d1f98cbf816342283ab2820525ef3698da3aa30533f63ae4b0d63555cf";
+
 /// Convert our own parser's metadata into candle's `Value` shape.
 ///
 /// ⚠️ EXISTS BECAUSE CANDLE CANNOT ALWAYS PARSE A FILE WE CAN. Both enums are
@@ -884,6 +904,9 @@ impl Content {
             ),
             BAICHUAN_VOCAB_SHA256 => Some(
                 "Baichuan's 64000-token vocabulary. ⚠️ WEAKER WARRANT THAN THE TWO ABOVE, DELIBERATELY: no corpus file shares or extends this vocabulary, so NO DECLARED MERGE LIST EXISTS to compare against and nothing here is an oracle. What stands in its place: the derived merge order is checked against the ordering llama.cpp's own converter wrote into `tokenizer.ggml.scores` -- a separately-authored fact, not one this crate produced -- and contradicts it 0 times. ⚠️ STATE THE POPULATION HONESTLY: there are 54803 adjacent pairs, but 24347 of them are TIES -- equal scores, which no ordering can contradict -- so only 30456 pairs can discriminate anything and those are the evidence. Counting all 54803 would inflate it by ~80% with members structurally incapable of falsifying the claim. The comparator is FORCED rather than trusted: perturbing the first id in the measured sequence raises the count by exactly one, so 0 is a reading and not a silence. This is PROOF AGAINST GROSS FAILURE, NOT PROOF OF CORRECTNESS -- a merge list in the wrong ORDER could agree with those scores and still tokenize differently, and no measurement here would see it. See `baichuan_derived_order_agrees_with_the_converters_own_scores`.",
+            ),
+            V1_TOY_VOCAB_SHA256 => Some(
+                "The 512-token vocabulary of `tinyllamas-stories-260k-f32.gguf`. ⚠️ SAME WEAKER WARRANT AS BAICHUAN AND OVER FAR FEWER OBSERVATIONS: no file shares or extends this vocabulary, so there is no oracle. The derived merge order contradicts the converter's own `tokenizer.ggml.scores` ordering 0 times -- but state the population, because it is the whole caveat: 164 adjacent pairs, of which 150 carry order information and 14 are ties. ⚠️ AND STATE THE NEGATIVE CASE BESIDE IT: A BROKEN COMPARATOR RETURNS 0 ON 164 PAIRS TOO. The forcing arm is the only thing that distinguishes those two outcomes, and it fires -- perturbing the first id in the measured sequence raises the count. ⚠️ SMALL IS NOT WEAK: at 8.5% ties this file has the HIGHEST informative fraction of the three allowlisted vocabularies (Baichuan 44.4% ties, the Llama reference 51.7%), so the limitation is how MANY observations there are, not how much each one can tell you. PROOF AGAINST GROSS FAILURE, NOT PROOF OF CORRECTNESS. See `the_v1_toy_order_agrees_over_a_small_but_clean_population`.",
             ),
             _ => None,
         }
@@ -2888,6 +2911,138 @@ mod spm_derivation_tests {
         );
     }
 
+    /// ⚠️ THE ALLOWLIST IS CLOSED, AND THIS REPLACES A CORPUS TEST THAT CAN NO
+    /// LONGER RUN.
+    ///
+    /// `a_vocabulary_with_no_oracle_is_still_refused` walked corpus files that
+    /// were NOT allowlisted and checked each was refused with its digest named.
+    /// Every SentencePiece vocabulary in the corpus is now allowlisted, so that
+    /// test had no subjects left — and a `for` over an empty list reaches no
+    /// assertion and reports success. It was deleted rather than left green.
+    ///
+    /// ⚠️ WHAT THAT COSTS, STATED RATHER THAN QUIETLY LOST: the refusal MESSAGE
+    /// path — the branch that formats "…this vocabulary's derived merges have
+    /// not been checked against an oracle… (sha256 {digest})" — is no longer
+    /// reachable from any corpus file, because reaching it needs a `llama`-model
+    /// checkpoint with no merges whose digest is absent from the allowlist, and
+    /// the corpus no longer contains one. The half that IS still testable is
+    /// below, and it runs without a corpus at all.
+    #[test]
+    fn the_derivation_allowlist_is_closed_and_its_lookup_discriminates() {
+        // CONTROL: the lookup finds what is there. Without this, the negative
+        // below would pass against a function that returns None for everything.
+        for (digest, label) in [
+            (LLAMA_SPM_VOCAB_SHA256, "llama-spm"),
+            (PHI3_VOCAB_SHA256, "phi-3"),
+            (BAICHUAN_VOCAB_SHA256, "baichuan"),
+            (V1_TOY_VOCAB_SHA256, "v1 toy"),
+        ] {
+            assert!(
+                Content::spm_derivation_warrant(digest).is_some(),
+                "{label} is not allowlisted, so the negative case below proves nothing"
+            );
+        }
+
+        // The allowlist does not answer for a vocabulary nobody verified.
+        for absent in [
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+            // one character off a real entry -- the nastiest near-miss
+            "92cdbd78176976ed0c31897436a0b785cc99437d18cedb014044c4b64273ef71",
+            "",
+        ] {
+            assert!(
+                Content::spm_derivation_warrant(absent).is_none(),
+                "an unverified digest {absent:?} is allowlisted, so the table admits vocabularies nobody checked"
+            );
+        }
+    }
+
+    /// ⚠️ THE SMALLEST POPULATION, AND WHY SMALL IS NOT WEAK.
+    ///
+    /// 164 adjacent pairs against Baichuan's 54803. The claim is the same shape
+    /// and rests on ~334x fewer observations, which is the honest caveat — but
+    /// the pairs it does have are cleaner than either large file's.
+    #[test]
+    #[ignore = "needs a local GGUF corpus; set LIGHTBULB_GGUF_CORPUS"]
+    fn the_v1_toy_order_agrees_over_a_small_but_clean_population() {
+        let Some(c) = read_corpus("tinyllamas-stories-260k-f32.gguf") else {
+            lightbulb_skip();
+            return;
+        };
+        let tokens = tokens_of(&c);
+        let scores = scores_of(&c);
+        assert_eq!(Content::vocab_sha256(&tokens), V1_TOY_VOCAB_SHA256);
+        assert_eq!(
+            scores.len(),
+            tokens.len(),
+            "scores and tokens must be parallel, or the witness does not line up with the subject"
+        );
+
+        let v = score_order_violations(&tokens, &scores);
+        let ties = v.pairs - v.informative;
+        eprintln!(
+            "  v1 toy: {} tokens, {} adjacent pairs of which {} INFORMATIVE ({ties} ties, {:.1}%), {} raw / {} genuine",
+            tokens.len(),
+            v.pairs,
+            v.informative,
+            100.0 * ties as f64 / v.pairs.max(1) as f64,
+            v.raw,
+            v.genuine
+        );
+
+        assert_eq!(v.genuine, 0, "the derived order contradicts the scores");
+
+        // ⚠️ SMALL IS NOT WEAK, ASSERTED RATHER THAN CLAIMED. If this file's tie
+        // fraction ever rises above the large vocabularies', the "small but
+        // clean" argument in its warrant stops being true and the warrant must
+        // be rewritten rather than kept.
+        let tie_fraction = ties as f64 / v.pairs.max(1) as f64;
+        assert!(
+            tie_fraction < 0.20,
+            "tie fraction rose to {:.1}%; the warrant claims this file is SMALL but CLEAN, and cleanliness is what it would be losing",
+            100.0 * tie_fraction
+        );
+
+        // ⚠️ THE NEGATIVE CASE, WHICH IS THE POINT ON A POPULATION THIS SIZE:
+        // a broken comparator returns 0 here too. Forcing is the only thing that
+        // tells the two apart, so it is asserted, not mentioned.
+        let ids = derived_product_ids(&tokens);
+        assert!(!ids.is_empty(), "no derived merges, nothing to perturb");
+        let mut forced = scores.clone();
+        forced[ids[0]] = scores.iter().cloned().fold(f32::INFINITY, f32::min) - 1.0;
+        let forced_genuine = score_order_violations(&tokens, &forced).genuine;
+        eprintln!("  forced (id {}): genuine {forced_genuine}", ids[0]);
+        assert!(
+            forced_genuine > v.genuine,
+            "the comparator did not register a deliberately introduced violation, so its {} above is a silence rather than a reading -- and on 164 pairs that is the difference between evidence and nothing",
+            v.genuine
+        );
+    }
+
+    /// The toy rebuilds, and its 512-token vocabulary survives the round trip.
+    #[test]
+    #[ignore = "needs a local GGUF corpus; set LIGHTBULB_GGUF_CORPUS"]
+    fn the_v1_toy_rebuilds_through_the_production_path() {
+        let Some(c) = read_corpus("tinyllamas-stories-260k-f32.gguf") else {
+            lightbulb_skip();
+            return;
+        };
+        let tk = c
+            .extract_tokenizer()
+            .expect("the v1 toy rebuilds from derived merges");
+        for probe in ["once upon a time", "the", "a b c", "\n"] {
+            let enc = tk.encode(probe, false).expect("encode");
+            assert!(
+                !enc.get_ids().is_empty(),
+                "{probe:?} encoded to nothing, so the tokenizer is not usable"
+            );
+        }
+        eprintln!(
+            "  v1 toy rebuilt and encodes; warrant: weaker + smallest, see spm_derivation_warrant"
+        );
+    }
+
     /// ⚠️ WHY THE ALLOWLIST IS NECESSARY AND NOT MERELY PRUDENT.
     ///
     /// The derivation is exact for llama.cpp's SentencePiece export and is a
@@ -2967,52 +3122,6 @@ mod spm_derivation_tests {
             Content::spm_derivation_warrant(LLAMA_SPM_VOCAB_SHA256).is_some(),
             "the digest is allowlisted"
         );
-    }
-
-    /// ⚠️ THE GUARD. An unoracled vocabulary must still be refused, or the
-    /// allowlist is decorative.
-    #[test]
-    #[ignore = "needs a local GGUF corpus; set LIGHTBULB_GGUF_CORPUS"]
-    fn a_vocabulary_with_no_oracle_is_still_refused() {
-        // ⚠️ THIS WAS A LOOP OVER A LIST AND THE LIST HAS ONE ENTRY LEFT.
-        //
-        // phi-3 left it when it turned out to share the Llama vocabulary as a
-        // prefix; baichuan left it when its weaker warrant was accepted. The
-        // guard FAILED on each change, which is what it is for.
-        //
-        // The loop is gone rather than suppressed: `clippy::single_element_loop`
-        // fired on the narrowed list and the gate caught it. A loop over one
-        // element is a claim that there is a collection, and there is not.
-        //
-        // ⚠️ WHEN THIS LAST SUBJECT IS ALLOWLISTED, DELETE THIS TEST -- do not
-        // rewrite it over an empty set. A guard that outlives its subject is a
-        // green light with nothing behind it, and the loop form made that
-        // failure silent: an empty `for` reaches no assertion and reports ok.
-        let name = "tinyllamas-stories-260k-f32.gguf";
-        let Some(p) = corpus_file(name) else {
-            lightbulb_skip();
-            return;
-        };
-        let c = Content::read(&p).expect("read");
-        let digest = Content::vocab_sha256(&tokens_of(&c));
-        assert_ne!(
-            digest, LLAMA_SPM_VOCAB_SHA256,
-            "{name} shares the oracle's vocabulary"
-        );
-        assert!(
-            Content::spm_derivation_warrant(&digest).is_none(),
-            "{name} must not be allowlisted"
-        );
-        let err = match c.extract_tokenizer() {
-            Ok(_) => panic!("{name} rebuilt without an oracle for its vocabulary"),
-            Err(e) => e.to_string(),
-        };
-        // The refusal must say what would RETIRE it, not merely that it happened.
-        assert!(
-            err.contains(&digest),
-            "{name}: the refusal does not name the digest a future oracle must match: {err}"
-        );
-        eprintln!("  {name}: refused, and the message names its digest");
     }
 
     /// Inputs the tokenizer comparisons range over.
