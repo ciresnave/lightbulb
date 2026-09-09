@@ -1,0 +1,281 @@
+//! How many corpus checkpoints could be SERVED, and why each one cannot.
+//!
+//! # Why this exists
+//!
+//! `tests/gguf_corpus_sweep.rs` reports **23 of 30 rebuild a tokenizer**, and
+//! that figure has been quoted as though it said something about end-to-end
+//! serving. It does not. ⚠️ **The two range over DIFFERENT POPULATIONS**, and
+//! nothing in the repo said so:
+//!
+//! - a tokenizer needs only `tokenizer.ggml.*`, which lives in the KV header
+//! - serving needs WEIGHTS, and most of this corpus has none
+//!
+//! `tests/gguf_serving_e2e.rs` serves exactly **one** checkpoint, named by
+//! `LIGHTBULB_GGUF`. So "usable end-to-end" had a population of one chosen by an
+//! environment variable — a claim with no denominator. This file supplies the
+//! denominator.
+//!
+//! # ⚠️ WHAT THIS MEASURES, AND WHAT IT DOES NOT
+//!
+//! It measures **whether the live loader accepts the file**, via
+//! `ParallelModelManager::load_gguf` — the reader that is actually reachable
+//! (see `tests/gguf_architecture_refusal.rs` for why that distinction matters).
+//!
+//! **Loading is NECESSARY for serving and is not SUFFICIENT.** A model that
+//! loads can still generate nonsense, which is precisely what this corpus did
+//! for ten days while every gate passed. **Do not quote this file's number as a
+//! serving figure** — that is the same substitution this file exists to stop,
+//! one level down. Coherence is `tests/gguf_serving_e2e.rs`, and it still
+//! covers one checkpoint.
+//!
+//! ```text
+//! LIGHTBULB_GGUF_CORPUS=<dir> cargo test --test gguf_serving_census -- --ignored --nocapture
+//! ```
+
+use lightbulb::gguf::{Content, Value};
+use std::path::PathBuf;
+
+/// The corpus files, plus any directory that could not be read.
+///
+/// ⚠️ THE SECOND RETURN VALUE IS LOAD-BEARING AND THE FIRST VERSION OF THIS
+/// FILE DROPPED IT. This walker was written from `gguf_corpus_sweep.rs`, whose
+/// version collects unreadable directories so the caller can refuse to report a
+/// count taken over a PARTIAL walk. Reimplementing it here, I kept the traversal
+/// and silently `continue`d on an unreadable directory -- so a permissions error
+/// would have SHRUNK the denominator and still reported success, which is the
+/// exact defect this file exists to measure, committed by the file itself.
+///
+/// A partial walk under-counts `with_weights`, and an under-counted denominator
+/// is a serving claim that looks better than the truth.
+fn corpus() -> Option<(Vec<PathBuf>, Vec<String>)> {
+    let root = PathBuf::from(std::env::var_os("LIGHTBULB_GGUF_CORPUS")?);
+    let mut out = Vec::new();
+    let mut unreadable = Vec::new();
+    let mut stack = vec![root];
+    while let Some(d) = stack.pop() {
+        let entries = match std::fs::read_dir(&d) {
+            Ok(e) => e,
+            Err(e) => {
+                unreadable.push(format!("{}: {e}", d.display()));
+                continue;
+            }
+        };
+        for e in entries.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                stack.push(p);
+            } else if p
+                .extension()
+                .is_some_and(|x| x.eq_ignore_ascii_case("gguf"))
+            {
+                out.push(p);
+            }
+        }
+    }
+    out.sort();
+    Some((out, unreadable))
+}
+
+/// Why a file is or is not a serving candidate. The order of these variants is
+/// the order the checks run, and each one is a DIFFERENT fact about the file.
+#[derive(Debug, PartialEq, Eq)]
+enum Verdict {
+    /// `Content::read` refused. Nothing further can be said about it.
+    Unreadable,
+    /// Readable, and carries ZERO tensors. ⚠️ This is the big one: a
+    /// `ggml-vocab-*.gguf` is a vocabulary fixture and was never a model. It
+    /// cannot be served BY CONSTRUCTION, not by defect.
+    VocabularyOnly,
+    /// Has weights, but declares an architecture the loader does not build.
+    ForeignArchitecture(String),
+    /// Has weights and a supported architecture, and the live loader accepted
+    /// it. ⚠️ A CANDIDATE FOR SERVING, NOT A DEMONSTRATION OF IT.
+    Loads,
+    /// Has weights and a supported architecture, and the loader refused
+    /// because a TENSOR'S DTYPE is not representable. ⚠️ This is a DOCUMENTED
+    /// limitation, not a defect: the IQ codebook family is rejected by candle
+    /// and by fuel alike, so it is not a missing table entry.
+    ///
+    /// ⚠️ It is kept SEPARATE from `LoadFailed` rather than folded into it,
+    /// because an exemption must name the property it assumes — here, "the
+    /// refusal names an unrepresentable dtype" — and not the category that
+    /// usually has it ("it is a SmolLM2 file"). A future refusal for a
+    /// different reason must NOT inherit this exemption.
+    UnsupportedQuantization(String),
+    /// Has weights and a supported architecture, and the loader refused for
+    /// some OTHER reason. This is the one that is a defect.
+    LoadFailed(String),
+}
+
+fn tensor_count(c: &Content) -> usize {
+    // Either reader answers this; candle's is the one the loader uses, and its
+    // absence is itself informative, so fall back rather than treating a
+    // candle refusal as zero tensors.
+    match c.tensor_infos() {
+        Ok(t) => t.len(),
+        Err(_) => c.lightning_tensor_infos().map(|t| t.len()).unwrap_or(0),
+    }
+}
+
+fn architecture(c: &Content) -> String {
+    match c.metadata().get("general.architecture") {
+        Some(Value::String(s)) => s.clone(),
+        _ => "<absent>".to_string(),
+    }
+}
+
+fn classify(path: &PathBuf) -> Verdict {
+    let Ok(c) = Content::read(path) else {
+        return Verdict::Unreadable;
+    };
+    if tensor_count(&c) == 0 {
+        return Verdict::VocabularyOnly;
+    }
+    let arch = architecture(&c);
+    if arch != "llama" {
+        return Verdict::ForeignArchitecture(arch);
+    }
+    drop(c);
+    // One at a time, dropped immediately: the corpus holds a 637 MB checkpoint
+    // and nine quantizations, and holding them all would measure the box rather
+    // than the loader.
+    match lightbulb::model::parallel_model_manager::ParallelModelManager::load_gguf(
+        path,
+        1,
+        512,
+        Some(candlelight::core::Device::Cpu),
+        None,
+    ) {
+        Ok(m) => {
+            drop(m);
+            Verdict::Loads
+        }
+        Err(e) => {
+            let msg = e.to_string();
+            // Keyed on the PROPERTY, read out of the refusal itself.
+            if msg.contains("unknown dtype for tensor") {
+                Verdict::UnsupportedQuantization(msg)
+            } else {
+                Verdict::LoadFailed(msg)
+            }
+        }
+    }
+}
+
+/// The tally, extracted so the test body stays readable and under Codacy's
+/// 50-line limit. Counting and asserting are different jobs and the split makes
+/// the assertions visible in one screen.
+#[derive(Default)]
+struct Census {
+    unreadable: usize,
+    vocab_only: usize,
+    foreign: usize,
+    loads: usize,
+    unsupported: Vec<(String, String)>,
+    failed: Vec<(String, String)>,
+}
+
+impl Census {
+    fn of(files: &[PathBuf]) -> Self {
+        let mut c = Census::default();
+        for path in files {
+            let name = path.file_name().unwrap().to_string_lossy().into_owned();
+            let v = classify(path);
+            println!("  {name:<38} {v:?}");
+            match v {
+                Verdict::Unreadable => c.unreadable += 1,
+                Verdict::VocabularyOnly => c.vocab_only += 1,
+                Verdict::ForeignArchitecture(_) => c.foreign += 1,
+                Verdict::Loads => c.loads += 1,
+                Verdict::UnsupportedQuantization(e) => c.unsupported.push((name, e)),
+                Verdict::LoadFailed(e) => c.failed.push((name, e)),
+            }
+        }
+        c
+    }
+
+    /// Files that could in principle be served. ⚠️ THE DENOMINATOR, and the
+    /// whole point of the file: it is not the corpus size.
+    fn with_weights(&self, total: usize) -> usize {
+        total - self.vocab_only - self.unreadable
+    }
+
+    fn report(&self, total: usize) {
+        println!(
+            "
+  {total} files"
+        );
+        println!(
+            "  {:>3}  vocabulary-only -- CANNOT be served by construction",
+            self.vocab_only
+        );
+        println!("  {:>3}  unreadable", self.unreadable);
+        println!(
+            "  {:>3}  carry weights   <- THE SERVING DENOMINATOR",
+            self.with_weights(total)
+        );
+        println!("  {:>3}    of those, a foreign architecture", self.foreign);
+        println!(
+            "  {:>3}    of those, accepted by the live loader",
+            self.loads
+        );
+        println!(
+            "  {:>3}    of those, an unrepresentable tensor dtype (documented)",
+            self.unsupported.len()
+        );
+        println!(
+            "  {:>3}    of those, refused for some OTHER reason",
+            self.failed.len()
+        );
+        for (n, _) in &self.unsupported {
+            println!("         unsupported quantization: {n}");
+        }
+    }
+}
+
+#[test]
+#[ignore = "needs a local GGUF corpus; set LIGHTBULB_GGUF_CORPUS"]
+fn the_servable_population_is_measured_rather_than_assumed() {
+    let Some((files, unreadable_dirs)) = corpus() else {
+        lightbulb::test_notice::skip_unless_required(
+            "LIGHTBULB_REQUIRE_CORPUS",
+            "set LIGHTBULB_GGUF_CORPUS to a directory containing .gguf files",
+        );
+        return;
+    };
+    assert!(
+        unreadable_dirs.is_empty(),
+        "the corpus walk was incomplete, so the denominator below understates it: {unreadable_dirs:?}"
+    );
+    assert!(
+        !files.is_empty(),
+        "an empty corpus satisfies every assertion below, so it fails here instead"
+    );
+
+    let c = Census::of(&files);
+    c.report(files.len());
+
+    // ⚠️ THE POPULATION MUST NOT BE EMPTY. Every assertion here is satisfied by
+    // a corpus of thirty vocabulary files, which is the shape this corpus very
+    // nearly has -- so the guard is not hypothetical.
+    assert!(
+        c.with_weights(files.len()) > 0,
+        "no corpus file carries weights, so this census measured nothing about serving"
+    );
+
+    // ⚠️ AND THE LOADED COUNT MUST NOT BE ZERO. `with_weights > 0` is satisfied
+    // by a corpus whose every weighted file is refused, which would make the
+    // serving claim vacuous while this test stayed green.
+    assert!(
+        c.loads > 0,
+        "every weighted file was refused, so nothing here supports a serving claim"
+    );
+
+    // A refusal for a reason OTHER than an unrepresentable dtype is a defect
+    // and must be named rather than absorbed into a ratio.
+    assert!(
+        c.failed.is_empty(),
+        "llama checkpoints with weights that the live loader refused for an unexplained reason: {:#?}",
+        c.failed
+    );
+}
