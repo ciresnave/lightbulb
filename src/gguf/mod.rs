@@ -360,7 +360,7 @@ impl Content {
         match &self.candle_content {
             Some(c) => Ok(&c.tensor_infos),
             None => bail!(
-                "this GGUF's tensor directory cannot be represented: {}. Metadata IS available: the tokenizer, architecture and hyperparameters all read normally; only tensor loading is refused. This is analysed in docs/superpowers/specs/2026-08-14-gguf-metadata-chat-template-design.md, under the heading naming `GgmlDType::from_u32` -- the IQ codebook family is rejected by candle AND by fuel, so it is not a missing table entry. Read that before re-deriving it.",
+                "this GGUF's tensor directory cannot be represented: {}. WARNING -- THE NUMBER IN THAT MESSAGE IS A DTYPE CODE, NOT A TENSOR INDEX: candle bails with `unknown dtype for tensor {{u}}` where `u` is the dtype, so the sentence's grammar attaches the number to the wrong noun. Measured 2026-09-09, the three refusing corpus files report 20, 23 and 20, and each is exactly an unsupported dtype in that file's own tensor directory. Reading them as tensor indices produced a published and retracted claim. tests/gguf_dtype_census.rs prints the per-file dtype histogram and the accepted set, and is regenerated rather than remembered. Metadata IS available: the tokenizer, architecture and hyperparameters all read normally; only tensor loading is refused. This is analysed in docs/superpowers/specs/2026-08-14-gguf-metadata-chat-template-design.md, under the heading naming `GgmlDType::from_u32` -- the IQ codebook family is rejected by candle AND by fuel, so it is not a missing table entry. Read that before re-deriving it.",
                 self.candle_refusal
                     .as_deref()
                     .unwrap_or("candle refused the file")
