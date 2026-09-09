@@ -132,6 +132,19 @@ const LLAMA_SPM_VOCAB_SHA256: &str =
 /// a 32064-token file producing exactly the 61249 merges of a 32000-token one.
 const PHI3_VOCAB_SHA256: &str = "45715642b43ea2169115398dc8853cc6e8b70c969e42574417009b01724e2a2f";
 
+/// SHA-256 of Baichuan's 64000-token vocabulary.
+///
+/// ⚠️ THIS ONE HAS NO ORACLE, AND ITS WARRANT IS WEAKER THAN THE OTHER TWO'S.
+/// No corpus file shares this vocabulary — searched by digest across all 30,
+/// and the search finds four genuinely shared groups, so it can detect sharing.
+/// Nor is it a prefix of, or extended by, any of them. So there is no declared
+/// merge list anywhere to compare the derived one against.
+///
+/// What stands in for it is stated at `spm_derivation_warrant`, and it is
+/// evidence against gross failure rather than proof of correctness.
+const BAICHUAN_VOCAB_SHA256: &str =
+    "392ea9d92bd1c32d3dee2ce425d501eb9ab91eb27636a9e0a69af4651292034e";
+
 /// Convert our own parser's metadata into candle's `Value` shape.
 ///
 /// ⚠️ EXISTS BECAUSE CANDLE CANNOT ALWAYS PARSE A FILE WE CAN. Both enums are
@@ -864,10 +877,13 @@ impl Content {
     fn spm_derivation_warrant(digest: &str) -> Option<&'static str> {
         match digest {
             LLAMA_SPM_VOCAB_SHA256 => Some(
-                "the 32000-token Llama SentencePiece vocabulary. Verified against `tinyllama-1.1b-chat-v1.0.Q4_0.gguf`, whose token list is byte-identical and which carries 61249 real merges: the derived list is SET-IDENTICAL to it (0 extra, 0 missing), and both tokenizers agree on 26 varied inputs across both `add_special_tokens` arms. See `llama_spm_agrees_with_the_oracle_through_the_production_path`.",
+                "the 32000-token Llama SentencePiece vocabulary. Verified against `tinyllama-1.1b-chat-v1.0.Q4_0.gguf`, whose token list is byte-identical and which carries 61249 real merges: the derived list is SET-IDENTICAL to it (0 extra, 0 missing), and both tokenizers agree on 26 varied inputs across both `add_special_tokens` arms. ⚠️ For comparison with the weaker warrants below, this vocabulary's score-order population splits 61248 adjacent pairs into 29611 INFORMATIVE and 31637 TIES (51.7% ties), and its 15 raw order violations are ALL transitions out of the -1e9 no-rank sentinel, so 0 are genuine. Stated so a reader comparing vocabularies is not weighing a corrected denominator against an uncorrected one. See `llama_spm_agrees_with_the_oracle_through_the_production_path`.",
             ),
             PHI3_VOCAB_SHA256 => Some(
                 "Phi-3's 32064-token vocabulary, whose first 32000 ids are byte-identical to the Llama SentencePiece list above. The extra 64 are chat control tokens that split into nothing, so the derived merge list is the SAME 61249 and is SET-IDENTICAL to TinyLlama's declared one (0 extra, 0 missing). Same oracle, same proof, not a weaker one. See `phi3_extends_the_llama_vocabulary_and_inherits_its_oracle`.",
+            ),
+            BAICHUAN_VOCAB_SHA256 => Some(
+                "Baichuan's 64000-token vocabulary. ⚠️ WEAKER WARRANT THAN THE TWO ABOVE, DELIBERATELY: no corpus file shares or extends this vocabulary, so NO DECLARED MERGE LIST EXISTS to compare against and nothing here is an oracle. What stands in its place: the derived merge order is checked against the ordering llama.cpp's own converter wrote into `tokenizer.ggml.scores` -- a separately-authored fact, not one this crate produced -- and contradicts it 0 times. ⚠️ STATE THE POPULATION HONESTLY: there are 54803 adjacent pairs, but 24347 of them are TIES -- equal scores, which no ordering can contradict -- so only 30456 pairs can discriminate anything and those are the evidence. Counting all 54803 would inflate it by ~80% with members structurally incapable of falsifying the claim. The comparator is FORCED rather than trusted: perturbing the first id in the measured sequence raises the count by exactly one, so 0 is a reading and not a silence. This is PROOF AGAINST GROSS FAILURE, NOT PROOF OF CORRECTNESS -- a merge list in the wrong ORDER could agree with those scores and still tokenize differently, and no measurement here would see it. See `baichuan_derived_order_agrees_with_the_converters_own_scores`.",
             ),
             _ => None,
         }
@@ -2417,6 +2433,352 @@ mod spm_derivation_tests {
             .collect()
     }
 
+    /// `tokenizer.ggml.scores` as `f32`s, or empty when the file declares none.
+    ///
+    /// ⚠️ TEST-ONLY, AND THAT BOUNDARY IS LOAD-BEARING. The production path
+    /// reads NO scores — `derive_merges` works from the token list alone, and
+    /// the module doc above records that `scores` is deliberately unread. These
+    /// tests use the scores as an independent WITNESS to check the derived
+    /// order against; they must never become an input to the derivation, or the
+    /// witness and the subject stop being separate things.
+    fn scores_of(c: &Content) -> Vec<f32> {
+        match c.metadata().get("tokenizer.ggml.scores") {
+            Some(Value::Array(a)) => a.iter().filter_map(|v| v.to_f32().ok()).collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// llama.cpp writes this where a token has no rank at all — byte tokens and
+    /// unused slots. It is a MARKER, not a position.
+    const SCORE_SENTINEL: f32 = -1_000_000_000.0;
+
+    /// What a score-order comparison found, and over what.
+    ///
+    /// ⚠️ `pairs` IS NOT THE POPULATION. `informative` is. Equal-scored
+    /// neighbours are ties, and a tie cannot contradict any ordering — so the
+    /// pairs that could have falsified the claim are the ones with differing
+    /// scores. Reporting `0 out of pairs` inflates the evidence by however many
+    /// ties there are, which is 44% on one corpus vocabulary and 52% on another.
+    struct Violations {
+        /// Ascents, including those out of a sentinel.
+        raw: usize,
+        /// Ascents whose predecessor is a real rank — the ones that mean something.
+        genuine: usize,
+        /// Adjacent pairs with DIFFERING scores: the population that can falsify.
+        informative: usize,
+        /// All adjacent pairs, ties included. Kept only so the two can be shown
+        /// side by side; it is not the denominator of any claim.
+        pairs: usize,
+    }
+
+    /// Adjacent pairs where the derived merge order contradicts the order the
+    /// scores imply, as `(raw, genuine)`.
+    ///
+    /// ⚠️ THE TWO NUMBERS DIFFER AND THE DIFFERENCE IS THE WHOLE POINT. Scores
+    /// descend with rank, so an ASCENT between neighbours is a contradiction —
+    /// unless the predecessor is `SCORE_SENTINEL`, which is not a rank and
+    /// cannot be contradicted by one.
+    ///
+    /// Measured on `ggml-vocab-llama-spm.gguf`: 15 raw, and ALL 15 have a
+    /// sentinel predecessor, so 0 genuine. An earlier version of this work read
+    /// the raw 15 as that file's disagreement rate and was about to ship
+    /// `99.976%` as the bar for other vocabularies to clear — a bar derived from
+    /// a mismeasured reference, which is easier to clear than the true one and
+    /// looks like success on both sides.
+    fn score_order_violations(tokens: &[String], scores: &[f32]) -> Violations {
+        let index: std::collections::HashMap<&str, usize> = tokens
+            .iter()
+            .enumerate()
+            .map(|(i, t)| (t.as_str(), i))
+            .collect();
+        let mut product_ids = Vec::new();
+        for (i, t) in tokens.iter().enumerate() {
+            for c in 1..t.len() {
+                if t.is_char_boundary(c) {
+                    let (a, b) = t.split_at(c);
+                    if index.contains_key(a) && index.contains_key(b) {
+                        product_ids.push(i);
+                    }
+                }
+            }
+        }
+        let seq: Vec<f32> = product_ids
+            .iter()
+            .filter_map(|&i| scores.get(i).copied())
+            .collect();
+        let mut raw = 0usize;
+        let mut genuine = 0usize;
+        let mut informative = 0usize;
+        for k in 1..seq.len() {
+            // ⚠️ A TIE CANNOT CONTRADICT ANY ORDERING, so it is not part of the
+            // population this check ranges over. Counting ties in the
+            // denominator inflates the evidence with members that are
+            // structurally incapable of falsifying the claim.
+            if seq[k] != seq[k - 1] {
+                informative += 1;
+            }
+            if seq[k] > seq[k - 1] {
+                raw += 1;
+                if seq[k - 1] != SCORE_SENTINEL {
+                    genuine += 1;
+                }
+            }
+        }
+        Violations {
+            raw,
+            genuine,
+            informative,
+            pairs: seq.len().saturating_sub(1),
+        }
+    }
+
+    /// The token ids the order comparison actually ranges over — one entry per
+    /// derived merge, in emission order.
+    ///
+    /// ⚠️ EXPOSED BECAUSE A FORCING ARM MUST PERTURB INSIDE THE MEASURED
+    /// POPULATION. An earlier version set token 0's score below every other and
+    /// the count did not move: token 0 is a control token that splits into
+    /// nothing, so it never appears here at all. The perturbation was real and
+    /// landed OUTSIDE the sequence being counted — a silence that looks exactly
+    /// like a blind comparator, and the third distinct way a forcing arm failed
+    /// on this measurement.
+    fn derived_product_ids(tokens: &[String]) -> Vec<usize> {
+        let index: std::collections::HashSet<&str> = tokens.iter().map(|s| s.as_str()).collect();
+        let mut out = Vec::new();
+        for (i, t) in tokens.iter().enumerate() {
+            for c in 1..t.len() {
+                if t.is_char_boundary(c) {
+                    let (a, b) = t.split_at(c);
+                    if index.contains(a) && index.contains(b) {
+                        out.push(i);
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// Ascents in a bare sequence — the counter `score_order_violations` uses,
+    /// exposed so it can be checked against inputs whose answer is known.
+    fn ascents(seq: &[f32]) -> usize {
+        (1..seq.len()).filter(|&k| seq[k] > seq[k - 1]).count()
+    }
+
+    /// ⚠️ THE COUNTER, AGAINST ANSWERS KNOWN WITHOUT ANY FILE.
+    ///
+    /// Runs in the ordinary suite. Without this, every `0` below is a number
+    /// from an instrument nothing has ever checked.
+    #[test]
+    fn the_ascent_counter_is_correct_on_known_sequences() {
+        assert_eq!(ascents(&[5.0, 4.0, 3.0, 2.0]), 0, "strictly descending");
+        assert_eq!(ascents(&[5.0, 6.0, 3.0, 2.0]), 1, "one ascent");
+        assert_eq!(ascents(&[1.0, 2.0, 3.0, 4.0]), 3, "strictly ascending");
+        assert_eq!(ascents(&[5.0, 5.0, 5.0]), 0, "ties are not ascents");
+        assert_eq!(ascents(&[]), 0, "empty");
+        assert_eq!(ascents(&[1.0]), 0, "single element has no pairs");
+    }
+
+    /// ⚠️ ONLY A STRICTLY-ADDITIVE PERTURBATION IS A VALID FORCING ARM.
+    ///
+    /// Two earlier attempts were rejected, and both reported the file whose
+    /// answer is KNOWN as blind:
+    ///
+    /// ```text
+    /// swap one adjacent pair            fixes one ascent, creates another -- nets to zero
+    /// move the minimum to the front     adds one pair, REMOVES TWO        -- nets to zero
+    /// prepend a lower value             adds one pair, removes nothing    -- always +1
+    /// ```
+    ///
+    /// A perturbation that both ADDS and REMOVES can cancel. Believing either
+    /// rejected arm would have produced "my instrument is broken" — a
+    /// conclusion that stops work rather than yielding a wrong number, so
+    /// nothing downstream would ever have contradicted it.
+    #[test]
+    fn prepending_a_lower_value_always_adds_exactly_one_ascent() {
+        for seq in [
+            vec![5.0, 4.0, 3.0],
+            vec![5.0, 6.0, 3.0],
+            vec![1.0, 1.0, 1.0],
+            vec![0.0],
+        ] {
+            let before = ascents(&seq);
+            let lower = seq.iter().cloned().fold(f32::INFINITY, f32::min) - 1.0;
+            let mut forced = vec![lower];
+            forced.extend_from_slice(&seq);
+            assert_eq!(
+                ascents(&forced),
+                before + 1,
+                "prepending {lower} to {seq:?} must add exactly one ascent"
+            );
+        }
+    }
+
+    /// ⚠️ THE WEAKER WARRANT, MEASURED AND LABELLED AS WEAKER.
+    ///
+    /// Baichuan has no oracle: no corpus file shares or extends its vocabulary,
+    /// so no declared merge list exists to compare the derived one against.
+    /// What stands in its place is the ordering llama.cpp's own converter wrote
+    /// into `tokenizer.ggml.scores` — a separately-authored fact this crate did
+    /// not produce.
+    ///
+    /// ⚠️ AND THAT IS NOT PROOF OF CORRECTNESS. A merge list in the wrong ORDER
+    /// could agree with those scores and still tokenize differently, and nothing
+    /// measured here would see it. The claim is bounded on purpose.
+    #[test]
+    #[ignore = "needs a local GGUF corpus; set LIGHTBULB_GGUF_CORPUS"]
+    fn baichuan_derived_order_agrees_with_the_converters_own_scores() {
+        let Some(c) = read_corpus("ggml-vocab-baichuan.gguf") else {
+            lightbulb_skip();
+            return;
+        };
+        let tokens = tokens_of(&c);
+        let scores = scores_of(&c);
+
+        // CONTROL: this is the vocabulary the allowlist names, and it declares
+        // the scores the whole warrant rests on.
+        assert_eq!(Content::vocab_sha256(&tokens), BAICHUAN_VOCAB_SHA256);
+        assert_eq!(
+            scores.len(),
+            tokens.len(),
+            "scores and tokens must be parallel, or the witness does not line up with the subject"
+        );
+
+        let v = score_order_violations(&tokens, &scores);
+        let merges = Content::derive_merges(&tokens).len();
+        eprintln!(
+            "  baichuan: {} tokens, {merges} derived merges, {} adjacent pairs of which {} INFORMATIVE ({} ties), {} raw / {} genuine violations",
+            tokens.len(),
+            v.pairs,
+            v.informative,
+            v.pairs - v.informative,
+            v.raw,
+            v.genuine
+        );
+
+        // ⚠️ STATE THE POPULATION IN THE CLAIM. `0 violations` means something
+        // very different over 54804 pairs than over 165, and the notation erases
+        // the difference.
+        // ⚠️ ASSERT ON THE INFORMATIVE COUNT, NOT THE RAW PAIR COUNT. An earlier
+        // version guarded `merges > 50_000` and the warrant quoted 54804 -- but
+        // 24347 of those pairs are TIES, which no ordering can contradict. The
+        // claim's population is the pairs that could have falsified it.
+        assert!(
+            v.informative > 25_000,
+            "the informative population collapsed to {} of {} pairs; a `0` over a small population is much weaker evidence and this assertion exists to make that visible",
+            v.informative,
+            v.pairs
+        );
+        assert_eq!(
+            v.genuine, 0,
+            "the derived order contradicts the converter's own score order {} times",
+            v.genuine
+        );
+
+        // ⚠️ FORCE IT. Without this, `0` is indistinguishable from a comparator
+        // that cannot report anything. Strictly additive: prepend a value lower
+        // than every score, which adds exactly one ascent and removes nothing.
+        // (A swap, or moving the minimum, can cancel — see
+        // `prepending_a_lower_value_always_adds_exactly_one_ascent`.)
+        let ids = derived_product_ids(&tokens);
+        assert!(
+            !ids.is_empty(),
+            "no derived merges, so there is no population to perturb"
+        );
+        let mut forced_scores = scores.clone();
+        let lowest = scores.iter().cloned().fold(f32::INFINITY, f32::min) - 1.0;
+        // The first token in the MEASURED SEQUENCE, not the first token in the
+        // vocabulary -- see `derived_product_ids`.
+        forced_scores[ids[0]] = lowest;
+        let forced_genuine = score_order_violations(&tokens, &forced_scores).genuine;
+        eprintln!(
+            "  forced (id {} = first in the derived sequence, scored below all others): genuine {forced_genuine}",
+            ids[0]
+        );
+        assert!(
+            forced_genuine > v.genuine,
+            "the comparator did not register a deliberately introduced violation, so its {} above is a silence rather than a reading",
+            v.genuine
+        );
+    }
+
+    /// ⚠️ WHY `raw` AND `genuine` DIFFER, AND WHY A BASELINE WAS RETIRED.
+    ///
+    /// `-1000000000.0` is llama.cpp's marker for a token with no rank at all —
+    /// byte tokens and unused slots. It is not a position and cannot be
+    /// contradicted by one.
+    ///
+    /// On the VALIDATED file every raw violation has a sentinel predecessor, so
+    /// its genuine count is 0. An earlier version of this work read the raw 15
+    /// as that file's true disagreement rate and was about to ship `99.976%` as
+    /// the bar for other vocabularies to clear. ⚠️ A BAR DERIVED FROM A
+    /// MISMEASURED REFERENCE IS EASIER TO CLEAR THAN THE TRUE ONE, AND CLEARING
+    /// IT LOOKS LIKE SUCCESS ON BOTH SIDES.
+    #[test]
+    #[ignore = "needs a local GGUF corpus; set LIGHTBULB_GGUF_CORPUS"]
+    fn every_raw_violation_on_the_validated_file_is_a_sentinel_artefact() {
+        let Some(c) = read_corpus("ggml-vocab-llama-spm.gguf") else {
+            lightbulb_skip();
+            return;
+        };
+        let tokens = tokens_of(&c);
+        let scores = scores_of(&c);
+        let sentinels = scores.iter().filter(|&&s| s == SCORE_SENTINEL).count();
+        let v = score_order_violations(&tokens, &scores);
+        eprintln!(
+            "  llama-spm: {sentinels} sentinel tokens, {} adjacent pairs of which {} INFORMATIVE ({} ties), {} raw, {} genuine",
+            v.pairs,
+            v.informative,
+            v.pairs - v.informative,
+            v.raw,
+            v.genuine
+        );
+
+        // The file must actually CONTAIN sentinels, or this test proves nothing
+        // about the distinction it exists to draw.
+        assert!(
+            sentinels > 0,
+            "no sentinel scores here, so raw and genuine cannot differ and this test is vacuous"
+        );
+        assert!(
+            v.raw > 0,
+            "no raw violations, so nothing distinguishes the two counts"
+        );
+        assert_eq!(
+            v.genuine, 0,
+            "the validated file has genuine order violations, which would undermine using it as the reference at all"
+        );
+    }
+
+    /// Baichuan rebuilds, and the allowlist is what permits it.
+    #[test]
+    #[ignore = "needs a local GGUF corpus; set LIGHTBULB_GGUF_CORPUS"]
+    fn baichuan_rebuilds_now_and_would_not_without_its_allowlist_entry() {
+        let Some(c) = read_corpus("ggml-vocab-baichuan.gguf") else {
+            lightbulb_skip();
+            return;
+        };
+        let digest = Content::vocab_sha256(&tokens_of(&c));
+        assert!(
+            Content::spm_derivation_warrant(&digest).is_some(),
+            "baichuan is not allowlisted, so the rebuild below cannot be attributed to this change"
+        );
+        let tk = c
+            .extract_tokenizer()
+            .expect("baichuan rebuilds from derived merges");
+
+        // A rebuild that produces nothing usable is not a rebuild. Round-trip a
+        // few inputs through it so the success is a reading, not a constructor
+        // that happened to return Ok.
+        for probe in ["hello", "\u{4E2D}\u{6587}", "a b c", "123"] {
+            let enc = tk.encode(probe, false).expect("encode");
+            assert!(
+                !enc.get_ids().is_empty(),
+                "{probe:?} encoded to nothing, so the tokenizer is not usable"
+            );
+        }
+        eprintln!("  baichuan rebuilt and encodes; warrant: weaker, see spm_derivation_warrant");
+    }
+
     /// ⚠️ THE ENABLING FACT, WHICH A DIGEST SWEEP CANNOT SEE.
     ///
     /// Phi-3's vocabulary EXTENDS the Llama SentencePiece one rather than
@@ -2612,38 +2974,45 @@ mod spm_derivation_tests {
     #[test]
     #[ignore = "needs a local GGUF corpus; set LIGHTBULB_GGUF_CORPUS"]
     fn a_vocabulary_with_no_oracle_is_still_refused() {
-        // ⚠️ phi-3 WAS in this list and is not any more -- it turned out to
-        // share the Llama vocabulary as a prefix and inherits that oracle. This
-        // guard caught the allowlist change, which is what it is for.
-        for name in [
-            "ggml-vocab-baichuan.gguf",
-            "tinyllamas-stories-260k-f32.gguf",
-        ] {
-            let Some(p) = corpus_file(name) else {
-                lightbulb_skip();
-                return;
-            };
-            let c = Content::read(&p).expect("read");
-            let digest = Content::vocab_sha256(&tokens_of(&c));
-            assert_ne!(
-                digest, LLAMA_SPM_VOCAB_SHA256,
-                "{name} shares the oracle's vocabulary"
-            );
-            assert!(
-                Content::spm_derivation_warrant(&digest).is_none(),
-                "{name} must not be allowlisted"
-            );
-            let err = match c.extract_tokenizer() {
-                Ok(_) => panic!("{name} rebuilt without an oracle for its vocabulary"),
-                Err(e) => e.to_string(),
-            };
-            // The refusal must say what would RETIRE it, not merely that it happened.
-            assert!(
-                err.contains(&digest),
-                "{name}: the refusal does not name the digest a future oracle must match: {err}"
-            );
-            eprintln!("  {name}: refused, and the message names its digest");
-        }
+        // ⚠️ THIS WAS A LOOP OVER A LIST AND THE LIST HAS ONE ENTRY LEFT.
+        //
+        // phi-3 left it when it turned out to share the Llama vocabulary as a
+        // prefix; baichuan left it when its weaker warrant was accepted. The
+        // guard FAILED on each change, which is what it is for.
+        //
+        // The loop is gone rather than suppressed: `clippy::single_element_loop`
+        // fired on the narrowed list and the gate caught it. A loop over one
+        // element is a claim that there is a collection, and there is not.
+        //
+        // ⚠️ WHEN THIS LAST SUBJECT IS ALLOWLISTED, DELETE THIS TEST -- do not
+        // rewrite it over an empty set. A guard that outlives its subject is a
+        // green light with nothing behind it, and the loop form made that
+        // failure silent: an empty `for` reaches no assertion and reports ok.
+        let name = "tinyllamas-stories-260k-f32.gguf";
+        let Some(p) = corpus_file(name) else {
+            lightbulb_skip();
+            return;
+        };
+        let c = Content::read(&p).expect("read");
+        let digest = Content::vocab_sha256(&tokens_of(&c));
+        assert_ne!(
+            digest, LLAMA_SPM_VOCAB_SHA256,
+            "{name} shares the oracle's vocabulary"
+        );
+        assert!(
+            Content::spm_derivation_warrant(&digest).is_none(),
+            "{name} must not be allowlisted"
+        );
+        let err = match c.extract_tokenizer() {
+            Ok(_) => panic!("{name} rebuilt without an oracle for its vocabulary"),
+            Err(e) => e.to_string(),
+        };
+        // The refusal must say what would RETIRE it, not merely that it happened.
+        assert!(
+            err.contains(&digest),
+            "{name}: the refusal does not name the digest a future oracle must match: {err}"
+        );
+        eprintln!("  {name}: refused, and the message names its digest");
     }
 
     /// Inputs the tokenizer comparisons range over.
