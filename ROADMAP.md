@@ -191,6 +191,28 @@ Measured by `tests/gguf_corpus_sweep.rs` over every local GGUF:
   0  OUR READER cannot open   -- this group was 5 and is now EMPTY
 ```
 
+⚠️ **AND "OUR READER CAN OPEN IT" IS NOT "THE LIBRARY CAN LOAD IT". `0` ABOVE IS
+A METADATA FACT, NOT A TENSOR FACT.** Every count in this block is scoped to the
+TOKENIZER, which lives in the KV header ahead of any tensor. Three of the very
+files this group used to contain still refuse at the tensor directory —
+measured 2026-09-09 by `tests/gguf_corpus_sweep.rs`'s companion,
+`tests/gguf_serving_census.rs`:
+
+```
+SmolLM2-135M-Instruct-IQ3_XS   unknown dtype for tensor 21
+SmolLM2-135M-Instruct-IQ4_XS   unknown dtype for tensor 23
+SmolLM2-135M-Instruct-Q2_K     unknown dtype for tensor 20
+```
+
+Their metadata reads normally — which is exactly what #73–#76 fixed, and is why
+they moved out of this group — but `ParallelModelManager::load_gguf` cannot
+build a model from them. Note the tensor indices DIFFER, and that `Q2_K` is a
+K-quant rather than an IQ type: these files MIX quantizations, and one tensor in
+each uses a type candle and fuel both reject. **A per-tensor dtype limit, not a
+whole-file format one.**
+
+**The two questions have different populations and neither answers the other.**
+
 ⚠️ **That last group used to read "unreadable BEFORE the tokenizer is reached",
 and NONE of the five is unreadable.** `Content::read` parses tensor infos
 eagerly, so an unknown quantization dtype fails the whole call — but
@@ -218,11 +240,18 @@ well.
 
 ⚠️ **DONE, AND THE PARAGRAPH ABOVE IS NOW HISTORY RATHER THAN A PLAN.** Both
 halves landed across #73–#76: a metadata read stopped depending on candle being
-able to type the tensors, which recovered the three IQ-dtype SmolLM2 files, and
-the two parsers stopped cancelling each other out, which reached the v1 file.
-**The "OUR READER cannot open" group went 5 → 0**, and `ggml-vocab-aquila` moved
-from *unopenable* to *opened and refused for an absent `tokenizer.ggml.pre`* —
-a different and much more informative outcome.
+able to type the tensors, which recovered the three IQ-dtype SmolLM2 files'
+**metadata**, and the two parsers stopped cancelling each other out, which
+reached the v1 file. **The "OUR READER cannot open" group went 5 → 0**, and
+`ggml-vocab-aquila` moved from *unopenable* to *opened and refused for an absent
+`tokenizer.ggml.pre`* — a different and much more informative outcome.
+
+⚠️ **"RECOVERED" MEANT THEIR METADATA AND THIS SENTENCE ORIGINALLY DID NOT SAY
+SO.** The three IQ-dtype files still cannot have their TENSORS loaded — see the
+note under the support table above. The word was written while the question in
+front of me was the tokenizer, and it reads, months later, as though those files
+became usable. **A term that was unambiguous in its own paragraph acquires a
+second meaning as soon as a neighbouring claim ranges over something else.**
 
 The diagnosis above is kept because it is how the group was understood, not
 because any of it is outstanding. ⚠️ **A closed defect written up in open-defect
