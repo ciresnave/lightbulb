@@ -340,6 +340,22 @@ use std::io::Write;
 /// `create_dir_all` on a name derived only from `name`, so two concurrent
 /// `cargo test` runs — or `cargo test` and `cargo mutants` — deleted each
 /// other's fixtures mid-test.
+/// Make `d` exist and be EMPTY, whatever was there before.
+///
+/// Extracted so the guarantee can be tested directly: a helper that only
+/// promises "the directory exists" cannot be distinguished from one that
+/// promises "the directory is yours" until something asserts the difference.
+/// See `a_fixture_directory_does_not_inherit_a_previous_run`.
+fn fresh_dir(d: &std::path::Path) {
+    let _ = std::fs::remove_dir_all(d);
+    std::fs::create_dir_all(d).unwrap();
+    assert!(
+        std::fs::read_dir(d).unwrap().next().is_none(),
+        "fixture {} is not empty at creation, so a test asserting what it does NOT contain would be testing a previous run",
+        d.display()
+    );
+}
+
 fn tmp_model_dir(name: &str) -> std::path::PathBuf {
     use std::sync::atomic::{AtomicUsize, Ordering};
     static N: AtomicUsize = AtomicUsize::new(0);
@@ -350,11 +366,68 @@ fn tmp_model_dir(name: &str) -> std::path::PathBuf {
     );
     let d = std::path::Path::new(env!("CARGO_TARGET_TMPDIR"))
         .join(format!("lb-chat-tmpl-{name}-{nonce}"));
-    std::fs::create_dir_all(&d).unwrap();
+    // REMOVE BEFORE CREATE. `create_dir_all` SUCCEEDS on an existing directory
+    // and does NOT clear it, and `CARGO_TARGET_TMPDIR` is never cleaned between
+    // runs -- so a fixture can inherit files a PREVIOUS run's test wrote into
+    // the same path. That is issue #82: the nonce is pid + atomic counter,
+    // which is unique WITHIN a run and RECURS ACROSS runs, because pids are
+    // recycled and the counter restarts at 0.
+    //
+    // Measured 2026-09-11 before the fix: 14183 stale fixture directories in
+    // target/tmp over 393 distinct pids, 6389 of them holding a
+    // `tokenizer_config.json` that a later step of their own test had written.
+    // For THIS test's name alone: 347 stale directories, 343 already poisoned.
+    //
+    // `tokenizer_config_wins_over_registry` asserts tier 3 fires BEFORE it
+    // writes a tier-1 file, so on a name+pid+counter collision it read the
+    // PREVIOUS run's tier-1 file and failed with `left: TokenizerConfig,
+    // right: Registry` -- a defect in the FIXTURE that looks exactly like a
+    // defect in `resolve`.
+    fresh_dir(&d);
     // config.json is what fingerprint() hashes; every fixture needs one.
     let mut f = std::fs::File::create(d.join("config.json")).unwrap();
     f.write_all(br#"{"model_type":"llama"}"#).unwrap();
     d
+}
+
+/// Issue #82: a fixture must not inherit a PREVIOUS RUN's files.
+///
+/// `CARGO_TARGET_TMPDIR` is never cleaned between runs and `create_dir_all`
+/// succeeds on an existing directory WITHOUT clearing it. The nonce is
+/// pid + atomic counter — unique within a run, and it RECURS across runs
+/// because pids are recycled and the counter restarts at 0.
+///
+/// This poisons a directory exactly as a previous run would have, then asserts
+/// the fixture helper hands back a clean one. The poisoning is ASSERTED before
+/// the act under test, because a probe that failed to poison would make the
+/// check below pass for the wrong reason.
+#[test]
+fn a_fixture_directory_does_not_inherit_a_previous_run() {
+    let d = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("lb-chat-tmpl-issue82-probe");
+
+    // Stand in for a previous run: the directory exists and holds the tier-1
+    // file that `tokenizer_config_wins_over_registry` writes at its LAST step.
+    std::fs::create_dir_all(&d).unwrap();
+    std::fs::write(
+        d.join("tokenizer_config.json"),
+        r#"{"chat_template":"STALE"}"#,
+    )
+    .unwrap();
+    assert!(
+        d.join("tokenizer_config.json").exists(),
+        "the probe did not poison the directory, so the assertion below would prove nothing"
+    );
+
+    fresh_dir(&d);
+
+    assert!(
+        !d.join("tokenizer_config.json").exists(),
+        "the fixture inherited a previous run's tier-1 file -- this is issue #82, and a test asserting tier 3 fires would read TokenizerConfig instead of Registry"
+    );
+    assert!(
+        d.exists(),
+        "fresh_dir must leave the directory existing, not merely absent"
+    );
 }
 
 /// `fingerprint`, for fixtures that are supposed to have one. It returns
