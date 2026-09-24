@@ -307,6 +307,138 @@ immediate follow-up.
 
 ---
 
+## 6. Per-gap: is fuel missing this, or does Lightbulb just not call it?
+
+MEASURED against fuel's actual crates at `origin/main` (via `gh api`, not the stale local
+checkout — same caveat as §5). Method: `gh api repos/ciresnave/fuel/contents/<path>` to list
+directories and read files, plus `gh api search/code -f q='"<symbol>" repo:ciresnave/fuel'` to
+locate implementations. Checked in the PM's stated priority order.
+
+**Lightbulb's current direct-dependency footprint on fuel, for context:** `Cargo.toml`
+declares exactly two fuel deps — `fuel-inference` and (implicitly, via `fuel`) `fuel-core`. `src/model_fuel/` imports only the `fuel` facade (§5). `fuel_inference` is used **only in two
+integration tests** (`tests/gpu_paged_vs_contiguous.rs`, `tests/paged_plan_once.rs` —
+`fuel_inference::multi_session::{KvBudget, PagedSessionScheduler}`), never in `src/`. `fuel-parallel`, `fuel-transformers`, `fuel-formats`, `fuel-quantized` are **not Lightbulb
+dependencies at all** — `fuel-transformers` and `fuel-quantized`/`fuel-formats` arrive only
+*transitively* through `fuel`/`fuel-core` in `Cargo.lock` (confirmed: `grep '^name =
+"fuel-parallel"$' Cargo.lock` → 0 hits; `fuel-transformers` → 1 hit, transitive only, `grep -rn
+"use fuel_transformers" src/` → 0 hits).
+
+### Multi-device model parallelism — **(b) PRESENT IN FUEL, NOT WIRED IN LIGHTBULB**
+
+Fuel ships a dedicated crate, **`fuel-parallel`** (`description = "Multi-GPU parallelism
+primitives for the Fuel ML framework"`), with `src/{comm,device_group,distributed_cache,
+pipeline_parallel,tensor_parallel,topology}.rs` — the same module names as Lightbulb's own
+`src/multi_gpu/`, but a different, apparently more mature implementation:
+
+- **Tensor parallel**: `ColumnParallel`/`RowParallel` sharding, built on
+  `fuel::lazy::WeightStorage::apply_linear` — the doc states this "buys F32, BF16, Q4_0 and
+  LoRA weights for free," unlike Lightbulb's hand-rolled `matmul`-only version.
+  `grep -n "not yet implemented\|todo!\|bail!"` over all six `fuel-parallel/src/*.rs` files →
+  **0 hits**, in any file.
+- **Pipeline parallel**: `ScheduleKind::{GPipe, OneForwardOneBackward}` — GPipe and a real 1F1B
+  scheduler (not a bail), with a test asserting 1F1B's bubble time is ≤ GPipe's.
+- **Topology**: descriptive-only (`DeviceInfo`, `Link`, `Interconnect`; explicitly "no CUDA or
+  Metal API calls" in the module doc) — a different design from Lightbulb's own
+  `DeviceTopology::discover()`, which is the one that had the non-terminating
+  `cuda_if_available` loop. Fuel's version sidesteps that class of bug by never probing itself.
+- **Distributed cache**: a coordination *protocol* (`CacheShardInfo`, `CacheSyncProtocol`,
+  `SyncEvent`), explicitly documented as NOT the storage layer ("the actual cache storage...
+  lives in `fuel_inference`"). This is a different abstraction from Lightbulb's
+  `CacheSyncStrategy::{Replicated,Sharded,Hybrid}` enum, so it is not a drop-in replacement —
+  wiring it up is a redesign, not a re-export.
+- Has a live multi-backend test (`fuel-parallel/tests/tri_backend_device_group_live.rs`),
+  naming CUDA/Vulkan devices explicitly rather than falling back to CPU — the failure mode that
+  made Lightbulb's own `ColumnWise`/`RowWise` tests run zero times for months (ROADMAP.md,
+  2026-09-02 finding) does not appear to be present here, though **I did not run this test
+  myself (no GPU in this environment) — that it exists and is structured to name real devices
+  is measured; that it currently passes on real hardware is ASSUMED from its presence, not
+  independently verified.**
+
+**One real caveat, not fuel-has-everything**: fuel-parallel's `ShardingStrategy` has no
+`Hybrid` variant at all — only `ColumnParallel`/`RowParallel` exist. Lightbulb's own
+`ShardingStrategy::Hybrid` bail therefore has **no fuel equivalent to wire to** — this one
+specific sub-gap may genuinely be (a), or may simply be a strategy nobody has needed (fuel's
+two-strategy design might be the intentionally complete set). **I could not determine which.**
+Same open question for `CacheSyncStrategy::{Sharded,Hybrid}` specifically, since fuel's
+protocol layer doesn't map onto that enum directly — establishing whether `fuel_inference`'s
+storage side actually implements sharded/hybrid cache storage (as opposed to just coordination)
+needs a read of `fuel_inference`'s cache modules that I have not done; **flagged as not yet
+determined, not asserted either way.**
+
+**Bottom line for the PM's sequencing question: the multi-GPU gap that matters most for the
+new hardware — actually running tensor/pipeline-parallel inference across multiple heterogeneous
+devices at all — is (b).** Fuel has it, Lightbulb has never depended on `fuel-parallel` and
+`src/multi_gpu/` was never wired to talk to fuel's tensor type in the first place (it predates
+the port and operates on `candlelight` tensors). The eight bail sites are in a module that isn't
+even on the fuel port's critical path — the real fix is wiring `model_fuel/` to `fuel-parallel`
+and `fuel_inference`'s distributed cache storage, then likely deleting `src/multi_gpu/` rather
+than fixing its bails.
+
+### GGUF / quantized loading — **(b) PRESENT IN FUEL, NOT WIRED IN LIGHTBULB, and more so than I expected**
+
+`fuel-formats/src/` has `gguf.rs`, `ggml.rs`, `imatrix.rs`, `pickle.rs`, `safetensors.rs` — real
+parsers, not stubs (file listing via `gh api`, not inferred from crate description).
+`fuel-quantized/src/` has `k_quants.rs`, `cpu.rs`, `avx.rs`, `neon.rs` — real dequant/kernel
+code with SIMD variants, not a placeholder.
+
+**Further than that: `fuel-transformers` already ships GGUF-quantized model constructors for
+specific architectures**, found via `gh api search/code -f q='"fn from_gguf"
+repo:ciresnave/fuel'`: `lazy_quantized_llama.rs`, `lazy_quantized_phi3.rs`,
+`lazy_quantized_qwen2.rs`, `lazy_quantized_qwen3.rs`, `lazy_quantized_qwen3_moe.rs`,
+`lazy_quantized_gemma3.rs`, `lazy_quantized_glm4.rs`, `lazy_quantized_t5.rs`,
+`lazy_quantized_lfm2.rs`, `lazy_quantized_smollm3.rs`, `lazy_quantized_whisper.rs` — each with
+its own `from_gguf` constructor. This directly contradicts the assumption I'd have made from
+Lightbulb's side alone (`src/engine/model_runner.rs:327`'s message, "GGUF/other Candle-supported
+quant formats... Quantized/GGUF support is pending `impl FuelDecoder for Llama3Model`") — that
+message describes Lightbulb's own wiring gap, not a fuel capability gap. **Lightbulb's own
+comment is accurate about Lightbulb, and reads (without the crate-level check) like it's about
+fuel — worth fixing in `model_runner.rs` since a future reader would draw the same wrong
+inference I almost did.**
+
+### Architecture dispatch beyond Llama — **(b) PRESENT IN FUEL, NOT WIRED IN LIGHTBULB, overwhelmingly**
+
+`fuel-transformers/src/models/mod.rs` declares ~90+ `pub mod lazy_*` architectures (partial
+list, alphabetical prefix only, via `gh api`): `lazy_bert`, `lazy_chatglm`, `lazy_deepseek2`,
+`lazy_falcon`, `lazy_gemma`/`gemma2`/`gemma3`/`gemma4_*`, `lazy_glm4`, `lazy_granite`,
+`lazy_lfm2`, `lazy_llama_full`, `lazy_mamba`/`mamba2`, `lazy_qwen*` (not shown in the head read,
+but the quantized-constructor search above confirms `lazy_quantized_qwen2/3/3_moe` exist), and
+more — this is a genuine model zoo, not a handful of variants. Lightbulb's `model_fuel/`
+hand-rolls its own `LlamaModel`-only loader against the bare `fuel::lazy` facade instead of
+using this zoo at all.
+
+### AWQ — **COULD NOT DETERMINE**
+
+`gh api search/code -f q='AWQ repo:ciresnave/fuel'` found no crate implementing the AWQ format
+specifically (hits were unrelated: `quant_w4a16.rs`, `quant_scale.rs`, generic quantization
+infra). `fuel-cuda-backend`'s W4A16 kernel is the same *numeric family* as AWQ (4-bit weight,
+16-bit activation) but AWQ checkpoints carry a specific packing/scale format I did not verify
+fuel's loader accepts. **Genuinely unresolved — do not treat this as (a) or (b) without a
+follow-up read of the AWQ checkpoint format against `fuel-quantized`'s loader,** which I have
+not done. Lowest priority per the PM's ordering, so not pursued further today.
+
+### Speculative decoding — **(b) PRESENT IN FUEL, NOT WIRED IN LIGHTBULB**
+
+`fuel-inference/src/speculative.rs` implements real draft-then-verify accept/reject
+math (Leviathan et al. 2023 / Chen et al. 2023), taking caller-supplied closures for the draft
+and target models — not a stub. Lightbulb has zero references to `fuel_inference::speculative`
+anywhere (`grep -rn "fuel_inference" .` → only the two `multi_session` test imports noted
+above). Lowest priority per the PM's ordering, so not pursued further today, but the
+finding is unambiguous.
+
+### Answering the PM's actual question
+
+**Mostly (b).** Of the five gaps: multi-device parallelism, GGUF/quantized loading, and
+architecture dispatch are all substantially (b) — the capability exists in fuel crates
+Lightbulb does not yet depend on or call. Speculative decoding is (b) as well, more simply (a
+single module, unused). AWQ is genuinely undetermined. **None of the five came back as clearly
+(a) missing-in-fuel.** Per the PM's own decision rule, this points at concentrating the
+immediate work in Lightbulb (wiring), not standing down this lane in favor of fuel-side
+capability work — with the caveat that `Hybrid` tensor-parallel sharding and `Sharded`/`Hybrid`
+cache *storage* (as opposed to coordination) remain open questions that could still turn out to
+need fuel-side work; I would not close those off without the follow-up reads named above.
+
+---
+
 ## Summary table
 
 | Question | Answer | Confidence |
@@ -317,5 +449,6 @@ immediate follow-up.
 | Multi-GPU real? | 8/8 original bail sites still bail; 3/6 strategies now honest-but-unimplemented, 3/6 working | MEASURED |
 | Test suite covers fuel path? | Unit-level yes (62 tests, every CI run); end-to-end HTTP/content correctness no (never run in CI, last manual run 2026-08-08) | MEASURED |
 | Fuel import buckets | 1 stable, ~6 modules assumed-settled-but-unconfirmed, 2 symbol-families (Tensor, LlamaModel-family) confirmed undecided | MIXED — see caveats |
+| Gaps: fuel-missing vs Lightbulb-unwired | Multi-GPU, GGUF/quantized, architecture dispatch, speculative decoding: mostly (b) unwired, fuel already has them. AWQ: undetermined. `Hybrid` TP/cache-sync specifically: undetermined | MOSTLY MEASURED, two open items flagged |
 
 No port code was written. No version was bumped.
