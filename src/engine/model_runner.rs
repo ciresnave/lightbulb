@@ -313,27 +313,40 @@ impl ModelRunner {
         std::thread::spawn(move || {
             // The candlelight arm above auto-detects `.gguf` and routes to
             // `load_gguf`. This arm has no GGUF loader wired up yet — that is
-            // a gap in THIS crate's wiring, not in Fuel: `fuel-transformers`
-            // already ships `QuantizedLlama3Model::from_gguf` (reachable
-            // through the same `fuel::` facade this module already imports,
-            // no new dependency needed — see `src/model_fuel/decoder.rs` for
-            // the `FuelDecoder` trait this needs a second `impl` on). Until
-            // that `impl` lands, this arm currently loads SafeTensors only
-            // via `load_llama_f32_from_dir` (a directory with
-            // `model.safetensors`). Without this check, a GGUF-configured
-            // server rebuilt with `fuel-engine` would silently hand the
-            // `.gguf` file path to the SafeTensors loader and fail with a
-            // confusing "missing model.safetensors" error that names the
-            // wrong problem. Fail explicitly instead.
+            // a gap in THIS crate's wiring, not a capability fuel lacks:
+            // `fuel-transformers` ships a `QuantizedLlama3Model::from_gguf`
+            // constructor (reachable through the same `fuel::` facade this
+            // module already imports, no new dependency needed — see
+            // `src/model_fuel/decoder.rs` for the `FuelDecoder` trait this
+            // needs a second `impl` on). Until that `impl` lands, this arm
+            // currently loads SafeTensors only via `load_llama_f32_from_dir`
+            // (a directory with `model.safetensors`). Without this check, a
+            // GGUF-configured server rebuilt with `fuel-engine` would
+            // silently hand the `.gguf` file path to the SafeTensors loader
+            // and fail with a confusing "missing model.safetensors" error
+            // that names the wrong problem. Fail explicitly instead.
+            //
+            // ⚠️ "Ships a constructor" is not "supports quantized GGUF
+            // loading" — that second phrase is a capability claim this repo
+            // cannot verify and, as of 2026-09-24, is false for most real
+            // checkpoints: fuel's own `dequant_bytes_to_f32`
+            // (`fuel-transformers/src/models/lazy_quantized_llama.rs`) wires
+            // only F32/F16/BF16/Q4_0 of GGUF's ~15 quant types, and
+            // `output.weight` at Q6_K — llama.cpp's ordinary output, not an
+            // exotic case — is not among them. Say what fuel ships, not what
+            // it can do with any given file.
             let is_gguf = model_path
                 .extension()
                 .map_or(false, |ext| ext.eq_ignore_ascii_case("gguf"));
             if is_gguf {
                 let msg = format!(
                     "fuel-engine does not yet load GGUF models (got {}); \
-                     Fuel itself supports quantized GGUF loading via \
-                     `QuantizedLlama3Model::from_gguf` — Lightbulb's Fuel \
-                     path just doesn't call it yet. The Fuel path currently \
+                     Fuel ships `QuantizedLlama3Model::from_gguf` \
+                     (fuel-transformers) — Lightbulb's Fuel path does not \
+                     call it yet. Note fuel's dequant dispatch currently \
+                     wires only F32/F16/BF16/Q4_0, so files using other \
+                     quant types (commonly Q6_K on output.weight) will not \
+                     load even once this is wired. The Fuel path currently \
                      loads SafeTensors only via load_llama_f32_from_dir. \
                      See `src/model_fuel/decoder.rs` (`FuelDecoder`) for \
                      where the second `impl` lands. Rebuild without \
