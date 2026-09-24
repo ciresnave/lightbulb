@@ -36,9 +36,9 @@ anywhere forever without meaning progress or its absence.
 | `src/multi_gpu/topology.rs` | Device discovery/memory/P2P — **mostly hardcoded placeholders** (`// TODO: Candle API for memory info`, fixed 80GB guess, hardcoded P2P=true) | **DELETE** | `fuel-hardware::probe::ProbeReport::probe_all()` (real per-device memory), `enumerate::{Cuda,Vulkan,Cpu}Enumerator`, `transfer_cost::BandwidthMatrix::measure` (real measured H2D/D2H bandwidth), `fuel-dispatch::topology::SystemTopology`. **Fuel's version is measured; Lightbulb's is a guess.** Probably the cleanest, easiest win in this whole audit. |
 | `src/multi_gpu/config.rs` | `ParallelismMode`/`MultiGPUConfig` strategy-selection policy | **WIRE** | The size-based heuristic itself is Lightbulb's own, no fuel equivalent (fuel reports hardware facts, picks no strategy) — but must be rewired onto fuel-hardware/fuel-dispatch topology instead of candlelight's `DeviceTopology::discover()`. |
 | `src/multi_gpu/tensor_parallel.rs` (Column/Row) | Sharded matmul | **DELETE** | `fuel-parallel::tensor_parallel::{ColumnParallel,RowParallel}`, zero `bail!`/`todo!`. |
-| `src/multi_gpu/tensor_parallel.rs` (`Hybrid`) | Combined sharding | **UNRESOLVED** | fuel's `TensorParallelConfig` has no third variant. Unclear whether this is a real requirement or an invented strategy nobody needs — not determined either today or previously. |
+| `src/multi_gpu/tensor_parallel.rs` (`Hybrid`) | Combined sharding | **CONFIRMED ABSENT — real question, not resolved** | fuel-lane confirmed: no third variant. The sharding dimension type is `ShardDim` (`fuel-parallel/src/tensor_parallel.rs:179`), exactly two values (`Column`/`Row`) — corrected from an earlier "`TensorParallelConfig`" naming guess; `ColumnParallel`/`RowParallel` are separate structs, not enum variants. Still unclear whether `Hybrid` is a real requirement or an invented strategy nobody needs. |
 | `src/multi_gpu/pipeline_parallel.rs` | GPipe scheduling | **DELETE** | `fuel-parallel::pipeline_parallel::{GPipe, OneForwardOneBackward}`, generic scheduler not tied to a tensor type, zero `bail!`/`todo!`. |
-| `src/multi_gpu/distributed_cache.rs` (`Sharded`/`Hybrid` cache-sync **storage**) | Cross-device KV cache storage | **UNRESOLVED — asked the fuel lane directly, not answered as of this doc** | `fuel-parallel::distributed_cache` is coordination-only, its own doc says storage "lives in fuel_inference" — checked `fuel-inference::tiered_storage` (single-device tiering) and `multi_session` (`SessionState` takes one `Device`) and found **no actual cross-device sharded storage**. This *weakens* rather than confirms the assumption from earlier today. Sent `[ASK]` to `gf5jcpe8` directly rather than guess a second time. |
+| `src/multi_gpu/distributed_cache.rs` (`Sharded`/`Hybrid` cache-sync **storage**) | Cross-device KV cache storage | ⚠️ **BUILD — CONFIRMED, the one place today fuel is BEHIND Lightbulb, not ahead** | Fuel lane confirmed structurally, with a positive control: `fuel-parallel/src/distributed_cache.rs` is exhaustively coordination-only — four items (`CacheShardInfo`, `SyncEvent`, `CacheSyncProtocol`, `CacheRoutingHint`), none store cache data, all track shard/rank/position metadata. `fuel-inference`'s `SessionState` holds exactly one `KvCache` + one `InferenceContext`, and `InferenceContext::new` takes a single `Device`. Grep of `fuel-inference/src/*.rs` for `shard`/`multi_device`/`cross_device`/`multi_gpu` → **zero** (the same pattern hits real code in `fuel-parallel`'s `comm.rs`/`device_group.rs`/`tensor_parallel.rs`, so the query works and the zero is real, not a broken grep). **There is no `CacheStrategy`-shaped enum anywhere in fuel — `Sharded` is not even declared as a concept, let alone implemented.** Lightbulb's own `distributed_cache.rs:165` at least *names* the strategy and marks it unimplemented; fuel hasn't modelled it as a type at all. **Open architectural question, not yet answered: does this get built in fuel or in Lightbulb?** CireSnave's multi-GPU box will exercise this immediately, so it can't stay open indefinitely. |
 | `src/cache/kv_compression.rs` | KIVI/R-KV/low-rank KV compression | **DELETE**, name-matched not independently re-verified this pass | `fuel-inference::kv_compress` states the same three strategies. Recommend a direct side-by-side read before treating as settled. |
 | `src/cache/prefix_cache.rs` | Hash-keyed prefix reuse | **DELETE**, name-matched not independently re-verified this pass | `fuel-inference::prefix_cache`, same stated purpose. Same caveat. |
 | `src/cache/parallel_cache_builder.rs` | Forked from Candle's `ScatteredCacheBuilder` (attributed, SPDX'd) | **DELETE, high confidence** | Lightbulb's own `src/model_fuel/policies.rs` (already built, part of the fuel port) already does this job on `fuel::kv_block_pool`. The replacement already exists in-repo. |
@@ -54,16 +54,28 @@ anywhere forever without meaning progress or its absence.
 | `src/tools/mod.rs` | Test-only candlelight `DType` reference | **KEEP** (trivial) | Test code, migrates for free whenever the surrounding module does. |
 | `src/lib.rs` | Doctest-style smoke example + `LlamaEosToks` reference | **KEEP** (trivial) | Documentation/example code, not production path. |
 
-## A more misleading comment, found while writing this doc
+## More misleading pointers, found while writing this doc and by the fuel lane
 
-Beyond `model_runner.rs:327` (fixed in #91 today): **`gguf/mod.rs`'s framing of itself as an
-"independently tested GGUF reader"** (the framing this lane itself used in PR #92's body today) is
-accurate for the *interpretation logic* but not for the *underlying types* — `crate::gguf::Content`
-still imports `candlelight::core::quantized::gguf_file::{Value, TensorInfo, QTensor}` directly (see
-table row above). Nobody wrote a false comment here — but a future reader (including this lane, hours
-ago) could reasonably assume "Lightbulb's own GGUF reader" means "candlelight-free," and it doesn't
-yet. Worth a doc-comment addition in `gguf/mod.rs` stating this split plainly, as its own small fix —
-not done in this document.
+The fourth and fifth false pointers found today (after `model_runner.rs:327`, fixed in #91; `deny.toml`'s
+"we don't expose raw RSA operations"; and fuel's own example claiming to mirror an eager module that
+404s) — this pattern is now recurring often enough to name as its own category, not four unrelated
+incidents:
+
+- ⚠️ **`fuel-parallel/src/distributed_cache.rs`'s own doc comment claims cache storage "lives in
+  `fuel_inference`". That claim is FALSE, not merely unconfirmed** — the fuel lane's structural scan
+  (with a positive control proving the query works) found no cross-device storage anywhere in
+  `fuel-inference`. Not this repo's comment to fix, but the exact shape of misdirection this section
+  exists to catch, and it fooled two independent readings today (this lane's first pass, and the
+  assumption baked into `distributed_cache.rs`'s own row before the fuel lane's answer landed) before a
+  structural scan caught it.
+- **`gguf/mod.rs`'s framing of itself as an "independently tested GGUF reader"** (the framing this lane
+  itself used in PR #92's body today) is accurate for the *interpretation logic* but not for the
+  *underlying types* — `crate::gguf::Content` still imports
+  `candlelight::core::quantized::gguf_file::{Value, TensorInfo, QTensor}` directly (see table row
+  above). Nobody wrote a false comment here — but a future reader (including this lane, hours ago)
+  could reasonably assume "Lightbulb's own GGUF reader" means "candlelight-free," and it doesn't yet.
+  Worth a doc-comment addition in `gguf/mod.rs` stating this split plainly, as its own small fix — not
+  done in this document.
 
 ## What works TODAY with `--features fuel-engine` and zero candlelight
 
@@ -73,8 +85,8 @@ two checkpoint formats (SafeTensors f32 via `load_llama_f32_from_dir`, GGUF-quan
 blocked there on non-Q4_0 tensors, see #92), CPU only (no multi-GPU, no fused kernels beyond what
 `fuel::lazy` already does internally), no LoRA, no AWQ, no speculative decoding, no tensor/pipeline
 parallelism. Every one of those absences was checked THIS session and found to be **Lightbulb not
-calling something fuel already has** (see table above) rather than a fuel-side hole, with the
-exceptions noted UNRESOLVED/BUILD above.
+calling something fuel already has** (see table above) rather than a fuel-side hole — **with one
+confirmed exception: cross-device KV cache storage, which fuel does not have either.**
 
 ## Milestone: what stands between today and `fuel-engine` becoming DEFAULT
 
@@ -90,8 +102,12 @@ verdicts:
    largest capability jump available, and per today's audit, requires no new fuel work at all.
 4. **Wire `fuel-parallel`** for tensor/pipeline parallelism, **delete `src/multi_gpu/`**'s
    candlelight-based Column/Row/GPipe implementations (keeping only the genuinely-Lightbulb
-   `config.rs` strategy-selection policy, rewired). The `Hybrid` TP variant and cross-device cache
-   storage stay open pending fuel lane confirmation.
+   `config.rs` strategy-selection policy, rewired). ⚠️ **Cross-device KV cache storage does NOT ride
+   along with this step for free — it is confirmed BUILD, not DELETE, the one place today fuel is
+   behind Lightbulb rather than ahead (fuel has no `CacheStrategy`-shaped type at all). This needs an
+   architectural decision (fuel or Lightbulb?) before step 4 can be considered complete, and
+   CireSnave's multi-GPU box will need an answer, not just the tensor/pipeline half.** `Hybrid` TP
+   stays open pending real-requirement confirmation, lower urgency.
 5. **Wire `fuel-inference::speculative`** for speculative decoding.
 6. **Flip `fuel-engine` from opt-in to default**, delete `candlelight`, delete this session's
    `[patch]` block in `Cargo.toml` along with it.
@@ -140,9 +156,11 @@ means further `todo!`/`bail!` sites could exist unfound.
 
 ## What I could not determine (collected, not scattered)
 
-- Whether cross-device sharded KV cache **storage** exists anywhere in fuel (asked `gf5jcpe8` directly,
-  unanswered as of this document).
-- Whether `TensorParallelConfig::Hybrid` is a real requirement anyone needs, or an invented strategy.
+- ~~Whether cross-device sharded KV cache storage exists anywhere in fuel~~ — **RESOLVED by the fuel
+  lane: it does not, anywhere, confirmed with a positive control.** See the BUILD verdict above; the
+  open item now is architectural (fuel or Lightbulb builds it), not factual.
+- Whether `Hybrid` sharding (`ShardDim` has only `Column`/`Row`) is a real requirement anyone needs, or
+  an invented strategy.
 - Whether fuel's lazy-graph optimizer actually performs the two specific fusions
   `fused_kernels.rs` hand-writes (architectural claim found, not a specific fusion-pass test).
 - `src/cache/tensor_codec.rs`'s fuel equivalent, if any.
