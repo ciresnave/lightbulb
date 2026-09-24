@@ -312,24 +312,33 @@ impl ModelRunner {
 
         std::thread::spawn(move || {
             // The candlelight arm above auto-detects `.gguf` and routes to
-            // `load_gguf`. This arm has no GGUF loader at all — Fuel decode
-            // support is SafeTensors-only today (`load_llama_f32_from_dir`
-            // expects a directory with `model.safetensors`). Without this
-            // check, a GGUF-configured server rebuilt with `fuel-engine`
-            // would silently hand the `.gguf` file path to the SafeTensors
-            // loader and fail with a confusing "missing model.safetensors"
-            // error that names the wrong problem. Fail explicitly instead.
+            // `load_gguf`. This arm has no GGUF loader wired up yet — that is
+            // a gap in THIS crate's wiring, not in Fuel: `fuel-transformers`
+            // already ships `QuantizedLlama3Model::from_gguf` (reachable
+            // through the same `fuel::` facade this module already imports,
+            // no new dependency needed — see `src/model_fuel/decoder.rs` for
+            // the `FuelDecoder` trait this needs a second `impl` on). Until
+            // that `impl` lands, this arm currently loads SafeTensors only
+            // via `load_llama_f32_from_dir` (a directory with
+            // `model.safetensors`). Without this check, a GGUF-configured
+            // server rebuilt with `fuel-engine` would silently hand the
+            // `.gguf` file path to the SafeTensors loader and fail with a
+            // confusing "missing model.safetensors" error that names the
+            // wrong problem. Fail explicitly instead.
             let is_gguf = model_path
                 .extension()
                 .map_or(false, |ext| ext.eq_ignore_ascii_case("gguf"));
             if is_gguf {
                 let msg = format!(
-                    "fuel-engine does not yet support GGUF models (got {}); \
-                     the Fuel path currently loads SafeTensors only via \
-                     load_llama_f32_from_dir. Quantized/GGUF support is \
-                     pending `impl FuelDecoder for Llama3Model`. Rebuild \
-                     without --features fuel-engine to use this model, or \
-                     point at a SafeTensors checkpoint directory.",
+                    "fuel-engine does not yet load GGUF models (got {}); \
+                     Fuel itself supports quantized GGUF loading via \
+                     `QuantizedLlama3Model::from_gguf` — Lightbulb's Fuel \
+                     path just doesn't call it yet. The Fuel path currently \
+                     loads SafeTensors only via load_llama_f32_from_dir. \
+                     See `src/model_fuel/decoder.rs` (`FuelDecoder`) for \
+                     where the second `impl` lands. Rebuild without \
+                     --features fuel-engine to use this model, or point at \
+                     a SafeTensors checkpoint directory.",
                     model_path.display()
                 );
                 eprintln!("{msg}");
