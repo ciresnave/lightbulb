@@ -318,3 +318,64 @@ criterion      = { version = "0.8", features = ["html_reports"] }
 [[bench]]
 name = "batched_inference_benchmark"
 harness = false
+
+# `github.com/ciresnave/candle` does not exist (404) and never did — CireSnave,
+# 2026-09-24: "Candle is github.com/huggingface/candle if I'm not mistaken. I
+# may have had a temporary fork of their code but I never made any changes to
+# it so anything pointing at github.com/ciresnave/candle can be safely
+# redirected to HuggingFace's Candle repo." Neither this manifest nor
+# candlelight's declares that URL directly — it comes from `candle-layer-norm`
+# (github.com/ciresnave/candle-layer-norm, a SEPARATE repo this crate does not
+# own): `candle-core = { git = "https://github.com/ciresnave/candle.git",
+# branch = "main", package = "candle-core", features = ["cuda"] }`, no version
+# constraint. `cargo metadata --locked` (the `gates` CI job's "Cargo.lock
+# matches the manifests" step) resolves the FULL locked graph regardless of
+# which features are active by default — Cargo.lock must satisfy every
+# optional dependency reachable through ANY feature combination declared in
+# this manifest, not just the ones active today, precisely so enabling a
+# feature later never needs network access. So it hits this dead source even
+# though Lightbulb's own default build never activates `layer-norm`. Red on
+# `main` since 2026-09-11 (root-caused 2026-09-24, `gates` run 107869908976).
+#
+# ⚠️ A `[patch]` ON candle-core ITSELF DOES NOT WORK — TESTED, NOT ASSUMED.
+# `[patch."https://github.com/ciresnave/candle.git"] candle-core = "0.11.0"`
+# (matching candlelight's own crates.io version) looked like the obvious fix
+# and passed locally on the first try — because this machine still had a
+# cached git checkout of the dead repo from before it went 404. Moving that
+# cache aside and re-running reproduced the exact CI failure: cargo still
+# tries to fetch `candle.git` to resolve `candle-layer-norm`'s manifest before
+# a patch on `candle-core` can even apply, because the git dependency floats
+# on `branch = "main"` rather than a pinned `rev` — a plain `[patch]` on the
+# dependency name does not stop cargo probing the ORIGINAL source first. A
+# CI-clean local test needs the cache removed; a green run with it present is
+# not evidence.
+#
+# WHAT ACTUALLY WORKS: patch `candle-layer-norm` ITSELF (a live, reachable
+# repo — only its `candle-core` dependency points at the dead URL) to the
+# crates.io release upstream already publishes. Patching the DEPENDENT means
+# cargo substitutes the whole package, including its manifest, without ever
+# needing to read the original's Cargo.toml — so `candle.git` is never
+# touched. Verified with the dead repo's git cache removed (a clean-CI
+# simulation): `cargo metadata --locked` exits 0, zero remaining references
+# to `ciresnave/candle.git` in Cargo.lock, `cargo update -p candle-layer-norm`
+# touched exactly 8 packages (no unrelated churn), and `cargo check` /
+# `cargo check --features fuel-engine` / `cargo test --tests` all still pass.
+#
+# candle-layer-norm 0.0.1 (crates.io) is OLDER than the git-pinned 0.0.3 and
+# pulls its own candle-core 0.9.2 rather than 0.11.0 — a different version
+# coexisting in the graph, which Cargo already did for three other candle-core
+# versions before this patch, so it costs nothing new. Nothing in this crate
+# calls `candle-layer-norm` directly (Lightbulb never activates the
+# `layer-norm` feature by default), so the version gap has no behavioural
+# consequence for anything Lightbulb builds today.
+#
+# MINIMUM FIX, NOT AN UPGRADE PROJECT (CireSnave, 2026-09-24: "we're ditching
+# Candle for Fuel, the only things we should need Candle crates for is
+# historical records") — no candle-path code was touched to accommodate this,
+# and CireSnave's fallback (repoint at github.com/huggingface/candle) was not
+# needed.
+#
+# NONE OF THIS SURVIVES CANDLELIGHT'S DELETION once the Fuel port replaces it
+# as the default serving path — this whole patch block goes with it.
+[patch."https://github.com/ciresnave/candle-layer-norm"]
+candle-layer-norm = "0.0.1"
