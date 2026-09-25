@@ -358,8 +358,36 @@ harness = false
 # touched. Verified with the dead repo's git cache removed (a clean-CI
 # simulation): `cargo metadata --locked` exits 0, zero remaining references
 # to `ciresnave/candle.git` in Cargo.lock, `cargo update -p candle-layer-norm`
-# touched exactly 8 packages (no unrelated churn), and `cargo check` /
-# `cargo check --features fuel-engine` / `cargo test --tests` all still pass.
+# touched exactly 6 package names (bindgen_cuda, candle-core, candle-kernels,
+# candle-layer-norm, candle-ug, fancy-regex) — but that count is not the whole
+# story, corrected here rather than caveated:
+#
+# ⚠️ THE SAME `cargo update -p candle-layer-norm` ALSO RE-POINTED 12 UNRELATED
+# DEPENDENCY EDGES to an OLDER windows-sys — measured by diffing this
+# manifest's lockfile against `main`'s package-by-package, not just reading
+# `cargo update`'s own change summary (which reports package version
+# add/remove events, not edge reassignments among ALREADY-PRESENT versions —
+# a real blind spot in that output, not a manual miscount). None of the 12
+# affected packages (rustix, tempfile, errno, quinn-udp, dirs-sys,
+# is-terminal, nu-ansi-term, socket2, winapi-util, anstyle-query,
+# anstyle-wincon, rustls-platform-verifier) changed VERSION — cargo's
+# resolver simply chose a different, already-coexisting windows-sys entry
+# for their edge on this particular resolve, a legal-but-gratuitous
+# tie-break with nothing forcing it. Caught by a full lockfile diff against
+# `main` (PM's read, not mine originally), confirmed by checking that the
+# named packages' own versions were unchanged before/after. Fixed by
+# hand-correcting exactly those 12 edges back to `windows-sys 0.61.2` in the
+# already-generated lockfile (the same version entry was already present and
+# valid for all of them) — not by re-running `cargo update` again, which
+# reproduced the same spurious reassignment deterministically on retry.
+#
+# Verified after the correction: `cargo metadata --locked` still exits 0,
+# `cargo check` / `cargo check --features fuel-engine` / `cargo test --tests`
+# all still pass, and a full diff against `main`'s Cargo.lock now contains
+# ONLY the 6 candle-related package changes above plus their own direct
+# transitive knock-on (cudarc 0.19.8 -> 0.18.2 for the one dependent that
+# needs it, `half` gaining a direct edge, `ug-metal` moving within
+# candle-ug's own feature set) — nothing unrelated remains.
 #
 # candle-layer-norm 0.0.1 (crates.io) is OLDER than the git-pinned 0.0.3 and
 # pulls its own candle-core 0.9.2 rather than 0.11.0 — a different version
