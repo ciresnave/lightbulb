@@ -22,11 +22,21 @@ use super::session::SessionState;
 /// `loader_gguf.rs`). Both implement `FuelDecoder`, so everything below the
 /// point of construction dispatches through that trait and does not care
 /// which variant it is holding.
+///
+/// `#[allow(dead_code)]`: this whole module is unreachable under default
+/// features (see `FuelEngineModel`'s own doc, and `main`'s pre-existing
+/// "never constructed"/"never used" warnings on that struct) — the only
+/// caller is the `fuel-engine`-gated arm of `ModelRunner::start`, and the
+/// `clippy` gate runs default features only. Allowed at each new site this
+/// change adds, not by raising the gate's ceiling, so the ratchet still
+/// bites on anything genuinely new elsewhere.
+#[allow(dead_code)]
 enum LoadedModel {
     F32(LoadedLlama),
     QuantizedGguf(LoadedQuantizedLlama),
 }
 
+#[allow(dead_code)]
 impl LoadedModel {
     fn config(&self) -> &fuel::lazy::LlamaConfig {
         match self {

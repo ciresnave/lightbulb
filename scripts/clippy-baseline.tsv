@@ -7,7 +7,7 @@
 # count	lint
 135	clippy::collapsible_if
 72	unused_variables
-43	dead_code
+39	dead_code
 37	unused_imports
 32	clippy::manual_div_ceil
 28	clippy::needless_range_loop
