@@ -10,6 +10,14 @@ backed by a read of fuel's actual crates via `gh api` against `origin/main` — 
 import. Three parallel sub-investigations did the file-by-file reads; this document consolidates them
 and states plainly where a row is weaker evidence (name-matched from context, rate-limited, etc.).
 
+⚠️ **Provenance gap, stated rather than papered over: measured against `origin/main` on 2026-09-24;
+the exact SHA read at the time was not recorded.** Fuel's `main` moved repeatedly that same day (the
+llama/phi extraction, the `fuel-loaders` rename, and more since) and has moved further since this
+document was written, so every claim below should be treated as describing fuel's crates as they stood
+sometime on 2026-09-24, not as reproducible against today's `origin/main` — a re-run against the
+current tip may find crates renamed, moved, or changed underneath this reading. Re-verify rather than
+trust before acting on any single row for implementation.
+
 ## The one metric that matters
 
 ```
