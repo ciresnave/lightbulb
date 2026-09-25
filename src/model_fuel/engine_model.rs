@@ -199,7 +199,7 @@ impl FuelEngineModel {
     pub(crate) fn load(model_path: &Path, context_length: usize) -> Result<Self> {
         let is_gguf = model_path
             .extension()
-            .map_or(false, |ext| ext.eq_ignore_ascii_case("gguf"));
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("gguf"));
         let loaded = if is_gguf {
             LoadedModel::QuantizedGguf(super::loader_gguf::load_quantized_llama_gguf(model_path)?)
         } else {
