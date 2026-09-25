@@ -4,7 +4,7 @@
     license     = "MIT OR Apache-2.0"
     name        = "lightbulb"
     repository  = "https://github.com/ciresnave/lightbulb"
-    version     = "0.1.0"
+    version     = "0.1.1"
 
 [features]
     # CUDA support with flash attention and fused kernels.

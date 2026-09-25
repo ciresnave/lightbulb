@@ -163,6 +163,32 @@ pub async fn chat_completions(
     State(state): State<AppState>,
     Json(request): Json<ChatCompletionRequest>,
 ) -> impl IntoResponse {
+    // Reject a `model` that does not name what is actually loaded, while a
+    // model IS loaded (`inference_tx.is_some()`) — when none is loaded, the
+    // existing "No model available on the server" fallback further down
+    // already reports that, and this check must not shadow it.
+    //
+    // Measured 2026-09-24: `model: "nonexistent-model"` against a running
+    // server returned a normal 200, served by whatever was actually loaded,
+    // silently ignoring the field. Harmless for a single-model server in
+    // isolation, but a specific hazard for a caller (OverMind) that tries
+    // candidate models in sequence and records a failure per model NAME —
+    // every name serving the same model turns one real failure into several
+    // distinct, misleading ones. See `docs/TOOL-CALLING-DESIGN-2026-09-25.md`
+    // for the fuller writeup; this is the fix, not the design.
+    if state.inference_tx.is_some() && request.model != state.config.default_model {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": format!(
+                    "model '{}' is not loaded on this server; the loaded model is '{}'",
+                    request.model, state.config.default_model
+                )
+            })),
+        )
+            .into_response();
+    }
+
     // BEFORE the `stream` routing below, deliberately, and not inside either
     // branch of it. Only `create_chat_completion` consults
     // `lightbulb.output_contract`; `create_chat_stream` has never read
@@ -1659,7 +1685,7 @@ mod tests {
         // Deserialized from a body, not constructed field-by-field: the shape
         // below is what a client actually posts.
         let request: ChatCompletionRequest = serde_json::from_value(serde_json::json!({
-            "model": "fixture",
+            "model": "lightbulb-default",
             "messages": [{"role": "user", "content": CONTRACT_QUESTION}],
             "max_tokens": 8,
             "temperature": 0.0,
@@ -1737,7 +1763,7 @@ mod tests {
         let (tx, runner) = stub_runner();
         let state = state_with_runner(Some(template), Some(tx));
         let request: ChatCompletionRequest = serde_json::from_value(serde_json::json!({
-            "model": "fixture",
+            "model": "lightbulb-default",
             "messages": [{"role": "user", "content": CONTRACT_QUESTION}],
             "max_tokens": 8,
             "temperature": 0.0,
@@ -1805,7 +1831,7 @@ mod tests {
     /// `create_chat_completion`'s plain path.
     fn plain_request(stream: bool) -> ChatCompletionRequest {
         serde_json::from_value(serde_json::json!({
-            "model": "fixture",
+            "model": "lightbulb-default",
             "messages": [{"role": "user", "content": CONTRACT_QUESTION}],
             "max_tokens": 8,
             "temperature": 0.0,
@@ -2348,7 +2374,7 @@ mod tests {
             let state = state_with_monitor(None, Some(tx), monitor.clone());
 
             let request: ChatCompletionRequest = serde_json::from_value(serde_json::json!({
-                "model": "fixture",
+                "model": "lightbulb-default",
                 "messages": [{"role": "user", "content": CONTRACT_QUESTION}],
                 "max_tokens": 8,
                 "temperature": 0.0,
@@ -2504,7 +2530,7 @@ mod tests {
     /// A body carrying a contract, with `stream` as given.
     fn contract_request(stream: bool) -> ChatCompletionRequest {
         serde_json::from_value(serde_json::json!({
-            "model": "fixture",
+            "model": "lightbulb-default",
             "messages": [{"role": "user", "content": CONTRACT_QUESTION}],
             "max_tokens": 8,
             "temperature": 0.0,
