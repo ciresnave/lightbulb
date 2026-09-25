@@ -146,8 +146,12 @@ pub fn load_quantized_llama_gguf(path: &Path) -> Result<LoadedQuantizedLlama> {
     }
 
     let device = super::device::select();
-    let model = QuantizedLlama3Model::from_gguf(path, &full)
-        .map_err(|e| anyhow::anyhow!("building QuantizedLlama3Model from {}: {e:?}", path.display()))?;
+    let model = QuantizedLlama3Model::from_gguf(path, &full).map_err(|e| {
+        anyhow::anyhow!(
+            "building QuantizedLlama3Model from {}: {e:?}",
+            path.display()
+        )
+    })?;
 
     Ok(LoadedQuantizedLlama {
         eos: full.eos_token_id.clone(),
@@ -236,11 +240,8 @@ mod tests {
             .to_vec();
 
         let max_seq_len = ids.len() + 24;
-        let mut st = super::super::session::SessionState::new(
-            &loaded.config,
-            max_seq_len,
-            &loaded.device,
-        )?;
+        let mut st =
+            super::super::session::SessionState::new(&loaded.config, max_seq_len, &loaded.device)?;
 
         use crate::model_fuel::decoder::FuelDecoder;
         let mut logits = loaded.model.prefill(&ids, &mut st)?;

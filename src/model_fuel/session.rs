@@ -103,7 +103,11 @@ impl SessionState {
     /// See the struct doc for why this differs from `parts()`.
     pub(crate) fn parts_persistent(
         &mut self,
-    ) -> (&mut KvCache, &mut InferenceContext, &mut Option<DecodeSession>) {
+    ) -> (
+        &mut KvCache,
+        &mut InferenceContext,
+        &mut Option<DecodeSession>,
+    ) {
         (&mut self.cache, &mut self.ctx, &mut self.quantized_session)
     }
 
