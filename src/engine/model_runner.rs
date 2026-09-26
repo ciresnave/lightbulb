@@ -328,13 +328,28 @@ impl ModelRunner {
             //
             // ⚠️ "Ships a constructor" is not "supports quantized GGUF
             // loading" — that second phrase is a capability claim this repo
-            // cannot verify and, as of 2026-09-24, is false for most real
-            // checkpoints: fuel's own `dequant_bytes_to_f32`
-            // (`fuel-transformers/src/models/lazy_quantized_llama.rs`) wires
-            // only F32/F16/BF16/Q4_0 of GGUF's ~15 quant types, and
-            // `output.weight` at Q6_K — llama.cpp's ordinary output, not an
-            // exotic case — is not among them. Say what fuel ships, not what
-            // it can do with any given file.
+            // cannot verify by reading, only by running, and it changes as
+            // fuel ships. RE-MEASURED 2026-09-26 against fuel's `main`
+            // `580540f` (2026-09-26T00:33:00Z), after fuel#244 landed
+            // (2026-09-25T22:46Z UTC) — the previous version of this comment
+            // (dated 2026-09-24) said fuel's dequant wired only
+            // F32/F16/BF16/Q4_0 and that Q6_K was not among them. That is
+            // now FALSE: fuel#244 centralized `dequant_bytes_to_f32` across
+            // all 10 `fuel-transformers` quantized-model files into
+            // `fuel_quantized::dequant_ggml_bytes`
+            // (`fuel-quantized/src/dequant.rs`), which wires 14 of
+            // `GgmlDType`'s 15 variants, Q6_K included —
+            // `lazy_quantized_llama.rs:498`'s `dequant_bytes_to_f32` is now a
+            // one-line delegation to it. The remaining, still-real
+            // limitation is narrower than before: `Q8_1` alone declines with
+            // a typed error (`BlockQ8_1::to_float` is `unimplemented!()`
+            // upstream, GAP-125) rather than panicking, and GGUF's IQ
+            // (sub-byte) quant family isn't modeled by `GgmlDType` at all —
+            // `GgmlDType::from_u32` (`fuel-ir/src/quantized.rs`) has no arms
+            // for those codes and falls through to its generic "unknown
+            // dtype" error (GAP-339, fuel#247). Say what fuel ships, dated,
+            // not what it could do with any given file — and re-check this
+            // date before trusting it, the same way this correction had to.
             let is_gguf = model_path
                 .extension()
                 .map_or(false, |ext| ext.eq_ignore_ascii_case("gguf"));
@@ -343,11 +358,12 @@ impl ModelRunner {
                     "fuel-engine does not yet load GGUF models (got {}); \
                      Fuel ships `QuantizedLlama3Model::from_gguf` \
                      (fuel-transformers) — Lightbulb's Fuel path does not \
-                     call it yet. Note fuel's dequant dispatch currently \
-                     wires only F32/F16/BF16/Q4_0, so files using other \
-                     quant types (commonly Q6_K on output.weight) will not \
-                     load even once this is wired. The Fuel path currently \
-                     loads SafeTensors only via load_llama_f32_from_dir. \
+                     call it yet. As of fuel main 580540f (2026-09-26), \
+                     fuel's dequant dispatch wires 14 of 15 quant types \
+                     (Q6_K included since fuel#244); Q8_1 and GGUF's IQ \
+                     (sub-byte) family are the remaining gaps, not \
+                     Q6_K/output.weight. The Fuel path currently loads \
+                     SafeTensors only via load_llama_f32_from_dir. \
                      See `src/model_fuel/decoder.rs` (`FuelDecoder`) for \
                      where the second `impl` lands. Rebuild without \
                      --features fuel-engine to use this model, or point at \
