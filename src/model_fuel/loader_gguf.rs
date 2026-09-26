@@ -27,11 +27,28 @@
 //! that mapping is not documented anywhere else fuel or Lightbulb has it
 //! written down.
 //!
+//! ⚠️ **UPDATE 2026-09-26: fuel HAS now shipped the replacement, but this
+//! repo cannot call it yet — do not delete this function on this update.**
+//! `fuel#246` (merged 2026-09-25T23:42Z) added exactly the API this comment
+//! asked for:
+//! `fuel_loaders::quantized::config_from_gguf::derive_config(content,
+//! architecture) -> Result<GgufDerivedConfig>`, generically parameterized on
+//! architecture, not hardcoded to Llama. **Removal is blocked on one thing
+//! only: `Cargo.toml`'s `fuel` dependency is pinned to a git `rev` from
+//! before all five of tonight's fuel merges (`#244`/`#245`/`#246`/`#247`/
+//! `#253`), so `derive_config` does not exist in the fuel this crate actually
+//! resolves today.** Bumping that pin is its own separate change — it pulls
+//! in real code-path changes (`#244`'s dequant centralization,
+//! `#245`'s safetensors relocation) that deserve their own build and test
+//! run, not a hunk inside this file's PR — and is the PM's to sequence, not
+//! done here.
+//!
 //! **DELETE THIS FILE'S CONFIG-BUILDING FUNCTION (`llama_full_config_from_gguf`)
-//! THE MOMENT FUEL SHIPS A `from_gguf`-adjacent config derivation** (in
-//! `fuel-loaders` or elsewhere) and call that instead. Until then this is
-//! Lightbulb's own code, reusing Lightbulb's own already-tested reader, not a
-//! fork of fuel's.
+//! THE MOMENT the `fuel` pin advances past `#246` and `derive_config` is
+//! actually reachable** — not "the moment fuel ships it upstream" (that
+//! already happened; reachability is the remaining condition) — and call
+//! that instead. Until then this is Lightbulb's own code, reusing
+//! Lightbulb's own already-tested reader, not a fork of fuel's.
 
 use std::path::Path;
 
