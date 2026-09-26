@@ -67,6 +67,39 @@ impl FuelDecoder for LlamaModel {
     }
 }
 
+/// The second implementor — GGUF-quantized LLaMA, added 2026-09-24.
+///
+/// `QuantizedLlama3Model` wraps `Llama3Model` (fuel-transformers), which
+/// exposes only `forward_with_kv_context_persistent(tokens, cache, ctx,
+/// &mut Option<DecodeSession>)` — the explicit-session shape this module's
+/// header calls out as a hazard, not the `forward_decode_step(tokens, cache,
+/// ctx)` shape `LlamaModel` above uses. There is no `forward_decode_step`
+/// equivalent on `Llama3Model` (checked against fuel's `origin/main`,
+/// 2026-09-24 — filed with the fuel lane, not something this repo can fix).
+/// `SessionState::parts_persistent()` exists to hold the session this needs;
+/// see its doc for why the plain `LlamaModel` impl above doesn't have one.
+impl FuelDecoder for fuel::lazy_quantized_llama::QuantizedLlama3Model {
+    fn prefill(&self, tokens: &[u32], st: &mut SessionState) -> Result<Vec<f32>> {
+        let (cache, ctx, session) = st.parts_persistent();
+        let logits = self
+            .inner()
+            .forward_with_kv_context_persistent(tokens, cache, ctx, session)
+            .map_err(|e| anyhow::anyhow!("quantized prefill forward: {e:?}"))?;
+        st.advance(tokens.len());
+        Ok(logits)
+    }
+
+    fn step(&self, token: u32, st: &mut SessionState) -> Result<Vec<f32>> {
+        let (cache, ctx, session) = st.parts_persistent();
+        let logits = self
+            .inner()
+            .forward_with_kv_context_persistent(&[token], cache, ctx, session)
+            .map_err(|e| anyhow::anyhow!("quantized decode forward: {e:?}"))?;
+        st.advance(1);
+        Ok(logits)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

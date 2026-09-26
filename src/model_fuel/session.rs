@@ -27,18 +27,28 @@
 
 use anyhow::Result;
 
-use fuel::inference_context::{InferenceContext, KvCache};
+use fuel::inference_context::{DecodeSession, InferenceContext, KvCache};
 use fuel::lazy::LlamaConfig;
 use fuel::{DType, Device};
 
 /// One sequence's KV cache, inference context, and position.
 ///
-/// The decode plan is NOT held here — it rides on the `InferenceContext`, which
-/// is what `forward_decode_step` reads and writes.
+/// The decode plan is NOT held here for the plain `LlamaModel` path — it rides
+/// on the `InferenceContext`, which is what `forward_decode_step` reads and
+/// writes. `quantized_session` is the exception: `Llama3Model`/
+/// `QuantizedLlama3Model` (fuel-transformers) expose only
+/// `forward_with_kv_context_persistent`, which takes the plan explicitly as a
+/// `&mut Option<DecodeSession>` fourth argument — the pre-`forward_decode_step`
+/// shape this module's own doc comment above describes as a hazard. There is
+/// no `forward_decode_step`-equivalent on `Llama3Model` to avoid it with (see
+/// `docs/FUEL-PORT-STATUS-2026-09-24.md` §6 and the filed fuel finding), so the
+/// quantized `FuelDecoder` impl in `decoder.rs` has to hold one. `None` and
+/// unused for the plain `LlamaModel` path.
 pub struct SessionState {
     cache: KvCache,
     ctx: InferenceContext,
     position: usize,
+    quantized_session: Option<DecodeSession>,
 }
 
 impl SessionState {
@@ -71,6 +81,7 @@ impl SessionState {
             cache,
             ctx: InferenceContext::new(device.clone()),
             position: 0,
+            quantized_session: None,
         })
     }
 
@@ -85,6 +96,19 @@ impl SessionState {
     /// without the fields becoming public.
     pub(crate) fn parts(&mut self) -> (&mut KvCache, &mut InferenceContext) {
         (&mut self.cache, &mut self.ctx)
+    }
+
+    /// The three pieces `forward_with_kv_context_persistent` needs, borrowed
+    /// together — the quantized (`QuantizedLlama3Model`) decode path only.
+    /// See the struct doc for why this differs from `parts()`.
+    pub(crate) fn parts_persistent(
+        &mut self,
+    ) -> (
+        &mut KvCache,
+        &mut InferenceContext,
+        &mut Option<DecodeSession>,
+    ) {
+        (&mut self.cache, &mut self.ctx, &mut self.quantized_session)
     }
 
     /// Record that `n` tokens were committed.

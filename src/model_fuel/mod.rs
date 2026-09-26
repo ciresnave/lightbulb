@@ -97,6 +97,7 @@ pub mod engine_model;
 pub mod generate;
 pub mod loader;
 pub mod loader_f32;
+pub mod loader_gguf;
 pub mod policies;
 pub mod session;
 

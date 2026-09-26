@@ -34,6 +34,29 @@ use std::path::Path;
 
 use fuel::lazy::{LlamaModel, LlamaWeights};
 
+/// A loaded GGUF-quantized Llama-shape model, plus everything a serving loop
+/// needs to drive it — the `QuantizedLlama3Model` counterpart to
+/// [`LoadedLlama`]. See `loader_gguf.rs` for how this is built.
+///
+/// `eos` uses `fuel::lazy_llama_full::LlamaEosToks` directly (not
+/// `Option<LlamaEosToks>` wrapped again) since `LlamaFullConfig::eos_token_id`
+/// already carries that `Option`.
+pub struct LoadedQuantizedLlama {
+    pub model: fuel::lazy_quantized_llama::QuantizedLlama3Model,
+    pub config: fuel::lazy::LlamaConfig,
+    pub tokenizer: tokenizers::Tokenizer,
+    pub eos: Option<fuel::lazy_llama_full::LlamaEosToks>,
+    pub device: fuel::Device,
+}
+
+impl LoadedQuantizedLlama {
+    /// `true` if `tok` ends generation for this checkpoint. Mirrors
+    /// [`LoadedLlama::is_eos`].
+    pub fn is_eos(&self, tok: u32) -> bool {
+        self.eos.as_ref().is_some_and(|e| e.is_eos(tok))
+    }
+}
+
 /// A loaded Llama-shape model, plus everything a serving loop needs to drive it.
 ///
 /// `config` is retained because callers need `vocab_size` to slice logits and

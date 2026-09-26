@@ -14,8 +14,65 @@ use crate::engine::model_runner::EngineModel;
 use crate::engine::{RequestContext, RequestState};
 
 use super::decoder::FuelDecoder;
-use super::loader::LoadedLlama;
+use super::loader::{LoadedLlama, LoadedQuantizedLlama};
 use super::session::SessionState;
+
+/// Which checkpoint format is loaded: SafeTensors f32 (`LoadedLlama`) or
+/// GGUF-quantized (`LoadedQuantizedLlama`, added 2026-09-24 — see
+/// `loader_gguf.rs`). Both implement `FuelDecoder`, so everything below the
+/// point of construction dispatches through that trait and does not care
+/// which variant it is holding.
+///
+/// `#[allow(dead_code)]`: this whole module is unreachable under default
+/// features (see `FuelEngineModel`'s own doc, and `main`'s pre-existing
+/// "never constructed"/"never used" warnings on that struct) — the only
+/// caller is the `fuel-engine`-gated arm of `ModelRunner::start`, and the
+/// `clippy` gate runs default features only. Allowed at each new site this
+/// change adds, not by raising the gate's ceiling, so the ratchet still
+/// bites on anything genuinely new elsewhere.
+#[allow(dead_code)]
+enum LoadedModel {
+    F32(LoadedLlama),
+    QuantizedGguf(LoadedQuantizedLlama),
+}
+
+#[allow(dead_code)]
+impl LoadedModel {
+    fn config(&self) -> &fuel::lazy::LlamaConfig {
+        match self {
+            Self::F32(l) => &l.config,
+            Self::QuantizedGguf(l) => &l.config,
+        }
+    }
+
+    fn device(&self) -> &fuel::Device {
+        match self {
+            Self::F32(l) => &l.device,
+            Self::QuantizedGguf(l) => &l.device,
+        }
+    }
+
+    fn tokenizer(&self) -> &tokenizers::Tokenizer {
+        match self {
+            Self::F32(l) => &l.tokenizer,
+            Self::QuantizedGguf(l) => &l.tokenizer,
+        }
+    }
+
+    fn is_eos(&self, tok: u32) -> bool {
+        match self {
+            Self::F32(l) => l.is_eos(tok),
+            Self::QuantizedGguf(l) => l.is_eos(tok),
+        }
+    }
+
+    fn decoder(&self) -> &dyn FuelDecoder {
+        match self {
+            Self::F32(l) => &l.model,
+            Self::QuantizedGguf(l) => &l.model,
+        }
+    }
+}
 
 /// Pick a token from a realized logit row.
 ///
@@ -104,7 +161,7 @@ fn effective_generation_budget(
 /// outside this crate constructs a `FuelEngineModel` today; if that changes,
 /// widen deliberately rather than as a side effect of a compiler complaint.
 pub(crate) struct FuelEngineModel {
-    loaded: LoadedLlama,
+    loaded: LoadedModel,
     /// Keyed by `RequestContext.request.id`. Entries are created on the
     /// request's first step and dropped when it completes — a session holds a
     /// pre-allocated KV cache (~92 MiB for TinyLlama at 2048 f32), so leaking
@@ -142,12 +199,22 @@ pub(crate) struct FuelEngineModel {
 }
 
 impl FuelEngineModel {
-    /// Load a SafeTensors checkpoint directory.
+    /// Load a checkpoint: a `.gguf` file goes through the GGUF-quantized
+    /// loader, anything else is treated as a SafeTensors checkpoint
+    /// directory. Mirrors the extension check the candlelight arm in
+    /// `src/engine/model_runner.rs` already makes.
     ///
     /// Fails here rather than at first request if the tokenizer or config is
-    /// missing — see `LoadedLlama`.
-    pub(crate) fn load(model_dir: &Path, context_length: usize) -> Result<Self> {
-        let loaded = super::loader_f32::load_llama_f32_from_dir(model_dir)?;
+    /// missing — see `LoadedLlama` / `LoadedQuantizedLlama`.
+    pub(crate) fn load(model_path: &Path, context_length: usize) -> Result<Self> {
+        let is_gguf = model_path
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("gguf"));
+        let loaded = if is_gguf {
+            LoadedModel::QuantizedGguf(super::loader_gguf::load_quantized_llama_gguf(model_path)?)
+        } else {
+            LoadedModel::F32(super::loader_f32::load_llama_f32_from_dir(model_path)?)
+        };
         Ok(Self {
             loaded,
             sessions: HashMap::new(),
@@ -167,7 +234,7 @@ impl FuelEngineModel {
                 // `RequestContext::add_special_tokens`.
                 let ids: Vec<u32> = self
                     .loaded
-                    .tokenizer
+                    .tokenizer()
                     .encode(ctx.request.prompt.as_str(), ctx.add_special_tokens)
                     .map_err(|e| anyhow::anyhow!("tokenizing prompt: {e}"))?
                     .get_ids()
@@ -223,8 +290,8 @@ impl FuelEngineModel {
                 }
 
                 let mut st =
-                    SessionState::new(&self.loaded.config, max_seq_len, &self.loaded.device)?;
-                let logits = self.loaded.model.prefill(&ids, &mut st)?;
+                    SessionState::new(self.loaded.config(), max_seq_len, self.loaded.device())?;
+                let logits = self.loaded.decoder().prefill(&ids, &mut st)?;
                 self.sessions.insert(ctx.request.id.clone(), st);
 
                 let seed = seed_for(&ctx.request.id, ctx.tokens_generated);
@@ -266,7 +333,7 @@ impl FuelEngineModel {
                     .sessions
                     .get_mut(&ctx.request.id)
                     .ok_or_else(|| anyhow::anyhow!("no session for request {}", ctx.request.id))?;
-                let logits = self.loaded.model.step(last, st)?;
+                let logits = self.loaded.decoder().step(last, st)?;
 
                 let seed = seed_for(&ctx.request.id, ctx.tokens_generated);
                 let tok = select_token(&logits, ctx.request_temperature(), seed);
@@ -307,7 +374,7 @@ impl EngineModel for FuelEngineModel {
 
     fn decode_text(&self, tokens: &[u32], skip_special: bool) -> Result<String> {
         self.loaded
-            .tokenizer
+            .tokenizer()
             .decode(tokens, skip_special)
             .map_err(|e| anyhow::anyhow!("detokenizing: {e}"))
     }
