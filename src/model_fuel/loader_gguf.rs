@@ -41,7 +41,9 @@
 //! in real code-path changes (`#244`'s dequant centralization,
 //! `#245`'s safetensors relocation) that deserve their own build and test
 //! run, not a hunk inside this file's PR — and is the PM's to sequence, not
-//! done here.
+//! done here. **Tracked in lightbulb#97** — that issue, not this comment, is
+//! the owner of the deferral; check there before assuming the pin is still
+//! stale.
 //!
 //! **DELETE THIS FILE'S CONFIG-BUILDING FUNCTION (`llama_full_config_from_gguf`)
 //! THE MOMENT the `fuel` pin advances past `#246` and `derive_config` is
