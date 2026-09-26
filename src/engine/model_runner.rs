@@ -312,24 +312,73 @@ impl ModelRunner {
 
         std::thread::spawn(move || {
             // The candlelight arm above auto-detects `.gguf` and routes to
-            // `load_gguf`. This arm has no GGUF loader at all — Fuel decode
-            // support is SafeTensors-only today (`load_llama_f32_from_dir`
-            // expects a directory with `model.safetensors`). Without this
-            // check, a GGUF-configured server rebuilt with `fuel-engine`
-            // would silently hand the `.gguf` file path to the SafeTensors
-            // loader and fail with a confusing "missing model.safetensors"
-            // error that names the wrong problem. Fail explicitly instead.
+            // `load_gguf`. This arm has no GGUF loader wired up yet — that is
+            // a gap in THIS crate's wiring, not a capability fuel lacks:
+            // `fuel-transformers` ships a `QuantizedLlama3Model::from_gguf`
+            // constructor, already available to this crate (declared in
+            // `Cargo.toml`, no new dependency needed) — this file itself
+            // imports no `fuel` types at all (0 of its 6 `use` statements
+            // do), but `src/model_fuel/decoder.rs:30` already has a real
+            // `use fuel::lazy::LlamaModel;`, which is the trait `decoder.rs`
+            // needs a second `impl` on for the constructor above. Until that
+            // `impl` lands, this arm
+            // currently loads SafeTensors only via `load_llama_f32_from_dir`
+            // (a directory with `model.safetensors`). Without this check, a
+            // GGUF-configured server rebuilt with `fuel-engine` would
+            // silently hand the `.gguf` file path to the SafeTensors loader
+            // and fail with a confusing "missing model.safetensors" error
+            // that names the wrong problem. Fail explicitly instead.
+            //
+            // ⚠️ "Ships a constructor" is not "supports quantized GGUF
+            // loading" — that second phrase is a capability claim this repo
+            // cannot verify by reading, only by running, and it changes as
+            // fuel ships. RE-MEASURED 2026-09-26 against fuel's `main`
+            // `580540f` (2026-09-26T00:33:00Z), after fuel#244 landed
+            // (2026-09-25T22:46Z UTC) — the previous version of this comment
+            // (dated 2026-09-24) said fuel's dequant wired only
+            // F32/F16/BF16/Q4_0 and that GGUF's Q6_K wire type was not among
+            // them. That is now FALSE: fuel#244 centralized
+            // `dequant_bytes_to_f32` across all 10 `fuel-transformers`
+            // quantized-model files into `fuel_quantized::dequant_ggml_bytes`
+            // (`fuel-quantized/src/dequant.rs`), which wires 14 of
+            // `GgmlDType`'s 15 variants, `GgmlDType::Q6K` (GGUF's `Q6_K`)
+            // included — `lazy_quantized_llama.rs:498`'s
+            // `dequant_bytes_to_f32` is now a one-line delegation to it. The
+            // remaining, still-real limitation is narrower than before:
+            // `Q8_1` alone declines with a typed error
+            // (`BlockQ8_1::to_float` is `unimplemented!()` upstream,
+            // GAP-125) rather than panicking, and GGUF's IQ/TQ/MXFP4/NVFP4
+            // families aren't modeled by `GgmlDType` at all — its own doc
+            // comment (`fuel-ir/src/quantized.rs:14`) states this scope
+            // explicitly: "plus Q4_0..Q8_1 and Q2K..Q8K; NOT the
+            // IQ*/TQ*/MXFP4/NVFP4 families" — read as the type's own
+            // declared boundary, not inferred from a windowed grep (which
+            // cost a wrong GAP-number citation here once already: `fuel-ir`
+            // has no bearing here, `GAP-339`/`fuel#247` names a *different*
+            // sub-byte hazard, `Op::Const` uploads of fuel-core's own
+            // `DType::{F4,F6E2M3,F6E3M2}`, unrelated to `GgmlDType`). Say
+            // what fuel ships, dated, not what it could do with any given
+            // file — and re-check this date before trusting it, the same
+            // way this correction had to, twice.
             let is_gguf = model_path
                 .extension()
                 .map_or(false, |ext| ext.eq_ignore_ascii_case("gguf"));
             if is_gguf {
                 let msg = format!(
-                    "fuel-engine does not yet support GGUF models (got {}); \
-                     the Fuel path currently loads SafeTensors only via \
-                     load_llama_f32_from_dir. Quantized/GGUF support is \
-                     pending `impl FuelDecoder for Llama3Model`. Rebuild \
-                     without --features fuel-engine to use this model, or \
-                     point at a SafeTensors checkpoint directory.",
+                    "fuel-engine does not yet load GGUF models (got {}); \
+                     Fuel ships `QuantizedLlama3Model::from_gguf` \
+                     (fuel-transformers) — Lightbulb's Fuel path does not \
+                     call it yet. As of fuel main 580540f (2026-09-26), \
+                     fuel's dequant dispatch wires 14 of 15 GgmlDType \
+                     variants (GGUF's Q6_K included since fuel#244); Q8_1 \
+                     and GGUF's IQ/TQ/MXFP4/NVFP4 families are the \
+                     remaining gaps, not Q6_K/output.weight. The Fuel path \
+                     currently loads SafeTensors only via \
+                     load_llama_f32_from_dir. \
+                     See `src/model_fuel/decoder.rs` (`FuelDecoder`) for \
+                     where the second `impl` lands. Rebuild without \
+                     --features fuel-engine to use this model, or point at \
+                     a SafeTensors checkpoint directory.",
                     model_path.display()
                 );
                 eprintln!("{msg}");
