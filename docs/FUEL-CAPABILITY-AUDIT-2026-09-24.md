@@ -96,6 +96,20 @@ parallelism. Every one of those absences was checked THIS session and found to b
 calling something fuel already has** (see table above) rather than a fuel-side hole — **with one
 confirmed exception: cross-device KV cache storage, which fuel does not have either.**
 
+⚠️ **SUPERSEDED 2026-09-26, this paragraph left as-taken rather than rewritten (this is an audit, not
+a live status page — see the provenance note at the top).** The "blocked there on non-Q4_0 tensors"
+finding above was true when measured on 2026-09-24 and is now **false**: `fuel#244` (merged
+2026-09-25T22:46Z) centralized GGUF dequantization across all 10 `fuel-transformers` quantized-model
+files, wiring 14 of `GgmlDType`'s 15 variants including `Q6_K`. Re-measured against fuel `main`
+`580540f` (2026-09-26T00:33Z) directly — see `src/engine/model_runner.rs`'s comment (fixed in #91/#92
+the same night) for the re-derived claim and its own citation correction. The current real limitation
+is `Q8_1` (typed error, GAP-125) and GGUF's IQ/TQ/MXFP4/NVFP4 families (unmodeled by `GgmlDType` at
+all, per that type's own doc comment — not GAP-339/`fuel#247`, a different, unrelated hazard this
+lane cited wrongly once and retracted). This paragraph's *other* claims (no multi-GPU, no LoRA, no
+AWQ, no speculative decoding, no tensor/pipeline parallelism) are unaffected by tonight's five fuel
+merges (#244/#245/#246/#247/#253) and were re-checked against their titles/bodies before writing this
+note — none of the other four touch AWQ, LoRA, speculative decoding, or parallelism.
+
 ## Milestone: what stands between today and `fuel-engine` becoming DEFAULT
 
 In priority order, per the PM's sequencing (cheapest/highest-value first), and using this audit's own
@@ -103,9 +117,17 @@ verdicts:
 
 1. **DELETE `src/multi_gpu/topology.rs`, wire `fuel-hardware`** — cleanest win, hardcoded stub replaced
    by a measured implementation, no design decisions needed.
-2. **Finish PR #92's GGUF path** once fuel wires K-quant dequant (already filed, fuel#243-adjacent
-   per the PM) — the only architecture currently usable end-to-end needs this to serve real-world
-   checkpoints, not just the one local Q4_0-with-Q6_K-output file.
+2. ⚠️ **UPDATED 2026-09-26 — this precondition is now MET.** *(Original text, dated 2026-09-24, for
+   the record: "Finish PR #92's GGUF path once fuel wires K-quant dequant (already filed, fuel#243-
+   adjacent per the PM) — the only architecture currently usable end-to-end needs this to serve
+   real-world checkpoints, not just the one local Q4_0-with-Q6_K-output file." The `#243`-adjacent
+   citation was itself imprecise; the actual fix is `fuel#244`.)* **`fuel#244` (merged
+   2026-09-25T22:46Z) wires K-quant dequant, `Q6_K` included — confirmed against fuel `main` `580540f`.
+   Finishing PR #92's GGUF path no longer waits on fuel; the remaining GGUF-side fuel dependency is the
+   config-derivation gap `fuel#246` (merged 2026-09-25T23:42Z) already closed with
+   `fuel_model_loader::quantized::config_from_gguf::derive_config` — Lightbulb's own dated copy in
+   `loader_gguf.rs` can be deleted once the fuel lane confirms it's safe to depend on (in progress as
+   of this edit, not yet done).**
 3. **Replace the Llama-only loader with `fuel-transformers`' ~90-architecture zoo** — the single
    largest capability jump available, and per today's audit, requires no new fuel work at all.
 4. **Wire `fuel-parallel`** for tensor/pipeline parallelism, **delete `src/multi_gpu/`**'s
