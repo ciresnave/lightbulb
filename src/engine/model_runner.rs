@@ -315,10 +315,13 @@ impl ModelRunner {
             // `load_gguf`. This arm has no GGUF loader wired up yet — that is
             // a gap in THIS crate's wiring, not a capability fuel lacks:
             // `fuel-transformers` ships a `QuantizedLlama3Model::from_gguf`
-            // constructor (reachable through the same `fuel::` facade this
-            // module already imports, no new dependency needed — see
-            // `src/model_fuel/decoder.rs` for the `FuelDecoder` trait this
-            // needs a second `impl` on). Until that `impl` lands, this arm
+            // constructor, already available to this crate (declared in
+            // `Cargo.toml`, no new dependency needed) — this file itself
+            // imports no `fuel` types at all (0 of its 6 `use` statements
+            // do), but `src/model_fuel/decoder.rs:30` already has a real
+            // `use fuel::lazy::LlamaModel;`, which is the trait `decoder.rs`
+            // needs a second `impl` on for the constructor above. Until that
+            // `impl` lands, this arm
             // currently loads SafeTensors only via `load_llama_f32_from_dir`
             // (a directory with `model.safetensors`). Without this check, a
             // GGUF-configured server rebuilt with `fuel-engine` would
