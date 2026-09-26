@@ -333,23 +333,30 @@ impl ModelRunner {
             // `580540f` (2026-09-26T00:33:00Z), after fuel#244 landed
             // (2026-09-25T22:46Z UTC) — the previous version of this comment
             // (dated 2026-09-24) said fuel's dequant wired only
-            // F32/F16/BF16/Q4_0 and that Q6_K was not among them. That is
-            // now FALSE: fuel#244 centralized `dequant_bytes_to_f32` across
-            // all 10 `fuel-transformers` quantized-model files into
-            // `fuel_quantized::dequant_ggml_bytes`
+            // F32/F16/BF16/Q4_0 and that GGUF's Q6_K wire type was not among
+            // them. That is now FALSE: fuel#244 centralized
+            // `dequant_bytes_to_f32` across all 10 `fuel-transformers`
+            // quantized-model files into `fuel_quantized::dequant_ggml_bytes`
             // (`fuel-quantized/src/dequant.rs`), which wires 14 of
-            // `GgmlDType`'s 15 variants, Q6_K included —
-            // `lazy_quantized_llama.rs:498`'s `dequant_bytes_to_f32` is now a
-            // one-line delegation to it. The remaining, still-real
-            // limitation is narrower than before: `Q8_1` alone declines with
-            // a typed error (`BlockQ8_1::to_float` is `unimplemented!()`
-            // upstream, GAP-125) rather than panicking, and GGUF's IQ
-            // (sub-byte) quant family isn't modeled by `GgmlDType` at all —
-            // `GgmlDType::from_u32` (`fuel-ir/src/quantized.rs`) has no arms
-            // for those codes and falls through to its generic "unknown
-            // dtype" error (GAP-339, fuel#247). Say what fuel ships, dated,
-            // not what it could do with any given file — and re-check this
-            // date before trusting it, the same way this correction had to.
+            // `GgmlDType`'s 15 variants, `GgmlDType::Q6K` (GGUF's `Q6_K`)
+            // included — `lazy_quantized_llama.rs:498`'s
+            // `dequant_bytes_to_f32` is now a one-line delegation to it. The
+            // remaining, still-real limitation is narrower than before:
+            // `Q8_1` alone declines with a typed error
+            // (`BlockQ8_1::to_float` is `unimplemented!()` upstream,
+            // GAP-125) rather than panicking, and GGUF's IQ/TQ/MXFP4/NVFP4
+            // families aren't modeled by `GgmlDType` at all — its own doc
+            // comment (`fuel-ir/src/quantized.rs:14`) states this scope
+            // explicitly: "plus Q4_0..Q8_1 and Q2K..Q8K; NOT the
+            // IQ*/TQ*/MXFP4/NVFP4 families" — read as the type's own
+            // declared boundary, not inferred from a windowed grep (which
+            // cost a wrong GAP-number citation here once already: `fuel-ir`
+            // has no bearing here, `GAP-339`/`fuel#247` names a *different*
+            // sub-byte hazard, `Op::Const` uploads of fuel-core's own
+            // `DType::{F4,F6E2M3,F6E3M2}`, unrelated to `GgmlDType`). Say
+            // what fuel ships, dated, not what it could do with any given
+            // file — and re-check this date before trusting it, the same
+            // way this correction had to, twice.
             let is_gguf = model_path
                 .extension()
                 .map_or(false, |ext| ext.eq_ignore_ascii_case("gguf"));
@@ -359,11 +366,12 @@ impl ModelRunner {
                      Fuel ships `QuantizedLlama3Model::from_gguf` \
                      (fuel-transformers) — Lightbulb's Fuel path does not \
                      call it yet. As of fuel main 580540f (2026-09-26), \
-                     fuel's dequant dispatch wires 14 of 15 quant types \
-                     (Q6_K included since fuel#244); Q8_1 and GGUF's IQ \
-                     (sub-byte) family are the remaining gaps, not \
-                     Q6_K/output.weight. The Fuel path currently loads \
-                     SafeTensors only via load_llama_f32_from_dir. \
+                     fuel's dequant dispatch wires 14 of 15 GgmlDType \
+                     variants (GGUF's Q6_K included since fuel#244); Q8_1 \
+                     and GGUF's IQ/TQ/MXFP4/NVFP4 families are the \
+                     remaining gaps, not Q6_K/output.weight. The Fuel path \
+                     currently loads SafeTensors only via \
+                     load_llama_f32_from_dir. \
                      See `src/model_fuel/decoder.rs` (`FuelDecoder`) for \
                      where the second `impl` lands. Rebuild without \
                      --features fuel-engine to use this model, or point at \
