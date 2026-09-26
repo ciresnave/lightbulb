@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender};
 use tokio::sync::{mpsc as async_mpsc, oneshot};
 
-use crate::engine::{Request, RequestContext, RequestState};
+use crate::engine::{Request, RequestContext};
 // Only the `not(fuel-engine)` `ModelRunner::start` names this bare — the
 // `impl EngineModel for crate::model::ParallelModelManager` below spells the
 // type out fully qualified, so it does not keep this import alive on its
@@ -14,9 +14,12 @@ use crate::model::ParallelModelManager;
 
 /// Why generation stopped, in OpenAI's vocabulary.
 ///
-/// Two variants only. OpenAI also defines `content_filter` and `tool_calls`;
-/// nothing in Lightbulb produces either, and an enum carrying variants no
-/// code can construct is worse than one that grows when a producer appears.
+/// OpenAI also defines `content_filter`; nothing in Lightbulb produces it,
+/// and an enum carrying a variant no code can construct is worse than one
+/// that grows when a producer appears. `ToolCalls` is the one exception,
+/// added together with its producer: `api::openai::chat::extract_tool_calls`
+/// parsing Lightbulb's own injected `<tool_call>` tag out of the complete
+/// generated text (see `docs/TOOL-CALLING-DESIGN-2026-09-25.md`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FinishReason {
     /// The model emitted an end-of-sequence token.
@@ -24,6 +27,10 @@ pub enum FinishReason {
     /// `max_new_tokens` was reached with no EOS. Continuing is meaningful,
     /// which is why a client needs to be able to tell this from `Stop`.
     Length,
+    /// The response carries one or more `tool_calls` instead of (or ahead
+    /// of) a normal answer. Set by the handler after parsing generated
+    /// text, never by the runner: the runner has no notion of `tools`.
+    ToolCalls,
 }
 
 impl FinishReason {
@@ -31,6 +38,7 @@ impl FinishReason {
         match self {
             FinishReason::Stop => "stop",
             FinishReason::Length => "length",
+            FinishReason::ToolCalls => "tool_calls",
         }
     }
 }
@@ -404,28 +412,6 @@ fn run_jobs<M: EngineModel>(mut model: M, rx: Receiver<InferenceJob>) {
                 loop {
                     match model.step_batch(&mut batch) {
                         Ok(_) => {
-                            // Check if a tool call was detected (CR.1)
-                            if batch[0].state.is_awaiting_tool_result() {
-                                // Tool call detected — KV cache is preserved.
-                                // For now, log and resume without tool execution.
-                                // Future: execute tool via callback, then inject result.
-                                if let RequestState::AwaitingToolResult {
-                                    ref tool_name,
-                                    ref tool_args,
-                                    ..
-                                } = batch[0].state
-                                {
-                                    eprintln!(
-                                        "Tool call detected (no executor registered): {}({})",
-                                        tool_name, tool_args
-                                    );
-                                }
-                                // Resume decoding — model continues without tool result
-                                // (graceful degradation when no tool executor is available)
-                                batch[0].resume_decoding();
-                                continue;
-                            }
-
                             // Get the most recent token and decode it
                             if let Some(&last_token) = batch[0].generated_tokens.last() {
                                 match model.decode_text(&[last_token], false) {
@@ -474,13 +460,6 @@ fn run_jobs<M: EngineModel>(mut model: M, rx: Receiver<InferenceJob>) {
                 loop {
                     match model.step_batch(&mut batch) {
                         Ok(_) => {
-                            // Check if a tool call was detected (CR.1)
-                            if batch[0].state.is_awaiting_tool_result() {
-                                // Graceful degradation: resume without tool result
-                                batch[0].resume_decoding();
-                                continue;
-                            }
-
                             if !batch[0].should_continue() {
                                 break;
                             }
