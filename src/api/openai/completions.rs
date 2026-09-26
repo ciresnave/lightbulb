@@ -84,6 +84,23 @@ pub async fn completions(
     State(state): State<AppState>,
     Json(request): Json<CompletionRequest>,
 ) -> impl IntoResponse {
+    // Same check and same reasoning as `openai::chat::chat_completions` —
+    // reject a `model` that does not name what is actually loaded, only
+    // while a model IS loaded, so the existing "No model available on the
+    // server" fallback in `create_completion` still handles the other case.
+    if state.inference_tx.is_some() && request.model != state.config.default_model {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": format!(
+                    "model '{}' is not loaded on this server; the loaded model is '{}'",
+                    request.model, state.config.default_model
+                )
+            })),
+        )
+            .into_response();
+    }
+
     match create_completion(state, request).await {
         Ok(response) => (StatusCode::OK, Json(response)).into_response(),
         Err(e) => (
