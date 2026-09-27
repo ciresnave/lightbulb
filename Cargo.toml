@@ -289,6 +289,14 @@
     # Also where fuel's per-architecture quantized models (`lazy_quantized_qwen3`
     # and siblings, see lightbulb#97's follow-up) would come from.
     fuel-transformers = { git = "https://github.com/ciresnave/fuel", rev = "4910b37a60a17b3111ac909f249bf17926bcb316" }
+    # `fuel_loaders::quantized::config_from_gguf::derive_config` -- the
+    # architecture-parameterized GGUF config reader lightbulb#97 (step 2)
+    # replaces `src/model_fuel/loader_gguf.rs`'s own `llama_full_config_from_gguf`
+    # with. Reads the file through fuel's OWN `gguf_file::Content`, a
+    # metadata-only parse distinct from `crate::gguf::Content` (Lightbulb's
+    # reader, kept for the tokenizer extraction `derive_config` deliberately
+    # does not do).
+    fuel-loaders = { git = "https://github.com/ciresnave/fuel", rev = "4910b37a60a17b3111ac909f249bf17926bcb316" }
     # Only used to CONSTRUCT a `CudaDevice` in the GPU measurement harness.
     # `fuel-core` provides `impl From<CudaDevice> for Device` (its `cuda_backend`
     # module) but re-exports only `builder_arg`, not `CudaDevice` itself — so a

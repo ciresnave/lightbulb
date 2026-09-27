@@ -3834,6 +3834,7 @@ dependencies = [
  "fuel-cpu-backend",
  "fuel-cuda-backend",
  "fuel-inference",
+ "fuel-loaders",
  "fuel-model-llama",
  "fuel-transformers",
  "futures",
