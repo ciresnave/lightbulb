@@ -144,12 +144,10 @@ impl ParallelKvCache {
         // are its REAL live write position, not a sentinel — so without this,
         // a slot that sat out this step gets its cache overwritten by whatever
         // that row computed while masked out. `parallel_model_manager.rs`
-        // includes `Completed` and `AwaitingToolResult` slots in the batch
-        // precisely because it believes they are inert, and CR.1 promises a
-        // paused request's "KV cache is preserved" — this is what makes that
-        // true. A resumed tool-call request would otherwise attend over
-        // corrupted history and produce fluent, wrong output with nothing
-        // logged.
+        // includes `Completed` slots in the batch precisely because it
+        // believes they are inert — this is what makes that true. A
+        // resumed request would otherwise attend over corrupted history
+        // and produce fluent, wrong output with nothing logged.
         //
         // Implemented by neutralising the SOURCE rather than skipping rows:
         // inactive rows write back the cache's current contents, so the

@@ -108,6 +108,28 @@ impl ChatTemplate {
         self.resolved_by != Resolution::None && !self.source.trim().is_empty()
     }
 
+    /// Whether this template's own Jinja source branches on a `tools`
+    /// variable, i.e. it is one of the checkpoint's own templates that HF's
+    /// `apply_chat_template(tools=...)` convention was written for.
+    ///
+    /// A substring check, not a parse: real templates spell the check as
+    /// `{% if tools %}`, `{%- if tools is not none %}` and similar, and there
+    /// is no cheaper way to ask "does this template know what to do with a
+    /// tools list" without actually rendering it with one. False positives
+    /// (a template that merely mentions the word without a real branch) are
+    /// possible but unseen in this codebase's Hub sample and cost nothing
+    /// today, since nothing currently WIRES a `tools` value into `render`'s
+    /// context (see `api::openai::chat::create_chat_completion`) — this
+    /// predicate exists only to keep Lightbulb's own injected-prompt fallback
+    /// from being the only path in the code, per the portfolio PM's
+    /// tool-calls-design-pivot ruling, condition 2: a real deployment on a
+    /// tool-capable checkpoint should prefer the checkpoint's own convention
+    /// once that branch is implemented, rather than talking over it with a
+    /// redundant system message.
+    pub fn supports_native_tools(&self) -> bool {
+        self.source.contains("tools")
+    }
+
     /// Render `messages` into a prompt string.
     ///
     /// Errors rather than panicking: a template that fails to render must fall
