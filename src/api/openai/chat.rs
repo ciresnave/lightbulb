@@ -37,13 +37,15 @@ pub struct ChatCompletionRequest {
     #[serde(default)]
     pub stream: bool,
 
-    /// Number of completions to generate
+    /// Number of completions to generate. `1` (the default) is a no-op;
+    /// anything else is rejected with a 400 — see `validate_n`.
     #[serde(default = "default_n")]
     pub n: usize,
 
-    /// Stop sequences
+    /// Stop sequences. Accepts either shape the spec allows (a bare string
+    /// or an array) — see [`StopSequences`].
     #[serde(default)]
-    pub stop: Option<Vec<String>>,
+    pub stop: Option<StopSequences>,
 
     /// Tools the model may call. Presence (non-empty, and `tool_choice` not
     /// `"none"`) is what turns on tool-call prompting and parsing at all —
@@ -62,6 +64,33 @@ pub struct ChatCompletionRequest {
     /// Lightbulb-specific extensions
     #[serde(default)]
     pub lightbulb: Option<LightbulbExtensions>,
+}
+
+/// The `stop` field's two legal shapes: a single string, or an array of up
+/// to 4. Declaring the field as `Option<Vec<String>>` alone rejects the
+/// (spec-legal, common) bare-string form with a 400 deserialize error before
+/// this code ever runs — not the silent-discard defect item 2 targets, but
+/// close enough kin, and free to fix in the same pass through this struct.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum StopSequences {
+    Single(String),
+    Multiple(Vec<String>),
+}
+
+impl StopSequences {
+    /// Borrow every configured sequence as `&str`, skipping empty ones — an
+    /// empty stop string matches everywhere and would truncate output at
+    /// position 0, which is never what a caller means by sending it.
+    pub(crate) fn as_list(&self) -> Vec<&str> {
+        match self {
+            StopSequences::Single(s) => vec![s.as_str()],
+            StopSequences::Multiple(v) => v.iter().map(String::as_str).collect(),
+        }
+        .into_iter()
+        .filter(|s| !s.is_empty())
+        .collect()
+    }
 }
 
 /// One entry of `ChatCompletionRequest.tools`.
@@ -327,6 +356,41 @@ pub async fn chat_completions(
                     deltas are a separate streaming shape from the non-streaming path \
                     landed here. Send `stream: false` to use tools today, or omit `tools` \
                     to stream."
+            })),
+        )
+            .into_response();
+    }
+
+    // `n` accepted-and-silently-discarded is the defect class board item 71's
+    // item 2 exists to close — see `validate_n` for why this is a reject
+    // rather than an implementation.
+    if let Err(msg) = validate_n(request.n) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": msg})),
+        )
+            .into_response();
+    }
+
+    // A MEANINGFUL `stop` cannot be honored on a stream: tokens already sent
+    // to the client cannot be un-sent, and detecting a stop sequence across
+    // chunk boundaries is real, separate work — see `apply_stop_sequences`'s
+    // non-streaming use below. A no-op `stop` (absent, or every entry empty)
+    // costs nothing and is left to stream freely.
+    if request.stream
+        && request
+            .stop
+            .as_ref()
+            .is_some_and(|s| !s.as_list().is_empty())
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "a non-empty `stop` with `stream: true` is not yet implemented: \
+                    truncating output already sent to the client is impossible, and \
+                    detecting a stop sequence across streamed chunk boundaries is separate, \
+                    undone work. Send `stream: false` to use `stop` today, or omit it to \
+                    stream."
             })),
         )
             .into_response();
@@ -620,6 +684,49 @@ fn validate_tool_choice(request: &ChatCompletionRequest) -> Result<(), String> {
     }
 }
 
+/// Validate `n` against what Lightbulb actually implements: only `1` (the
+/// spec default; a no-op most clients send unconditionally). `n > 1` is
+/// rejected with a 400 rather than silently returning one choice.
+///
+/// Deliberately NOT implemented, and the reason is the point of the
+/// message: the default (non-`fuel-engine`) decode path is pure greedy
+/// argmax — `temperature` is stored on every request but never read by it
+/// (lightbulb#102) — so `n` independent runs of the same prompt would
+/// return `n` IDENTICAL completions. That is a feature that looks broken
+/// rather than one that is honestly absent: a caller asking for 3 completions
+/// and getting 3 copies of the same string would reasonably file a bug
+/// against `n`, when the real defect is temperature. Revisit once sampling
+/// actually varies output — the implementation itself is straightforward
+/// (loop `run_inference_once` `n` times, one `ChatChoice` per run, sum
+/// `usage`); it is deferred for this reason, not because it is hard.
+pub(crate) fn validate_n(n: usize) -> Result<(), String> {
+    if n == 1 {
+        return Ok(());
+    }
+    Err(format!(
+        "n={n} is not supported: the default decode path is deterministic (greedy argmax; \
+         temperature is accepted but not applied on this build, see lightbulb#102), so \
+         running it {n} times would return {n} identical completions rather than {n} useful \
+         ones. Send n=1 (the default) until sampling actually varies output."
+    ))
+}
+
+/// Truncate `text` at the earliest occurrence of any `stop_sequences` entry,
+/// excluding the matched sequence itself from the returned text — matching
+/// OpenAI's own behavior (the stop string never appears in the output).
+///
+/// Returns `(possibly-truncated text, whether a sequence matched)`. The
+/// second value is what lets a caller override `finish_reason` to `"stop"`
+/// even when the runner's own reason was `Length` — hitting a stop sequence
+/// IS a stop, regardless of why the runner itself stopped generating.
+pub(crate) fn apply_stop_sequences(text: &str, stop_sequences: &[&str]) -> (String, bool) {
+    let earliest = stop_sequences.iter().filter_map(|seq| text.find(seq)).min();
+    match earliest {
+        Some(pos) => (text[..pos].to_string(), true),
+        None => (text.to_string(), false),
+    }
+}
+
 /// How `tools` reach the model's context for this request.
 ///
 /// A real decision point, not a single hardcoded path — per the tool-calls
@@ -854,22 +961,42 @@ async fn create_chat_completion(
             .duration_since(SystemTime::UNIX_EPOCH)?
             .as_secs();
 
+        // Stop-sequence truncation runs BEFORE tool-call extraction: a stop
+        // sequence is a cutoff on generation itself, so the tag (if any)
+        // is looked for in the text the caller actually asked to see, not
+        // in text that would have been truncated away.
+        let stop_list = request
+            .stop
+            .as_ref()
+            .map(StopSequences::as_list)
+            .unwrap_or_default();
+        let (text, stopped) = if stop_list.is_empty() {
+            (result.text, false)
+        } else {
+            apply_stop_sequences(&result.text, &stop_list)
+        };
+        let stopped_reason = if stopped {
+            crate::engine::model_runner::FinishReason::Stop
+        } else {
+            result.finish_reason
+        };
+
         // Only look for the tag when the request actually offered tools: a
         // model can produce this exact text sequence coincidentally (or a
         // caller's own prior assistant turn can contain literal `<tool_call>`
         // text being quoted), and `wants_tools` is the one signal that says
         // Lightbulb itself asked for this format on THIS request.
         let (content, finish_reason, tool_calls) = if wants_tools {
-            match extract_tool_calls(&result.text) {
+            match extract_tool_calls(&text) {
                 Some((leading, calls)) => (
                     leading,
                     crate::engine::model_runner::FinishReason::ToolCalls,
                     Some(calls),
                 ),
-                None => (result.text, result.finish_reason, None),
+                None => (text, stopped_reason, None),
             }
         } else {
-            (result.text, result.finish_reason, None)
+            (text, stopped_reason, None)
         };
 
         return Ok(ChatCompletionResponse {
@@ -3458,5 +3585,158 @@ mod tests {
             .await
             .into_response();
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    // === n / stop / top_p (board item 71, item 2) ===
+
+    #[test]
+    fn stop_sequences_accepts_a_bare_string() {
+        let parsed: StopSequences = serde_json::from_value(serde_json::json!("</s>")).unwrap();
+        assert_eq!(parsed.as_list(), vec!["</s>"]);
+    }
+
+    #[test]
+    fn stop_sequences_accepts_an_array() {
+        let parsed: StopSequences =
+            serde_json::from_value(serde_json::json!(["</s>", "\n\n"])).unwrap();
+        assert_eq!(parsed.as_list(), vec!["</s>", "\n\n"]);
+    }
+
+    #[test]
+    fn stop_sequences_as_list_drops_empty_entries() {
+        let parsed: StopSequences = serde_json::from_value(serde_json::json!(["", "X"])).unwrap();
+        assert_eq!(parsed.as_list(), vec!["X"]);
+    }
+
+    #[test]
+    fn apply_stop_sequences_truncates_at_the_earliest_match() {
+        let (text, stopped) = apply_stop_sequences("Paris is the capital.</s> extra", &["</s>"]);
+        assert_eq!(text, "Paris is the capital.");
+        assert!(stopped);
+    }
+
+    #[test]
+    fn apply_stop_sequences_picks_the_earliest_of_several_matches() {
+        let (text, stopped) = apply_stop_sequences("abcXdefYghi", &["Y", "X"]);
+        assert_eq!(text, "abc");
+        assert!(stopped);
+    }
+
+    #[test]
+    fn apply_stop_sequences_returns_the_full_text_when_nothing_matches() {
+        let (text, stopped) = apply_stop_sequences("no stop here", &["</s>"]);
+        assert_eq!(text, "no stop here");
+        assert!(!stopped);
+    }
+
+    /// Sabotage test for the REJECT path (PM's verification condition applies
+    /// to rejects too, not just the implement): if `validate_n` were changed
+    /// to accept `n=3`, this must go red. Confirmed by temporarily hardcoding
+    /// `Ok(())` in `validate_n` and re-running — failed as expected, restored.
+    #[test]
+    fn validate_n_rejects_anything_but_one() {
+        assert!(validate_n(1).is_ok());
+        let err = validate_n(3).expect_err("n=3 must be rejected");
+        assert!(
+            err.contains('3') && err.contains("temperature"),
+            "rejection must name the value and the real reason (temperature, not difficulty): {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn chat_completions_rejects_n_greater_than_one() {
+        let state = state_with(None);
+        let mut req = request();
+        req.n = 3;
+
+        let response = chat_completions(State(state), Json(req))
+            .await
+            .into_response();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn chat_completions_accepts_n_equal_one() {
+        // Not a reject test: n=1 is the no-op default and must reach the
+        // ordinary (no-runner) fallback path, not a 400.
+        let state = state_with(None);
+        let req = request();
+        assert_eq!(req.n, 1);
+
+        let response = chat_completions(State(state), Json(req))
+            .await
+            .into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn chat_completions_rejects_stream_with_a_meaningful_stop() {
+        let state = state_with(None);
+        let mut req = request();
+        req.stream = true;
+        req.stop = Some(StopSequences::Single("</s>".to_string()));
+
+        let response = chat_completions(State(state), Json(req))
+            .await
+            .into_response();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn chat_completions_allows_stream_with_a_noop_stop() {
+        // An absent (or all-empty) `stop` must not be caught by the
+        // stream+stop rejection — only a MEANINGFUL stop is refused.
+        let state = state_with(None);
+        let mut req = request();
+        req.stream = true;
+        req.stop = Some(StopSequences::Multiple(vec![String::new()]));
+
+        let response = chat_completions(State(state), Json(req)).await;
+        // Streaming responses are SSE, not a JSON body with a status this
+        // harness can read directly the same way — reaching `create_chat_stream`
+        // at all (rather than the 400 branch above it) is what this test
+        // asserts, via the absence of a BAD_REQUEST status.
+        assert_ne!(response.into_response().status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn create_chat_completion_truncates_at_a_stop_sequence() {
+        let (tx, runner) = stub_runner_with_text(
+            "Paris is the capital of France.</s> unwanted continuation",
+            FinishReason::Length,
+        );
+        let state = state_with_runner(None, Some(tx));
+
+        let mut req = request();
+        req.stop = Some(StopSequences::Single("</s>".to_string()));
+
+        let response = create_chat_completion(state, req)
+            .await
+            .expect("forced generation must not error");
+        drop(runner);
+
+        assert_eq!(
+            response.choices[0].message.content,
+            "Paris is the capital of France."
+        );
+        assert_eq!(
+            response.choices[0].finish_reason, "stop",
+            "hitting a stop sequence must report finish_reason=stop even though the \
+             runner's own reason was Length"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_chat_completion_leaves_text_alone_when_no_stop_configured() {
+        let (tx, runner) = stub_runner_with_text("ordinary answer", FinishReason::Stop);
+        let state = state_with_runner(None, Some(tx));
+
+        let response = create_chat_completion(state, request())
+            .await
+            .expect("forced generation must not error");
+        drop(runner);
+
+        assert_eq!(response.choices[0].message.content, "ordinary answer");
+        assert_eq!(response.choices[0].finish_reason, "stop");
     }
 }
