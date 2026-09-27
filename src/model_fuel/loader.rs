@@ -32,20 +32,20 @@
 use anyhow::{Context, Result};
 use std::path::Path;
 
-use fuel::lazy::{LlamaModel, LlamaWeights};
+use fuel_model_llama::{LlamaConfig, LlamaModel, LlamaWeights};
 
 /// A loaded GGUF-quantized Llama-shape model, plus everything a serving loop
 /// needs to drive it — the `QuantizedLlama3Model` counterpart to
 /// [`LoadedLlama`]. See `loader_gguf.rs` for how this is built.
 ///
-/// `eos` uses `fuel::lazy_llama_full::LlamaEosToks` directly (not
-/// `Option<LlamaEosToks>` wrapped again) since `LlamaFullConfig::eos_token_id`
-/// already carries that `Option`.
+/// `eos` uses `fuel_transformers::models::lazy_llama_full::LlamaEosToks`
+/// directly (not `Option<LlamaEosToks>` wrapped again) since
+/// `LlamaFullConfig::eos_token_id` already carries that `Option`.
 pub struct LoadedQuantizedLlama {
-    pub model: fuel::lazy_quantized_llama::QuantizedLlama3Model,
-    pub config: fuel::lazy::LlamaConfig,
+    pub model: fuel_transformers::models::lazy_quantized_llama::QuantizedLlama3Model,
+    pub config: LlamaConfig,
     pub tokenizer: tokenizers::Tokenizer,
-    pub eos: Option<fuel::lazy_llama_full::LlamaEosToks>,
+    pub eos: Option<fuel_transformers::models::lazy_llama_full::LlamaEosToks>,
     pub device: fuel::Device,
 }
 
@@ -68,11 +68,11 @@ impl LoadedQuantizedLlama {
 /// per-request one.
 pub struct LoadedLlama {
     pub model: LlamaModel,
-    pub config: fuel::lazy::LlamaConfig,
+    pub config: LlamaConfig,
     pub tokenizer: tokenizers::Tokenizer,
     /// `None` when `config.json` carries no `eos_token_id`. Generation then
     /// stops only on `max_new_tokens`, which is why the loader logs a warning.
-    pub eos: Option<fuel::lazy_llama_full::LlamaEosToks>,
+    pub eos: Option<fuel_transformers::models::lazy_llama_full::LlamaEosToks>,
     /// The device the weights were loaded onto. A `SessionState` built against
     /// a different one is a byte-count error deep inside `realize`.
     pub device: fuel::Device,
@@ -154,8 +154,9 @@ pub fn load_llama_from_dir(dir: &Path) -> Result<LoadedLlama> {
     // (hidden_size → dim, num_hidden_layers → n_layers, ...) into the same
     // `LlamaConfig` via `to_lazy_config()`, but only this one retains
     // `eos_token_id`. Without it the engine can stop only on max_new_tokens.
-    let full = fuel::lazy_llama_full::LlamaFullConfig::from_hf_json_str(&config_str)
-        .map_err(|e| anyhow::anyhow!("parsing config.json: {e:?}"))?;
+    let full =
+        fuel_transformers::models::lazy_llama_full::LlamaFullConfig::from_hf_json_str(&config_str)
+            .map_err(|e| anyhow::anyhow!("parsing config.json: {e:?}"))?;
     let config = full.to_lazy_config();
 
     let weights_path = dir.join("model.safetensors");

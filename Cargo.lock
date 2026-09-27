@@ -308,40 +308,40 @@ dependencies = [
 
 [[package]]
 name = "baracuda-build"
-version = "0.0.1-alpha.78"
+version = "0.0.1-alpha.82"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5e0f98555d03b2defb66efa823cc89cb843788844a921f69928785eced97517f"
+checksum = "127e3a583500cf4756396dab9f54df50f8ab92dc087aff5ce18623b6d7865870"
 
 [[package]]
 name = "baracuda-core"
-version = "0.0.1-alpha.78"
+version = "0.0.1-alpha.82"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "af9a22434c78fb37c8f16feadb96ee2fb23dbcf2479aff9d53e58482d08b0168"
+checksum = "fcf69aad498b3e0ef84f4ed7e342eb28ce0100b6359100a7cec69333d127c8e3"
 dependencies = [
  "baracuda-types",
  "libloading 0.8.9",
- "thiserror 1.0.69",
+ "thiserror 2.0.19",
 ]
 
 [[package]]
 name = "baracuda-cublas"
-version = "0.0.1-alpha.78"
+version = "0.0.1-alpha.82"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "45afc2b4e0fe56dd6899c4b87c4b6090b48e1d8228a0a711f1de131f6453a76c"
+checksum = "9b66ae5c1162b8a808b8c8f033039f24c3ec041d100e7a413d804171ee21590e"
 dependencies = [
  "baracuda-core",
  "baracuda-cublas-sys",
  "baracuda-cuda-sys",
  "baracuda-driver",
  "baracuda-types",
- "thiserror 1.0.69",
+ "thiserror 2.0.19",
 ]
 
 [[package]]
 name = "baracuda-cublas-sys"
-version = "0.0.1-alpha.78"
+version = "0.0.1-alpha.82"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "80c70c53e44fd0c95c664872a273e053d5f2136646f9ed3a28b799b7ae70355f"
+checksum = "bf0e231f64da9bdf7b13b57d95cf6d3efd8075fd12f23e2e7ce489980e27e6b0"
 dependencies = [
  "baracuda-build",
  "baracuda-core",
@@ -352,9 +352,9 @@ dependencies = [
 
 [[package]]
 name = "baracuda-cuda-sys"
-version = "0.0.1-alpha.78"
+version = "0.0.1-alpha.82"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "331df401a77e8fc4f344a589fa31a2407dc7edf7f58b4a025c08c5c83cdecaba"
+checksum = "f9ea95590c8850ce4886eb0f734e0a4f34847f12f5049043e216e96d446ecd9c"
 dependencies = [
  "baracuda-build",
  "baracuda-core",
@@ -364,23 +364,23 @@ dependencies = [
 
 [[package]]
 name = "baracuda-curand"
-version = "0.0.1-alpha.78"
+version = "0.0.1-alpha.82"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c6bb40106e274b3bd4b00915abd41a10fd5c161c8fa7ddf8a2c46db5ea2de171"
+checksum = "6decf48ca7d3fe73160d7e744603e852641fc0cc8fa762b3967d14ea0f2c5053"
 dependencies = [
  "baracuda-core",
  "baracuda-cuda-sys",
  "baracuda-curand-sys",
  "baracuda-driver",
  "baracuda-types",
- "thiserror 1.0.69",
+ "thiserror 2.0.19",
 ]
 
 [[package]]
 name = "baracuda-curand-sys"
-version = "0.0.1-alpha.78"
+version = "0.0.1-alpha.82"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "60cc0cdce79ced0f8f45202d0a6e1830765ce48df5932b55ddca7297114e9d64"
+checksum = "9c7985e10294c0538287685347ced1fb6111b34342dbc66967dcf6008c531c07"
 dependencies = [
  "baracuda-build",
  "baracuda-core",
@@ -391,9 +391,9 @@ dependencies = [
 
 [[package]]
 name = "baracuda-cutlass"
-version = "0.0.1-alpha.78"
+version = "0.0.1-alpha.82"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "311203d3add253b95a5ff6f95a45c45ca29cce106421393d16e506eee12940fa"
+checksum = "ce49ca8dbe629f3a5399ceea17ab52ae9b1b7deaa44d37c588b1189c758da468"
 dependencies = [
  "baracuda-cublas",
  "baracuda-cublas-sys",
@@ -402,14 +402,14 @@ dependencies = [
  "baracuda-kernels-types",
  "baracuda-types",
  "half",
- "thiserror 1.0.69",
+ "thiserror 2.0.19",
 ]
 
 [[package]]
 name = "baracuda-cutlass-kernels-sys"
-version = "0.0.1-alpha.78"
+version = "0.0.1-alpha.82"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1ef3341024add7448583aec1990d52582361084887ede7893808ee0725e669ec"
+checksum = "c27ade3a8c6e6a7bd7e3d32e2990ceff65f4f35735a83f58cc9d2a33b4b7d45f"
 dependencies = [
  "baracuda-cutlass-sys",
  "baracuda-forge",
@@ -417,30 +417,30 @@ dependencies = [
 
 [[package]]
 name = "baracuda-cutlass-sys"
-version = "0.0.1-alpha.78"
+version = "0.0.1-alpha.82"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "700150c636cce7ac622b4860e1311db26faa62eb3e51c1ec1599599ffbb498d9"
+checksum = "48264506d0ba6403968c3b943aca10438e658417f5bf98fd4a98555b8b0e4080"
 dependencies = [
  "fs2",
 ]
 
 [[package]]
 name = "baracuda-driver"
-version = "0.0.1-alpha.78"
+version = "0.0.1-alpha.82"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "13af5028fa114a7bf19cbc2ca8a99c02cdfed160448186bd6fb1a490c1300f31"
+checksum = "e372e44833514764139f86e4ab9942fa79602e4c5c01d84b868183f0fc4e0245"
 dependencies = [
  "baracuda-core",
  "baracuda-cuda-sys",
  "baracuda-types",
- "thiserror 1.0.69",
+ "thiserror 2.0.19",
 ]
 
 [[package]]
 name = "baracuda-forge"
-version = "0.0.1-alpha.78"
+version = "0.0.1-alpha.82"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2da0310ea60e36c1f6bc221a42f15fef7cb22c6dae02be8330706cfd4d21113f"
+checksum = "f896dec1f46c51b2bf4e62b68c4ba9f2e6bacac79b11cea3004d96646300dec1"
 dependencies = [
  "baracuda-build",
  "fs2",
@@ -450,26 +450,15 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
- "thiserror 1.0.69",
+ "thiserror 2.0.19",
  "walkdir",
 ]
 
 [[package]]
-name = "baracuda-kernel-vocab"
-version = "0.0.1-alpha.78"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "110db6b5952707daead4f334314c7eab4fca6244f70754e84d53a10b89f3b839"
-dependencies = [
- "baracuda-types",
- "float8 0.7.0",
- "half",
-]
-
-[[package]]
 name = "baracuda-kernels-sys"
-version = "0.0.1-alpha.78"
+version = "0.0.1-alpha.82"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cf7b77795b52add55351ce9181ad090b406a838fd37188dd4c46b88a56a73e7b"
+checksum = "9c3d025167333edadb46c50536e7329f105433c216e66ead0ef513b8b6b7318e"
 dependencies = [
  "baracuda-cutlass-kernels-sys",
  "baracuda-cutlass-sys",
@@ -478,34 +467,34 @@ dependencies = [
 
 [[package]]
 name = "baracuda-kernels-types"
-version = "0.0.1-alpha.78"
+version = "0.0.1-alpha.82"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f13a1ab4d54d3b0682aeb9ff58b34fca032f4a2c02f239531e498f41d92240ee"
+checksum = "65774cfb84ec86b46a2ee24dbfdaf34f95d20411e73b061a6810562a2753aea9"
 dependencies = [
  "baracuda-driver",
- "baracuda-kernel-vocab",
  "baracuda-types",
  "float8 0.7.0",
  "half",
+ "unpopped-vocab",
 ]
 
 [[package]]
 name = "baracuda-nvrtc"
-version = "0.0.1-alpha.78"
+version = "0.0.1-alpha.82"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6cb0ff439c24f6c5df752b537758074733e82c527efda0ee0d5ed201aa33a89a"
+checksum = "655870fd7bcb6b45cdd048ef70f5eb74722f562bf424b557d4086be1cc9991eb"
 dependencies = [
  "baracuda-core",
  "baracuda-nvrtc-sys",
  "baracuda-types",
- "thiserror 1.0.69",
+ "thiserror 2.0.19",
 ]
 
 [[package]]
 name = "baracuda-nvrtc-sys"
-version = "0.0.1-alpha.78"
+version = "0.0.1-alpha.82"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "77635319960f2a27e652f78580b3a40c47f4fa826f291854a4a3c427d693c436"
+checksum = "3e6d8eafd3179af7242390dee4ea2167cab16da7fbc7276c9a1bbf3b208736ab"
 dependencies = [
  "baracuda-build",
  "baracuda-core",
@@ -515,12 +504,13 @@ dependencies = [
 
 [[package]]
 name = "baracuda-types"
-version = "0.0.1-alpha.78"
+version = "0.0.1-alpha.82"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "917109a691b8859c04578aad35154d29b1bf05185e045954cb0a9a3fd6933c6b"
+checksum = "e57d845c5349af7cd1196c787022b08663b63b163aec237b8eeafacddb2dda57"
 dependencies = [
  "float8 0.7.0",
  "half",
+ "unpopped-vocab",
 ]
 
 [[package]]
@@ -1942,6 +1932,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "fancy-regex"
+version = "0.19.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d301f5bf187b3c295fce6468d3875037a0bccc5f6b151c63cac2f85babf21912"
+dependencies = [
+ "bit-set 0.8.0",
+ "regex-automata",
+ "regex-syntax",
+]
+
+[[package]]
 name = "fastrand"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2100,25 +2101,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "fuel"
+version = "0.11.2"
+source = "git+https://github.com/ciresnave/fuel?rev=4910b37a60a17b3111ac909f249bf17926bcb316#4910b37a60a17b3111ac909f249bf17926bcb316"
+dependencies = [
+ "fuel-core",
+ "fuel-transformers",
+]
+
+[[package]]
 name = "fuel-backend-contract"
-version = "0.10.3"
-source = "git+https://github.com/ciresnave/fuel?rev=2d0c04b71b456d313d6873f7099866c38e63a0ba#2d0c04b71b456d313d6873f7099866c38e63a0ba"
+version = "0.11.2"
+source = "git+https://github.com/ciresnave/fuel?rev=4910b37a60a17b3111ac909f249bf17926bcb316#4910b37a60a17b3111ac909f249bf17926bcb316"
 dependencies = [
  "fuel-ir",
 ]
 
 [[package]]
 name = "fuel-conv"
-version = "0.10.3"
-source = "git+https://github.com/ciresnave/fuel?rev=2d0c04b71b456d313d6873f7099866c38e63a0ba#2d0c04b71b456d313d6873f7099866c38e63a0ba"
+version = "0.11.2"
+source = "git+https://github.com/ciresnave/fuel?rev=4910b37a60a17b3111ac909f249bf17926bcb316#4910b37a60a17b3111ac909f249bf17926bcb316"
 dependencies = [
  "num-traits",
 ]
 
 [[package]]
 name = "fuel-core"
-version = "0.10.3"
-source = "git+https://github.com/ciresnave/fuel?rev=2d0c04b71b456d313d6873f7099866c38e63a0ba#2d0c04b71b456d313d6873f7099866c38e63a0ba"
+version = "0.11.2"
+source = "git+https://github.com/ciresnave/fuel?rev=4910b37a60a17b3111ac909f249bf17926bcb316#4910b37a60a17b3111ac909f249bf17926bcb316"
 dependencies = [
  "baracuda-core",
  "baracuda-driver",
@@ -2136,9 +2146,9 @@ dependencies = [
  "fuel-graph",
  "fuel-hardware",
  "fuel-ir",
+ "fuel-loaders",
  "fuel-memory",
  "fuel-quantized",
- "fuel-ug",
  "fuel-vulkan-backend",
  "gemm 0.19.0",
  "half",
@@ -2151,7 +2161,7 @@ dependencies = [
  "rand 0.9.5",
  "rand_distr",
  "rayon",
- "safetensors 0.7.0",
+ "safetensors 0.8.0",
  "serde",
  "serde_json",
  "smallvec",
@@ -2163,8 +2173,8 @@ dependencies = [
 
 [[package]]
 name = "fuel-correctness-fixtures"
-version = "0.10.3"
-source = "git+https://github.com/ciresnave/fuel?rev=2d0c04b71b456d313d6873f7099866c38e63a0ba#2d0c04b71b456d313d6873f7099866c38e63a0ba"
+version = "0.11.2"
+source = "git+https://github.com/ciresnave/fuel?rev=4910b37a60a17b3111ac909f249bf17926bcb316#4910b37a60a17b3111ac909f249bf17926bcb316"
 dependencies = [
  "bytemuck",
  "fuel-ir",
@@ -2174,8 +2184,8 @@ dependencies = [
 
 [[package]]
 name = "fuel-cpu-backend"
-version = "0.10.3"
-source = "git+https://github.com/ciresnave/fuel?rev=2d0c04b71b456d313d6873f7099866c38e63a0ba#2d0c04b71b456d313d6873f7099866c38e63a0ba"
+version = "0.11.2"
+source = "git+https://github.com/ciresnave/fuel?rev=4910b37a60a17b3111ac909f249bf17926bcb316#4910b37a60a17b3111ac909f249bf17926bcb316"
 dependencies = [
  "bytemuck",
  "float8 0.7.0",
@@ -2192,13 +2202,13 @@ dependencies = [
  "rand 0.9.5",
  "rand_distr",
  "rayon",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
 name = "fuel-cpu-kernels"
-version = "0.10.3"
-source = "git+https://github.com/ciresnave/fuel?rev=2d0c04b71b456d313d6873f7099866c38e63a0ba#2d0c04b71b456d313d6873f7099866c38e63a0ba"
+version = "0.11.2"
+source = "git+https://github.com/ciresnave/fuel?rev=4910b37a60a17b3111ac909f249bf17926bcb316#4910b37a60a17b3111ac909f249bf17926bcb316"
 dependencies = [
  "float8 0.7.0",
  "half",
@@ -2208,8 +2218,8 @@ dependencies = [
 
 [[package]]
 name = "fuel-cuda-backend"
-version = "0.10.3"
-source = "git+https://github.com/ciresnave/fuel?rev=2d0c04b71b456d313d6873f7099866c38e63a0ba#2d0c04b71b456d313d6873f7099866c38e63a0ba"
+version = "0.11.2"
+source = "git+https://github.com/ciresnave/fuel?rev=4910b37a60a17b3111ac909f249bf17926bcb316#4910b37a60a17b3111ac909f249bf17926bcb316"
 dependencies = [
  "baracuda-core",
  "baracuda-cublas",
@@ -2238,8 +2248,8 @@ dependencies = [
 
 [[package]]
 name = "fuel-dispatch"
-version = "0.10.3"
-source = "git+https://github.com/ciresnave/fuel?rev=2d0c04b71b456d313d6873f7099866c38e63a0ba#2d0c04b71b456d313d6873f7099866c38e63a0ba"
+version = "0.11.2"
+source = "git+https://github.com/ciresnave/fuel?rev=4910b37a60a17b3111ac909f249bf17926bcb316#4910b37a60a17b3111ac909f249bf17926bcb316"
 dependencies = [
  "baracuda-kernels-types",
  "baracuda-nvrtc",
@@ -2255,7 +2265,7 @@ dependencies = [
  "fuel-memory",
  "fuel-vulkan-backend",
  "half",
- "kiss-ref-core",
+ "kiss-ref-core 0.3.4",
  "serde",
  "serde_json",
  "serde_yaml_ng",
@@ -2266,15 +2276,15 @@ dependencies = [
 
 [[package]]
 name = "fuel-formats"
-version = "0.10.3"
-source = "git+https://github.com/ciresnave/fuel?rev=2d0c04b71b456d313d6873f7099866c38e63a0ba#2d0c04b71b456d313d6873f7099866c38e63a0ba"
+version = "0.11.2"
+source = "git+https://github.com/ciresnave/fuel?rev=4910b37a60a17b3111ac909f249bf17926bcb316#4910b37a60a17b3111ac909f249bf17926bcb316"
 dependencies = [
  "bytemuck",
  "byteorder",
  "fuel-ir",
  "half",
  "memmap2",
- "safetensors 0.7.0",
+ "safetensors 0.8.0",
  "serde",
  "serde_json",
  "smallvec",
@@ -2284,8 +2294,8 @@ dependencies = [
 
 [[package]]
 name = "fuel-graph"
-version = "0.10.3"
-source = "git+https://github.com/ciresnave/fuel?rev=2d0c04b71b456d313d6873f7099866c38e63a0ba#2d0c04b71b456d313d6873f7099866c38e63a0ba"
+version = "0.11.2"
+source = "git+https://github.com/ciresnave/fuel?rev=4910b37a60a17b3111ac909f249bf17926bcb316#4910b37a60a17b3111ac909f249bf17926bcb316"
 dependencies = [
  "float8 0.7.0",
  "fuel-backend-contract",
@@ -2296,8 +2306,8 @@ dependencies = [
 
 [[package]]
 name = "fuel-hardware"
-version = "0.10.3"
-source = "git+https://github.com/ciresnave/fuel?rev=2d0c04b71b456d313d6873f7099866c38e63a0ba#2d0c04b71b456d313d6873f7099866c38e63a0ba"
+version = "0.11.2"
+source = "git+https://github.com/ciresnave/fuel?rev=4910b37a60a17b3111ac909f249bf17926bcb316#4910b37a60a17b3111ac909f249bf17926bcb316"
 dependencies = [
  "fuel-cpu-backend",
  "fuel-cuda-backend",
@@ -2309,13 +2319,14 @@ dependencies = [
 
 [[package]]
 name = "fuel-inference"
-version = "0.10.3"
-source = "git+https://github.com/ciresnave/fuel?rev=2d0c04b71b456d313d6873f7099866c38e63a0ba#2d0c04b71b456d313d6873f7099866c38e63a0ba"
+version = "0.11.2"
+source = "git+https://github.com/ciresnave/fuel?rev=4910b37a60a17b3111ac909f249bf17926bcb316#4910b37a60a17b3111ac909f249bf17926bcb316"
 dependencies = [
+ "fuel",
  "fuel-backend-contract",
- "fuel-core",
  "fuel-graph",
  "fuel-ir",
+ "fuel-model-llama",
  "fuel-transformers",
  "rand 0.9.5",
  "serde",
@@ -2325,14 +2336,14 @@ dependencies = [
 
 [[package]]
 name = "fuel-ir"
-version = "0.10.3"
-source = "git+https://github.com/ciresnave/fuel?rev=2d0c04b71b456d313d6873f7099866c38e63a0ba#2d0c04b71b456d313d6873f7099866c38e63a0ba"
+version = "0.11.2"
+source = "git+https://github.com/ciresnave/fuel?rev=4910b37a60a17b3111ac909f249bf17926bcb316#4910b37a60a17b3111ac909f249bf17926bcb316"
 dependencies = [
  "float8 0.7.0",
  "half",
  "libm",
  "num-traits",
- "safetensors 0.7.0",
+ "safetensors 0.8.0",
  "serde",
  "serde_json",
  "smallvec",
@@ -2342,26 +2353,41 @@ dependencies = [
 
 [[package]]
 name = "fuel-kernel-seam-types"
-version = "0.10.3"
-source = "git+https://github.com/ciresnave/fuel?rev=2d0c04b71b456d313d6873f7099866c38e63a0ba#2d0c04b71b456d313d6873f7099866c38e63a0ba"
+version = "0.11.2"
+source = "git+https://github.com/ciresnave/fuel?rev=4910b37a60a17b3111ac909f249bf17926bcb316#4910b37a60a17b3111ac909f249bf17926bcb316"
 
 [[package]]
 name = "fuel-kiss-ref-backend"
-version = "0.1.0"
-source = "git+https://github.com/ciresnave/fuel?rev=2d0c04b71b456d313d6873f7099866c38e63a0ba#2d0c04b71b456d313d6873f7099866c38e63a0ba"
+version = "0.11.2"
+source = "git+https://github.com/ciresnave/fuel?rev=4910b37a60a17b3111ac909f249bf17926bcb316#4910b37a60a17b3111ac909f249bf17926bcb316"
 dependencies = [
  "fuel-ir",
  "fuel-kernel-seam-types",
  "half",
- "kiss-classify-vocab",
- "kiss-ops-vocab",
- "kiss-ref-core",
+ "kiss-classify-vocab 0.3.4",
+ "kiss-ops-vocab 0.3.4",
+ "kiss-ref-core 0.3.4",
+]
+
+[[package]]
+name = "fuel-loaders"
+version = "0.11.2"
+source = "git+https://github.com/ciresnave/fuel?rev=4910b37a60a17b3111ac909f249bf17926bcb316#4910b37a60a17b3111ac909f249bf17926bcb316"
+dependencies = [
+ "fuel-backend-contract",
+ "fuel-formats",
+ "fuel-ir",
+ "fuel-quantized",
+ "memmap2",
+ "safetensors 0.8.0",
+ "tokenizers 0.23.1",
+ "yoke 0.8.3",
 ]
 
 [[package]]
 name = "fuel-memory"
-version = "0.10.3"
-source = "git+https://github.com/ciresnave/fuel?rev=2d0c04b71b456d313d6873f7099866c38e63a0ba#2d0c04b71b456d313d6873f7099866c38e63a0ba"
+version = "0.11.2"
+source = "git+https://github.com/ciresnave/fuel?rev=4910b37a60a17b3111ac909f249bf17926bcb316#4910b37a60a17b3111ac909f249bf17926bcb316"
 dependencies = [
  "bytemuck",
  "fuel-cpu-backend",
@@ -2375,9 +2401,40 @@ dependencies = [
 ]
 
 [[package]]
+name = "fuel-model-llama"
+version = "0.11.2"
+source = "git+https://github.com/ciresnave/fuel?rev=4910b37a60a17b3111ac909f249bf17926bcb316#4910b37a60a17b3111ac909f249bf17926bcb316"
+dependencies = [
+ "fuel-core",
+ "fuel-dispatch",
+ "fuel-graph",
+ "fuel-ir",
+ "half",
+ "hf-hub 0.5.0",
+ "serde",
+ "serde_json",
+ "tokenizers 0.23.1",
+]
+
+[[package]]
+name = "fuel-model-phi"
+version = "0.11.2"
+source = "git+https://github.com/ciresnave/fuel?rev=4910b37a60a17b3111ac909f249bf17926bcb316#4910b37a60a17b3111ac909f249bf17926bcb316"
+dependencies = [
+ "fuel-core",
+ "fuel-graph",
+ "fuel-ir",
+ "fuel-quantized",
+ "half",
+ "hf-hub 0.5.0",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "fuel-quantized"
-version = "0.10.3"
-source = "git+https://github.com/ciresnave/fuel?rev=2d0c04b71b456d313d6873f7099866c38e63a0ba#2d0c04b71b456d313d6873f7099866c38e63a0ba"
+version = "0.11.2"
+source = "git+https://github.com/ciresnave/fuel?rev=4910b37a60a17b3111ac909f249bf17926bcb316#4910b37a60a17b3111ac909f249bf17926bcb316"
 dependencies = [
  "byteorder",
  "fuel-backend-contract",
@@ -2389,35 +2446,38 @@ dependencies = [
 
 [[package]]
 name = "fuel-transformers"
-version = "0.10.3"
-source = "git+https://github.com/ciresnave/fuel?rev=2d0c04b71b456d313d6873f7099866c38e63a0ba#2d0c04b71b456d313d6873f7099866c38e63a0ba"
+version = "0.11.2"
+source = "git+https://github.com/ciresnave/fuel?rev=4910b37a60a17b3111ac909f249bf17926bcb316#4910b37a60a17b3111ac909f249bf17926bcb316"
 dependencies = [
  "byteorder",
- "fancy-regex 0.17.0",
+ "fancy-regex 0.19.2",
  "fuel-core",
  "fuel-cpu-backend",
+ "fuel-dispatch",
+ "fuel-graph",
+ "fuel-ir",
+ "fuel-model-llama",
+ "fuel-model-phi",
+ "fuel-quantized",
+ "half",
+ "hf-hub 0.5.0",
+ "image",
  "num-traits",
  "rand 0.9.5",
+ "rand_distr",
  "rayon",
+ "safetensors 0.8.0",
  "serde",
  "serde_json",
  "serde_plain",
+ "tokenizers 0.23.1",
  "tracing",
 ]
 
 [[package]]
-name = "fuel-ug"
-version = "0.10.3"
-source = "git+https://github.com/ciresnave/fuel?rev=2d0c04b71b456d313d6873f7099866c38e63a0ba#2d0c04b71b456d313d6873f7099866c38e63a0ba"
-dependencies = [
- "ug",
- "ug-cuda",
-]
-
-[[package]]
 name = "fuel-vulkan-backend"
-version = "0.10.3"
-source = "git+https://github.com/ciresnave/fuel?rev=2d0c04b71b456d313d6873f7099866c38e63a0ba#2d0c04b71b456d313d6873f7099866c38e63a0ba"
+version = "0.11.2"
+source = "git+https://github.com/ciresnave/fuel?rev=4910b37a60a17b3111ac909f249bf17926bcb316#4910b37a60a17b3111ac909f249bf17926bcb316"
 dependencies = [
  "fuel-backend-contract",
  "fuel-conv",
@@ -2432,8 +2492,8 @@ dependencies = [
 
 [[package]]
 name = "fuel-vulkan-kernels"
-version = "0.10.3"
-source = "git+https://github.com/ciresnave/fuel?rev=2d0c04b71b456d313d6873f7099866c38e63a0ba#2d0c04b71b456d313d6873f7099866c38e63a0ba"
+version = "0.11.2"
+source = "git+https://github.com/ciresnave/fuel?rev=4910b37a60a17b3111ac909f249bf17926bcb316#4910b37a60a17b3111ac909f249bf17926bcb316"
 
 [[package]]
 name = "futf"
@@ -3646,10 +3706,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6fcb81fffc8d6826e3a5554475285c61cfb56bc5e7be9dec92ab6b90bced6dea"
 
 [[package]]
+name = "kiss-classify-vocab"
+version = "0.3.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "847f6f43c7382fc059a42c1e0ebcb097f13873b7857ca73199bc01b350768543"
+
+[[package]]
 name = "kiss-ops-vocab"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0326591f92b26ca24cb2a6e326916f14c1d79366000a870fd70f36cefbaf1f4e"
+
+[[package]]
+name = "kiss-ops-vocab"
+version = "0.3.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d6d6f826bb2eeb7dd965504cac7292af12db045e8f1195ed85e967cd94dd24c8"
 
 [[package]]
 name = "kiss-ref-core"
@@ -3658,8 +3730,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3ba0da4b85c87a67fe8df19eb5d9d230897af4b2729c7135a2e0b34b41f15903"
 dependencies = [
  "half",
- "kiss-classify-vocab",
- "kiss-ops-vocab",
+ "kiss-classify-vocab 0.2.0",
+ "kiss-ops-vocab 0.2.0",
+ "libm",
+]
+
+[[package]]
+name = "kiss-ref-core"
+version = "0.3.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1bb61ad1f7565ace250d54be155afdbe825ad06dd05d9d9393db03424d71fe50"
+dependencies = [
+ "half",
+ "kiss-classify-vocab 0.3.4",
+ "kiss-ops-vocab 0.3.4",
  "libm",
 ]
 
@@ -3750,6 +3834,8 @@ dependencies = [
  "fuel-cpu-backend",
  "fuel-cuda-backend",
  "fuel-inference",
+ "fuel-model-llama",
+ "fuel-transformers",
  "futures",
  "futures-util",
  "ggml-quants",
@@ -3759,8 +3845,8 @@ dependencies = [
  "hyper 1.11.0",
  "hyper-util",
  "instant-acme",
- "kiss-ops-vocab",
- "kiss-ref-core",
+ "kiss-ops-vocab 0.2.0",
+ "kiss-ref-core 0.2.0",
  "memmap2",
  "minijinja",
  "minijinja-contrib",
@@ -6969,6 +7055,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "81e544489bf3d8ef66c953931f56617f423cd4b5494be343d9b9d3dda037b9a3"
 
 [[package]]
+name = "unpopped-vocab"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "919c9ac8b0e669d0691a218504929a6dd79abc7b46d163eebc949d75bc3db8b1"
+dependencies = [
+ "float8 0.7.0",
+ "half",
+]
+
+[[package]]
 name = "unsafe-libyaml"
 version = "0.2.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7105,9 +7201,9 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "vulkan_gen"
-version = "0.3.0"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4333cb0d7a3f24246eadffc8de89694fd88c9d6aac912661dab3978a7e1c8a1b"
+checksum = "49a6cebc8e779256cba54c9c85269a738f1a5b0bab80e258e4a3bde3da278cba"
 dependencies = [
  "regex",
  "roxmltree",
@@ -7119,9 +7215,9 @@ dependencies = [
 
 [[package]]
 name = "vulkane"
-version = "0.9.0"
+version = "0.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8ec23099c359ae475feb072c48f24e8431513e41d9a3c3cb3ee0f094c9fb3748"
+checksum = "ac465b73e7225c339cda9b0cef6361284205fa3ce34f9ed322f9c35051de85fe"
 dependencies = [
  "libloading 0.9.0",
  "ureq 3.3.0",

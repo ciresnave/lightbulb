@@ -287,8 +287,9 @@ use anyhow::{Context, Result, bail};
 use fuel::inference_context::InferenceContext;
 use fuel::kv_block_pool::{KvGeometry, PhysBlockId, SessionHandle};
 use fuel::kv_block_pool_device::DeviceKvPool;
-use fuel::lazy::{LayerWeights, LlamaConfig, LlamaModel, WeightStorage};
+use fuel::lazy::{LayerWeights, WeightStorage};
 use fuel::{DType, Device, Shape};
+use fuel_model_llama::{LlamaConfig, LlamaModel};
 
 use fuel::lazy::Tensor;
 
@@ -733,9 +734,12 @@ impl<'m> BatchedPagedDecoder<'m> {
             w.token_embedding.clone(),
             Shape::from_dims(&[cfg.vocab_size, dim]),
             &self.device,
-        );
+        )
+        .map_err(|e| anyhow::anyhow!("step: embedding graph root: {e:?}"))?;
         let tokens: Vec<u32> = batch.iter().map(|&(_, t)| t).collect();
-        let token_ids = embed.const_u32_like(tokens, Shape::from_dims(&[b]));
+        let token_ids = embed
+            .const_u32_like(tokens, Shape::from_dims(&[b]))
+            .map_err(|e| anyhow::anyhow!("step: token id tensor: {e:?}"))?;
         let mut h = embed
             .index_select(0usize, &token_ids)
             .map_err(|e| anyhow::anyhow!("step: embedding lookup: {e:?}"))?
@@ -758,8 +762,12 @@ impl<'m> BatchedPagedDecoder<'m> {
         };
         let (rope_cos, rope_sin) =
             batched_rope_tables(&h, cfg.rope_base, rope_positions, cfg.head_dim)?;
-        let block_table = h.const_u32_like(pt.block_table.clone(), pt.block_table_shape());
-        let context_lens = h.const_u32_like(pt.context_lens.clone(), pt.context_lens_shape());
+        let block_table = h
+            .const_u32_like(pt.block_table.clone(), pt.block_table_shape())
+            .map_err(|e| anyhow::anyhow!("step: block table tensor: {e:?}"))?;
+        let context_lens = h
+            .const_u32_like(pt.context_lens.clone(), pt.context_lens_shape())
+            .map_err(|e| anyhow::anyhow!("step: context lens tensor: {e:?}"))?;
 
         // One `InferenceContext` per step: the graph is rebuilt each step, so
         // NodeIds are not stable and a longer-lived persistent map would
@@ -1093,7 +1101,7 @@ fn assert_all_f32(
 mod tests {
     use super::*;
     use fuel::kv_block_pool_device::BlockKind;
-    use fuel::lazy::LlamaWeights;
+    use fuel_model_llama::LlamaWeights;
     use std::path::PathBuf;
 
     // ---- fixtures --------------------------------------------------------
@@ -1200,8 +1208,8 @@ mod tests {
     /// than a silent wrong head.
     fn load_f32_checkpoint(dir: &std::path::Path) -> Result<LlamaModel> {
         use fuel::lazy::{load_tensor_as_f32, load_transposed_matrix};
-        use fuel::lazy_llama2c::Llama2cConfig;
         use fuel::safetensors::MmapedSafetensors;
+        use fuel_transformers::models::lazy_llama2c::Llama2cConfig;
 
         let config_str = std::fs::read_to_string(dir.join("config.json"))?;
         let config: LlamaConfig = Llama2cConfig::from_hf_json_str(&config_str)
@@ -1317,7 +1325,8 @@ mod tests {
         // [B, Hkv, 1, D], sliced per row and reshaped to the block's slot layout.
         let b = 3usize;
         let src_data = rand_f32(b * hkv * hd, 7);
-        let src = Tensor::from_f32(src_data.clone(), Shape::from_dims(&[b, hkv, 1, hd]), &dev);
+        let src = Tensor::from_f32(src_data.clone(), Shape::from_dims(&[b, hkv, 1, hd]), &dev)
+            .map_err(|e| anyhow::anyhow!("{e:?}"))?;
         // Deliberately non-monotonic, non-identity targets.
         let targets: [(usize, usize); 3] = [(4, 2), (1, 0), (3, 3)];
 
@@ -1415,14 +1424,16 @@ mod tests {
         let dev = Device::cpu();
 
         let x_data = rand_f32(b * heads * hd, 11);
-        let x = Tensor::from_f32(x_data.clone(), Shape::from_dims(&[b, heads, 1, hd]), &dev);
+        let x = Tensor::from_f32(x_data.clone(), Shape::from_dims(&[b, heads, 1, hd]), &dev)
+            .map_err(|e| anyhow::anyhow!("{e:?}"))?;
         let (cos, sin) = batched_rope_tables(&x, base, &positions, hd)?;
         let got = rope_batched(&x, &cos, &sin)?.realize_f32();
 
         let per_row = heads * hd;
         for (row, &pos) in positions.iter().enumerate() {
             let row_data = x_data[row * per_row..(row + 1) * per_row].to_vec();
-            let xr = Tensor::from_f32(row_data, Shape::from_dims(&[1usize, heads, 1, hd]), &dev);
+            let xr = Tensor::from_f32(row_data, Shape::from_dims(&[1usize, heads, 1, hd]), &dev)
+                .map_err(|e| anyhow::anyhow!("{e:?}"))?;
             let (c, s) = xr.rope_tables_const(base, pos, 1, hd);
             let want = xr
                 .rope_with_tables_decomposed(&c, &s)
@@ -1532,11 +1543,16 @@ mod tests {
 
         let q_data = rand_f32(b * hq * d, 42);
         let run = |block_table: Vec<u32>| -> Result<Vec<f32>> {
-            let q = Tensor::from_f32(q_data.clone(), Shape::from_dims(&[b, hq, 1, d]), &dev);
+            let q = Tensor::from_f32(q_data.clone(), Shape::from_dims(&[b, hq, 1, d]), &dev)
+                .map_err(|e| anyhow::anyhow!("{e:?}"))?;
             let kc = q.const_placeholder_like(pool.pool_shape().clone(), DType::F32);
             let vc = q.const_placeholder_like(pool.pool_shape().clone(), DType::F32);
-            let bt = q.const_u32_like(block_table, pt.block_table_shape());
-            let cl = q.const_u32_like(pt.context_lens.clone(), pt.context_lens_shape());
+            let bt = q
+                .const_u32_like(block_table, pt.block_table_shape())
+                .map_err(|e| anyhow::anyhow!("{e:?}"))?;
+            let cl = q
+                .const_u32_like(pt.context_lens.clone(), pt.context_lens_shape())
+                .map_err(|e| anyhow::anyhow!("{e:?}"))?;
             let out = q
                 .paged_attn(&kc, &vc, &bt, &cl, None, scale, block_size, None)
                 .map_err(|e| anyhow::anyhow!("{e:?}"))?;

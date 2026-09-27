@@ -38,7 +38,7 @@ enum LoadedModel {
 
 #[allow(dead_code)]
 impl LoadedModel {
-    fn config(&self) -> &fuel::lazy::LlamaConfig {
+    fn config(&self) -> &fuel_model_llama::LlamaConfig {
         match self {
             Self::F32(l) => &l.config,
             Self::QuantizedGguf(l) => &l.config,

@@ -32,11 +32,9 @@ use anyhow::{Context, Result};
 use std::path::Path;
 use std::sync::Arc;
 
-use fuel::lazy::{
-    LayerWeights, LlamaConfig, LlamaModel, LlamaWeights, WeightStorage, load_tensor_as_f32,
-    load_transposed_matrix,
-};
+use fuel::lazy::{LayerWeights, WeightStorage, load_tensor_as_f32, load_transposed_matrix};
 use fuel::safetensors::MmapedSafetensors;
+use fuel_model_llama::{LlamaConfig, LlamaModel, LlamaWeights};
 
 use super::loader::LoadedLlama;
 
@@ -54,8 +52,9 @@ pub fn load_llama_f32_from_dir(dir: &Path) -> Result<LoadedLlama> {
     // `LlamaFullConfig`, NOT `Llama2cConfig`. Both parse this same file into
     // the same `LlamaConfig` via `to_lazy_config()`, but only this one retains
     // `eos_token_id`. Without it the engine can stop only on max_new_tokens.
-    let full = fuel::lazy_llama_full::LlamaFullConfig::from_hf_json_str(&config_str)
-        .map_err(|e| anyhow::anyhow!("parsing config.json: {e:?}"))?;
+    let full =
+        fuel_transformers::models::lazy_llama_full::LlamaFullConfig::from_hf_json_str(&config_str)
+            .map_err(|e| anyhow::anyhow!("parsing config.json: {e:?}"))?;
     let config: LlamaConfig = full.to_lazy_config();
 
     let weights_path = dir.join("model.safetensors");

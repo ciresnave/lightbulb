@@ -27,7 +27,7 @@
 
 use anyhow::Result;
 
-use fuel::lazy::LlamaModel;
+use fuel_model_llama::LlamaModel;
 
 use super::session::SessionState;
 
@@ -78,7 +78,7 @@ impl FuelDecoder for LlamaModel {
 /// 2026-09-24 — filed with the fuel lane, not something this repo can fix).
 /// `SessionState::parts_persistent()` exists to hold the session this needs;
 /// see its doc for why the plain `LlamaModel` impl above doesn't have one.
-impl FuelDecoder for fuel::lazy_quantized_llama::QuantizedLlama3Model {
+impl FuelDecoder for fuel_transformers::models::lazy_quantized_llama::QuantizedLlama3Model {
     fn prefill(&self, tokens: &[u32], st: &mut SessionState) -> Result<Vec<f32>> {
         let (cache, ctx, session) = st.parts_persistent();
         let logits = self

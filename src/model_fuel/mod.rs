@@ -120,14 +120,17 @@ pub fn smoke_matmul() -> Vec<f32> {
 
     // a = [[1, 2, 3],
     //      [4, 5, 6]]                    — the ROOT; owns the graph.
-    let a = Tensor::from_f32(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], (2usize, 3usize), &dev);
+    let a = Tensor::from_f32(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], (2usize, 3usize), &dev)
+        .expect("from_f32: graph build");
 
     // w = [[1, 0],
     //      [0, 1],
     //      [1, 1]]                       — built on a's graph, per rule 1.
     // NOT `Tensor::from_f32(..)`, which would mint a second graph and panic
     // at the matmul.
-    let w = a.const_f32_like(vec![1.0, 0.0, 0.0, 1.0, 1.0, 1.0], (3usize, 2usize));
+    let w = a
+        .const_f32_like(vec![1.0, 0.0, 0.0, 1.0, 1.0, 1.0], (3usize, 2usize))
+        .expect("const_f32_like: graph build");
 
     // a @ w = [[1+3, 2+3], [4+6, 5+6]] = [[4, 5], [10, 11]]
     let y = a.matmul(&w).expect("matmul: graph build");
@@ -160,9 +163,11 @@ mod tests {
         use fuel::lazy::Tensor;
 
         let dev = Device::cpu();
-        let a = Tensor::from_f32(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], (2usize, 3usize), &dev);
+        let a = Tensor::from_f32(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], (2usize, 3usize), &dev)
+            .expect("from_f32: graph build");
         // A SECOND graph — this is the mistake the module doc warns about.
-        let w = Tensor::from_f32(vec![1.0, 0.0, 0.0, 1.0, 1.0, 1.0], (3usize, 2usize), &dev);
-        let _ = a.matmul(&w);
+        let w = Tensor::from_f32(vec![1.0, 0.0, 0.0, 1.0, 1.0, 1.0], (3usize, 2usize), &dev)
+            .expect("from_f32: graph build");
+        let _ = a.matmul(&w).expect("same graph");
     }
 }

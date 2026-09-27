@@ -56,8 +56,8 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 
-use fuel::lazy_llama_full::{LlamaEosToks, LlamaFullConfig};
-use fuel::lazy_quantized_llama::QuantizedLlama3Model;
+use fuel_transformers::models::lazy_llama_full::{LlamaEosToks, LlamaFullConfig};
+use fuel_transformers::models::lazy_quantized_llama::QuantizedLlama3Model;
 
 use super::loader::LoadedQuantizedLlama;
 
