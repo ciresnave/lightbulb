@@ -28,8 +28,8 @@
 use anyhow::Result;
 
 use fuel::inference_context::{DecodeSession, InferenceContext, KvCache};
-use fuel::lazy::LlamaConfig;
 use fuel::{DType, Device};
+use fuel_model_llama::LlamaConfig;
 
 /// One sequence's KV cache, inference context, and position.
 ///
@@ -128,7 +128,7 @@ mod tests {
     /// `new()` cannot silently start mid-sequence.
     #[test]
     fn new_session_starts_at_position_zero() {
-        let cfg = fuel::lazy::LlamaConfig {
+        let cfg = fuel_model_llama::LlamaConfig {
             vocab_size: 32,
             dim: 8,
             n_layers: 1,

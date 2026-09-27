@@ -218,7 +218,11 @@ impl PagedGeometry {
     /// matched prefix falls in the unusable remainder) against eviction
     /// granularity (bigger blocks ⇒ more short spans free nothing). There is no
     /// measurement informing the choice yet.
-    pub fn for_llama(cfg: &fuel::lazy::LlamaConfig, block_size: usize, num_blocks: usize) -> Self {
+    pub fn for_llama(
+        cfg: &fuel_model_llama::LlamaConfig,
+        block_size: usize,
+        num_blocks: usize,
+    ) -> Self {
         Self {
             kv: KvGeometry {
                 n_layers: cfg.n_layers,
