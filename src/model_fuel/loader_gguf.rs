@@ -1,56 +1,30 @@
 //! Loading a GGUF-quantized Llama-shape checkpoint into Fuel.
 //!
-//! # Provenance and removal condition — read before touching this file
+//! # Provenance — read before touching this file
 //!
 //! `fuel::QuantizedLlama3Model::from_gguf` takes a pre-built
-//! `fuel::lazy_llama_full::LlamaFullConfig` as an argument; it does not derive
-//! one from the GGUF file itself. Checked against fuel's `origin/main` on
-//! 2026-09-24 (`gh api` code search over `repo:ciresnave/fuel` for the
-//! `llama.*` GGUF metadata keys): the only place fuel derives this config is
-//! ~80 hand-written lines inside `fuel-examples/examples/quantized/main.rs`'s
-//! `llama_config_from_gguf`, and no reusable helper exists anywhere in the
-//! repo. **This is a missing API on fuel's side, filed with the fuel lane the
-//! same day** (see `docs/FUEL-PORT-STATUS-2026-09-24.md` §6), with
-//! `fuel-loaders` named as the obvious home (its stated job is already
-//! "HF `config.json` resolution", and this is the same job for GGUF).
-//!
-//! **What this file actually is: NOT a copy of that ~80-line function.**
-//! Lightbulb already has its own independently-tested GGUF metadata reader
-//! (`crate::gguf`, `metadata_u64`/`metadata_f32`, used by the candlelight GGUF
-//! loader in `src/loaders/mod.rs`), including a fallback chain for
-//! `vocab_size` that fuel's example does not need (fuel derives vocab_size
-//! from `token_embd.weight`'s tensor shape instead — a different, also-valid
-//! derivation this file does not need to duplicate because the metadata-key
-//! chain already handles the one local checkpoint this was tested against).
-//! What IS taken from fuel's example is the **field mapping** — which
-//! `llama.*` GGUF keys correspond to which `LlamaFullConfig` field — because
-//! that mapping is not documented anywhere else fuel or Lightbulb has it
-//! written down.
-//!
-//! ⚠️ **UPDATE 2026-09-26: fuel HAS now shipped the replacement, but this
-//! repo cannot call it yet — do not delete this function on this update.**
-//! `fuel#246` (merged 2026-09-25T23:42Z) added exactly the API this comment
-//! asked for:
+//! `LlamaFullConfig` as an argument; it does not derive one from the GGUF
+//! file itself. That gap is now filled by
 //! `fuel_loaders::quantized::config_from_gguf::derive_config(content,
-//! architecture) -> Result<GgufDerivedConfig>`, generically parameterized on
-//! architecture, not hardcoded to Llama. **Removal is blocked on one thing
-//! only: `Cargo.toml`'s `fuel` dependency is pinned to a git `rev` from
-//! before all five of tonight's fuel merges (`#244`/`#245`/`#246`/`#247`/
-//! `#253`), so `derive_config` does not exist in the fuel this crate actually
-//! resolves today.** Bumping that pin is its own separate change — it pulls
-//! in real code-path changes (`#244`'s dequant centralization,
-//! `#245`'s safetensors relocation) that deserve their own build and test
-//! run, not a hunk inside this file's PR — and is the PM's to sequence, not
-//! done here. **Tracked in lightbulb#97** — that issue, not this comment, is
-//! the owner of the deferral; check there before assuming the pin is still
-//! stale.
+//! architecture) -> Result<GgufDerivedConfig>` (`fuel#246`), reachable since
+//! lightbulb#97's rev bump (PR #100). This file's job is now just the
+//! adaptation: `GgufDerivedConfig` deliberately excludes `head_dim`,
+//! `bos_token_id`, `eos_token_id`, `rope_scaling` and `tie_word_embeddings`
+//! (per its own doc — "Llama-specific config concerns, not GGUF-metadata
+//! extraction"), so `derive_llama_full_config` computes `head_dim` locally
+//! and reads bos/eos through Lightbulb's own already-tested `crate::gguf`
+//! reader, same as before.
 //!
-//! **DELETE THIS FILE'S CONFIG-BUILDING FUNCTION (`llama_full_config_from_gguf`)
-//! THE MOMENT the `fuel` pin advances past `#246` and `derive_config` is
-//! actually reachable** — not "the moment fuel ships it upstream" (that
-//! already happened; reachability is the remaining condition) — and call
-//! that instead. Until then this is Lightbulb's own code, reusing
-//! Lightbulb's own already-tested reader, not a fork of fuel's.
+//! `require_llama_architecture` still gates this file (hardcoded to the
+//! literal architecture `"llama"`) because nothing downstream of it —
+//! `QuantizedLlama3Model`, this file's `LlamaFullConfig` construction — can
+//! serve any other architecture yet. Widening this to fuel's other
+//! `Architecture` variants (`Qwen3` named specifically, board item 71) is
+//! lightbulb#97's steps 3-4, deliberately not done here: routing to a
+//! different fuel model type per detected architecture is new construction,
+//! not a config-source swap, and narrowing the gate before that construction
+//! exists would let an unsupported file through to code that cannot build
+//! it — worse than the blanket refusal it would replace.
 
 use std::path::Path;
 
@@ -61,43 +35,38 @@ use fuel_transformers::models::lazy_quantized_llama::QuantizedLlama3Model;
 
 use super::loader::LoadedQuantizedLlama;
 
-/// Build a `LlamaFullConfig` from a GGUF file's own metadata, using
-/// Lightbulb's existing GGUF metadata reader (`crate::gguf`), not fuel's.
+/// Build a `LlamaFullConfig` from a GGUF file's own metadata: the eight core
+/// fields from fuel's `derive_config`, `head_dim` computed locally, and
+/// bos/eos read through Lightbulb's own `crate::gguf` reader (`content` is
+/// already open for tokenizer extraction — see the caller).
 ///
-/// See the module doc for why this exists and when to delete it.
-fn llama_full_config_from_gguf(content: &crate::gguf::Content) -> Result<LlamaFullConfig> {
+/// See the module doc for why this file still exists at all.
+fn derive_llama_full_config(
+    content: &crate::gguf::Content,
+    path: &Path,
+) -> Result<LlamaFullConfig> {
     crate::gguf::require_llama_architecture(content.metadata())?;
 
-    let get_u64 = |key: &str| -> Result<u64> { crate::gguf::metadata_u64(content.metadata(), key) };
-    let get_f32 = |key: &str| -> Result<f32> { crate::gguf::metadata_f32(content.metadata(), key) };
+    // `derive_config` takes fuel's OWN GGUF reader, not `crate::gguf::Content`
+    // — a second, metadata-only parse of the same file (not a second mmap of
+    // the weights; `Content::read` reads only the header + tensor-info table).
+    let mut file = std::fs::File::open(path).with_context(|| {
+        format!(
+            "opening {} for fuel's own GGUF metadata read",
+            path.display()
+        )
+    })?;
+    let fuel_content = fuel_loaders::quantized::gguf_file::Content::read(&mut file)
+        .map_err(|e| anyhow::anyhow!("fuel gguf_file::Content::read({}): {e:?}", path.display()))?;
+    let derived = fuel_loaders::quantized::config_from_gguf::derive_config(
+        &fuel_content,
+        fuel_loaders::quantized::arch::Architecture::Llama,
+    )
+    .map_err(|e| anyhow::anyhow!("fuel derive_config({}): {e}", path.display()))?;
 
-    let hidden_size = get_u64("llama.embedding_length")? as usize;
-    let intermediate_size = get_u64("llama.feed_forward_length")? as usize;
-    let num_hidden_layers = get_u64("llama.block_count")? as usize;
-    let num_attention_heads = get_u64("llama.attention.head_count")? as usize;
-    let num_key_value_heads = get_u64("llama.attention.head_count_kv")? as usize;
-    let head_dim = hidden_size / num_attention_heads.max(1);
+    let head_dim = derived.hidden_size / derived.n_heads.max(1);
 
     use crate::gguf::Value;
-
-    // Same fallback chain as `src/loaders/mod.rs::extract_llama_config_from_metadata`
-    // — `llama.vocab_size` is absent on this repo's own TinyLlama GGUF, measured
-    // 2026-09-05 over the local corpus. Kept in sync deliberately: both loaders
-    // solve the same problem on the same files.
-    let vocab_size = get_u64("llama.vocab_size")
-        .or_else(|_| get_u64("llama.n_vocab"))
-        .map(|v| v as usize)
-        .or_else(|_| match content.metadata().get("tokenizer.ggml.tokens") {
-            Some(Value::Array(tokens)) => Ok(tokens.len()),
-            _ => anyhow::bail!(
-                "could not determine vocab_size: tried llama.vocab_size, llama.n_vocab, \
-                 and counting tokenizer.ggml.tokens"
-            ),
-        })?;
-
-    let rms_norm_eps = get_f32("llama.attention.layer_norm_rms_epsilon").unwrap_or(1e-5) as f64;
-    let rope_theta = get_f32("llama.rope.freq_base").unwrap_or(10_000.0) as f64;
-    let max_position_embeddings = get_u64("llama.context_length").unwrap_or(2048) as usize;
 
     let bos_token_id = content
         .metadata()
@@ -116,16 +85,16 @@ fn llama_full_config_from_gguf(content: &crate::gguf::Content) -> Result<LlamaFu
         .map(LlamaEosToks::Single);
 
     Ok(LlamaFullConfig {
-        hidden_size,
-        intermediate_size,
-        vocab_size,
-        num_hidden_layers,
-        num_attention_heads,
-        num_key_value_heads,
+        hidden_size: derived.hidden_size,
+        intermediate_size: derived.intermediate_size,
+        vocab_size: derived.vocab_size,
+        num_hidden_layers: derived.n_layers,
+        num_attention_heads: derived.n_heads,
+        num_key_value_heads: derived.n_kv_heads,
         head_dim,
-        rms_norm_eps,
-        rope_theta,
-        max_position_embeddings,
+        rms_norm_eps: derived.rms_norm_eps,
+        rope_theta: derived.rope_theta,
+        max_position_embeddings: derived.max_position_embeddings,
         bos_token_id,
         eos_token_id,
         rope_scaling: None,
@@ -142,11 +111,12 @@ fn llama_full_config_from_gguf(content: &crate::gguf::Content) -> Result<LlamaFu
 ///
 /// # Safety
 ///
-/// Memory-maps the checkpoint twice: once through `crate::gguf::Content` (for
-/// config + tokenizer) and once inside `QuantizedLlama3Model::from_gguf` (for
-/// weights) — mirroring `fuel-examples/examples/quantized/main.rs`, which
-/// notes the OS shares page cache across the two. Mutating the file while
-/// either mapping is alive is undefined behaviour.
+/// Memory-maps or reads the checkpoint's header up to three times: once
+/// through `crate::gguf::Content` (tokenizer + bos/eos), once through fuel's
+/// own `gguf_file::Content` (the metadata `derive_config` reads), and once
+/// inside `QuantizedLlama3Model::from_gguf` (the actual weights) — the OS
+/// shares page cache across all three. Mutating the file while any is alive
+/// is undefined behaviour.
 pub fn load_quantized_llama_gguf(path: &Path) -> Result<LoadedQuantizedLlama> {
     let content = crate::gguf::Content::read(path)
         .with_context(|| format!("reading GGUF metadata from {}", path.display()))?;
@@ -155,7 +125,7 @@ pub fn load_quantized_llama_gguf(path: &Path) -> Result<LoadedQuantizedLlama> {
         .extract_tokenizer()
         .with_context(|| format!("extracting tokenizer from {}", path.display()))?;
 
-    let full = llama_full_config_from_gguf(&content)?;
+    let full = derive_llama_full_config(&content, path)?;
     if full.eos_token_id.is_none() {
         tracing::warn!(
             "GGUF file {} declares no tokenizer.ggml.eos_token_id; generation will stop \
@@ -197,6 +167,39 @@ mod tests {
             "C:/Models/TinyLlama-1.1B-Chat-v1.0-GGUF/tinyllama-1.1b-chat-v1.0.Q4_0.gguf",
         );
         p.is_file().then_some(p)
+    }
+
+    /// `derive_llama_full_config` against the real corpus file, before and
+    /// after lightbulb#97 step 2's swap to fuel's `derive_config` -- "same
+    /// file in, identical `LlamaFullConfig` out", per the PM's own framing:
+    /// if any field moved, that is the finding, not a nuisance. Values are
+    /// this file's standard TinyLlama-1.1B-Chat architecture numbers, hand-
+    /// verified against the file's own metadata (`hidden_size` /
+    /// `num_attention_heads` = 2048 / 32 = 64 = `head_dim`) rather than
+    /// copied from the deleted hand-rolled parser's output blind.
+    #[test]
+    fn derive_llama_full_config_matches_the_pre_swap_baseline() {
+        let Some(path) = tinyllama_gguf_path() else {
+            eprintln!("no TinyLlama GGUF on disk; skipping (see tinyllama_gguf_path)");
+            return;
+        };
+        let content = crate::gguf::Content::read(&path).expect("reading GGUF metadata");
+        let full = derive_llama_full_config(&content, &path).expect("deriving LlamaFullConfig");
+
+        assert_eq!(full.hidden_size, 2048);
+        assert_eq!(full.intermediate_size, 5632);
+        assert_eq!(full.vocab_size, 32000);
+        assert_eq!(full.num_hidden_layers, 22);
+        assert_eq!(full.num_attention_heads, 32);
+        assert_eq!(full.num_key_value_heads, 4);
+        assert_eq!(full.head_dim, 64);
+        assert!((full.rms_norm_eps - 1e-5).abs() < 1e-9);
+        assert_eq!(full.rope_theta, 10000.0);
+        assert_eq!(full.max_position_embeddings, 2048);
+        assert_eq!(full.bos_token_id, Some(1));
+        assert!(matches!(full.eos_token_id, Some(ref e) if e.is_eos(2)));
+        assert_eq!(full.rope_scaling, None);
+        assert!(!full.tie_word_embeddings);
     }
 
     /// Loads the real TinyLlama Q4_0 GGUF checkpoint through
