@@ -223,7 +223,6 @@ impl RequestContext {
         matches!(self.state, RequestState::Decoding)
             && self.tokens_generated < self.request.max_new_tokens
     }
-
 }
 
 /// Legacy RequestQueue

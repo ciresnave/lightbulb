@@ -305,7 +305,11 @@ pub async fn chat_completions(
     // `tool_choice` values Lightbulb does not implement get a named 400
     // rather than silently behaving as `"auto"` — see `validate_tool_choice`.
     if let Err(msg) = validate_tool_choice(&request) {
-        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": msg}))).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": msg})),
+        )
+            .into_response();
     }
 
     // Streaming tool-call deltas are a separate, not-yet-implemented shape
@@ -3248,8 +3252,10 @@ mod tests {
         req.tool_choice = Some(serde_json::json!("required"));
         assert!(validate_tool_choice(&req).is_err());
 
-        req.tool_choice = Some(serde_json::json!({"type": "function", "function": {"name": "get_weather"}}));
-        let err = validate_tool_choice(&req).expect_err("forced-function choice is not implemented");
+        req.tool_choice =
+            Some(serde_json::json!({"type": "function", "function": {"name": "get_weather"}}));
+        let err =
+            validate_tool_choice(&req).expect_err("forced-function choice is not implemented");
         assert!(
             err.contains("auto") && err.contains("none"),
             "rejection must name what IS supported, not just reject: {err}"
@@ -3257,8 +3263,7 @@ mod tests {
     }
 
     #[test]
-    fn inject_tools_instruction_appends_to_an_existing_system_message_rather_than_duplicating_it()
-    {
+    fn inject_tools_instruction_appends_to_an_existing_system_message_rather_than_duplicating_it() {
         let tools = vec![Tool::Function {
             function: ToolFunctionDef {
                 name: "get_weather".to_string(),
@@ -3290,7 +3295,11 @@ mod tests {
         );
         assert!(out[0].content.starts_with("You are terse."));
         assert!(out[0].content.contains("get_weather"));
-        assert_eq!(out.len(), messages.len(), "no message should be dropped or added");
+        assert_eq!(
+            out.len(),
+            messages.len(),
+            "no message should be dropped or added"
+        );
     }
 
     #[test]
