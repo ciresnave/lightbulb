@@ -65,7 +65,29 @@ fn derive_llama_full_config(
     .map_err(|e| anyhow::anyhow!("fuel derive_config({}): {e}", path.display()))?;
 
     let head_dim = derived.hidden_size / derived.n_heads.max(1);
+    let (bos_token_id, eos_token_id) = bos_eos_from_metadata(content);
 
+    Ok(LlamaFullConfig {
+        hidden_size: derived.hidden_size,
+        intermediate_size: derived.intermediate_size,
+        vocab_size: derived.vocab_size,
+        num_hidden_layers: derived.n_layers,
+        num_attention_heads: derived.n_heads,
+        num_key_value_heads: derived.n_kv_heads,
+        head_dim,
+        rms_norm_eps: derived.rms_norm_eps,
+        rope_theta: derived.rope_theta,
+        max_position_embeddings: derived.max_position_embeddings,
+        bos_token_id,
+        eos_token_id,
+        rope_scaling: None,
+        tie_word_embeddings: false,
+    })
+}
+
+/// Read `tokenizer.ggml.{bos,eos}_token_id` — the two fields `derive_config`
+/// deliberately excludes — through Lightbulb's own `crate::gguf` reader.
+fn bos_eos_from_metadata(content: &crate::gguf::Content) -> (Option<u32>, Option<LlamaEosToks>) {
     use crate::gguf::Value;
 
     let bos_token_id = content
@@ -84,22 +106,7 @@ fn derive_llama_full_config(
         })
         .map(LlamaEosToks::Single);
 
-    Ok(LlamaFullConfig {
-        hidden_size: derived.hidden_size,
-        intermediate_size: derived.intermediate_size,
-        vocab_size: derived.vocab_size,
-        num_hidden_layers: derived.n_layers,
-        num_attention_heads: derived.n_heads,
-        num_key_value_heads: derived.n_kv_heads,
-        head_dim,
-        rms_norm_eps: derived.rms_norm_eps,
-        rope_theta: derived.rope_theta,
-        max_position_embeddings: derived.max_position_embeddings,
-        bos_token_id,
-        eos_token_id,
-        rope_scaling: None,
-        tie_word_embeddings: false,
-    })
+    (bos_token_id, eos_token_id)
 }
 
 /// Load a GGUF-quantized Llama-shape checkpoint from a single `.gguf` file.
