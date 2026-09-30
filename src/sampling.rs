@@ -1,28 +1,9 @@
-//! Sampling strategies (top-k, top-p, temperature) and utilities
+//! Sampling strategies (top-k, temperature) and utilities
 
 use rand::distr::Distribution;
 use rand::distr::weighted::WeightedIndex;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
-
-#[derive(Clone, Debug)]
-pub struct SamplingParams {
-    pub temperature: f32,
-    pub top_k: Option<usize>,
-    pub top_p: Option<f32>,
-    pub seed: u64,
-}
-
-impl Default for SamplingParams {
-    fn default() -> Self {
-        Self {
-            temperature: 1.0,
-            top_k: None,
-            top_p: None,
-            seed: 42,
-        }
-    }
-}
 
 /// Apply temperature scaling to logits in-place
 pub fn apply_temperature(logits: &mut [f32], temperature: f32) {
@@ -48,38 +29,29 @@ pub fn top_k_filter(logits: &mut [f32], k: usize) {
     }
 }
 
-/// Keep smallest set of logits whose softmax mass >= p (nucleus sampling)
-pub fn top_p_filter(logits: &mut [f32], p: f32) {
-    if !(0.0..=1.0).contains(&p) || p >= 1.0 {
-        return;
-    }
-    // sort by logit desc, track cumulative softmax probs
-    let mut idx: Vec<usize> = (0..logits.len()).collect();
-    idx.sort_unstable_by(|&a, &b| logits[b].partial_cmp(&logits[a]).unwrap());
-    // compute softmax of sorted logits in a numerically stable way
-    let max_l = logits[idx[0]];
-    let mut exp_sum = 0.0f32;
-    let mut exps = vec![0.0f32; logits.len()];
-    for &i in &idx {
-        let e = (logits[i] - max_l).exp();
-        exp_sum += e;
-        exps[i] = e;
-    }
-    let mut cum = 0.0f32;
-    let mut keep = vec![false; logits.len()];
-    for &i in &idx {
-        let prob = exps[i] / exp_sum;
-        cum += prob;
-        keep[i] = true;
-        if cum >= p {
-            break;
-        }
-    }
-    for (i, l) in logits.iter_mut().enumerate() {
-        if !keep[i] {
-            *l = f32::NEG_INFINITY;
-        }
-    }
+/// Derive one token's sampling seed from the request it belongs to and its
+/// position within that request.
+///
+/// NOT a shared counter on the model. A single counter incremented across
+/// every request makes one request's sampled tokens depend on how much
+/// traffic the process served before it — the same prompt at
+/// `temperature: 0.7` would return different text depending on what ran
+/// earlier. Harmless only by accident on a serial decode loop, since nothing
+/// interleaves; it becomes real cross-tenant coupling the moment a genuine
+/// batch has two requests stepping in the same call and sharing the
+/// counter's sequence. Hashing `(request_id, token_index)` instead makes
+/// each request's seed sequence depend only on itself.
+///
+/// Shared by both decode paths (`model_fuel::engine_model` and
+/// `model::parallel_model_manager`) rather than duplicated — this is the
+/// one thing both need to get right identically, and a second copy is a
+/// second thing to keep in sync.
+pub fn seed_for(request_id: &str, token_index: usize) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    request_id.hash(&mut hasher);
+    token_index.hash(&mut hasher);
+    hasher.finish()
 }
 
 /// Sample an index from (filtered) logits using a seeded RNG for reproducibility

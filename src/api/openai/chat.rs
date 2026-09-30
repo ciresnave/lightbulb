@@ -688,26 +688,22 @@ fn validate_tool_choice(request: &ChatCompletionRequest) -> Result<(), String> {
 /// spec default; a no-op most clients send unconditionally). `n > 1` is
 /// rejected with a 400 rather than silently returning one choice.
 ///
-/// Deliberately NOT implemented, and the reason is the point of the
-/// message: the default (non-`fuel-engine`) decode path is pure greedy
-/// argmax — `temperature` is stored on every request but never read by it
-/// (lightbulb#102) — so `n` independent runs of the same prompt would
-/// return `n` IDENTICAL completions. That is a feature that looks broken
-/// rather than one that is honestly absent: a caller asking for 3 completions
-/// and getting 3 copies of the same string would reasonably file a bug
-/// against `n`, when the real defect is temperature. Revisit once sampling
-/// actually varies output — the implementation itself is straightforward
-/// (loop `run_inference_once` `n` times, one `ChatChoice` per run, sum
-/// `usage`); it is deferred for this reason, not because it is hard.
+/// Deliberately NOT implemented — real sampling landed (lightbulb#102), so
+/// `n` independent runs of the same prompt now genuinely differ, unlike when
+/// this rejection was first written. The remaining blocker is response
+/// shaping, not determinism: today's non-streaming path returns exactly one
+/// `ChatChoice`/`CompletionChoice`; `n` needs `n` of them (one per
+/// `run_inference_once` call, indices `0..n`, `usage` summed across all
+/// `n`), which is real, straightforward, undone work — sized separately,
+/// not folded into whichever PR happens to touch this function next.
 pub(crate) fn validate_n(n: usize) -> Result<(), String> {
     if n == 1 {
         return Ok(());
     }
     Err(format!(
-        "n={n} is not supported: the default decode path is deterministic (greedy argmax; \
-         temperature is accepted but not applied on this build, see lightbulb#102), so \
-         running it {n} times would return {n} identical completions rather than {n} useful \
-         ones. Send n=1 (the default) until sampling actually varies output."
+        "n={n} is not supported: Lightbulb's non-streaming response shape returns exactly \
+         one choice per request today. Running inference {n} times and returning {n} choices \
+         is planned but not yet implemented. Send n=1 (the default) until it lands."
     ))
 }
 
@@ -3638,8 +3634,9 @@ mod tests {
         assert!(validate_n(1).is_ok());
         let err = validate_n(3).expect_err("n=3 must be rejected");
         assert!(
-            err.contains('3') && err.contains("temperature"),
-            "rejection must name the value and the real reason (temperature, not difficulty): {err}"
+            err.contains('3') && !err.contains("temperature"),
+            "rejection must name the value, and must NOT still cite temperature/determinism \
+             now that real sampling has landed (lightbulb#102) — that reason is stale: {err}"
         );
     }
 

@@ -27,9 +27,12 @@ pub struct CompletionRequest {
     pub temperature: f32,
 
     /// Top-p sampling. `1.0` (the default) is a no-op; any other value is
-    /// rejected with a 400 — nucleus sampling is not wired into either
-    /// decode path (`src/sampling.rs::top_p_filter` exists but is dead code,
-    /// called from neither), so accepting it would silently do nothing.
+    /// rejected with a 400 — nucleus sampling is not implemented on either
+    /// decode path. (A `top_p_filter` function existed in `src/sampling.rs`
+    /// at one point, dead code called from neither path — deleted alongside
+    /// lightbulb#102's temperature fix rather than left sitting there
+    /// looking like a capability; wiring it in now would silently reopen a
+    /// question this field's rejection already closes.)
     #[serde(default = "default_top_p")]
     pub top_p: f32,
 

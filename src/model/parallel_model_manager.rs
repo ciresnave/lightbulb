@@ -94,6 +94,33 @@ pub struct ParallelModelManager {
     per_token_tracker: Option<crate::cache::PerTokenTracker>,
 }
 
+/// Pick a token from one row of realized logits, honoring `temperature`.
+///
+/// `temperature <= 0.0` stays exactly greedy via the existing `argmax` —
+/// today's only behavior on this path, unchanged. Anything else scales
+/// logits and samples, via the same `crate::sampling` primitives
+/// `model_fuel::engine_model::select_token` already uses on the
+/// `fuel-engine` feature path: both feature flags now implement the
+/// identical policy, rather than one sampling on `temperature` and one
+/// silently ignoring it (lightbulb#102).
+///
+/// The request default is `temperature: 1.0` (matching OpenAI's real
+/// default), and real temperature-1.0 semantics is "sample from the
+/// unscaled distribution" — NOT deterministic. So this changes default
+/// behavior for every caller who never sets the field at all: greedy today,
+/// real non-deterministic sampling after this lands. That is deliberate —
+/// matching the spec is the point of an OpenAI-compatible surface, and a
+/// caller who wants determinism sends `temperature: 0` and gets exactly
+/// what every caller gets today.
+fn select_token(logits_slice: &Tensor, temperature: f64, seed: u64) -> Result<u32> {
+    if temperature <= 0.0 {
+        return Ok(logits_slice.argmax(0)?.to_scalar::<u32>()?);
+    }
+    let mut logits = logits_slice.to_dtype(DType::F32)?.to_vec1::<f32>()?;
+    crate::sampling::apply_temperature(&mut logits, temperature as f32);
+    Ok(crate::sampling::sample_from_logits(&logits, seed) as u32)
+}
+
 impl ParallelModelManager {
     /// Load a model for parallel batched inference
     ///
@@ -1338,7 +1365,8 @@ impl ParallelModelManager {
                         seq_len,
                         logits_slice.dims()
                     );
-                    let next_token = logits_slice.argmax(0)?.to_scalar::<u32>()?;
+                    let seed = crate::sampling::seed_for(&ctx.request.id, ctx.tokens_generated);
+                    let next_token = select_token(&logits_slice, ctx.request_temperature(), seed)?;
 
                     crate::debug_prefill!(
                         "req_id={}, next_token={}, seq_len={} before updating context",
@@ -1600,7 +1628,8 @@ impl ParallelModelManager {
                 }
 
                 let logits_slice = logits.i(idx)?; // Use idx directly since logits shape matches batch_size
-                let next_token = logits_slice.argmax(0)?.to_scalar::<u32>()?;
+                let seed = crate::sampling::seed_for(&ctx.request.id, ctx.tokens_generated);
+                let next_token = select_token(&logits_slice, ctx.request_temperature(), seed)?;
 
                 crate::debug_decode!("RESULT: idx={}, i={}, next_token={}", idx, i, next_token);
 
@@ -1807,5 +1836,75 @@ impl ParallelModelManager {
     /// Get a mutable reference to the cache builder
     pub fn cache_builder_mut(&mut self) -> &mut crate::engine::ParallelCacheBuilder {
         &mut self.cache_builder
+    }
+}
+
+#[cfg(test)]
+mod select_token_tests {
+    use super::select_token;
+    use candlelight::core::{Device, Tensor};
+
+    /// Mirrors `model_fuel::engine_model`'s own
+    /// `select_token_is_greedy_at_zero_and_seeded_above` (this function is a
+    /// thin `Tensor`-unwrapping wrapper around the same `crate::sampling`
+    /// calls, not a second implementation of the sampling math — this test
+    /// proves the wrapper plumbs `Tensor` -> those calls correctly, not that
+    /// the math itself is right, which the other test already covers).
+    ///
+    /// Pinned seeds throughout, per the PM's condition: a sampling test must
+    /// be reproducible, not probabilistic — the same seed against the same
+    /// row always produces the same token, so this never passes or fails by
+    /// luck.
+    #[test]
+    fn select_token_is_greedy_at_zero_and_seeded_above() {
+        let dev = Device::Cpu;
+        let peaked = Tensor::new(&[0.1f32, 3.0, 0.2, 2.9, 0.3], &dev).unwrap();
+
+        assert_eq!(
+            select_token(&peaked, 0.0, 1).unwrap(),
+            1,
+            "temperature 0 must be argmax"
+        );
+        assert_eq!(
+            select_token(&peaked, 0.0, 999).unwrap(),
+            1,
+            "greedy must ignore the seed"
+        );
+        assert_eq!(
+            select_token(&peaked, 1.0, 7).unwrap(),
+            select_token(&peaked, 1.0, 7).unwrap(),
+            "same seed must reproduce"
+        );
+
+        let flat = Tensor::new(&[1.0f32; 8], &dev).unwrap();
+        let tokens: std::collections::HashSet<u32> = (1u64..=5)
+            .map(|seed| select_token(&flat, 1.0, seed).unwrap())
+            .collect();
+        assert!(
+            tokens.len() > 1,
+            "pinned seeds 1..=5 over a flat distribution all produced the same token \
+             ({tokens:?}) — select_token is not threading the seed through"
+        );
+    }
+
+    /// The default request temperature is 1.0, and this is the behavior
+    /// change stated in the PR body: default-configured requests move from
+    /// deterministic greedy to real, non-deterministic sampling. Pinned to a
+    /// fixed seed pair rather than "run it and see" — two DIFFERENT pinned
+    /// seeds against a flat row must disagree at least once across a small
+    /// pinned set, which is the reproducible form of "temperature 1.0 is not
+    /// secretly still greedy".
+    #[test]
+    fn default_temperature_of_one_does_not_collapse_to_greedy() {
+        let dev = Device::Cpu;
+        let flat = Tensor::new(&[1.0f32; 16], &dev).unwrap();
+        let a = select_token(&flat, 1.0, 1).unwrap();
+        let b = select_token(&flat, 1.0, 2).unwrap();
+        assert_ne!(
+            a, b,
+            "two different pinned seeds at temperature=1.0 (the request default) produced \
+             the same token on a flat distribution — sampling is not varying output at the \
+             default temperature, which is the exact behavior this change exists to fix"
+        );
     }
 }
