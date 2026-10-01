@@ -5,7 +5,6 @@
 //! cache and the graph. That split is the one the port is built on.
 
 use std::collections::{HashMap, HashSet};
-use std::hash::{Hash, Hasher};
 use std::path::Path;
 
 use anyhow::Result;
@@ -38,7 +37,7 @@ enum LoadedModel {
 
 #[allow(dead_code)]
 impl LoadedModel {
-    fn config(&self) -> &fuel::lazy::LlamaConfig {
+    fn config(&self) -> &fuel_model_llama::LlamaConfig {
         match self {
             Self::F32(l) => &l.config,
             Self::QuantizedGguf(l) => &l.config,
@@ -86,26 +85,6 @@ fn select_token(logits: &[f32], temperature: f64, seed: u64) -> u32 {
     let mut l = logits.to_vec();
     crate::sampling::apply_temperature(&mut l, temperature as f32);
     crate::sampling::sample_from_logits(&l, seed) as u32
-}
-
-/// Derive one token's sampling seed from the request it belongs to and its
-/// position within that request.
-///
-/// NOT a shared counter on the model. A single counter incremented across
-/// every request (the original shape) makes one request's sampled tokens
-/// depend on how much traffic the process served before it — the same
-/// prompt at `temperature: 0.7` would return different text depending on
-/// what ran earlier. Harmless only by accident: `run_jobs` currently drives
-/// one request at a time, so nothing interleaves. It becomes real
-/// cross-tenant coupling the moment `step_batch` sees a genuine batch, since
-/// two requests stepping in the same call would then share the counter's
-/// sequence. Hashing `(request_id, token_index)` instead makes each
-/// request's seed sequence depend only on itself.
-fn seed_for(request_id: &str, token_index: usize) -> u64 {
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    request_id.hash(&mut hasher);
-    token_index.hash(&mut hasher);
-    hasher.finish()
 }
 
 /// Cap a request's generation budget to what remains of `context_length`
@@ -225,7 +204,7 @@ impl FuelEngineModel {
     /// Advance one request by at most one token.
     fn step_one(&mut self, ctx: &mut RequestContext) -> Result<Option<u32>> {
         match ctx.state {
-            RequestState::Completed | RequestState::AwaitingToolResult { .. } => Ok(None),
+            RequestState::Completed => Ok(None),
             RequestState::Pending => {
                 // `ctx.add_special_tokens`, never a literal `true`: a prompt
                 // rendered through a chat template already carries the
@@ -294,7 +273,7 @@ impl FuelEngineModel {
                 let logits = self.loaded.decoder().prefill(&ids, &mut st)?;
                 self.sessions.insert(ctx.request.id.clone(), st);
 
-                let seed = seed_for(&ctx.request.id, ctx.tokens_generated);
+                let seed = crate::sampling::seed_for(&ctx.request.id, ctx.tokens_generated);
                 let tok = select_token(&logits, ctx.request_temperature(), seed);
                 ctx.generated_tokens.push(tok);
                 ctx.start_decoding();
@@ -303,8 +282,8 @@ impl FuelEngineModel {
                 // meaning; candlelight's own prefill arm
                 // (`parallel_model_manager.rs`: `ctx.position += seq_len`)
                 // uses the cache-position meaning instead, and both backends
-                // feed the same `RequestContext` — `await_tool_result` reads
-                // `position` as a cache offset — so this matches that rather
+                // feed the same `RequestContext`, where `position` is read
+                // elsewhere as a cache offset — so this matches that rather
                 // than calling `record_token()` here.
                 ctx.position += ids.len();
                 ctx.tokens_generated += 1;
@@ -335,7 +314,7 @@ impl FuelEngineModel {
                     .ok_or_else(|| anyhow::anyhow!("no session for request {}", ctx.request.id))?;
                 let logits = self.loaded.decoder().step(last, st)?;
 
-                let seed = seed_for(&ctx.request.id, ctx.tokens_generated);
+                let seed = crate::sampling::seed_for(&ctx.request.id, ctx.tokens_generated);
                 let tok = select_token(&logits, ctx.request_temperature(), seed);
                 ctx.generated_tokens.push(tok);
                 ctx.record_token();

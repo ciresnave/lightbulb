@@ -26,17 +26,25 @@ pub struct CompletionRequest {
     #[serde(default = "default_temperature")]
     pub temperature: f32,
 
-    /// Top-p sampling
+    /// Top-p sampling. `1.0` (the default) is a no-op; any other value is
+    /// rejected with a 400 — nucleus sampling is not implemented on either
+    /// decode path. (A `top_p_filter` function existed in `src/sampling.rs`
+    /// at one point, dead code called from neither path — deleted alongside
+    /// lightbulb#102's temperature fix rather than left sitting there
+    /// looking like a capability; wiring it in now would silently reopen a
+    /// question this field's rejection already closes.)
     #[serde(default = "default_top_p")]
     pub top_p: f32,
 
-    /// Number of completions to generate
+    /// Number of completions to generate. `1` (the default) is a no-op;
+    /// anything else is rejected — see `chat::validate_n`.
     #[serde(default = "default_n")]
     pub n: usize,
 
-    /// Stop sequences
+    /// Stop sequences. Accepts either shape the spec allows (a bare string
+    /// or an array) — see [`crate::api::openai::chat::StopSequences`].
     #[serde(default)]
-    pub stop: Option<Vec<String>>,
+    pub stop: Option<crate::api::openai::chat::StopSequences>,
 
     /// Echo the prompt in the completion
     #[serde(default)]
@@ -95,6 +103,30 @@ pub async fn completions(
                 "error": format!(
                     "model '{}' is not loaded on this server; the loaded model is '{}'",
                     request.model, state.config.default_model
+                )
+            })),
+        )
+            .into_response();
+    }
+
+    // `n` and `top_p` accepted-and-silently-discarded is the defect class
+    // board item 71's item 2 exists to close — see the reasoning on
+    // `chat::validate_n` and on this struct's `top_p` field doc.
+    if let Err(msg) = crate::api::openai::chat::validate_n(request.n) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": msg})),
+        )
+            .into_response();
+    }
+    if request.top_p != 1.0 {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": format!(
+                    "top_p={} is not supported: nucleus sampling is not wired into either \
+                     decode path. Send top_p=1.0 (the default) or omit the field.",
+                    request.top_p
                 )
             })),
         )
@@ -160,14 +192,33 @@ async fn create_completion(
     )
     .await?;
 
+    // Stop-sequence truncation applies to the GENERATED continuation only,
+    // before `echo` concatenation — a stop string that happens to occur in
+    // the prompt itself must not truncate the prompt when `echo: true`.
+    let stop_list = request
+        .stop
+        .as_ref()
+        .map(crate::api::openai::chat::StopSequences::as_list)
+        .unwrap_or_default();
+    let (generated, stopped) = if stop_list.is_empty() {
+        (result.text, false)
+    } else {
+        crate::api::openai::chat::apply_stop_sequences(&result.text, &stop_list)
+    };
+    let finish_reason = if stopped {
+        crate::engine::model_runner::FinishReason::Stop
+    } else {
+        result.finish_reason
+    };
+
     // `echo` concatenates with no separator: OpenAI returns the prompt
     // followed immediately by its continuation, because the two are one
     // continuous text. The placeholder's blank line was an artifact of the
     // prompt and the placeholder being unrelated strings.
     let completion_text = if request.echo {
-        format!("{}{}", prompt_text, result.text)
+        format!("{}{}", prompt_text, generated)
     } else {
-        result.text
+        generated
     };
 
     Ok(CompletionResponse {
@@ -179,7 +230,7 @@ async fn create_completion(
             text: completion_text,
             index: 0,
             logprobs: None,
-            finish_reason: result.finish_reason.as_str().to_string(),
+            finish_reason: finish_reason.as_str().to_string(),
         }],
         usage: Some(Usage {
             prompt_tokens: result.prompt_tokens,
@@ -199,4 +250,142 @@ fn default_top_p() -> f32 {
 
 fn default_n() -> usize {
     1
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::response::IntoResponse;
+
+    fn request() -> CompletionRequest {
+        serde_json::from_value(serde_json::json!({
+            "model": "test-model",
+            "prompt": "hi",
+        }))
+        .unwrap()
+    }
+
+    fn state_with_runner(
+        inference_tx: Option<std::sync::mpsc::Sender<crate::engine::model_runner::InferenceJob>>,
+    ) -> AppState {
+        use crate::engine::{MemoryAwareConfig, MemoryAwareScheduler};
+        AppState {
+            scheduler: std::sync::Arc::new(MemoryAwareScheduler::new(MemoryAwareConfig::default())),
+            config: crate::api::ApiConfig::default(),
+            db_pool: None,
+            inference_tx,
+            chat_template: None,
+            eos_monitor: std::sync::Arc::new(crate::engine::eos_monitor::EosMonitor::default()),
+        }
+    }
+
+    /// A runner that answers every job with fixed text, so a truncation test
+    /// can force a known generation rather than depending on a real model.
+    fn stub_runner_with_text(
+        text: &str,
+        finish_reason: crate::engine::model_runner::FinishReason,
+    ) -> (
+        std::sync::mpsc::Sender<crate::engine::model_runner::InferenceJob>,
+        std::thread::JoinHandle<()>,
+    ) {
+        use crate::engine::model_runner::{CompletionResult, InferenceJob, ResponseMode};
+        let (tx, rx) = std::sync::mpsc::channel::<InferenceJob>();
+        let text = text.to_string();
+        let handle = std::thread::spawn(move || {
+            while let Ok(job) = rx.recv() {
+                if let ResponseMode::Complete(resp) = job.response_mode {
+                    let _ = resp.send(Ok(CompletionResult {
+                        text: text.clone(),
+                        prompt_tokens: 1,
+                        completion_tokens: 1,
+                        finish_reason,
+                    }));
+                }
+            }
+        });
+        (tx, handle)
+    }
+
+    #[tokio::test]
+    async fn completions_rejects_top_p_not_equal_one() {
+        let state = state_with_runner(None);
+        let mut req = request();
+        req.top_p = 0.9;
+
+        let response = self::completions(State(state), Json(req))
+            .await
+            .into_response();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn completions_accepts_the_default_top_p() {
+        let state = state_with_runner(None);
+        let req = request();
+        assert_eq!(req.top_p, 1.0);
+
+        let response = self::completions(State(state), Json(req))
+            .await
+            .into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn completions_rejects_n_greater_than_one() {
+        let state = state_with_runner(None);
+        let mut req = request();
+        req.n = 3;
+
+        let response = self::completions(State(state), Json(req))
+            .await
+            .into_response();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn create_completion_truncates_at_a_stop_sequence() {
+        let (tx, runner) = stub_runner_with_text(
+            "Paris is the capital.</s> unwanted continuation",
+            crate::engine::model_runner::FinishReason::Length,
+        );
+        let state = state_with_runner(Some(tx));
+
+        let mut req = request();
+        req.stop = Some(crate::api::openai::chat::StopSequences::Single(
+            "</s>".to_string(),
+        ));
+
+        let response = create_completion(state, req)
+            .await
+            .expect("forced generation must not error");
+        drop(runner);
+
+        assert_eq!(response.choices[0].text, "Paris is the capital.");
+        assert_eq!(response.choices[0].finish_reason, "stop");
+    }
+
+    #[tokio::test]
+    async fn create_completion_stop_truncation_does_not_touch_the_echoed_prompt() {
+        // The prompt itself contains the stop string; only the GENERATED
+        // continuation may be truncated by it.
+        let (tx, runner) = stub_runner_with_text(
+            " continuation</s> more",
+            crate::engine::model_runner::FinishReason::Length,
+        );
+        let state = state_with_runner(Some(tx));
+
+        let mut req = request();
+        req.prompt = PromptInput::Single("prompt</s>text".to_string());
+        req.echo = true;
+        req.stop = Some(crate::api::openai::chat::StopSequences::Single(
+            "</s>".to_string(),
+        ));
+
+        let response = create_completion(state, req)
+            .await
+            .expect("forced generation must not error");
+        drop(runner);
+
+        assert_eq!(response.choices[0].text, "prompt</s>text continuation");
+    }
 }

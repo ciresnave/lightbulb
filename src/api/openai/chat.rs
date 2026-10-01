@@ -37,23 +37,113 @@ pub struct ChatCompletionRequest {
     #[serde(default)]
     pub stream: bool,
 
-    /// Number of completions to generate
+    /// Number of completions to generate. `1` (the default) is a no-op;
+    /// anything else is rejected with a 400 — see `validate_n`.
     #[serde(default = "default_n")]
     pub n: usize,
 
-    /// Stop sequences
+    /// Stop sequences. Accepts either shape the spec allows (a bare string
+    /// or an array) — see [`StopSequences`].
     #[serde(default)]
-    pub stop: Option<Vec<String>>,
+    pub stop: Option<StopSequences>,
+
+    /// Tools the model may call. Presence (non-empty, and `tool_choice` not
+    /// `"none"`) is what turns on tool-call prompting and parsing at all —
+    /// see `create_chat_completion`'s handling of `tools_active`.
+    #[serde(default)]
+    pub tools: Option<Vec<Tool>>,
+
+    /// Selection policy for `tools`. Only `"auto"` (the default) and `"none"`
+    /// are implemented; anything else (`"required"`, or an object forcing one
+    /// named function) is rejected with a 400 naming what is supported,
+    /// rather than silently treated as `"auto"` — see item 2 of the
+    /// portfolio PM's two-item task: a documented refusal beats a silent lie.
+    #[serde(default)]
+    pub tool_choice: Option<serde_json::Value>,
 
     /// Lightbulb-specific extensions
     #[serde(default)]
     pub lightbulb: Option<LightbulbExtensions>,
 }
 
+/// The `stop` field's two legal shapes: a single string, or an array of up
+/// to 4. Declaring the field as `Option<Vec<String>>` alone rejects the
+/// (spec-legal, common) bare-string form with a 400 deserialize error before
+/// this code ever runs — not the silent-discard defect item 2 targets, but
+/// close enough kin, and free to fix in the same pass through this struct.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum StopSequences {
+    Single(String),
+    Multiple(Vec<String>),
+}
+
+impl StopSequences {
+    /// Borrow every configured sequence as `&str`, skipping empty ones — an
+    /// empty stop string matches everywhere and would truncate output at
+    /// position 0, which is never what a caller means by sending it.
+    pub(crate) fn as_list(&self) -> Vec<&str> {
+        match self {
+            StopSequences::Single(s) => vec![s.as_str()],
+            StopSequences::Multiple(v) => v.iter().map(String::as_str).collect(),
+        }
+        .into_iter()
+        .filter(|s| !s.is_empty())
+        .collect()
+    }
+}
+
+/// One entry of `ChatCompletionRequest.tools`.
+///
+/// Only the `function` tool type exists in OpenAI's spec today; a `#[serde(tag
+/// = "type", rename_all = "snake_case")]` enum with one variant still gives a
+/// clear rejection (an unknown `"type"`) if a client sends something else,
+/// rather than this deserializing as nothing and the tool silently vanishing.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum Tool {
+    Function { function: ToolFunctionDef },
+}
+
+/// The `function` object inside a `Tool`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ToolFunctionDef {
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    /// JSON Schema for the function's arguments, passed through verbatim into
+    /// the tool-description prompt (see `build_tools_system_message`) rather
+    /// than parsed — Lightbulb never validates a call's arguments against it,
+    /// matching OverMind's own `_parse_arguments`, which is equally tolerant.
+    #[serde(default)]
+    pub parameters: Option<serde_json::Value>,
+}
+
+/// A single tool call the model asked for, in OpenAI's response shape.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolCall {
+    pub id: String,
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub function: ToolCallFunction,
+}
+
+/// The `function` half of a [`ToolCall`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolCallFunction {
+    pub name: String,
+    /// A JSON-encoded **string**, per the spec, not a nested object — a real
+    /// client's SDK deserializes this field as `str` and calls its own
+    /// `json.loads` on it. OverMind's `_parse_arguments` tolerates either
+    /// shape, but Lightbulb should not rely on the one caller it has already
+    /// measured being the only one that ever reads this response.
+    pub arguments: String,
+}
+
 /// Chat message
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatMessage {
-    /// Role: system, user, assistant, function
+    /// Role: system, user, assistant, tool, function
     pub role: String,
 
     /// Message content
@@ -62,6 +152,20 @@ pub struct ChatMessage {
     /// Optional name for function calls
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+
+    /// Tool calls the assistant is making. `None` on every message this
+    /// server has ever emitted until now; the field exists purely to be
+    /// populated by `create_chat_completion`'s tool-call path and to accept
+    /// it back in a caller's own `messages` history without rejecting the
+    /// field as unknown (serde already drops unknown fields silently, but an
+    /// explicit field round-trips it instead of eating it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<Vec<ToolCall>>,
+
+    /// Present on a `role: "tool"` message: which `tool_calls[].id` this is
+    /// the result for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
 }
 
 /// Lightbulb-specific request extensions
@@ -223,6 +327,71 @@ pub async fn chat_completions(
         return (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({"error": STREAMING_CONTRACT_REJECTION})),
+        )
+            .into_response();
+    }
+
+    // `tool_choice` values Lightbulb does not implement get a named 400
+    // rather than silently behaving as `"auto"` — see `validate_tool_choice`.
+    if let Err(msg) = validate_tool_choice(&request) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": msg})),
+        )
+            .into_response();
+    }
+
+    // Streaming tool-call deltas are a separate, not-yet-implemented shape
+    // (OpenAI streams `id`/`type`/`function.name` in one delta and appends to
+    // `function.arguments` across later ones — see
+    // `docs/TOOL-CALLING-DESIGN-2026-09-25.md`). Silently prompting for tools
+    // and then never parsing them back out of the stream would be exactly the
+    // silent-lie failure mode item 2 of this task exists to avoid, so this
+    // combination is refused rather than degraded.
+    if request.stream && request_wants_tools(&request) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "`tools` with `stream: true` is not yet implemented: tool-call \
+                    deltas are a separate streaming shape from the non-streaming path \
+                    landed here. Send `stream: false` to use tools today, or omit `tools` \
+                    to stream."
+            })),
+        )
+            .into_response();
+    }
+
+    // `n` accepted-and-silently-discarded is the defect class board item 71's
+    // item 2 exists to close — see `validate_n` for why this is a reject
+    // rather than an implementation.
+    if let Err(msg) = validate_n(request.n) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": msg})),
+        )
+            .into_response();
+    }
+
+    // A MEANINGFUL `stop` cannot be honored on a stream: tokens already sent
+    // to the client cannot be un-sent, and detecting a stop sequence across
+    // chunk boundaries is real, separate work — see `apply_stop_sequences`'s
+    // non-streaming use below. A no-op `stop` (absent, or every entry empty)
+    // costs nothing and is left to stream freely.
+    if request.stream
+        && request
+            .stop
+            .as_ref()
+            .is_some_and(|s| !s.as_list().is_empty())
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "a non-empty `stop` with `stream: true` is not yet implemented: \
+                    truncating output already sent to the client is impossible, and \
+                    detecting a stop sequence across streamed chunk boundaries is separate, \
+                    undone work. Send `stream: false` to use `stop` today, or omit it to \
+                    stream."
+            })),
         )
             .into_response();
     }
@@ -477,6 +646,240 @@ pub(crate) fn build_prompt_from_raw(
 /// diluting the window the chat paths' evidence has to fit in. The sentence
 /// above said "all three sites" for one commit, which invited exactly the
 /// four-call "fix" this paragraph exists to refuse.
+/// Lightbulb's own fixed tool-call wire convention: the tag a model is asked
+/// to answer with, and the one thing [`extract_tool_calls`] parses for.
+///
+/// The spelling matches Qwen's native `<tool_call>{json}</tool_call>` format
+/// (already named in `docs/TOOL-CALLING-DESIGN-2026-09-25.md` Q2) — reused
+/// rather than invented, so this is at most a second convention in the tree,
+/// not a third.
+const TOOL_CALL_TAG_START: &str = "<tool_call>";
+const TOOL_CALL_TAG_END: &str = "</tool_call>";
+
+/// Whether this request should have tools prompted for and parsed at all.
+///
+/// `false` for an empty `tools` list (a client that sends `"tools": []` is
+/// not asking for anything) and for `tool_choice: "none"`.
+fn request_wants_tools(request: &ChatCompletionRequest) -> bool {
+    request.tools.as_deref().is_some_and(|t| !t.is_empty())
+        && !matches!(&request.tool_choice, Some(v) if v.as_str() == Some("none"))
+}
+
+/// Validate `tool_choice` against what Lightbulb actually implements.
+///
+/// Only `"auto"` (the default when the field is omitted) and `"none"` are
+/// real policies. Per item 2 of the portfolio PM's task — decide deliberately
+/// between implementing a parameter and rejecting it, and say which — forcing
+/// one named tool, or `"required"`, is rejected with a 400 naming what IS
+/// supported, rather than silently treated as `"auto"`.
+fn validate_tool_choice(request: &ChatCompletionRequest) -> Result<(), String> {
+    match &request.tool_choice {
+        None => Ok(()),
+        Some(v) if v.as_str() == Some("auto") || v.as_str() == Some("none") => Ok(()),
+        Some(v) => Err(format!(
+            "tool_choice {v} is not supported; Lightbulb implements only \"auto\" \
+             (the default when the field is omitted) and \"none\". Forcing a \
+             specific tool, or \"required\", is not implemented."
+        )),
+    }
+}
+
+/// Validate `n` against what Lightbulb actually implements: only `1` (the
+/// spec default; a no-op most clients send unconditionally). `n > 1` is
+/// rejected with a 400 rather than silently returning one choice.
+///
+/// Deliberately NOT implemented — real sampling landed (lightbulb#102), so
+/// `n` independent runs of the same prompt now genuinely differ, unlike when
+/// this rejection was first written. The remaining blocker is response
+/// shaping, not determinism: today's non-streaming path returns exactly one
+/// `ChatChoice`/`CompletionChoice`; `n` needs `n` of them (one per
+/// `run_inference_once` call, indices `0..n`, `usage` summed across all
+/// `n`), which is real, straightforward, undone work — sized separately,
+/// not folded into whichever PR happens to touch this function next.
+pub(crate) fn validate_n(n: usize) -> Result<(), String> {
+    if n == 1 {
+        return Ok(());
+    }
+    Err(format!(
+        "n={n} is not supported: Lightbulb's non-streaming response shape returns exactly \
+         one choice per request today. Running inference {n} times and returning {n} choices \
+         is planned but not yet implemented. Send n=1 (the default) until it lands."
+    ))
+}
+
+/// Truncate `text` at the earliest occurrence of any `stop_sequences` entry,
+/// excluding the matched sequence itself from the returned text — matching
+/// OpenAI's own behavior (the stop string never appears in the output).
+///
+/// Returns `(possibly-truncated text, whether a sequence matched)`. The
+/// second value is what lets a caller override `finish_reason` to `"stop"`
+/// even when the runner's own reason was `Length` — hitting a stop sequence
+/// IS a stop, regardless of why the runner itself stopped generating.
+pub(crate) fn apply_stop_sequences(text: &str, stop_sequences: &[&str]) -> (String, bool) {
+    let earliest = stop_sequences.iter().filter_map(|seq| text.find(seq)).min();
+    match earliest {
+        Some(pos) => (text[..pos].to_string(), true),
+        None => (text.to_string(), false),
+    }
+}
+
+/// How `tools` reach the model's context for this request.
+///
+/// A real decision point, not a single hardcoded path — per the tool-calls
+/// pivot's condition 2, a checkpoint whose own chat template already
+/// branches on a `tools` Jinja variable should eventually be prompted that
+/// way instead of via Lightbulb's injected system message, since talking
+/// over a model's own trained convention with a second, different one is
+/// more likely to confuse it than help. `NativeTemplate` is not implemented
+/// today — no checkpoint on hand has such a template to prove a real
+/// implementation against (`ChatTemplate::supports_native_tools`) — so both
+/// arms currently resolve to the same injected behavior. The point of the
+/// match is that adding real native support later is a new arm's worth of
+/// change, not a rewrite of how this function's caller decides.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ToolPromptStrategy {
+    NativeTemplate,
+    Injected,
+}
+
+fn tool_prompt_strategy(
+    template: Option<&crate::api::chat_template::ResolvedTemplate>,
+) -> ToolPromptStrategy {
+    match template {
+        Some(t) if t.template.supports_native_tools() => ToolPromptStrategy::NativeTemplate,
+        _ => ToolPromptStrategy::Injected,
+    }
+}
+
+/// Build the instruction text describing `tools` and the exact tag Lightbulb
+/// asks the model to answer with.
+fn build_tools_instruction(tools: &[Tool]) -> String {
+    let mut s = String::from(
+        "You have access to the following tools. When you need to call one, \
+         respond with exactly one line per call, in this form and no other:\n",
+    );
+    s.push_str(TOOL_CALL_TAG_START);
+    s.push_str(r#"{"name": "<tool name>", "arguments": {<argument object>}}"#);
+    s.push_str(TOOL_CALL_TAG_END);
+    s.push_str(
+        "\nDo not use any other format. If no tool call is needed, answer \
+         normally without that tag.\n\nAvailable tools:\n",
+    );
+    for tool in tools {
+        let Tool::Function { function } = tool;
+        s.push_str("- ");
+        s.push_str(&function.name);
+        if let Some(desc) = &function.description {
+            s.push_str(": ");
+            s.push_str(desc);
+        }
+        if let Some(params) = &function.parameters {
+            s.push_str("\n  arguments schema: ");
+            s.push_str(&params.to_string());
+        }
+        s.push('\n');
+    }
+    s
+}
+
+/// Splice the tools instruction into `messages`.
+///
+/// **Merge, not duplicate** (tool-calls pivot condition 3): a caller's own
+/// existing system message gets the instruction appended to it rather than
+/// Lightbulb inserting a second system turn. Several templates on hand,
+/// TinyLlama's included, render exactly one system slot; two would either
+/// collide in the render or silently lose one. If the caller sent no system
+/// message, one is inserted at the front. This changes the conversation the
+/// caller sent — documented here and in the PR description precisely so it
+/// is observable rather than a surprise.
+fn inject_tools_instruction(messages: &[ChatMessage], tools: &[Tool]) -> Vec<ChatMessage> {
+    let instruction = build_tools_instruction(tools);
+    let mut out = Vec::with_capacity(messages.len() + 1);
+    let mut merged = false;
+    for m in messages {
+        if !merged && m.role == "system" {
+            out.push(ChatMessage {
+                role: m.role.clone(),
+                content: format!("{}\n\n{}", m.content, instruction),
+                name: m.name.clone(),
+                tool_calls: m.tool_calls.clone(),
+                tool_call_id: m.tool_call_id.clone(),
+            });
+            merged = true;
+        } else {
+            out.push(m.clone());
+        }
+    }
+    if !merged {
+        out.insert(
+            0,
+            ChatMessage {
+                role: "system".to_string(),
+                content: instruction,
+                name: None,
+                tool_calls: None,
+                tool_call_id: None,
+            },
+        );
+    }
+    out
+}
+
+/// Extract Lightbulb's own `<tool_call>{json}</tool_call>` tool calls from
+/// complete generated text, returning the leading (pre-tag) text as the
+/// message's real `content` alongside the parsed calls.
+///
+/// Deliberately independent of the deleted `engine::tool_call` streaming
+/// detector (see the tool-calls pivot, condition 4): this runs once, after
+/// generation has finished, over the whole text. It parses exactly one
+/// format because the tag is Lightbulb's own choice, not a family convention
+/// being reverse-engineered — there is nothing to key per checkpoint here,
+/// unlike the per-family parser the original design doc costed for Q2.
+///
+/// Returns `None` when no well-formed tag is found — the ordinary "answered
+/// normally" case. A tag that opens but never closes, or whose body is not
+/// the expected JSON object, is also `None` rather than an error: a small
+/// model asked to comply with a new format may simply decline to, and that
+/// is a model-capability finding, not a parser bug (tool-calls pivot,
+/// condition 1).
+fn extract_tool_calls(text: &str) -> Option<(String, Vec<ToolCall>)> {
+    let mut calls = Vec::new();
+    let mut leading: Option<String> = None;
+    let mut rest = text;
+    while let Some(start) = rest.find(TOOL_CALL_TAG_START) {
+        if leading.is_none() {
+            leading = Some(rest[..start].to_string());
+        }
+        let after_start = &rest[start + TOOL_CALL_TAG_START.len()..];
+        let Some(end) = after_start.find(TOOL_CALL_TAG_END) else {
+            break;
+        };
+        let body = after_start[..end].trim();
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(body)
+            && let Some(name) = v.get("name").and_then(|n| n.as_str())
+        {
+            let arguments = v
+                .get("arguments")
+                .cloned()
+                .unwrap_or_else(|| serde_json::Value::Object(Default::default()));
+            calls.push(ToolCall {
+                id: format!("call_{}", uuid::Uuid::new_v4()),
+                kind: "function".to_string(),
+                function: ToolCallFunction {
+                    name: name.to_string(),
+                    arguments: arguments.to_string(),
+                },
+            });
+        }
+        rest = &after_start[end + TOOL_CALL_TAG_END.len()..];
+    }
+    if calls.is_empty() {
+        None
+    } else {
+        Some((leading.unwrap_or_default().trim().to_string(), calls))
+    }
+}
+
 fn record_completion(
     monitor: &crate::engine::eos_monitor::EosMonitor,
     resolved_by: Option<crate::api::chat_template::Resolution>,
@@ -514,7 +917,23 @@ async fn create_chat_completion(
         }
     }
 
-    let prompt = build_prompt(&state, &request.messages);
+    // Tool-calls pivot (board item 71): `tools` never reaches the model via
+    // the checkpoint's own template today (see `ToolPromptStrategy`), so it
+    // is spliced in as a system-message instruction instead, and the
+    // generated text is parsed back for Lightbulb's own tag before the
+    // response is built below.
+    let wants_tools = request_wants_tools(&request);
+    let tools: &[Tool] = request.tools.as_deref().unwrap_or(&[]);
+    let prompt = if wants_tools {
+        // `tool_prompt_strategy`'s two arms are identical today — see its
+        // own doc comment — but the call site already asks the question a
+        // real native-template implementation would need answered.
+        let _ = tool_prompt_strategy(state.chat_template.as_deref());
+        let spliced = inject_tools_instruction(&request.messages, tools);
+        build_prompt(&state, &spliced)
+    } else {
+        build_prompt(&state, &request.messages)
+    };
 
     let max_new_tokens = request.max_tokens.unwrap_or(100);
     let temperature = request.temperature as f64;
@@ -538,6 +957,44 @@ async fn create_chat_completion(
             .duration_since(SystemTime::UNIX_EPOCH)?
             .as_secs();
 
+        // Stop-sequence truncation runs BEFORE tool-call extraction: a stop
+        // sequence is a cutoff on generation itself, so the tag (if any)
+        // is looked for in the text the caller actually asked to see, not
+        // in text that would have been truncated away.
+        let stop_list = request
+            .stop
+            .as_ref()
+            .map(StopSequences::as_list)
+            .unwrap_or_default();
+        let (text, stopped) = if stop_list.is_empty() {
+            (result.text, false)
+        } else {
+            apply_stop_sequences(&result.text, &stop_list)
+        };
+        let stopped_reason = if stopped {
+            crate::engine::model_runner::FinishReason::Stop
+        } else {
+            result.finish_reason
+        };
+
+        // Only look for the tag when the request actually offered tools: a
+        // model can produce this exact text sequence coincidentally (or a
+        // caller's own prior assistant turn can contain literal `<tool_call>`
+        // text being quoted), and `wants_tools` is the one signal that says
+        // Lightbulb itself asked for this format on THIS request.
+        let (content, finish_reason, tool_calls) = if wants_tools {
+            match extract_tool_calls(&text) {
+                Some((leading, calls)) => (
+                    leading,
+                    crate::engine::model_runner::FinishReason::ToolCalls,
+                    Some(calls),
+                ),
+                None => (text, stopped_reason, None),
+            }
+        } else {
+            (text, stopped_reason, None)
+        };
+
         return Ok(ChatCompletionResponse {
             id: format!("chatcmpl-{}", uuid::Uuid::new_v4()),
             object: "chat.completion".to_string(),
@@ -547,10 +1004,12 @@ async fn create_chat_completion(
                 index: 0,
                 message: ChatMessage {
                     role: "assistant".to_string(),
-                    content: result.text,
+                    content,
                     name: None,
+                    tool_calls,
+                    tool_call_id: None,
                 },
-                finish_reason: result.finish_reason.as_str().to_string(),
+                finish_reason: finish_reason.as_str().to_string(),
             }],
             usage: Some(Usage {
                 prompt_tokens: result.prompt_tokens,
@@ -582,6 +1041,8 @@ async fn create_chat_completion(
                 role: "assistant".to_string(),
                 content: response_content,
                 name: None,
+                tool_calls: None,
+                tool_call_id: None,
             },
             finish_reason: "stop".to_string(),
         }],
@@ -765,6 +1226,8 @@ fn build_contract_response(
                 role: "assistant".to_string(),
                 content: exec.final_text,
                 name: None,
+                tool_calls: None,
+                tool_call_id: None,
             },
             finish_reason,
         }],
@@ -1227,6 +1690,8 @@ mod tests {
             role: "user".to_string(),
             content: "Name the capital of France.".to_string(),
             name: None,
+            tool_calls: None,
+            tool_call_id: None,
         }]
     }
 
@@ -2789,5 +3254,486 @@ mod tests {
                  the monitor is editing what the client sees"
             );
         }
+    }
+
+    // === Tool calls (board item 71) ===
+    //
+    // Per the tool-calls pivot's condition 1: the parser (synthetic text, no
+    // model, no runner), the response-shape plumbing (a forced generation,
+    // not a hoped-for one), and a real model's willingness to comply are
+    // three different questions. Only the first two are testable here; the
+    // third needs a real checkpoint and is reported separately.
+
+    #[test]
+    fn extract_tool_calls_parses_a_well_formed_call() {
+        let text = r#"Sure, let me check.<tool_call>{"name": "get_weather", "arguments": {"city": "Paris"}}</tool_call>"#;
+        let (leading, calls) = extract_tool_calls(text).expect("expected a parsed tool call");
+        assert_eq!(leading, "Sure, let me check.");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].kind, "function");
+        assert_eq!(calls[0].function.name, "get_weather");
+        let args: serde_json::Value = serde_json::from_str(&calls[0].function.arguments)
+            .expect("arguments must be a JSON-encoded string, per the OpenAI spec");
+        assert_eq!(args["city"], "Paris");
+    }
+
+    #[test]
+    fn extract_tool_calls_parses_multiple_calls_in_one_reply() {
+        let text = r#"<tool_call>{"name": "a", "arguments": {}}</tool_call><tool_call>{"name": "b", "arguments": {"x": 1}}</tool_call>"#;
+        let (leading, calls) = extract_tool_calls(text).expect("expected two parsed calls");
+        assert_eq!(leading, "");
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].function.name, "a");
+        assert_eq!(calls[1].function.name, "b");
+        assert_ne!(
+            calls[0].id, calls[1].id,
+            "two calls in one reply must not share an id"
+        );
+    }
+
+    #[test]
+    fn extract_tool_calls_defaults_missing_arguments_to_an_empty_object() {
+        let text = r#"<tool_call>{"name": "ping"}</tool_call>"#;
+        let (_, calls) = extract_tool_calls(text).expect("name alone is still a valid call");
+        assert_eq!(calls[0].function.arguments, "{}");
+    }
+
+    #[test]
+    fn extract_tool_calls_returns_none_for_ordinary_text() {
+        assert!(extract_tool_calls("The capital of France is Paris.").is_none());
+    }
+
+    #[test]
+    fn extract_tool_calls_returns_none_for_an_unclosed_tag() {
+        // A small model that starts the tag and then runs out of budget, or
+        // simply never learned to close it, must read as "no tool call" —
+        // not as a parser error, and not as a malformed call.
+        let text = r#"<tool_call>{"name": "get_weather""#;
+        assert!(extract_tool_calls(text).is_none());
+    }
+
+    #[test]
+    fn extract_tool_calls_returns_none_for_a_body_that_is_not_json() {
+        let text = "<tool_call>get_weather(Paris)</tool_call>";
+        assert!(extract_tool_calls(text).is_none());
+    }
+
+    #[test]
+    fn extract_tool_calls_returns_none_for_a_body_missing_name() {
+        let text = r#"<tool_call>{"arguments": {"city": "Paris"}}</tool_call>"#;
+        assert!(extract_tool_calls(text).is_none());
+    }
+
+    #[test]
+    fn request_wants_tools_is_false_for_an_empty_list() {
+        let mut req = request();
+        req.tools = Some(vec![]);
+        assert!(!request_wants_tools(&req));
+    }
+
+    #[test]
+    fn request_wants_tools_is_false_for_tool_choice_none() {
+        let mut req = request();
+        req.tools = Some(vec![Tool::Function {
+            function: ToolFunctionDef {
+                name: "get_weather".to_string(),
+                description: None,
+                parameters: None,
+            },
+        }]);
+        req.tool_choice = Some(serde_json::json!("none"));
+        assert!(!request_wants_tools(&req));
+    }
+
+    #[test]
+    fn request_wants_tools_is_true_for_default_auto() {
+        let mut req = request();
+        req.tools = Some(vec![Tool::Function {
+            function: ToolFunctionDef {
+                name: "get_weather".to_string(),
+                description: None,
+                parameters: None,
+            },
+        }]);
+        assert!(request_wants_tools(&req));
+    }
+
+    #[test]
+    fn validate_tool_choice_accepts_auto_and_none() {
+        let mut req = request();
+        req.tool_choice = None;
+        assert!(validate_tool_choice(&req).is_ok());
+        req.tool_choice = Some(serde_json::json!("auto"));
+        assert!(validate_tool_choice(&req).is_ok());
+        req.tool_choice = Some(serde_json::json!("none"));
+        assert!(validate_tool_choice(&req).is_ok());
+    }
+
+    #[test]
+    fn validate_tool_choice_rejects_required_and_forced_function() {
+        let mut req = request();
+        req.tool_choice = Some(serde_json::json!("required"));
+        assert!(validate_tool_choice(&req).is_err());
+
+        req.tool_choice =
+            Some(serde_json::json!({"type": "function", "function": {"name": "get_weather"}}));
+        let err =
+            validate_tool_choice(&req).expect_err("forced-function choice is not implemented");
+        assert!(
+            err.contains("auto") && err.contains("none"),
+            "rejection must name what IS supported, not just reject: {err}"
+        );
+    }
+
+    #[test]
+    fn inject_tools_instruction_appends_to_an_existing_system_message_rather_than_duplicating_it() {
+        let tools = vec![Tool::Function {
+            function: ToolFunctionDef {
+                name: "get_weather".to_string(),
+                description: Some("Look up current weather".to_string()),
+                parameters: None,
+            },
+        }];
+        let messages = vec![
+            ChatMessage {
+                role: "system".to_string(),
+                content: "You are terse.".to_string(),
+                name: None,
+                tool_calls: None,
+                tool_call_id: None,
+            },
+            ChatMessage {
+                role: "user".to_string(),
+                content: "What's the weather?".to_string(),
+                name: None,
+                tool_calls: None,
+                tool_call_id: None,
+            },
+        ];
+        let out = inject_tools_instruction(&messages, &tools);
+        let system_count = out.iter().filter(|m| m.role == "system").count();
+        assert_eq!(
+            system_count, 1,
+            "condition 3: an existing system message must be merged into, not duplicated"
+        );
+        assert!(out[0].content.starts_with("You are terse."));
+        assert!(out[0].content.contains("get_weather"));
+        assert_eq!(
+            out.len(),
+            messages.len(),
+            "no message should be dropped or added"
+        );
+    }
+
+    #[test]
+    fn inject_tools_instruction_inserts_a_system_message_when_the_caller_sent_none() {
+        let tools = vec![Tool::Function {
+            function: ToolFunctionDef {
+                name: "get_weather".to_string(),
+                description: None,
+                parameters: None,
+            },
+        }];
+        let messages = one_user_message();
+        let out = inject_tools_instruction(&messages, &tools);
+        assert_eq!(out.len(), messages.len() + 1);
+        assert_eq!(out[0].role, "system");
+        assert!(out[0].content.contains("get_weather"));
+        assert_eq!(out[1].content, messages[0].content);
+    }
+
+    /// [`stub_runner_with`] with a caller-chosen generated text, so a
+    /// plumbing test can force a known generation instead of hoping a real
+    /// model complies (tool-calls pivot, condition 1).
+    fn stub_runner_with_text(
+        text: &str,
+        finish_reason: FinishReason,
+    ) -> (
+        std::sync::mpsc::Sender<crate::engine::model_runner::InferenceJob>,
+        std::thread::JoinHandle<()>,
+    ) {
+        use crate::engine::model_runner::{CompletionResult, InferenceJob, ResponseMode};
+        let (tx, rx) = std::sync::mpsc::channel::<InferenceJob>();
+        let text = text.to_string();
+        let handle = std::thread::spawn(move || {
+            while let Ok(job) = rx.recv() {
+                if let ResponseMode::Complete(resp) = job.response_mode {
+                    let _ = resp.send(Ok(CompletionResult {
+                        text: text.clone(),
+                        prompt_tokens: 1,
+                        completion_tokens: 1,
+                        finish_reason,
+                    }));
+                }
+            }
+        });
+        (tx, handle)
+    }
+
+    #[tokio::test]
+    async fn create_chat_completion_reports_tool_calls_from_a_forced_generation() {
+        let generated =
+            r#"<tool_call>{"name": "get_weather", "arguments": {"city": "Paris"}}</tool_call>"#;
+        let (tx, runner) = stub_runner_with_text(generated, FinishReason::Stop);
+        let state = state_with_runner(None, Some(tx));
+
+        let mut req = request();
+        req.tools = Some(vec![Tool::Function {
+            function: ToolFunctionDef {
+                name: "get_weather".to_string(),
+                description: None,
+                parameters: None,
+            },
+        }]);
+
+        let response = create_chat_completion(state, req)
+            .await
+            .expect("forced generation must not error");
+        drop(runner);
+
+        assert_eq!(response.choices[0].finish_reason, "tool_calls");
+        assert_eq!(response.choices[0].message.content, "");
+        let calls = response.choices[0]
+            .message
+            .tool_calls
+            .as_ref()
+            .expect("tool_calls must be populated when the tag was found");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].function.name, "get_weather");
+    }
+
+    #[tokio::test]
+    async fn create_chat_completion_without_tools_never_parses_the_tag() {
+        // The same generated text, but the request never offered `tools` —
+        // must be returned verbatim as ordinary content, not parsed. A model
+        // quoting `<tool_call>` literally (or a caller's own conversation
+        // history containing that text) must not be mistaken for Lightbulb's
+        // own tool-prompting format on a request that never asked for it.
+        let generated =
+            r#"<tool_call>{"name": "get_weather", "arguments": {"city": "Paris"}}</tool_call>"#;
+        let (tx, runner) = stub_runner_with_text(generated, FinishReason::Stop);
+        let state = state_with_runner(None, Some(tx));
+
+        let response = create_chat_completion(state, request())
+            .await
+            .expect("forced generation must not error");
+        drop(runner);
+
+        assert_eq!(response.choices[0].finish_reason, "stop");
+        assert_eq!(response.choices[0].message.content, generated);
+        assert!(response.choices[0].message.tool_calls.is_none());
+    }
+
+    #[tokio::test]
+    async fn create_chat_completion_falls_back_to_ordinary_content_when_the_model_does_not_comply()
+    {
+        // Tools were requested, but the model answered normally anyway (the
+        // model-capability case condition 1 warns must not read as a broken
+        // parser): the response must still be a normal `stop` completion.
+        let (tx, runner) = stub_runner_with_text("Paris is sunny today.", FinishReason::Stop);
+        let state = state_with_runner(None, Some(tx));
+
+        let mut req = request();
+        req.tools = Some(vec![Tool::Function {
+            function: ToolFunctionDef {
+                name: "get_weather".to_string(),
+                description: None,
+                parameters: None,
+            },
+        }]);
+
+        let response = create_chat_completion(state, req)
+            .await
+            .expect("forced generation must not error");
+        drop(runner);
+
+        assert_eq!(response.choices[0].finish_reason, "stop");
+        assert_eq!(response.choices[0].message.content, "Paris is sunny today.");
+        assert!(response.choices[0].message.tool_calls.is_none());
+    }
+
+    #[tokio::test]
+    async fn chat_completions_rejects_stream_with_tools() {
+        let state = state_with(None);
+        let mut req = request();
+        req.stream = true;
+        req.tools = Some(vec![Tool::Function {
+            function: ToolFunctionDef {
+                name: "get_weather".to_string(),
+                description: None,
+                parameters: None,
+            },
+        }]);
+
+        let response = chat_completions(State(state), Json(req))
+            .await
+            .into_response();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn chat_completions_rejects_an_unsupported_tool_choice() {
+        let state = state_with(None);
+        let mut req = request();
+        req.tool_choice = Some(serde_json::json!("required"));
+
+        let response = chat_completions(State(state), Json(req))
+            .await
+            .into_response();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    // === n / stop / top_p (board item 71, item 2) ===
+
+    #[test]
+    fn stop_sequences_accepts_a_bare_string() {
+        let parsed: StopSequences = serde_json::from_value(serde_json::json!("</s>")).unwrap();
+        assert_eq!(parsed.as_list(), vec!["</s>"]);
+    }
+
+    #[test]
+    fn stop_sequences_accepts_an_array() {
+        let parsed: StopSequences =
+            serde_json::from_value(serde_json::json!(["</s>", "\n\n"])).unwrap();
+        assert_eq!(parsed.as_list(), vec!["</s>", "\n\n"]);
+    }
+
+    #[test]
+    fn stop_sequences_as_list_drops_empty_entries() {
+        let parsed: StopSequences = serde_json::from_value(serde_json::json!(["", "X"])).unwrap();
+        assert_eq!(parsed.as_list(), vec!["X"]);
+    }
+
+    #[test]
+    fn apply_stop_sequences_truncates_at_the_earliest_match() {
+        let (text, stopped) = apply_stop_sequences("Paris is the capital.</s> extra", &["</s>"]);
+        assert_eq!(text, "Paris is the capital.");
+        assert!(stopped);
+    }
+
+    #[test]
+    fn apply_stop_sequences_picks_the_earliest_of_several_matches() {
+        let (text, stopped) = apply_stop_sequences("abcXdefYghi", &["Y", "X"]);
+        assert_eq!(text, "abc");
+        assert!(stopped);
+    }
+
+    #[test]
+    fn apply_stop_sequences_returns_the_full_text_when_nothing_matches() {
+        let (text, stopped) = apply_stop_sequences("no stop here", &["</s>"]);
+        assert_eq!(text, "no stop here");
+        assert!(!stopped);
+    }
+
+    /// Sabotage test for the REJECT path (PM's verification condition applies
+    /// to rejects too, not just the implement): if `validate_n` were changed
+    /// to accept `n=3`, this must go red. Confirmed by temporarily hardcoding
+    /// `Ok(())` in `validate_n` and re-running — failed as expected, restored.
+    #[test]
+    fn validate_n_rejects_anything_but_one() {
+        assert!(validate_n(1).is_ok());
+        let err = validate_n(3).expect_err("n=3 must be rejected");
+        assert!(
+            err.contains('3') && !err.contains("temperature"),
+            "rejection must name the value, and must NOT still cite temperature/determinism \
+             now that real sampling has landed (lightbulb#102) — that reason is stale: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn chat_completions_rejects_n_greater_than_one() {
+        let state = state_with(None);
+        let mut req = request();
+        req.n = 3;
+
+        let response = chat_completions(State(state), Json(req))
+            .await
+            .into_response();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn chat_completions_accepts_n_equal_one() {
+        // Not a reject test: n=1 is the no-op default and must reach the
+        // ordinary (no-runner) fallback path, not a 400.
+        let state = state_with(None);
+        let req = request();
+        assert_eq!(req.n, 1);
+
+        let response = chat_completions(State(state), Json(req))
+            .await
+            .into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn chat_completions_rejects_stream_with_a_meaningful_stop() {
+        let state = state_with(None);
+        let mut req = request();
+        req.stream = true;
+        req.stop = Some(StopSequences::Single("</s>".to_string()));
+
+        let response = chat_completions(State(state), Json(req))
+            .await
+            .into_response();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn chat_completions_allows_stream_with_a_noop_stop() {
+        // An absent (or all-empty) `stop` must not be caught by the
+        // stream+stop rejection — only a MEANINGFUL stop is refused.
+        let state = state_with(None);
+        let mut req = request();
+        req.stream = true;
+        req.stop = Some(StopSequences::Multiple(vec![String::new()]));
+
+        let response = chat_completions(State(state), Json(req)).await;
+        // Streaming responses are SSE, not a JSON body with a status this
+        // harness can read directly the same way — reaching `create_chat_stream`
+        // at all (rather than the 400 branch above it) is what this test
+        // asserts, via the absence of a BAD_REQUEST status.
+        assert_ne!(response.into_response().status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn create_chat_completion_truncates_at_a_stop_sequence() {
+        let (tx, runner) = stub_runner_with_text(
+            "Paris is the capital of France.</s> unwanted continuation",
+            FinishReason::Length,
+        );
+        let state = state_with_runner(None, Some(tx));
+
+        let mut req = request();
+        req.stop = Some(StopSequences::Single("</s>".to_string()));
+
+        let response = create_chat_completion(state, req)
+            .await
+            .expect("forced generation must not error");
+        drop(runner);
+
+        assert_eq!(
+            response.choices[0].message.content,
+            "Paris is the capital of France."
+        );
+        assert_eq!(
+            response.choices[0].finish_reason, "stop",
+            "hitting a stop sequence must report finish_reason=stop even though the \
+             runner's own reason was Length"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_chat_completion_leaves_text_alone_when_no_stop_configured() {
+        let (tx, runner) = stub_runner_with_text("ordinary answer", FinishReason::Stop);
+        let state = state_with_runner(None, Some(tx));
+
+        let response = create_chat_completion(state, request())
+            .await
+            .expect("forced generation must not error");
+        drop(runner);
+
+        assert_eq!(response.choices[0].message.content, "ordinary answer");
+        assert_eq!(response.choices[0].finish_reason, "stop");
     }
 }
