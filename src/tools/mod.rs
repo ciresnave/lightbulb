@@ -313,7 +313,6 @@ impl ToolRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use candlelight::core::{DType, Device, Tensor};
 
     #[test]
     fn test_text_only_model() -> Result<()> {
