@@ -693,6 +693,84 @@ pub fn splice_prefix(
     Ok(filled)
 }
 
+/// Reshuffle one physical block's K-or-V content from the pool's
+/// position-major `[block_size, n_kv_heads, head_dim]` layout (what
+/// [`BlockPlane::read_block_f32`] returns) into the head-major
+/// `[n_kv_heads, block_size, head_dim]` layout a persistent `fuel::
+/// inference_context::KvCache`'s per-layer storage uses (`[1, n_kv_heads,
+/// max_seq_len, head_dim]` — this is the slice for one `block_size`-wide range
+/// along the `max_seq_len` axis).
+///
+/// Pure data reshuffling, no graph ops and no device access — confirmed with
+/// the fuel lane (board item 86, 2026-10-01) that this transpose is orthogonal
+/// to the fuel-side seed primitive and belongs on Lightbulb's side. A naive
+/// byte copy between these two layouts would silently put each position's K/V
+/// under the wrong index — this function is the one thing standing between a
+/// prefix splice and that corruption.
+pub fn pool_block_to_kv_cache_layout(
+    pool_block: &[f32],
+    block_size: usize,
+    n_kv_heads: usize,
+    head_dim: usize,
+) -> Vec<f32> {
+    assert_eq!(
+        pool_block.len(),
+        block_size * n_kv_heads * head_dim,
+        "pool_block_to_kv_cache_layout: input length does not match block_size * n_kv_heads * head_dim"
+    );
+    let mut out = vec![0.0f32; pool_block.len()];
+    for s in 0..block_size {
+        for h in 0..n_kv_heads {
+            for d in 0..head_dim {
+                let src = s * (n_kv_heads * head_dim) + h * head_dim + d;
+                let dst = h * (block_size * head_dim) + s * head_dim + d;
+                out[dst] = pool_block[src];
+            }
+        }
+    }
+    out
+}
+
+/// Extract a [`PrefixMatch`]'s shared blocks from `plane` and hand each
+/// (layer, K-or-V, position offset, transposed data) tuple to `seed`, in
+/// layer-then-kind-then-block order. Returns the match's `shared_tokens`.
+///
+/// `seed` is injected rather than calling a Fuel primitive directly because,
+/// as of this writing (board item 86, 2026-10-01), Fuel does not yet have a
+/// way to write host bytes into a persistent `KvCache`'s `[0, N)` position
+/// range without invalidating `device_location` (confirmed feasible, PR in
+/// flight on the fuel side, shaped like fuel#271/#272). **Do not wire `seed`
+/// to a guessed Fuel call before that PR lands and is confirmed real** — in
+/// tests, mock it; the real caller is added once the primitive exists.
+///
+/// Does not splice — the caller is expected to have already called
+/// [`splice_prefix`] (or otherwise established that `m.donor` holds the
+/// claimed blocks); this only reads them back out for seeding a *different*
+/// (persistent, non-pooled) cache. Errors if `m.donor` is not a live session
+/// in `plane` (e.g. discarded between the lookup and this call).
+pub fn extract_prefix_match_for_kv_cache_seed(
+    plane: &impl BlockPlane,
+    m: &PrefixMatch,
+    mut seed: impl FnMut(usize, BlockKind, usize, &[f32]) -> Result<(), PolicyError>,
+) -> Result<usize, PolicyError> {
+    let g = plane.plane_geometry();
+    for layer in 0..g.n_layers {
+        for kind in [BlockKind::K, BlockKind::V] {
+            for b in 0..m.blocks {
+                let phys = plane
+                    .blocks()
+                    .resident_block(m.donor, b)
+                    .ok_or(PolicyError::Alloc(KvAllocError::UnknownSession))?;
+                let raw = plane.read_block_f32(layer, kind, phys)?;
+                let transposed =
+                    pool_block_to_kv_cache_layout(&raw, g.block_size, g.n_kv_heads, g.head_dim);
+                seed(layer, kind, b * g.block_size, &transposed)?;
+            }
+        }
+    }
+    Ok(m.shared_tokens)
+}
+
 // ===========================================================================
 // Segmented eviction: spans → block indices → EvictReport → span state
 // ===========================================================================
@@ -2918,6 +2996,118 @@ mod tests {
         );
         // promote deletes its keys.
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+
+    // -------------------------------------------------------------------
+    // Prefix-match -> persistent KvCache handoff (option (b), board item 86).
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn pool_block_to_kv_cache_layout_transposes_position_major_to_head_major() {
+        // block_size=2, n_kv_heads=2, head_dim=3: every (s, h, d) triple gets a
+        // distinct value so a wrong axis order shows up as a wrong number, not
+        // a coincidentally-matching one.
+        let (bs, hkv, d) = (2, 2, 3);
+        let mut pool_block = vec![0.0f32; bs * hkv * d];
+        for s in 0..bs {
+            for h in 0..hkv {
+                for dd in 0..d {
+                    pool_block[s * (hkv * d) + h * d + dd] = (s * 100 + h * 10 + dd) as f32;
+                }
+            }
+        }
+        let out = pool_block_to_kv_cache_layout(&pool_block, bs, hkv, d);
+        assert_eq!(out.len(), pool_block.len());
+        for s in 0..bs {
+            for h in 0..hkv {
+                for dd in 0..d {
+                    let want = (s * 100 + h * 10 + dd) as f32;
+                    let got = out[h * (bs * d) + s * d + dd];
+                    assert_eq!(
+                        got, want,
+                        "head-major index (h={h}, s={s}, d={dd}) did not carry the \
+                         position-major value from (s={s}, h={h}, d={dd})"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn extract_prefix_match_calls_seed_once_per_layer_kind_block_with_shared_token_count() {
+        let bs = 2;
+        let g = geom(/* num_blocks */ 8, bs); // n_layers=1, n_kv_heads=1, head_dim=2
+        let mut plane = MemPlane::new(g);
+
+        let donor = plane.blocks_mut().open();
+        plane.blocks_mut().append(donor, 4).unwrap(); // 2 blocks
+        let phys0 = plane.blocks().resident_block(donor, 0).unwrap();
+        let phys1 = plane.blocks().resident_block(donor, 1).unwrap();
+        fill_io(&plane, &g, phys0, 1.0);
+        fill_io(&plane, &g, phys1, 1000.0);
+
+        let m = PrefixMatch {
+            donor,
+            blocks: 2,
+            shared_tokens: 4,
+            remainder_tokens: 0,
+        };
+
+        let mut calls: Vec<(usize, BlockKind, usize, Vec<f32>)> = Vec::new();
+        let shared =
+            extract_prefix_match_for_kv_cache_seed(&plane, &m, |layer, kind, pos, data| {
+                calls.push((layer, kind, pos, data.to_vec()));
+                Ok(())
+            })
+            .unwrap();
+
+        assert_eq!(shared, 4, "must report the match's own shared_tokens");
+        // 1 layer * {K, V} * 2 blocks = 4 calls.
+        assert_eq!(calls.len(), 4);
+        // Documented order is layer-then-kind-then-block: K's two blocks, then
+        // V's two blocks, each block 1 landing at position `block_size`.
+        let kinds_and_positions: Vec<(BlockKind, usize)> = calls
+            .iter()
+            .map(|(_, kind, pos, _)| (*kind, *pos))
+            .collect();
+        assert_eq!(
+            kinds_and_positions,
+            vec![
+                (BlockKind::K, 0),
+                (BlockKind::K, bs),
+                (BlockKind::V, 0),
+                (BlockKind::V, bs),
+            ]
+        );
+        // Spot-check one call's data round-trips fill_io's own content, transposed
+        // (n_kv_heads=1 here, so the transpose is a no-op — correctness of the
+        // transpose itself is covered by the dedicated test above).
+        let (_, kind0, _, data0) = &calls[0];
+        assert_eq!(*kind0, BlockKind::K);
+        // fill_io's K seed=1.0; block_elems = bs(2) * n_kv_heads(1) * head_dim(2) = 4.
+        assert_eq!(data0, &vec![1.0, 2.0, 3.0, 4.0]);
+    }
+
+    #[test]
+    fn extract_prefix_match_errors_if_the_donor_was_discarded() {
+        let g = geom(4, 2);
+        let mut plane = MemPlane::new(g);
+        let donor = plane.blocks_mut().open();
+        plane.blocks_mut().append(donor, 2).unwrap(); // 1 block
+        plane.blocks_mut().discard(donor);
+
+        let m = PrefixMatch {
+            donor,
+            blocks: 1,
+            shared_tokens: 2,
+            remainder_tokens: 0,
+        };
+        let err =
+            extract_prefix_match_for_kv_cache_seed(&plane, &m, |_, _, _, _| Ok(())).unwrap_err();
+        assert!(matches!(
+            err,
+            PolicyError::Alloc(KvAllocError::UnknownSession)
+        ));
     }
 
     // -------------------------------------------------------------------
