@@ -48,16 +48,12 @@ pub mod test_notice;
 pub mod tls; // TLS certificate management
 pub mod tools; // Tool registry with capability detection (M5.6)
 
-pub async fn hello_generate(prompt: &str) -> anyhow::Result<()> {
-    // Trivial Candle call to verify dependency linkage; replace with real text-gen soon
-    let a = candlelight::core::Tensor::arange(0f32, 4f32, &candlelight::core::Device::Cpu)?;
-    let s = a.sum_all()?.to_scalar::<f32>()?;
-    println!("[hello-generate] prompt='{prompt}', candle_sum={s}");
-    Ok(())
-}
-
 /// Generate a few tokens locally using Candle's LLaMA model and tokenizer.json in the same folder.
 /// CPU-only, offline. Expects `config.json`, `tokenizer.json`, and `*.safetensors` in `model_dir`.
+///
+/// Candlelight-entangled via `crate::loaders::load_local_llama` — moves with `loaders/mod.rs` as
+/// part of the expanded PR 12 (board item 106), not independently deletable. See
+/// `tests/integration_local_model.rs`'s real (if `#[ignore]`d) caller.
 pub fn local_llama_generate(
     model_dir: &str,
     prompt: &str,

@@ -2,7 +2,7 @@
 //!
 //! Provides structs for calculating memory usage of models, caches, and activations.
 
-use candlelight::core::DType;
+use fuel::DType;
 
 /// Memory usage for model weights
 #[derive(Debug, Clone)]
@@ -30,15 +30,7 @@ impl WeightMemory {
             WeightMemory::Unquantized {
                 dtype,
                 num_parameters,
-            } => {
-                let bytes_per_param = match dtype {
-                    DType::F32 => 4,
-                    DType::F16 | DType::BF16 => 2,
-                    DType::U8 => 1,
-                    _ => 4, // Conservative default
-                };
-                num_parameters * bytes_per_param
-            }
+            } => num_parameters * dtype.size_in_bytes(),
 
             WeightMemory::Quantized {
                 bits,
@@ -106,11 +98,7 @@ pub struct KvCacheMemory {
 impl KvCacheMemory {
     /// Calculate KV cache memory in bytes
     pub fn bytes(&self) -> usize {
-        let bytes_per_element = match self.dtype {
-            DType::F32 => 4,
-            DType::F16 | DType::BF16 => 2,
-            _ => 2, // Default to FP16
-        };
+        let bytes_per_element = self.dtype.size_in_bytes();
 
         // Cache shape: [num_layers, 2 (K+V), batch_size, num_kv_heads, max_seq_len, head_dim]
         self.num_layers
@@ -148,11 +136,7 @@ pub struct ActivationMemory {
 impl ActivationMemory {
     /// Estimate activation memory (peak usage during forward pass)
     pub fn bytes(&self) -> usize {
-        let bytes_per_element = match self.dtype {
-            DType::F32 => 4,
-            DType::F16 | DType::BF16 => 2,
-            _ => 2,
-        };
+        let bytes_per_element = self.dtype.size_in_bytes();
 
         // Peak activations (conservative estimate):
         // - Input embeddings: batch × seq × hidden
@@ -225,6 +209,21 @@ impl MemoryEstimate {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The latent bug `fuel::DType::size_in_bytes()` fixes (board item 106,
+    /// translation guide §4): the old hand-rolled match's `_ => 4` default
+    /// silently mis-sized `I8` as 4 bytes/param instead of 1 — a 4x
+    /// overestimate for any caller passing an integer dtype this match never
+    /// enumerated. Pinned here so the fix is a proven correction, not an
+    /// assumed one.
+    #[test]
+    fn i8_weights_are_sized_as_one_byte_per_param_not_four() {
+        let weights = WeightMemory::Unquantized {
+            dtype: DType::I8,
+            num_parameters: 1_000_000,
+        };
+        assert_eq!(weights.bytes(), 1_000_000);
+    }
 
     #[test]
     fn test_weight_memory_fp16() {

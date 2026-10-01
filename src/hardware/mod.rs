@@ -235,18 +235,88 @@ pub enum InferenceBackend {
 }
 
 impl InferenceBackend {
-    /// Convert to Candle device
-    pub fn to_device(&self) -> candlelight::core::Device {
+    /// Convert to a Fuel device (board item 106, translation guide §3).
+    ///
+    /// `fuel::Device` is a struct (`Device::cpu()`), not an enum with a
+    /// `Device::Cpu` variant like candlelight's — CPU/CUDA/Metal/Vulkan are
+    /// the same type, distinguished by which backend is inside, not by a
+    /// match arm on the caller's side.
+    ///
+    /// Vulkan is a real capability gain over candlelight (which has none at
+    /// all), gated behind this crate's own `vulkan` feature because fuel-core
+    /// doesn't even compile its `vulkan_backend` module without `--features
+    /// vulkan` — unlike CUDA/Metal, which always compile and fall back to CPU
+    /// at runtime when the hardware or feature isn't present.
+    pub fn to_device(&self) -> fuel::Device {
         match self {
-            Self::Cpu => candlelight::core::Device::Cpu,
-            Self::Cuda => candlelight::core::Device::cuda_if_available(0)
-                .unwrap_or(candlelight::core::Device::Cpu),
-            Self::Rocm => candlelight::core::Device::Cpu, // TODO: Add ROCm support to Candle
-            Self::Metal => {
-                candlelight::core::Device::new_metal(0).unwrap_or(candlelight::core::Device::Cpu)
+            Self::Cpu => fuel::Device::cpu(),
+            Self::Cuda => {
+                fuel::cuda_backend::device_if_available(0).unwrap_or_else(|_| fuel::Device::cpu())
             }
-            Self::Vulkan => candlelight::core::Device::Cpu, // TODO: Add Vulkan support
+            // No fuel ROCm backend exists either (confirmed: no rocm_backend
+            // module anywhere in fuel-core, same as candlelight) — carried
+            // forward unchanged, not a regression introduced by this port.
+            Self::Rocm => fuel::Device::cpu(),
+            Self::Metal => {
+                fuel::metal_backend::device_if_available(0).unwrap_or_else(|_| fuel::Device::cpu())
+            }
+            #[cfg(feature = "vulkan")]
+            Self::Vulkan => {
+                fuel::vulkan_backend::new_device().unwrap_or_else(|_| fuel::Device::cpu())
+            }
+            #[cfg(not(feature = "vulkan"))]
+            Self::Vulkan => fuel::Device::cpu(),
         }
+    }
+}
+
+#[cfg(test)]
+mod inference_backend_to_device_tests {
+    use super::*;
+
+    /// `candlelight::core::Device` ALSO has `.is_cpu()`, so an `is_cpu()`
+    /// assertion alone passes against either implementation and proves
+    /// nothing about which one is in use. This pins the actual type: `fuel::
+    /// Device` is a struct with `.location()` (`fuel::DeviceLocation`),
+    /// which candlelight's enum-shaped `Device` does not have at all — a
+    /// compile error here is the discriminator, not a runtime assertion.
+    #[test]
+    fn to_device_returns_a_real_fuel_device_not_candlelights() {
+        let dev: fuel::Device = InferenceBackend::Cpu.to_device();
+        assert_eq!(dev.location(), fuel::DeviceLocation::Cpu);
+    }
+
+    #[test]
+    fn cpu_maps_to_a_cpu_device() {
+        assert!(InferenceBackend::Cpu.to_device().is_cpu());
+    }
+
+    #[test]
+    fn cuda_falls_back_to_cpu_without_cuda_hardware() {
+        // This machine/build has no CUDA — device_if_available must fall back,
+        // not error.
+        assert!(InferenceBackend::Cuda.to_device().is_cpu());
+    }
+
+    #[test]
+    fn rocm_is_cpu_no_fuel_rocm_backend_exists() {
+        // Confirmed absent in fuel (no rocm_backend module anywhere) during
+        // board item 106's translation-guide research — carried forward
+        // unchanged, not a regression introduced by this port.
+        assert!(InferenceBackend::Rocm.to_device().is_cpu());
+    }
+
+    #[test]
+    fn metal_falls_back_to_cpu_without_metal_hardware() {
+        assert!(InferenceBackend::Metal.to_device().is_cpu());
+    }
+
+    #[test]
+    fn vulkan_falls_back_to_cpu_without_the_vulkan_feature_enabled() {
+        // Default build (no `vulkan` feature): fuel-core's vulkan_backend
+        // module doesn't exist at all, so this must be CPU, not a compile
+        // error and not a panic.
+        assert!(InferenceBackend::Vulkan.to_device().is_cpu());
     }
 }
 
