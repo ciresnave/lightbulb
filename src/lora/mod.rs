@@ -69,6 +69,77 @@ pub struct LoraWeight {
     pub rank: usize,
 }
 
+/// The flat host arrays `fuel_nn::modules::lora::LoraLinear::new` expects,
+/// bridged from [`LoraWeight`]'s HF/PyTorch-layout tensors by
+/// [`LoraWeight::to_fuel_lora_arrays`].
+pub struct FuelLoraArrays {
+    /// `[in_features, rank]`, row-major.
+    pub lora_a: std::sync::Arc<[f32]>,
+    /// `[rank, out_features]`, row-major.
+    pub lora_b: std::sync::Arc<[f32]>,
+    pub rank: usize,
+    pub in_features: usize,
+    pub out_features: usize,
+}
+
+impl LoraWeight {
+    /// Bridges this adapter's A/B matrices to the flat host arrays
+    /// `fuel_nn::modules::lora::LoraLinear::new` expects (board item 106,
+    /// PR 17 — the narrow piece of `lora/mod.rs` confirmed independent of PR
+    /// 16's mlmf gating, since it depends only on `LoraLinear::new`'s INPUT
+    /// shape, never on how `LoraAdapter::load` populates `self.a`/`self.b`).
+    ///
+    /// This crate stores `a`/`b` in HF/PyTorch's native layout (`a: [rank,
+    /// in_features]`, `b: [out_features, rank]` — confirmed against
+    /// `merge_into`'s own shape checks, not assumed). Fuel's `LoraLinear`
+    /// wants each TRANSPOSED (`lora_a: [in_features, rank]`, `lora_b: [rank,
+    /// out_features]` — confirmed against `fuel-nn/src/modules/lora.rs`'s own
+    /// doc comment, which states this explicitly).
+    pub fn to_fuel_lora_arrays(&self) -> Result<FuelLoraArrays> {
+        let a_dims = self.a.dims();
+        let b_dims = self.b.dims();
+        if a_dims.len() != 2 || b_dims.len() != 2 {
+            bail!(
+                "LoraWeight::to_fuel_lora_arrays: expected 2D A/B matrices, got {:?}/{:?}",
+                a_dims,
+                b_dims
+            );
+        }
+        let (rank, in_features) = (a_dims[0], a_dims[1]);
+        let (out_features, b_rank) = (b_dims[0], b_dims[1]);
+        if b_rank != rank {
+            bail!("LoraWeight::to_fuel_lora_arrays: A rank {rank} does not match B rank {b_rank}");
+        }
+
+        // `to_vec1::<f32>()` requires the tensor already be F32 — a valid
+        // F16/BF16 adapter (a real, common checkpoint format) would otherwise
+        // error here instead of producing the promised f32 arrays. Convert
+        // rather than reject.
+        let lora_a: Vec<f32> = self
+            .a
+            .to_dtype(candlelight::core::DType::F32)?
+            .t()?
+            .contiguous()?
+            .flatten_all()?
+            .to_vec1()?;
+        let lora_b: Vec<f32> = self
+            .b
+            .to_dtype(candlelight::core::DType::F32)?
+            .t()?
+            .contiguous()?
+            .flatten_all()?
+            .to_vec1()?;
+
+        Ok(FuelLoraArrays {
+            lora_a: lora_a.into(),
+            lora_b: lora_b.into(),
+            rank,
+            in_features,
+            out_features,
+        })
+    }
+}
+
 /// LoRA format variants with different naming conventions
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LoraFormat {
@@ -667,5 +738,96 @@ mod tests {
 
         assert!(!report.is_valid());
         assert_eq!(report.total_components(), 3);
+    }
+
+    /// `to_fuel_lora_arrays` bridges `LoraLinear::new`'s INPUT shape, not
+    /// `LoraAdapter::load`'s storage format (board item 106, PR 17 — the
+    /// narrow piece confirmed independent of PR 16's mlmf gating). Fuel's own
+    /// doc comment on `lora_a`/`lora_b` says each is the TRANSPOSE of HF's
+    /// native layout; this test pins that with distinct per-cell values so a
+    /// missing transpose fails loudly, not coincidentally.
+    #[test]
+    fn to_fuel_lora_arrays_transposes_a_and_b_into_fuels_layout() {
+        // rank=2, in_features=3: a is HF-native [rank, in_features].
+        let a =
+            Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], (2, 3), &Device::Cpu).unwrap();
+        // out_features=4, rank=2: b is HF-native [out_features, rank].
+        let b = Tensor::from_vec(
+            vec![10.0f32, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0],
+            (4, 2),
+            &Device::Cpu,
+        )
+        .unwrap();
+        let weight = LoraWeight {
+            a,
+            b,
+            alpha: 16.0,
+            rank: 2,
+        };
+
+        let arrays = weight.to_fuel_lora_arrays().unwrap();
+
+        assert_eq!(
+            (arrays.rank, arrays.in_features, arrays.out_features),
+            (2, 3, 4)
+        );
+        // a transposed: [3,2] row-major = [[1,4],[2,5],[3,6]] flattened.
+        assert_eq!(arrays.lora_a.as_ref(), &[1.0, 4.0, 2.0, 5.0, 3.0, 6.0]);
+        // b transposed: [2,4] row-major = [[10,30,50,70],[20,40,60,80]] flattened.
+        assert_eq!(
+            arrays.lora_b.as_ref(),
+            &[10.0, 30.0, 50.0, 70.0, 20.0, 40.0, 60.0, 80.0]
+        );
+    }
+
+    #[test]
+    fn to_fuel_lora_arrays_rejects_a_b_rank_mismatch() {
+        let a = Tensor::zeros((2, 3), DType::F32, &Device::Cpu).unwrap(); // rank=2
+        let b = Tensor::zeros((4, 5), DType::F32, &Device::Cpu).unwrap(); // rank=5
+        let weight = LoraWeight {
+            a,
+            b,
+            alpha: 16.0,
+            rank: 2,
+        };
+        assert!(weight.to_fuel_lora_arrays().is_err());
+    }
+
+    /// Caught by Sourcery review on lightbulb#113: `to_vec1::<f32>()` requires
+    /// the tensor already be F32 — a valid F16/BF16 LoRA adapter (a real,
+    /// common checkpoint format, not a hypothetical) would error instead of
+    /// producing the promised f32 arrays. Pins the fix: non-F32 inputs must
+    /// convert, not fail.
+    #[test]
+    fn to_fuel_lora_arrays_converts_non_f32_dtypes_instead_of_erroring() {
+        let a = Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], (2, 3), &Device::Cpu)
+            .unwrap()
+            .to_dtype(DType::F16)
+            .unwrap();
+        let b = Tensor::from_vec(
+            vec![10.0f32, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0],
+            (4, 2),
+            &Device::Cpu,
+        )
+        .unwrap()
+        .to_dtype(DType::F16)
+        .unwrap();
+        let weight = LoraWeight {
+            a,
+            b,
+            alpha: 16.0,
+            rank: 2,
+        };
+
+        let arrays = weight
+            .to_fuel_lora_arrays()
+            .expect("F16 adapter weights must convert, not error");
+        assert_eq!(
+            (arrays.rank, arrays.in_features, arrays.out_features),
+            (2, 3, 4)
+        );
+        // F16 round-trips these exact values losslessly, so the transposed
+        // layout check from the F32 test applies unchanged.
+        assert_eq!(arrays.lora_a.as_ref(), &[1.0, 4.0, 2.0, 5.0, 3.0, 6.0]);
     }
 }
