@@ -8,38 +8,42 @@ Each PR below is scoped so `cargo build`/`cargo test` (default features) and `ca
 
 ---
 
-## Phase A — zero-coupling deletes and swaps (no cross-file dependency, safe to do in any order, listed cheapest-first)
+## ⚠️ Resequencing (2026-10-01, PM-approved, not a scope/risk change — see HANDOFF.md)
 
-**PR 1 — `multi_gpu::topology` → `fuel-hardware`.**
-Delete `src/multi_gpu/topology.rs`'s hand-rolled `DeviceTopology::discover()` (hardcoded 80GB guess, `// TODO: Candle API for memory info`), replace with `fuel-hardware::probe::ProbeReport::probe_all()`. No other file depends on this one's internals beyond `multi_gpu/config.rs`'s consumption of its output shape — update that call site in the same PR. Manifest ref: §3. Independently deployable: this subsystem isn't on the request-serving hot path yet (multi-GPU isn't wired to the fuel-engine feature at all today).
+Original PRs 2, 3, 5, 6, and the `loaders/mod.rs` half of PR 4 turned out NOT to be independent, contrary
+to how they were scoped below. Found while implementing PR 1: the manifest's "does an equivalent exist
+at the destination" check didn't verify "what does the EXISTING caller need back" — every one of these
+items is a type/trait that candlelight-typed caller files (`custom_attention.rs`, `custom_transformer.rs`,
+`custom_transformer_block.rs`, `mlp_wrapper.rs`, `parallel_model_manager.rs`, `batched_llama*.rs`,
+`speculative_adapters.rs`) construct from candlelight `VarBuilder`s or hold as fields — you cannot swap
+the wrapped type without those callers' weight-construction code already being on fuel, which is PR 12's
+job, not a standalone PR. **All five are MOVED into an expanded PR 12, below** — see that entry for the
+full real caller list per item. PRs 1, 7, 8, 9, and the `lib.rs`-only half of PR 4 remain independent,
+confirmed by checking every production caller (not just the destination), and PR 1 and PR 7 are done
+(lightbulb#109, lightbulb#110).
 
-**PR 2 — `model/quantizable_linear.rs` → `fuel-nn::modules::quantizable_linear`.**
-Direct match, single-file delete. Manifest ref: §1.
+---
 
-**PR 3 — `model/fused_rmsnorm.rs` → `fuel-nn::modules::norm::RmsNorm`.**
-Delete the file; in the same PR, `grep` the whole tree for any other `candle-layer-norm` consumer before removing that git dependency + the `[patch]` block in `Cargo.toml` (manifest §1 flags this check explicitly — don't drop the patch block on the assumption this was the only user without verifying).
+## Phase A — zero-coupling deletes and swaps (confirmed zero production callers beyond the file's own tests, checked per-item — not just "a fuel destination exists")
 
-**PR 4 — `src/lib.rs`'s `hello_generate`/`local_llama_generate` + `src/loaders/mod.rs` (whole file) → delete.**
-Both fully superseded by `src/model_fuel/{generate.rs,loader.rs,loader_f32.rs,loader_gguf.rs}` already in-repo. Manifest §7. Confirm no other file calls `crate::loaders::load_local_llama` before deleting (`loaders/awq.rs`, kept until Phase C, must not import from `loaders/mod.rs`'s Llama-specific code — check that boundary in this PR).
+**PR 1 — `multi_gpu::topology` → `fuel-hardware`. DONE — lightbulb#109.**
+Replaced the hand-rolled `DeviceTopology::discover()` (hardcoded 80GB guess, no real P2P/interconnect) with real `fuel::probe::ProbeReport`/`fuel::topology::SystemTopology` measurements. Manifest ref: §3.
 
-**PR 5 — `cache/parallel_cache_builder.rs`, `cache/prefix_cache.rs` → delete, wire `fuel-inference::prefix_cache`.**
-`parallel_cache_builder.rs` is already superseded by `src/model_fuel/policies.rs` in-repo (pure delete). `prefix_cache.rs` needs `fuel-inference` added as a real `src/` dependency (today it's only a test-only dependency per the translation guide §1 — this PR is also where that Cargo.toml change happens) and the call sites repointed at `PrefixCache::{new,lookup,insert}`. Translation guide §1.
+**PR 4 — `src/lib.rs`'s `hello_generate`/`local_llama_generate` → delete.**
+Confirmed zero callers anywhere outside `src/lib.rs` itself (re-checked specifically for this resequencing — the `loaders/mod.rs` half of the original PR 4 is NOT safe, see PR 12). Superseded by `src/model_fuel/generate.rs`. Manifest §7 (partial — the manifest's own §7 bundled this with `loaders/mod.rs`, which this resequencing splits apart).
 
-**PR 6 — `engine/speculative.rs` → wire `fuel-inference::speculative`.**
-Bigger shape change than PR 5: fuel's `verify_draft` takes realized host `Vec<f32>` logprobs, not live `Tensor`s (translation guide §2) — the caller must realize logits before calling verify, so this PR touches whatever currently calls `SpeculativeModel::forward_logits` as well as the trait itself. Do this after PR 5 so `fuel-inference` is already a real dependency, not because of a code dependency between the two.
-
-**PR 7 — `hardware/mod.rs::to_device()` translation.**
-Swap `candlelight::core::Device` (enum) for `fuel::Device` (struct, `Device::cpu()`/`cuda_backend::device_if_available()`/`metal_backend::device_if_available()`/`vulkan_backend::new_device()`) per translation guide §3. This one is a **real capability gain** (fuel has working Vulkan; candlelight's Vulkan arm was always a CPU-fallback stub) — worth calling out in the PR description since it changes observable behavior on Vulkan-capable hardware, which per CireSnave's own versioning rule (portfolio CLAUDE.md §9) means this PR needs a version bump, likely minor (new capability, not breaking — verify against the "does a conforming caller's observed outcome change for a request it could already legally send" test before deciding major vs minor).
+**PR 7 — `hardware/mod.rs::to_device()` translation. DONE — lightbulb#110.**
+`candlelight::core::Device` (enum) → `fuel::Device` (struct). Confirmed zero production callers before touching it (`model_selection.rs` uses `InferenceBackend` as a value, never calls `.to_device()`). Real capability gain: fuel has working Vulkan, candlelight's Vulkan arm was always a CPU-fallback stub — version-bump judgment call per CireSnave's breaking-version test, not yet made (PR not yet merged).
 
 **PR 8 — `memory/{estimate,speculative,utils}.rs` DType translation.**
-Replace hand-rolled `match dtype {...}` byte-width lookups with `fuel::DType::size_in_bytes()`. Translation guide §4 notes this *fixes* a latent bug (today's default-arm fallback silently mis-sizes `I8`/`I16`/`I32`) — flag in the PR description as a correctness fix, not just a mechanical swap, since it may change memory-estimate output for any caller already passing those dtypes (versioning judgment call, same test as PR 7).
+Replace hand-rolled `match dtype {...}` byte-width lookups with `fuel::DType::size_in_bytes()`. Confirmed zero external callers of `WeightMemory`/`ActivationMemory`/`KvCacheMemory` (checked for this resequencing). Translation guide §4 notes this *fixes* a latent bug (today's default-arm fallback silently mis-sizes `I8`/`I16`/`I32`) — flag in the PR description as a correctness fix, not just a mechanical swap.
 
 **PR 9 — `tools/mod.rs` test-only import swap.**
 Trivial, bundle with whichever earlier PR touches the module `tools/mod.rs`'s tests actually exercise, or land standalone — no risk either way.
 
 ---
 
-## Phase B — multi-GPU parallelism (each strategy independently swappable; `Hybrid`/`PipeDream`/distributed-cache storage explicitly NOT included, see blockers below)
+## Phase B — multi-GPU parallelism + the candlelight model-path deletion (expanded 2026-10-01)
 
 **PR 10 — `multi_gpu::tensor_parallel` Column/Row → `fuel-parallel::tensor_parallel::{ColumnParallel,RowParallel}`.**
 Depends on PR 1 (fuel-hardware topology already swapped in, so this PR's device-group construction has a consistent topology source). `ShardingStrategy::Hybrid`'s bail stays as-is — manifest §3 confirms no fuel destination exists for it yet; do not invent one in this PR.
@@ -47,12 +51,20 @@ Depends on PR 1 (fuel-hardware topology already swapped in, so this PR's device-
 **PR 11 — `multi_gpu::pipeline_parallel` GPipe → `fuel-parallel::pipeline_parallel::GPipe`.**
 Independent of PR 10 (different sharding axis) — can land before, after, or in parallel with it. `PipeDream`/`Interleaved1F1B` bails stay, same reasoning as PR 10's `Hybrid`.
 
-**PR 12 — `model/parallel_model_manager.rs`, `model/batched_llama*.rs`, and the rest of `model/custom_transformer*.rs`/`custom_attention.rs`/`batch_metadata.rs`/`chunked_prefill.rs`/`decode_state.rs`/`kv_tensor.rs`/`mlp_wrapper.rs` → delete, confirm `model_fuel/batched.rs` covers every deleted code path.**
-This is the largest single PR in the sequence by line count (manifest §1: ~6,700 candlelight lines across 9 files) but the replacement (`model_fuel/batched.rs`) already exists and is already tested under `--features fuel-engine`. The PR's job is verifying coverage, not writing new logic — run the existing `model_fuel` test suite plus any acceptance test in `tests/fuel_engine_http.rs` (per HANDOFF: last run by hand, re-run it as part of this PR's verification, don't trust a stale 2026-08-08 result) before deleting the candlelight-path files. This PR is also the natural point to decide whether the default (non-`fuel-engine`) build path gets deleted here or in a later, separate "flip the default" PR — recommend the latter (Phase D below), so this PR stays a pure move/delete without also changing which path serves production traffic.
+**PR 12 (EXPANDED 2026-10-01) — the candlelight model-path deletion. Absorbs original PRs 2, 3, 5, 6, and the `loaders/mod.rs` half of PR 4.**
+Not independently sub-deployable in the old sense — these all share real callers with each other and with the files this PR already deleted. One coordinated PR (or a tightly internally-ordered stack of commits within it, verified green at each step), not N parallel-mergeable PRs:
+- `model/quantizable_linear.rs` → `fuel-nn::modules::quantizable_linear` (was PR 2). Real callers: `custom_attention.rs`, `custom_transformer.rs`, `mlp_wrapper.rs` (all deleted by this PR) — their candlelight `VarBuilder`-based construction must move to fuel's `WeightStorage` construction as part of the same change, not before it.
+- `model/fused_rmsnorm.rs` → `fuel-nn::modules::norm::RmsNorm` (was PR 3). Real callers: `custom_transformer.rs`, `custom_transformer_block.rs` (both deleted by this PR). Same `candle-layer-norm` dependency/`[patch]`-block check as originally scoped, run it once this PR has actually removed every candlelight consumer.
+- `src/loaders/mod.rs` (whole file) → delete (the half of old PR 4 that isn't safe standalone). Real caller: `parallel_model_manager.rs` (deleted by this PR). `loaders/awq.rs` (Phase C, kept) must not import from `loaders/mod.rs`'s Llama-specific code — check that boundary.
+- `cache/parallel_cache_builder.rs` → delete, superseded by `src/model_fuel/policies.rs` (was PR 5, narrower half). Real callers found: `custom_attention.rs`, `custom_transformer.rs`, `custom_transformer_block.rs`, `parallel_model_manager.rs`, `batched_llama_wrapper.rs` (all deleted by this PR) — **but also** `speculative_adapters.rs` (not deleted by this PR, see below) **and** `multi_gpu/{distributed_cache.rs,pipeline_parallel.rs}` (not deleted by this PR, PR 10/11's territory). **This PR's deletion of `parallel_cache_builder.rs` is gated on ALL of its callers being gone — do not delete it here if `speculative_adapters.rs` or the two `multi_gpu` files still reference it.** Track as an exit condition, not an assumption.
+- `cache/prefix_cache.rs` → wire `fuel-inference::prefix_cache` (was PR 5, other half). Real caller: `parallel_model_manager.rs` (deleted by this PR) — narrower than `parallel_cache_builder.rs`, no known residual caller outside this PR's scope, but re-verify at PR time rather than trusting this note.
+- `engine/speculative.rs` → wire `fuel-inference::speculative`, **together with** `model/speculative_adapters.rs`'s own port (was PR 6, now explicitly bundled — `speculative_adapters.rs` is `engine/speculative.rs`'s one real caller and is itself candlelight-entangled, so wiring the trait without also porting its one caller leaves dead/broken code). This is what closes out `parallel_cache_builder.rs`'s remaining caller from the bullet above (minus the two `multi_gpu` files).
+- `model/parallel_model_manager.rs`, `model/batched_llama*.rs`, `model/custom_transformer*.rs`, `model/custom_attention.rs`, `model/batch_metadata.rs`, `model/chunked_prefill.rs`, `model/decode_state.rs`, `model/kv_tensor.rs`, `model/mlp_wrapper.rs` → delete, confirm `model_fuel/batched.rs` covers every deleted code path (the original PR 12 content, manifest §1, ~6,700 candlelight lines across 9 files). Run the existing `model_fuel` test suite plus `tests/fuel_engine_http.rs`'s acceptance gate (HANDOFF: last run by hand 2026-08-08, re-run it, don't trust that result) before deleting.
+- Exit condition for the WHOLE expanded PR 12: `grep -rln "candlelight" src/model/ src/loaders/mod.rs src/cache/parallel_cache_builder.rs src/cache/prefix_cache.rs src/engine/speculative.rs src/model/speculative_adapters.rs` → zero files. Whether the non-`fuel-engine` default build path itself flips is still Phase D's job (PR 18), not this one's — this PR removes the dead weight, Phase D removes the choice.
 
-**Blocked, not sequenced — needs a PM/architecture ruling first, per manifest §3's open items:**
+**Still blocked, not sequenced — needs a PM/architecture ruling first, per manifest §3's open items (unaffected by the resequencing above):**
 - `ShardingStrategy::Hybrid`, `PipelineStrategy::{PipeDream,Interleaved1F1B}` — no fuel destination exists; open whether these are real requirements.
-- `multi_gpu::distributed_cache` sharded/hybrid cache **storage** — confirmed fuel gap (fuel only has coordination, no storage layer); needs a ruling on whether this gets built in fuel or lightbulb before any PR touches it.
+- `multi_gpu::distributed_cache` sharded/hybrid cache **storage** — confirmed fuel gap (fuel only has coordination, no storage layer), confirmed genuinely unscoped by the fuel lane (2026-10-01: an unresolved design fork in fuel's own architecture, not just unsized). Deferred past this whole sequence. `parallel_cache_builder.rs`'s two residual `multi_gpu` callers (above) wait on whatever PR eventually resolves this, not on PR 12.
 
 ---
 
@@ -96,8 +108,8 @@ This is the version-bump moment the portfolio's breaking-version test (CLAUDE.md
 
 | Phase | PRs | Blocked on |
 |---|---|---|
-| A — zero-coupling deletes/swaps | 1–9 | Nothing; can start immediately once approved |
-| B — multi-GPU parallelism | 10–12 | PR 1 (topology) for PR 10; `Hybrid`/`PipeDream`/distributed-cache storage explicitly excluded pending a ruling |
+| A — zero-coupling deletes/swaps | 1, 4, 7, 8, 9 | Nothing. **1 and 7 done** (lightbulb#109, #110). Old 2/3/5/6 and `loaders/mod.rs`-half-of-4 MOVED into 12 (2026-10-01 resequencing) |
+| B — multi-GPU parallelism + candlelight model-path deletion | 10–12 | PR 1 (topology) for PR 10; PR 12 is now the expanded cluster absorbing old 2/3/5/6 — see its exit condition; `Hybrid`/`PipeDream`/distributed-cache storage explicitly excluded pending a ruling |
 | C — quantization/pruning/LoRA/AWQ | 13–17 | PR 15 blocked on fuel-side dispatch work; PR 16 blocked on mlmf-side crate promotion |
 | D — flip default | 18 | All of A–C |
 | E — GGUF reader + hub.rs | 19–20 | mlmf's mmap-accessor prerequisite (19); PM ruling on `hub.rs` (20) |
