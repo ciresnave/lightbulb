@@ -4,7 +4,7 @@
 
 use super::{ActivationMemory, KvCacheMemory, MemoryEstimate, WeightMemory};
 use crate::memory::utils::{estimate_parameters, format_bytes};
-use candlelight::core::DType;
+use fuel::DType;
 
 /// Memory estimate for speculative decoding (dual-model)
 #[derive(Debug, Clone)]

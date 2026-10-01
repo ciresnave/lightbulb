@@ -73,17 +73,8 @@ fn estimate_layer_parameters(hidden_size: usize, intermediate_size: usize) -> us
 /// * `vocab_size` - Vocabulary size
 /// * `hidden_size` - Embedding dimension
 /// * `dtype` - Data type
-pub fn estimate_embedding_size(
-    vocab_size: usize,
-    hidden_size: usize,
-    dtype: candlelight::core::DType,
-) -> usize {
-    let bytes_per_param = match dtype {
-        candlelight::core::DType::F32 => 4,
-        candlelight::core::DType::F16 | candlelight::core::DType::BF16 => 2,
-        _ => 2,
-    };
-    vocab_size * hidden_size * bytes_per_param
+pub fn estimate_embedding_size(vocab_size: usize, hidden_size: usize, dtype: fuel::DType) -> usize {
+    vocab_size * hidden_size * dtype.size_in_bytes()
 }
 
 #[cfg(test)]
@@ -130,7 +121,7 @@ mod tests {
 
     #[test]
     fn test_estimate_embedding_size() {
-        use candlelight::core::DType;
+        use fuel::DType;
 
         // Llama-7B embeddings
         let size_fp16 = estimate_embedding_size(32000, 4096, DType::F16);
