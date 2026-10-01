@@ -80,10 +80,11 @@ fn cached_strftime_now(fmt: &str, now: chrono::DateTime<chrono::Local>) -> Resul
         LazyLock::new(|| Mutex::new(HashMap::new()));
     let today = now.date_naive();
     let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some((cached_day, rendered)) = cache.get(fmt) {
-        if *cached_day == today {
-            return Ok(rendered.clone());
-        }
+    if let Some(rendered) = cache
+        .get(fmt)
+        .and_then(|(cached_day, s)| (*cached_day == today).then(|| s.clone()))
+    {
+        return Ok(rendered);
     }
     let rendered = now.format_with_items(items.into_iter()).to_string();
     cache.insert(fmt.to_string(), (today, rendered.clone()));
