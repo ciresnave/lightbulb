@@ -39,6 +39,18 @@ fn check_multi_gpu() -> Result<DeviceTopology> {
 }
 
 /// Create test tensor on specified device
+/// `tensor_parallel.rs`/`pipeline_parallel.rs`/`distributed_cache.rs`'s
+/// sharding code is still candlelight-typed (board item 106's migration PR 1
+/// only fixed `DeviceTopology` itself; the candlelight-to-fuel swap for these
+/// files is PRs 10-12, not yet done). `topology.device(idx)` is now `&fuel::
+/// Device`, a different type — this re-derives a candlelight device by the
+/// same ordinal rather than threading `topology`'s device through a type the
+/// still-candlelight sharding code can't take. Same fix shape as
+/// `DistributedCacheManager::new`'s equivalent patch.
+fn candlelight_device_for(idx: usize) -> candlelight::core::Device {
+    candlelight::core::Device::cuda_if_available(idx).expect("multi-GPU test requires CUDA")
+}
+
 fn create_test_tensor(shape: &[usize], device: &Device) -> Result<Tensor> {
     let numel: usize = shape.iter().product();
     let data: Vec<f32> = (0..numel).map(|i| i as f32 / 100.0).collect();
@@ -91,10 +103,7 @@ fn test_tensor_shard_creation() -> Result<()> {
     let topology = check_multi_gpu()?;
 
     // Create devices for 2 GPUs
-    let devices = vec![
-        topology.device(0).unwrap().clone(),
-        topology.device(1).unwrap().clone(),
-    ];
+    let devices = vec![candlelight_device_for(0), candlelight_device_for(1)];
 
     // Create a test tensor on CPU
     let cpu_device = Device::Cpu;
@@ -121,10 +130,7 @@ fn test_tensor_shard_creation() -> Result<()> {
 fn test_tensor_gather() -> Result<()> {
     let topology = check_multi_gpu()?;
 
-    let devices = vec![
-        topology.device(0).unwrap().clone(),
-        topology.device(1).unwrap().clone(),
-    ];
+    let devices = vec![candlelight_device_for(0), candlelight_device_for(1)];
 
     // Create original tensor
     let cpu_device = Device::Cpu;
@@ -155,10 +161,7 @@ fn test_sharded_linear() -> Result<()> {
     let batch_size = 8;
 
     // Create devices
-    let devices = vec![
-        topology.device(0).unwrap().clone(),
-        topology.device(1).unwrap().clone(),
-    ];
+    let devices = vec![candlelight_device_for(0), candlelight_device_for(1)];
 
     // Create full weights on CPU
     let cpu_device = Device::Cpu;
@@ -194,14 +197,11 @@ fn test_sharded_linear() -> Result<()> {
 #[test]
 #[ignore] // Requires multi-GPU
 fn test_pipeline_scheduler_creation() -> Result<()> {
-    let topology = check_multi_gpu()?;
+    let _topology = check_multi_gpu()?; // validates >=2 GPUs before candlelight_device_for assumes they exist
 
     let num_stages = 2;
     let num_layers = 40;
-    let devices = vec![
-        topology.device(0).unwrap().clone(),
-        topology.device(1).unwrap().clone(),
-    ];
+    let devices = vec![candlelight_device_for(0), candlelight_device_for(1)];
 
     let scheduler = PipelineScheduler::new(
         num_stages,
@@ -227,12 +227,9 @@ fn test_pipeline_scheduler_creation() -> Result<()> {
 #[test]
 #[ignore] // Requires multi-GPU
 fn test_pipeline_micro_batch_splitting() -> Result<()> {
-    let topology = check_multi_gpu()?;
+    let _topology = check_multi_gpu()?; // validates >=2 GPUs before candlelight_device_for assumes they exist
 
-    let devices = vec![
-        topology.device(0).unwrap().clone(),
-        topology.device(1).unwrap().clone(),
-    ];
+    let devices = vec![candlelight_device_for(0), candlelight_device_for(1)];
 
     let mut scheduler = PipelineScheduler::new(
         2,
@@ -243,7 +240,7 @@ fn test_pipeline_micro_batch_splitting() -> Result<()> {
     )?;
 
     // Create input batch (batch_size=8)
-    let device0 = topology.device(0).unwrap();
+    let device0 = candlelight_device_for(0);
     let input = create_test_tensor(&[8, 512], &device0)?;
 
     // Execute pipeline (placeholder forward - will work after Task 6 integration)
@@ -302,7 +299,7 @@ fn test_distributed_cache_replication() -> Result<()> {
     )?;
 
     // Create test K/V tensors
-    let device0 = topology.device(0).unwrap();
+    let device0 = candlelight_device_for(0);
     let k_new = create_test_tensor(&[1, 8, 1, 64], &device0)?;
     let v_new = create_test_tensor(&[1, 8, 1, 64], &device0)?;
 
@@ -364,10 +361,7 @@ fn test_full_multi_gpu_integration() -> Result<()> {
     println!("✓ Discovered {} GPUs", topology.num_gpus());
 
     // 2. Tensor parallelism
-    let devices = vec![
-        topology.device(0).unwrap().clone(),
-        topology.device(1).unwrap().clone(),
-    ];
+    let devices = vec![candlelight_device_for(0), candlelight_device_for(1)];
 
     let cpu_device = Device::Cpu;
     let tensor = create_test_tensor(&[64, 512], &cpu_device)?;

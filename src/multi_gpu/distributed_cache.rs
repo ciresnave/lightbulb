@@ -92,11 +92,18 @@ impl DistributedCacheManager {
         let num_gpus = topology.num_gpus();
         let mut local_caches = Vec::with_capacity(num_gpus);
 
-        // Create a ParallelCacheBuilder for each GPU
+        // `ParallelCacheBuilder` is candlelight-typed (board item 106's manifest
+        // flags it DELETE, superseded by `model_fuel::policies` — not yet done,
+        // cross-device cache storage itself is a separate, deferred decision).
+        // `topology.device(gpu_id)` is now `&fuel::Device` (PR 1) — a different
+        // type this still-candlelight builder can't take, so this constructs
+        // its own candlelight device by the same ordinal rather than threading
+        // `topology`'s device through a type it was never meant to accept.
         for gpu_id in 0..num_gpus {
-            let device = topology
-                .device(gpu_id)
-                .ok_or_else(|| anyhow::anyhow!("GPU {} not found in topology", gpu_id))?;
+            if topology.device(gpu_id).is_none() {
+                anyhow::bail!("GPU {} not found in topology", gpu_id);
+            }
+            let device = candlelight::core::Device::cuda_if_available(gpu_id)?;
             let cache_builder =
                 ParallelCacheBuilder::new(batch_size, context_size, dtype, &device)?;
             local_caches.push(cache_builder);
@@ -232,7 +239,7 @@ mod tests {
     /// records survived: nothing that could observe it ever ran.
     fn cpu_topology(n: usize) -> DeviceTopology {
         DeviceTopology {
-            devices: vec![candlelight::core::Device::Cpu; n],
+            devices: vec![fuel::Device::cpu(); n],
             memory_capacity: vec![1 << 30; n],
             memory_available: vec![1 << 30; n],
             interconnect: InterconnectTopology::PCIe {

@@ -297,6 +297,19 @@
     # reader, kept for the tokenizer extraction `derive_config` deliberately
     # does not do).
     fuel-loaders = { git = "https://github.com/ciresnave/fuel", rev = "4910b37a60a17b3111ac909f249bf17926bcb316" }
+    # `fuel_ir::probe::BackendId` and `fuel_ir::backend::TransferPath` — neither
+    # is re-exported through the `fuel` facade (`fuel-core`'s `lib.rs` has no
+    # `pub use fuel_ir::...` at all; it only re-exports the SPECIFIC fuel_ir
+    # items it needs under its own names, e.g. `DeviceLocation`). Needed by
+    # `multi_gpu::topology::DeviceTopology::discover` (board item 106, PR 1) to
+    # filter `ProbeReport`'s descriptors to CUDA and read real P2P status off
+    # `SystemTopology::transfer_path`. `ProbeReport`/`SystemTopology`/
+    # `TransferEstimate` themselves ARE reachable via the facade
+    # (`fuel::probe`, `fuel::topology`, `fuel::transfer_cost` — see
+    # `fuel-core/src/lib.rs`'s `pub use fuel_hardware::probe`/
+    # `pub use fuel_dispatch::topology`/`pub use fuel_hardware::transfer_cost`),
+    # so this is the only new crate-level dependency PR 1 needs.
+    fuel-ir = { git = "https://github.com/ciresnave/fuel", rev = "4910b37a60a17b3111ac909f249bf17926bcb316" }
     # Only used to CONSTRUCT a `CudaDevice` in the GPU measurement harness.
     # `fuel-core` provides `impl From<CudaDevice> for Device` (its `cuda_backend`
     # module) but re-exports only `builder_arg`, not `CudaDevice` itself — so a

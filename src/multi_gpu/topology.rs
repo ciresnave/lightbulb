@@ -1,7 +1,17 @@
 use anyhow::Result;
-use candlelight::core::Device;
+use fuel::probe::ProbeReport;
+use fuel::{Device, DeviceLocation};
+use fuel_ir::backend::TransferPath;
+use fuel_ir::probe::BackendId;
 
-/// Multi-GPU device topology and capabilities
+/// Multi-GPU device topology and capabilities.
+///
+/// Sourced from real Fuel measurements (board item 106, PR 1), not guesses:
+/// `fuel::probe::ProbeReport` for per-device memory, `fuel::topology::
+/// SystemTopology::transfer_path`/`transfer_estimate` for real P2P status and
+/// measured bandwidth. The prior version of this file hardcoded an 80GB
+/// per-GPU guess, assumed all GPUs can reach each other, and guessed NVLink
+/// vs PCIe purely from GPU count — none of that reflected real hardware.
 #[derive(Debug, Clone)]
 pub struct DeviceTopology {
     /// All available CUDA devices
@@ -11,6 +21,12 @@ pub struct DeviceTopology {
     pub memory_capacity: Vec<usize>,
 
     /// Available memory per device (bytes)
+    ///
+    /// Fuel's probe reports total device memory, not live free memory — this
+    /// is currently identical to `memory_capacity` (same as the pre-fuel
+    /// version of this struct, which also treated the two as equal). A real
+    /// live-utilization query would need a separate fuel primitive this
+    /// session did not find; not fabricated here.
     pub memory_available: Vec<usize>,
 
     /// Interconnect topology (NVLink, PCIe bandwidth)
@@ -21,52 +37,75 @@ pub struct DeviceTopology {
 }
 
 impl DeviceTopology {
-    /// Discover all available CUDA devices
+    /// Discover all available CUDA devices via Fuel's real hardware probe.
     pub fn discover() -> Result<Self> {
-        let mut devices = Vec::new();
-        let mut device_id = 0;
-
-        // Probe CUDA devices until one is not a CUDA device.
-        //
-        // ⚠️ AN `Ok` FROM `cuda_if_available` IS NOT EVIDENCE THE ORDINAL
-        // EXISTS. candle-core 0.10.2 `device.rs:323` is
-        // `if cuda_is_available() { new_cuda(ordinal) } else { Ok(Self::Cpu) }`
-        // — the fallback arm returns `Ok` unconditionally and NEVER CONSULTS
-        // THE ORDINAL.
-        //
-        // This loop previously broke only on `Err`, so on any build without the
-        // `cuda` feature every iteration returned `Ok(Cpu)`, pushed, and
-        // incremented: it did not terminate. And because it PUSHES each time it
-        // was unbounded allocation rather than a quiet spin. `Cargo.toml`
-        // records that `candlelight/cuda` does not build on this toolchain, so
-        // the non-terminating configuration is the ordinary one here.
-        //
-        // Measured before the fix: the termination test below did not fail, it
-        // hung — a bounded subprocess exited 124 after 25s.
-        loop {
-            match Device::cuda_if_available(device_id) {
-                Ok(device) if device.is_cuda() => {
-                    devices.push(device);
-                    device_id += 1;
+        let report = ProbeReport::probe_all();
+        let sys = fuel::topology::SystemTopology::current();
+        Self::from_probe(
+            &report,
+            |loc| match loc {
+                DeviceLocation::Cuda { gpu_id } => {
+                    Ok(fuel::cuda_backend::device_if_available(gpu_id)?)
                 }
-                _ => break,
-            }
-        }
+                other => anyhow::bail!(
+                    "DeviceTopology::discover: asked to open a non-CUDA location {other:?} — \
+                     this is a bug in the CUDA-only filter above, not a hardware condition"
+                ),
+            },
+            |a, b| sys.transfer_path(a, b),
+            |a, b| transfer_bandwidth_gbps(&sys, a, b),
+        )
+    }
 
-        if devices.is_empty() {
+    /// The pure decision core of [`Self::discover`]: given a probe report and
+    /// two injected queries (open a device by location; the interconnect
+    /// facts between two locations), build a `DeviceTopology`. Separated out
+    /// so the mapping logic is testable without real GPU hardware — this
+    /// machine has none — the same pattern as `model_fuel::policies::
+    /// extract_prefix_match_for_kv_cache_seed`'s injected `seed` callback.
+    ///
+    /// Filters to `BackendId::Cuda` only, preserving this struct's original
+    /// CUDA-only scope — broadening to Vulkan/Metal multi-GPU is a separate
+    /// decision, not a side effect of this fix.
+    fn from_probe(
+        report: &ProbeReport,
+        open_device: impl Fn(DeviceLocation) -> Result<Device>,
+        transfer_path: impl Fn(DeviceLocation, DeviceLocation) -> TransferPath,
+        transfer_bandwidth_gbps: impl Fn(DeviceLocation, DeviceLocation) -> f32,
+    ) -> Result<Self> {
+        let cuda: Vec<_> = report
+            .devices
+            .iter()
+            .filter(|d| d.backend == BackendId::Cuda)
+            .collect();
+        if cuda.is_empty() {
             anyhow::bail!("No CUDA devices available for multi-GPU inference");
         }
 
-        // Query memory capacity (TODO: Candle API for memory info)
-        // For now, assume 80GB per GPU (A100/H100 common size)
-        let memory_capacity = vec![80 * 1024 * 1024 * 1024; devices.len()];
+        let mut devices = Vec::with_capacity(cuda.len());
+        let mut memory_capacity = Vec::with_capacity(cuda.len());
+        let mut locations = Vec::with_capacity(cuda.len());
+        for d in &cuda {
+            devices.push(open_device(d.location)?);
+            memory_capacity.push(d.total_memory_bytes as usize);
+            locations.push(d.location);
+        }
         let memory_available = memory_capacity.clone();
 
-        // Detect interconnect topology
-        let interconnect = InterconnectTopology::detect(&devices)?;
+        let n = locations.len();
+        let mut p2p_access = vec![vec![false; n]; n];
+        for i in 0..n {
+            for j in 0..n {
+                p2p_access[i][j] =
+                    i == j || transfer_path(locations[i], locations[j]) == TransferPath::Peer;
+            }
+        }
 
-        // Query peer-to-peer access
-        let p2p_access = Self::query_p2p_access(&devices)?;
+        let interconnect = InterconnectTopology::from_measurements(
+            &locations,
+            &transfer_path,
+            &transfer_bandwidth_gbps,
+        );
 
         Ok(Self {
             devices,
@@ -75,14 +114,6 @@ impl DeviceTopology {
             interconnect,
             p2p_access,
         })
-    }
-
-    /// Check if peer-to-peer access is available between two devices
-    fn query_p2p_access(devices: &[Device]) -> Result<Vec<Vec<bool>>> {
-        // TODO: Query actual P2P capabilities via CUDA
-        // For now, assume all GPUs can access each other
-        let n = devices.len();
-        Ok(vec![vec![true; n]; n])
     }
 
     /// Get recommended parallelism strategy based on topology
@@ -144,6 +175,24 @@ impl DeviceTopology {
     }
 }
 
+/// Real measured GB/s between two locations, derived from Fuel's calibrated
+/// transfer estimate for a 1 GiB transfer. `fuel::transfer_cost::
+/// TransferEstimate::estimate_ns` is the only numeric cost primitive Fuel
+/// exposes (no direct "GB/s" field) — see `InterconnectTopology`'s doc for
+/// why this is an inference, not a value Fuel asserts directly.
+fn transfer_bandwidth_gbps(
+    sys: &fuel::topology::SystemTopology,
+    a: DeviceLocation,
+    b: DeviceLocation,
+) -> f32 {
+    const ONE_GIB: u64 = 1 << 30;
+    let ns = sys.transfer_estimate(a, b).estimate_ns(ONE_GIB);
+    if ns == 0 {
+        return 0.0;
+    }
+    (ONE_GIB as f64 / ns as f64) as f32
+}
+
 /// Interconnect topology between GPUs
 #[derive(Debug, Clone)]
 pub enum InterconnectTopology {
@@ -172,18 +221,57 @@ pub enum LinkType {
 }
 
 impl InterconnectTopology {
-    pub(crate) fn detect(devices: &[Device]) -> Result<Self> {
-        // TODO: Query actual interconnect via CUDA
-        // For now, assume NVLink for 2-GPU, PCIe for 4+
-        if devices.len() == 2 {
-            Ok(Self::NVLink {
-                bandwidth_gbps: 600.0, // NVLink 4.0
-            })
-        } else {
-            Ok(Self::PCIe {
-                bandwidth_gbps: 32.0, // PCIe 4.0 x16
-            })
+    /// Classify every device pair's measured link, then collapse to the
+    /// simplest shape that describes them all.
+    ///
+    /// ⚠️ Fuel has no type that names a link "NVLink" or "PCIe" — only
+    /// `TransferPath` (`Peer`/`DeviceCopy`/`HostStaging`/...) and a numeric
+    /// bandwidth estimate. `LinkType::NVLink` here means "Fuel reports a
+    /// direct peer path" and `LinkType::PCIe` means "it does not" — an
+    /// INFERENCE from the path classification, not a literal hardware query.
+    /// Fewer than 2 devices produces `PCIe { bandwidth_gbps: 0.0 }` — there is
+    /// no interconnect to describe.
+    fn from_measurements(
+        locations: &[DeviceLocation],
+        transfer_path: &impl Fn(DeviceLocation, DeviceLocation) -> TransferPath,
+        transfer_bandwidth_gbps: &impl Fn(DeviceLocation, DeviceLocation) -> f32,
+    ) -> Self {
+        if locations.len() < 2 {
+            return Self::PCIe {
+                bandwidth_gbps: 0.0,
+            };
         }
+
+        let mut links = Vec::new();
+        for i in 0..locations.len() {
+            for j in (i + 1)..locations.len() {
+                let is_peer = transfer_path(locations[i], locations[j]) == TransferPath::Peer;
+                links.push(InterconnectLink {
+                    from_device: i,
+                    to_device: j,
+                    link_type: if is_peer {
+                        LinkType::NVLink
+                    } else {
+                        LinkType::PCIe
+                    },
+                    bandwidth_gbps: transfer_bandwidth_gbps(locations[i], locations[j]),
+                });
+            }
+        }
+
+        if links.iter().all(|l| l.link_type == LinkType::NVLink) {
+            let avg = links.iter().map(|l| l.bandwidth_gbps).sum::<f32>() / links.len() as f32;
+            return Self::NVLink {
+                bandwidth_gbps: avg,
+            };
+        }
+        if links.iter().all(|l| l.link_type == LinkType::PCIe) {
+            let avg = links.iter().map(|l| l.bandwidth_gbps).sum::<f32>() / links.len() as f32;
+            return Self::PCIe {
+                bandwidth_gbps: avg,
+            };
+        }
+        Self::Mixed { links }
     }
 
     /// Get bandwidth description
@@ -206,10 +294,233 @@ impl InterconnectTopology {
 mod tests {
     use super::*;
 
-    /// A topology of CPU devices with a stated per-device memory budget.
+    fn descriptor(
+        backend: BackendId,
+        device_index: u32,
+        location: DeviceLocation,
+        total_memory_bytes: u64,
+    ) -> fuel_ir::probe::DeviceDescriptor {
+        fuel_ir::probe::DeviceDescriptor {
+            backend,
+            device_index,
+            hardware_sku: "test-gpu".to_string(),
+            vendor_id: 0x10DE,
+            device_id: 0,
+            compute_capability: Some((8, 9)),
+            subgroup_width: Some(32),
+            driver_version: "test".to_string(),
+            total_memory_bytes,
+            location,
+        }
+    }
+
+    fn report(devices: Vec<fuel_ir::probe::DeviceDescriptor>) -> ProbeReport {
+        ProbeReport {
+            version: fuel::probe::PROBE_REPORT_VERSION,
+            devices,
+        }
+    }
+
+    fn open_cpu_stand_in(_loc: DeviceLocation) -> Result<Device> {
+        // No GPU on this machine — a CPU `Device` stands in for "the open
+        // succeeded", since these tests assert on DeviceTopology's own fields
+        // (memory/p2p/interconnect), not on what kind of Device was opened.
+        Ok(Device::cpu())
+    }
+
+    #[test]
+    fn from_probe_errors_when_no_cuda_descriptor_is_present() {
+        let r = report(vec![descriptor(BackendId::Cpu, 0, DeviceLocation::Cpu, 0)]);
+        let err = DeviceTopology::from_probe(
+            &r,
+            open_cpu_stand_in,
+            |_, _| TransferPath::HostStaging,
+            |_, _| 0.0,
+        )
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("No CUDA devices"));
+    }
+
+    #[test]
+    fn from_probe_reads_real_memory_per_device_not_a_guess() {
+        let r = report(vec![
+            descriptor(
+                BackendId::Cuda,
+                0,
+                DeviceLocation::Cuda { gpu_id: 0 },
+                24 * (1 << 30),
+            ),
+            descriptor(
+                BackendId::Cuda,
+                1,
+                DeviceLocation::Cuda { gpu_id: 1 },
+                80 * (1 << 30),
+            ),
+        ]);
+        let t = DeviceTopology::from_probe(
+            &r,
+            open_cpu_stand_in,
+            |_, _| TransferPath::Peer,
+            |_, _| 100.0,
+        )
+        .unwrap();
+        assert_eq!(t.num_gpus(), 2);
+        // The two descriptors have DIFFERENT memory sizes — if this read a
+        // hardcoded constant instead of the descriptor, both entries would be
+        // identical.
+        assert_eq!(t.memory_capacity, vec![24 * (1 << 30), 80 * (1 << 30)]);
+        assert_eq!(t.memory_available, t.memory_capacity);
+    }
+
+    #[test]
+    fn from_probe_ignores_non_cuda_descriptors_in_the_report() {
+        let r = report(vec![
+            descriptor(BackendId::Cpu, 0, DeviceLocation::Cpu, 1 << 30),
+            descriptor(
+                BackendId::Cuda,
+                0,
+                DeviceLocation::Cuda { gpu_id: 0 },
+                16 * (1 << 30),
+            ),
+        ]);
+        let t = DeviceTopology::from_probe(
+            &r,
+            open_cpu_stand_in,
+            |_, _| TransferPath::Peer,
+            |_, _| 50.0,
+        )
+        .unwrap();
+        assert_eq!(
+            t.num_gpus(),
+            1,
+            "the CPU descriptor must not count as a GPU"
+        );
+    }
+
+    #[test]
+    fn from_probe_p2p_matrix_reflects_real_transfer_path_not_a_blanket_true() {
+        let r = report(vec![
+            descriptor(
+                BackendId::Cuda,
+                0,
+                DeviceLocation::Cuda { gpu_id: 0 },
+                1 << 30,
+            ),
+            descriptor(
+                BackendId::Cuda,
+                1,
+                DeviceLocation::Cuda { gpu_id: 1 },
+                1 << 30,
+            ),
+        ]);
+        // Device 0<->1 requires host staging: NOT direct P2P.
+        let t = DeviceTopology::from_probe(
+            &r,
+            open_cpu_stand_in,
+            |_, _| TransferPath::HostStaging,
+            |_, _| 10.0,
+        )
+        .unwrap();
+        assert_eq!(t.p2p_access, vec![vec![true, false], vec![false, true]]);
+    }
+
+    #[test]
+    fn from_probe_p2p_matrix_is_true_for_a_real_peer_path() {
+        let r = report(vec![
+            descriptor(
+                BackendId::Cuda,
+                0,
+                DeviceLocation::Cuda { gpu_id: 0 },
+                1 << 30,
+            ),
+            descriptor(
+                BackendId::Cuda,
+                1,
+                DeviceLocation::Cuda { gpu_id: 1 },
+                1 << 30,
+            ),
+        ]);
+        let t = DeviceTopology::from_probe(
+            &r,
+            open_cpu_stand_in,
+            |_, _| TransferPath::Peer,
+            |_, _| 300.0,
+        )
+        .unwrap();
+        assert_eq!(t.p2p_access, vec![vec![true, true], vec![true, true]]);
+    }
+
+    #[test]
+    fn interconnect_classifies_all_peer_links_as_nvlink() {
+        let locs = vec![
+            DeviceLocation::Cuda { gpu_id: 0 },
+            DeviceLocation::Cuda { gpu_id: 1 },
+        ];
+        let t =
+            InterconnectTopology::from_measurements(&locs, &|_, _| TransferPath::Peer, &|_, _| {
+                600.0
+            });
+        match t {
+            InterconnectTopology::NVLink { bandwidth_gbps } => assert_eq!(bandwidth_gbps, 600.0),
+            other => panic!("expected NVLink, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn interconnect_classifies_all_non_peer_links_as_pcie() {
+        let locs = vec![
+            DeviceLocation::Cuda { gpu_id: 0 },
+            DeviceLocation::Cuda { gpu_id: 1 },
+        ];
+        let t = InterconnectTopology::from_measurements(
+            &locs,
+            &|_, _| TransferPath::DeviceCopy,
+            &|_, _| 32.0,
+        );
+        match t {
+            InterconnectTopology::PCIe { bandwidth_gbps } => assert_eq!(bandwidth_gbps, 32.0),
+            other => panic!("expected PCIe, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn interconnect_classifies_a_mix_of_peer_and_non_peer_links_as_mixed() {
+        let locs = vec![
+            DeviceLocation::Cuda { gpu_id: 0 },
+            DeviceLocation::Cuda { gpu_id: 1 },
+            DeviceLocation::Cuda { gpu_id: 2 },
+        ];
+        // 0<->1 peer, everything else not — a real heterogeneous topology.
+        let t = InterconnectTopology::from_measurements(
+            &locs,
+            &|a, b| {
+                if matches!(
+                    (a, b),
+                    (
+                        DeviceLocation::Cuda { gpu_id: 0 },
+                        DeviceLocation::Cuda { gpu_id: 1 }
+                    )
+                ) {
+                    TransferPath::Peer
+                } else {
+                    TransferPath::DeviceCopy
+                }
+            },
+            &|_, _| 50.0,
+        );
+        match t {
+            InterconnectTopology::Mixed { links } => assert_eq!(links.len(), 3),
+            other => panic!("expected Mixed, got {other:?}"),
+        }
+    }
+
+    /// A topology of CPU devices with a stated per-device memory budget, for
+    /// `recommend_strategy`'s own logic — unrelated to `from_probe`'s
+    /// descriptor mapping above, so these build `DeviceTopology` directly via
+    /// its public fields, same as before this PR.
     fn topology_with(memory_per_device: usize, n: usize) -> DeviceTopology {
         DeviceTopology {
-            devices: vec![Device::Cpu; n],
+            devices: vec![Device::cpu(); n],
             memory_capacity: vec![memory_per_device; n],
             memory_available: vec![memory_per_device; n],
             interconnect: InterconnectTopology::PCIe {
@@ -220,11 +531,6 @@ mod tests {
     }
 
     /// **A model that does not fit is an ERROR, not a crash.**
-    ///
-    /// This was `panic!`, in a public method reachable through
-    /// `MultiGPUConfig::auto`, for the ordinary case of asking about a model
-    /// larger than the machine. Sizing a deployment is exactly the question a
-    /// caller asks, and it deserves an answer rather than an abort.
     #[test]
     fn a_model_larger_than_the_machine_is_an_error() {
         let t = topology_with(1000, 2);
@@ -239,9 +545,6 @@ mod tests {
     }
 
     /// And a topology with no devices is an error rather than an index panic.
-    ///
-    /// `DeviceTopology`'s fields are public, so an empty one is constructible,
-    /// and `self.memory_available[0]` would have panicked on the index.
     #[test]
     fn an_empty_topology_is_an_error_not_an_index_panic() {
         let t = topology_with(1000, 0);
@@ -268,10 +571,6 @@ mod tests {
     }
 
     /// Needs more than two -> pipeline, capped at four stages.
-    ///
-    /// The cap is the part worth pinning: `num_gpus.min(4)` on an 8-device
-    /// topology must give 4, and a test on a 2- or 4-device topology cannot
-    /// tell `min(4)` from the identity.
     #[test]
     fn a_model_spanning_many_devices_uses_pipeline_capped_at_four_stages() {
         use crate::multi_gpu::config::ParallelismMode;
@@ -285,39 +584,15 @@ mod tests {
         );
     }
 
-    /// **`discover()` must TERMINATE on a machine with no CUDA device.**
-    ///
-    /// # The defect this pins
-    ///
-    /// The probe loop broke only on `Err`:
-    ///
-    /// ```text
-    /// loop {
-    ///     match Device::cuda_if_available(device_id) {
-    ///         Ok(device) => { devices.push(device); device_id += 1; }
-    ///         Err(_) => break,
-    ///     }
-    /// }
-    /// ```
-    ///
-    /// `Device::cuda_if_available` returns `Ok(Device::Cpu)` when CUDA is
-    /// unavailable and **does not consult the ordinal in that path**
-    /// (candle-core 0.10.2, `device.rs:323`). So on a build without the `cuda`
-    /// feature every iteration returns `Ok`, pushes, and increments — the loop
-    /// never terminates, and because it PUSHES each time it is unbounded
-    /// allocation rather than a quiet spin.
-    ///
-    /// `Cargo.toml` records that `candlelight/cuda` does not build on this
-    /// toolchain, so the non-CUDA build is the ordinary one here.
-    ///
-    /// **An `Ok` from that function is not evidence the ordinal exists**, which
-    /// is why the fix tests `is_cuda()` rather than trusting the `Result`.
-    ///
-    /// This test is bounded on both kinds of machine: without CUDA it must be
-    /// the documented error, and with CUDA every discovered device must be a
-    /// CUDA device. Before the fix it does not fail — it hangs.
+    /// **`discover()` must still report the documented error on a machine
+    /// with no CUDA device** (this machine). Unlike the pre-fuel version,
+    /// there is no non-terminating-loop hazard to pin here — `ProbeReport::
+    /// probe_all()` is bounded by construction (it walks a fixed backend
+    /// registry once), so that regression class cannot recur through this
+    /// path. Kept as an integration smoke test of the real `discover()`
+    /// wrapper, not just `from_probe`.
     #[test]
-    fn discover_terminates_when_no_cuda_device_is_present() {
+    fn discover_reports_the_documented_error_without_cuda_hardware() {
         match DeviceTopology::discover() {
             Err(e) => {
                 let msg = format!("{e:#}");
@@ -327,18 +602,11 @@ mod tests {
                 );
             }
             Ok(topology) => {
-                assert!(
-                    !topology.devices.is_empty(),
-                    "a successful discovery must find at least one device"
-                );
-                assert!(
-                    topology.devices.iter().all(|d| d.is_cuda()),
-                    "discovery must not report a CPU fallback as a discovered GPU"
-                );
-                assert_eq!(
-                    topology.memory_capacity.len(),
-                    topology.devices.len(),
-                    "per-device vectors must match the device count"
+                // This CI machine has no GPU; a stray `Ok` would mean the
+                // CUDA filter is broken, not that hardware appeared.
+                panic!(
+                    "discover() unexpectedly succeeded with {} device(s) on a CPU-only machine",
+                    topology.num_gpus()
                 );
             }
         }
