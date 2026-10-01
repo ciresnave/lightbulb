@@ -195,7 +195,7 @@ mod tests {
     /// parallelism configuration is runnable at all.
     fn cpu_topology(n: usize) -> DeviceTopology {
         DeviceTopology {
-            devices: vec![candlelight::core::Device::Cpu; n],
+            devices: vec![fuel::Device::cpu(); n],
             memory_capacity: vec![1 << 30; n],
             memory_available: vec![1 << 30; n],
             interconnect: InterconnectTopology::PCIe {
