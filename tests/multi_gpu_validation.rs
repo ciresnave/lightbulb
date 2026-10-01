@@ -100,7 +100,7 @@ fn test_topology_discovery() -> Result<()> {
 #[test]
 #[ignore] // Requires multi-GPU
 fn test_tensor_shard_creation() -> Result<()> {
-    let topology = check_multi_gpu()?;
+    let _topology = check_multi_gpu()?; // validates >=2 GPUs before candlelight_device_for assumes they exist
 
     // Create devices for 2 GPUs
     let devices = vec![candlelight_device_for(0), candlelight_device_for(1)];
@@ -128,7 +128,7 @@ fn test_tensor_shard_creation() -> Result<()> {
 #[test]
 #[ignore] // Requires multi-GPU
 fn test_tensor_gather() -> Result<()> {
-    let topology = check_multi_gpu()?;
+    let _topology = check_multi_gpu()?; // validates >=2 GPUs before candlelight_device_for assumes they exist
 
     let devices = vec![candlelight_device_for(0), candlelight_device_for(1)];
 
@@ -154,7 +154,7 @@ fn test_tensor_gather() -> Result<()> {
 #[test]
 #[ignore] // Requires multi-GPU
 fn test_sharded_linear() -> Result<()> {
-    let topology = check_multi_gpu()?;
+    let _topology = check_multi_gpu()?; // validates >=2 GPUs before candlelight_device_for assumes they exist
 
     let input_dim = 512;
     let output_dim = 1024;
