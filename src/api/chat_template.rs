@@ -49,13 +49,46 @@
 //! `encode` call. A legacy-join prompt and `/v1/completions`'s raw text carry
 //! no special tokens of their own and still need `true`.
 
+use std::collections::HashMap;
 use std::path::Path;
+use std::sync::{LazyLock, Mutex};
 
+use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
 
 use crate::contracts::validation::RawMessage;
 
 pub mod registry;
+
+/// `strftime_now(fmt)`'s implementation, factored out so it can be tested
+/// against an injected `now` rather than the real wall clock (see
+/// `strftime_now_cache_tests` below) and so its date-granularity caching has
+/// somewhere to live. See the call site in `render` for why this caches at
+/// all.
+fn cached_strftime_now(fmt: &str, now: chrono::DateTime<chrono::Local>) -> Result<String, String> {
+    // chrono's formatter panics on an invalid specifier at Display time, so
+    // the format string is validated before it is used.
+    let items: Vec<_> = chrono::format::StrftimeItems::new(fmt).collect();
+    if items
+        .iter()
+        .any(|i| matches!(i, chrono::format::Item::Error))
+    {
+        return Err(format!("strftime_now: unsupported format string {fmt:?}"));
+    }
+
+    static CACHE: LazyLock<Mutex<HashMap<String, (NaiveDate, String)>>> =
+        LazyLock::new(|| Mutex::new(HashMap::new()));
+    let today = now.date_naive();
+    let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((cached_day, rendered)) = cache.get(fmt) {
+        if *cached_day == today {
+            return Ok(rendered.clone());
+        }
+    }
+    let rendered = now.format_with_items(items.into_iter()).to_string();
+    cache.insert(fmt.to_string(), (today, rendered.clone()));
+    Ok(rendered)
+}
 
 /// Which tier produced the template.
 ///
@@ -219,22 +252,23 @@ impl ChatTemplate {
         //
         // `Local`, not `Utc`: transformers calls
         // `datetime.now().strftime(fmt)`, which is local time.
+        //
+        // `render` is called fresh on EVERY request (see this method's own doc
+        // comment: a new `Environment` is built and the source re-parsed every
+        // call, and there is no cached prompt/token sequence anywhere in this
+        // crate). A bare `Local::now()` here therefore made the rendered prompt
+        // text — and therefore its tokenization — drift on every single call,
+        // which silently defeats any content-addressed prefix match keyed on
+        // tokens (`model_fuel::policies::BlockPrefixIndex`) for what is
+        // semantically the identical conversation. `cached_strftime_now` bounds
+        // that drift to at most once per LOCAL calendar day, which is the
+        // bug's actual granularity (`strftime_now` is only ever called with a
+        // date-only format in practice) — the one case this cannot remove is a
+        // request that straddles local midnight, irreducible without
+        // per-session prompt caching this crate does not have.
         env.add_function("strftime_now", |fmt: String| {
-            // chrono's formatter panics on an invalid specifier at Display
-            // time, so the format string is validated before it is used.
-            let items: Vec<_> = chrono::format::StrftimeItems::new(&fmt).collect();
-            if items
-                .iter()
-                .any(|i| matches!(i, chrono::format::Item::Error))
-            {
-                return Err(minijinja::Error::new(
-                    minijinja::ErrorKind::InvalidOperation,
-                    format!("strftime_now: unsupported format string {fmt:?}"),
-                ));
-            }
-            Ok(chrono::Local::now()
-                .format_with_items(items.into_iter())
-                .to_string())
+            cached_strftime_now(&fmt, chrono::Local::now())
+                .map_err(|msg| minijinja::Error::new(minijinja::ErrorKind::InvalidOperation, msg))
         });
 
         env.add_template("chat", &self.source)?;
@@ -1573,5 +1607,50 @@ pub fn probe_override_check(current: Resolution, force: bool) -> ProbeOverride {
                 .to_string(),
         ),
         Resolution::None => ProbeOverride::Proceed,
+    }
+}
+
+#[cfg(test)]
+mod strftime_now_cache_tests {
+    use super::cached_strftime_now;
+    use chrono::TimeZone;
+
+    #[test]
+    fn same_calendar_day_returns_identical_string_regardless_of_time_of_day() {
+        let fmt = "%d %b %Y same-day-test";
+        let morning = chrono::Local
+            .with_ymd_and_hms(2026, 10, 1, 1, 0, 0)
+            .unwrap();
+        let evening = chrono::Local
+            .with_ymd_and_hms(2026, 10, 1, 23, 59, 0)
+            .unwrap();
+        let a = cached_strftime_now(fmt, morning).unwrap();
+        let b = cached_strftime_now(fmt, evening).unwrap();
+        assert_eq!(
+            a, b,
+            "same calendar day must render identically regardless of time-of-day"
+        );
+    }
+
+    #[test]
+    fn calendar_day_rollover_refreshes_the_cached_string() {
+        let fmt = "%d %b %Y rollover-test";
+        let day1 = chrono::Local
+            .with_ymd_and_hms(2026, 10, 1, 12, 0, 0)
+            .unwrap();
+        let day2 = chrono::Local
+            .with_ymd_and_hms(2026, 10, 2, 12, 0, 0)
+            .unwrap();
+        let a = cached_strftime_now(fmt, day1).unwrap();
+        let b = cached_strftime_now(fmt, day2).unwrap();
+        assert_ne!(a, b, "a new calendar day must refresh the cached string");
+        assert!(a.contains("01 Oct 2026"), "got {a:?}");
+        assert!(b.contains("02 Oct 2026"), "got {b:?}");
+    }
+
+    #[test]
+    fn an_invalid_format_string_is_rejected() {
+        let err = cached_strftime_now("%Q", chrono::Local::now()).unwrap_err();
+        assert!(err.contains("unsupported format string"), "got {err:?}");
     }
 }
