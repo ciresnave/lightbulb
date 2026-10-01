@@ -14,19 +14,19 @@ use std::path::Path;
 
 /// Apply a pruning manifest to a GGUF model file
 ///
-/// **IMPORTANT**: This is a prototype implementation that currently stores pruned weights
-/// in F32 format (not re-quantized). This means the output file will be 4-8× larger than
-/// the input. Full quantization support (dequantize → mask → requantize) is TODO.
-///
 /// This function loads a GGUF model, applies pruning masks to specified layers,
-/// and writes the pruned model to a new file. Weights are dequantized and masked,
-/// but not yet re-quantized (stored as F32).
+/// and writes the pruned model to a new file. Weights are dequantized, masked,
+/// and **re-quantized back to their original dtype** (via [`quantize_tensor`]) —
+/// the output file is the same size/format as the input, not F32. Re-quantization
+/// is implemented for `Q4_0`/`Q4K`/`Q8_0` (round-trip tested in
+/// `quantization::tests`); any other dtype makes this function return an `Err`
+/// rather than silently falling back to F32 or any other format.
 ///
 /// # Arguments
 ///
 /// * `input_path` - Path to input GGUF model file
 /// * `manifest` - Pruning manifest containing masks for layers
-/// * `output_path` - Path to output pruned GGUF model file (will be F32 format)
+/// * `output_path` - Path to output pruned GGUF model file (same dtype as input)
 ///
 /// # Returns
 ///
@@ -42,7 +42,7 @@ use std::path::Path;
 /// let stats = apply_manifest_to_gguf(
 ///     Path::new("model.gguf"),
 ///     &manifest,
-///     Path::new("model_pruned_f32.gguf"),  // Note: F32 format (larger)
+///     Path::new("model_pruned.gguf"),  // same dtype as the input, not F32
 /// )?;
 /// // `achieved_sparsity` is a RATIO in 0.0..=1.0, so scale it for the `%`.
 /// println!(
