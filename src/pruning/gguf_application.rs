@@ -14,13 +14,16 @@ use std::path::Path;
 
 /// Apply a pruning manifest to a GGUF model file
 ///
-/// This function loads a GGUF model, applies pruning masks to specified layers,
-/// and writes the pruned model to a new file. Weights are dequantized, masked,
-/// and **re-quantized back to their original dtype** (via [`quantize_tensor`]) —
-/// the output file is the same size/format as the input, not F32. Re-quantization
-/// is implemented for `Q4_0`/`Q4K`/`Q8_0` (round-trip tested in
-/// `quantization::tests`); any other dtype makes this function return an `Err`
-/// rather than silently falling back to F32 or any other format.
+/// This function loads a GGUF model and writes a pruned copy to a new file.
+/// A tensor named in `manifest` is dequantized, masked, and **re-quantized
+/// back to its original dtype** (via [`quantize_tensor`]) — the output file
+/// is the same size/format as the input, not F32. Re-quantization is
+/// implemented for `Q4_0`/`Q4K`/`Q8_0` (round-trip tested in
+/// `quantization::tests`); a MASKED tensor of any other dtype makes this
+/// function return an `Err` rather than silently falling back to F32 or any
+/// other format. A tensor with **no mask in the manifest** is copied through
+/// unchanged, bytes as-is, regardless of its dtype — only masked tensors go
+/// through the dequantize/mask/re-quantize path at all.
 ///
 /// # Arguments
 ///
