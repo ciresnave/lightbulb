@@ -22,6 +22,7 @@ pub mod production_providers;
 pub mod query_analysis;
 pub mod reasoning_controls;
 pub mod relevance_search;
+pub(crate) mod scheduled_runner;
 pub mod slot_monitor;
 pub mod slot_pool;
 pub mod speculative;
