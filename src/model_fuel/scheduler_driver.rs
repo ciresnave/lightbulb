@@ -1,6 +1,8 @@
-//! The real [`SchedulerDriver`](crate::engine::scheduled_runner::SchedulerDriver)
-//! adapter: wraps `fuel_inference::multi_session::SessionScheduler` so
-//! [`crate::engine::scheduled_runner::run_scheduled_jobs`] (board item 97) can
+//! The real `SchedulerDriver` (`crate::engine::scheduled_runner::SchedulerDriver`
+//! — `pub(crate)`, so not an intra-doc link here: this module is `pub`, and
+//! rustdoc denies a public item linking to a private one) adapter: wraps
+//! `fuel_inference::multi_session::SessionScheduler` so
+//! `crate::engine::scheduled_runner::run_scheduled_jobs` (board item 97) can
 //! drive any `DecodeModel` through Fuel's own proven batched multi-session
 //! scheduler, instead of `model_runner.rs`'s existing `run_jobs` processing
 //! one request fully to completion before looking at the next.
@@ -239,7 +241,11 @@ mod tests {
         }
     }
 
-    fn driver(model: &LlamaModel, budget: KvBudget, eos_id: Option<u32>) -> FuelSchedulerDriver<'_, LlamaModel> {
+    fn driver(
+        model: &LlamaModel,
+        budget: KvBudget,
+        eos_id: Option<u32>,
+    ) -> FuelSchedulerDriver<'_, LlamaModel> {
         FuelSchedulerDriver::new(
             model,
             Device::cpu(),
@@ -256,7 +262,9 @@ mod tests {
         let model = tiny_model(1);
         let mut d = driver(&model, generous_budget(), None);
 
-        let id = d.try_admit(&[1, 2, 3], 3, 0.0).expect("must admit: capacity is generous");
+        let id = d
+            .try_admit(&[1, 2, 3], 3, 0.0)
+            .expect("must admit: capacity is generous");
         assert!(d.has_active_sessions());
 
         // Deliberately NOT asserting a fixed tick count: fuel's own `step()`
@@ -276,7 +284,11 @@ mod tests {
             );
             emitted.extend(advanced);
         }
-        assert_eq!(emitted.len(), 3, "max_new=3 must yield exactly 3 emitted tokens, got {emitted:?}");
+        assert_eq!(
+            emitted.len(),
+            3,
+            "max_new=3 must yield exactly 3 emitted tokens, got {emitted:?}"
+        );
         assert!(emitted.iter().all(|(eid, _)| *eid == id));
 
         let reaped = d.reap_finished();
@@ -285,7 +297,11 @@ mod tests {
         assert_eq!(*reaped_id, id);
         match outcome {
             FinishOutcome::Completed { tokens, stop } => {
-                assert_eq!(*stop, StopReason::Budget, "no eos_id was set; must stop on budget");
+                assert_eq!(
+                    *stop,
+                    StopReason::Budget,
+                    "no eos_id was set; must stop on budget"
+                );
                 // prompt (3) + max_new (3) generated tokens.
                 assert_eq!(tokens.len(), 6);
                 let generated: Vec<u32> = tokens[3..].to_vec();
@@ -297,7 +313,9 @@ mod tests {
                      seen_counts dedup/diff logic exists to preserve"
                 );
             }
-            FinishOutcome::Failed(e) => panic!("session must not fail on a healthy tiny model: {e}"),
+            FinishOutcome::Failed(e) => {
+                panic!("session must not fail on a healthy tiny model: {e}")
+            }
         }
         assert!(!d.has_active_sessions(), "the only session was just reaped");
     }
@@ -361,14 +379,24 @@ mod tests {
             .expect("admission must fit");
         d.step().expect("step must not error");
         let reaped = d.reap_finished();
-        assert_eq!(reaped.len(), 1, "eos_id matching the first sampled token must finish in one step");
+        assert_eq!(
+            reaped.len(),
+            1,
+            "eos_id matching the first sampled token must finish in one step"
+        );
         let (reaped_id, outcome) = &reaped[0];
         assert_eq!(*reaped_id, id);
         match outcome {
             FinishOutcome::Completed { stop, .. } => {
-                assert_eq!(*stop, StopReason::Eos, "last token matched eos_id; must report Eos");
+                assert_eq!(
+                    *stop,
+                    StopReason::Eos,
+                    "last token matched eos_id; must report Eos"
+                );
             }
-            FinishOutcome::Failed(e) => panic!("session must not fail on a healthy tiny model: {e}"),
+            FinishOutcome::Failed(e) => {
+                panic!("session must not fail on a healthy tiny model: {e}")
+            }
         }
     }
 }

@@ -332,7 +332,9 @@ mod tests {
                 _ => FakePlan::RunToBudget,
             };
             if plan == FakePlan::RejectAdmit {
-                return Err(AdmitError::Rejected("fake: permanently invalid prompt".to_string()));
+                return Err(AdmitError::Rejected(
+                    "fake: permanently invalid prompt".to_string(),
+                ));
             }
             let id = self.next_id;
             self.next_id += 1;
@@ -377,9 +379,9 @@ mod tests {
                     FakePlan::RunToBudget => s.produced >= s.max_new,
                     // Never inserted into `sessions` — try_admit rejects it
                     // before construction. Listed so this match stays total.
-                    FakePlan::RejectAdmit => unreachable!(
-                        "RejectAdmit sessions are never admitted into `sessions`"
-                    ),
+                    FakePlan::RejectAdmit => {
+                        unreachable!("RejectAdmit sessions are never admitted into `sessions`")
+                    }
                 })
                 .map(|(&id, _)| id)
                 .collect();
@@ -389,9 +391,9 @@ mod tests {
                     let s = self.sessions.remove(&id).unwrap();
                     let outcome = match s.plan {
                         FakePlan::Fail => FinishOutcome::Failed("fake failure".to_string()),
-                        FakePlan::RejectAdmit => unreachable!(
-                            "RejectAdmit sessions are never admitted into `sessions`"
-                        ),
+                        FakePlan::RejectAdmit => {
+                            unreachable!("RejectAdmit sessions are never admitted into `sessions`")
+                        }
                         FakePlan::HitEos | FakePlan::RunToBudget => {
                             let stop = if s.plan == FakePlan::HitEos {
                                 StopReason::Eos
