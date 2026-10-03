@@ -2102,8 +2102,8 @@ dependencies = [
 
 [[package]]
 name = "fuel"
-version = "0.11.2"
-source = "git+https://github.com/ciresnave/fuel?rev=4910b37a60a17b3111ac909f249bf17926bcb316#4910b37a60a17b3111ac909f249bf17926bcb316"
+version = "0.12.9"
+source = "git+https://github.com/ciresnave/fuel?rev=648e122b39d16ed6e2041b165898355f15e39868#648e122b39d16ed6e2041b165898355f15e39868"
 dependencies = [
  "fuel-core",
  "fuel-transformers",
@@ -2111,24 +2111,24 @@ dependencies = [
 
 [[package]]
 name = "fuel-backend-contract"
-version = "0.11.2"
-source = "git+https://github.com/ciresnave/fuel?rev=4910b37a60a17b3111ac909f249bf17926bcb316#4910b37a60a17b3111ac909f249bf17926bcb316"
+version = "0.12.9"
+source = "git+https://github.com/ciresnave/fuel?rev=648e122b39d16ed6e2041b165898355f15e39868#648e122b39d16ed6e2041b165898355f15e39868"
 dependencies = [
  "fuel-ir",
 ]
 
 [[package]]
 name = "fuel-conv"
-version = "0.11.2"
-source = "git+https://github.com/ciresnave/fuel?rev=4910b37a60a17b3111ac909f249bf17926bcb316#4910b37a60a17b3111ac909f249bf17926bcb316"
+version = "0.12.9"
+source = "git+https://github.com/ciresnave/fuel?rev=648e122b39d16ed6e2041b165898355f15e39868#648e122b39d16ed6e2041b165898355f15e39868"
 dependencies = [
  "num-traits",
 ]
 
 [[package]]
 name = "fuel-core"
-version = "0.11.2"
-source = "git+https://github.com/ciresnave/fuel?rev=4910b37a60a17b3111ac909f249bf17926bcb316#4910b37a60a17b3111ac909f249bf17926bcb316"
+version = "0.12.9"
+source = "git+https://github.com/ciresnave/fuel?rev=648e122b39d16ed6e2041b165898355f15e39868#648e122b39d16ed6e2041b165898355f15e39868"
 dependencies = [
  "baracuda-core",
  "baracuda-driver",
@@ -2173,8 +2173,8 @@ dependencies = [
 
 [[package]]
 name = "fuel-correctness-fixtures"
-version = "0.11.2"
-source = "git+https://github.com/ciresnave/fuel?rev=4910b37a60a17b3111ac909f249bf17926bcb316#4910b37a60a17b3111ac909f249bf17926bcb316"
+version = "0.12.9"
+source = "git+https://github.com/ciresnave/fuel?rev=648e122b39d16ed6e2041b165898355f15e39868#648e122b39d16ed6e2041b165898355f15e39868"
 dependencies = [
  "bytemuck",
  "fuel-ir",
@@ -2184,8 +2184,8 @@ dependencies = [
 
 [[package]]
 name = "fuel-cpu-backend"
-version = "0.11.2"
-source = "git+https://github.com/ciresnave/fuel?rev=4910b37a60a17b3111ac909f249bf17926bcb316#4910b37a60a17b3111ac909f249bf17926bcb316"
+version = "0.12.9"
+source = "git+https://github.com/ciresnave/fuel?rev=648e122b39d16ed6e2041b165898355f15e39868#648e122b39d16ed6e2041b165898355f15e39868"
 dependencies = [
  "bytemuck",
  "float8 0.7.0",
@@ -2207,8 +2207,8 @@ dependencies = [
 
 [[package]]
 name = "fuel-cpu-kernels"
-version = "0.11.2"
-source = "git+https://github.com/ciresnave/fuel?rev=4910b37a60a17b3111ac909f249bf17926bcb316#4910b37a60a17b3111ac909f249bf17926bcb316"
+version = "0.12.9"
+source = "git+https://github.com/ciresnave/fuel?rev=648e122b39d16ed6e2041b165898355f15e39868#648e122b39d16ed6e2041b165898355f15e39868"
 dependencies = [
  "float8 0.7.0",
  "half",
@@ -2218,8 +2218,8 @@ dependencies = [
 
 [[package]]
 name = "fuel-cuda-backend"
-version = "0.11.2"
-source = "git+https://github.com/ciresnave/fuel?rev=4910b37a60a17b3111ac909f249bf17926bcb316#4910b37a60a17b3111ac909f249bf17926bcb316"
+version = "0.12.9"
+source = "git+https://github.com/ciresnave/fuel?rev=648e122b39d16ed6e2041b165898355f15e39868#648e122b39d16ed6e2041b165898355f15e39868"
 dependencies = [
  "baracuda-core",
  "baracuda-cublas",
@@ -2248,8 +2248,8 @@ dependencies = [
 
 [[package]]
 name = "fuel-dispatch"
-version = "0.11.2"
-source = "git+https://github.com/ciresnave/fuel?rev=4910b37a60a17b3111ac909f249bf17926bcb316#4910b37a60a17b3111ac909f249bf17926bcb316"
+version = "0.12.9"
+source = "git+https://github.com/ciresnave/fuel?rev=648e122b39d16ed6e2041b165898355f15e39868#648e122b39d16ed6e2041b165898355f15e39868"
 dependencies = [
  "baracuda-kernels-types",
  "baracuda-nvrtc",
@@ -2276,8 +2276,8 @@ dependencies = [
 
 [[package]]
 name = "fuel-formats"
-version = "0.11.2"
-source = "git+https://github.com/ciresnave/fuel?rev=4910b37a60a17b3111ac909f249bf17926bcb316#4910b37a60a17b3111ac909f249bf17926bcb316"
+version = "0.12.9"
+source = "git+https://github.com/ciresnave/fuel?rev=648e122b39d16ed6e2041b165898355f15e39868#648e122b39d16ed6e2041b165898355f15e39868"
 dependencies = [
  "bytemuck",
  "byteorder",
@@ -2294,8 +2294,8 @@ dependencies = [
 
 [[package]]
 name = "fuel-graph"
-version = "0.11.2"
-source = "git+https://github.com/ciresnave/fuel?rev=4910b37a60a17b3111ac909f249bf17926bcb316#4910b37a60a17b3111ac909f249bf17926bcb316"
+version = "0.12.9"
+source = "git+https://github.com/ciresnave/fuel?rev=648e122b39d16ed6e2041b165898355f15e39868#648e122b39d16ed6e2041b165898355f15e39868"
 dependencies = [
  "float8 0.7.0",
  "fuel-backend-contract",
@@ -2306,21 +2306,22 @@ dependencies = [
 
 [[package]]
 name = "fuel-hardware"
-version = "0.11.2"
-source = "git+https://github.com/ciresnave/fuel?rev=4910b37a60a17b3111ac909f249bf17926bcb316#4910b37a60a17b3111ac909f249bf17926bcb316"
+version = "0.12.9"
+source = "git+https://github.com/ciresnave/fuel?rev=648e122b39d16ed6e2041b165898355f15e39868#648e122b39d16ed6e2041b165898355f15e39868"
 dependencies = [
  "fuel-cpu-backend",
  "fuel-cuda-backend",
  "fuel-ir",
  "fuel-vulkan-backend",
+ "num_cpus",
  "serde",
  "serde_json",
 ]
 
 [[package]]
 name = "fuel-inference"
-version = "0.11.2"
-source = "git+https://github.com/ciresnave/fuel?rev=4910b37a60a17b3111ac909f249bf17926bcb316#4910b37a60a17b3111ac909f249bf17926bcb316"
+version = "0.12.9"
+source = "git+https://github.com/ciresnave/fuel?rev=648e122b39d16ed6e2041b165898355f15e39868#648e122b39d16ed6e2041b165898355f15e39868"
 dependencies = [
  "fuel",
  "fuel-backend-contract",
@@ -2336,8 +2337,8 @@ dependencies = [
 
 [[package]]
 name = "fuel-ir"
-version = "0.11.2"
-source = "git+https://github.com/ciresnave/fuel?rev=4910b37a60a17b3111ac909f249bf17926bcb316#4910b37a60a17b3111ac909f249bf17926bcb316"
+version = "0.12.9"
+source = "git+https://github.com/ciresnave/fuel?rev=648e122b39d16ed6e2041b165898355f15e39868#648e122b39d16ed6e2041b165898355f15e39868"
 dependencies = [
  "float8 0.7.0",
  "half",
@@ -2353,13 +2354,13 @@ dependencies = [
 
 [[package]]
 name = "fuel-kernel-seam-types"
-version = "0.11.2"
-source = "git+https://github.com/ciresnave/fuel?rev=4910b37a60a17b3111ac909f249bf17926bcb316#4910b37a60a17b3111ac909f249bf17926bcb316"
+version = "0.12.9"
+source = "git+https://github.com/ciresnave/fuel?rev=648e122b39d16ed6e2041b165898355f15e39868#648e122b39d16ed6e2041b165898355f15e39868"
 
 [[package]]
 name = "fuel-kiss-ref-backend"
-version = "0.11.2"
-source = "git+https://github.com/ciresnave/fuel?rev=4910b37a60a17b3111ac909f249bf17926bcb316#4910b37a60a17b3111ac909f249bf17926bcb316"
+version = "0.12.9"
+source = "git+https://github.com/ciresnave/fuel?rev=648e122b39d16ed6e2041b165898355f15e39868#648e122b39d16ed6e2041b165898355f15e39868"
 dependencies = [
  "fuel-ir",
  "fuel-kernel-seam-types",
@@ -2371,14 +2372,17 @@ dependencies = [
 
 [[package]]
 name = "fuel-loaders"
-version = "0.11.2"
-source = "git+https://github.com/ciresnave/fuel?rev=4910b37a60a17b3111ac909f249bf17926bcb316#4910b37a60a17b3111ac909f249bf17926bcb316"
+version = "0.12.9"
+source = "git+https://github.com/ciresnave/fuel?rev=648e122b39d16ed6e2041b165898355f15e39868#648e122b39d16ed6e2041b165898355f15e39868"
 dependencies = [
  "fuel-backend-contract",
  "fuel-formats",
  "fuel-ir",
  "fuel-quantized",
  "memmap2",
+ "mlmf-core",
+ "mlmf-gguf",
+ "mlmf-source-file",
  "safetensors 0.8.0",
  "tokenizers 0.23.1",
  "yoke 0.8.3",
@@ -2386,8 +2390,8 @@ dependencies = [
 
 [[package]]
 name = "fuel-memory"
-version = "0.11.2"
-source = "git+https://github.com/ciresnave/fuel?rev=4910b37a60a17b3111ac909f249bf17926bcb316#4910b37a60a17b3111ac909f249bf17926bcb316"
+version = "0.12.9"
+source = "git+https://github.com/ciresnave/fuel?rev=648e122b39d16ed6e2041b165898355f15e39868#648e122b39d16ed6e2041b165898355f15e39868"
 dependencies = [
  "bytemuck",
  "fuel-cpu-backend",
@@ -2402,8 +2406,8 @@ dependencies = [
 
 [[package]]
 name = "fuel-model-llama"
-version = "0.11.2"
-source = "git+https://github.com/ciresnave/fuel?rev=4910b37a60a17b3111ac909f249bf17926bcb316#4910b37a60a17b3111ac909f249bf17926bcb316"
+version = "0.12.9"
+source = "git+https://github.com/ciresnave/fuel?rev=648e122b39d16ed6e2041b165898355f15e39868#648e122b39d16ed6e2041b165898355f15e39868"
 dependencies = [
  "fuel-core",
  "fuel-dispatch",
@@ -2418,8 +2422,8 @@ dependencies = [
 
 [[package]]
 name = "fuel-model-phi"
-version = "0.11.2"
-source = "git+https://github.com/ciresnave/fuel?rev=4910b37a60a17b3111ac909f249bf17926bcb316#4910b37a60a17b3111ac909f249bf17926bcb316"
+version = "0.12.9"
+source = "git+https://github.com/ciresnave/fuel?rev=648e122b39d16ed6e2041b165898355f15e39868#648e122b39d16ed6e2041b165898355f15e39868"
 dependencies = [
  "fuel-core",
  "fuel-graph",
@@ -2433,8 +2437,8 @@ dependencies = [
 
 [[package]]
 name = "fuel-quantized"
-version = "0.11.2"
-source = "git+https://github.com/ciresnave/fuel?rev=4910b37a60a17b3111ac909f249bf17926bcb316#4910b37a60a17b3111ac909f249bf17926bcb316"
+version = "0.12.9"
+source = "git+https://github.com/ciresnave/fuel?rev=648e122b39d16ed6e2041b165898355f15e39868#648e122b39d16ed6e2041b165898355f15e39868"
 dependencies = [
  "byteorder",
  "fuel-backend-contract",
@@ -2446,8 +2450,8 @@ dependencies = [
 
 [[package]]
 name = "fuel-transformers"
-version = "0.11.2"
-source = "git+https://github.com/ciresnave/fuel?rev=4910b37a60a17b3111ac909f249bf17926bcb316#4910b37a60a17b3111ac909f249bf17926bcb316"
+version = "0.12.9"
+source = "git+https://github.com/ciresnave/fuel?rev=648e122b39d16ed6e2041b165898355f15e39868#648e122b39d16ed6e2041b165898355f15e39868"
 dependencies = [
  "byteorder",
  "fancy-regex 0.19.2",
@@ -2476,8 +2480,8 @@ dependencies = [
 
 [[package]]
 name = "fuel-vulkan-backend"
-version = "0.11.2"
-source = "git+https://github.com/ciresnave/fuel?rev=4910b37a60a17b3111ac909f249bf17926bcb316#4910b37a60a17b3111ac909f249bf17926bcb316"
+version = "0.12.9"
+source = "git+https://github.com/ciresnave/fuel?rev=648e122b39d16ed6e2041b165898355f15e39868#648e122b39d16ed6e2041b165898355f15e39868"
 dependencies = [
  "fuel-backend-contract",
  "fuel-conv",
@@ -2492,8 +2496,8 @@ dependencies = [
 
 [[package]]
 name = "fuel-vulkan-kernels"
-version = "0.11.2"
-source = "git+https://github.com/ciresnave/fuel?rev=4910b37a60a17b3111ac909f249bf17926bcb316#4910b37a60a17b3111ac909f249bf17926bcb316"
+version = "0.12.9"
+source = "git+https://github.com/ciresnave/fuel?rev=648e122b39d16ed6e2041b165898355f15e39868#648e122b39d16ed6e2041b165898355f15e39868"
 
 [[package]]
 name = "futf"
@@ -4108,6 +4112,46 @@ dependencies = [
  "libc",
  "wasi 0.11.1+wasi-snapshot-preview1",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "mlmf-core"
+version = "0.5.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6f8c97edd4d598aa59f6afbe522d7fdfae14ddf54398997973115b3e110c6e82"
+dependencies = [
+ "bytemuck",
+ "smallvec",
+ "thiserror 2.0.19",
+]
+
+[[package]]
+name = "mlmf-ggml"
+version = "0.5.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "59984fa0af7ac68e62a163724673cd22393eccf75ef67d49810b59c306ba2084"
+dependencies = [
+ "mlmf-core",
+]
+
+[[package]]
+name = "mlmf-gguf"
+version = "0.5.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c18cd453df09dbb49f2635648c00e30c128743a587aa2beec20b31a8e491e02b"
+dependencies = [
+ "mlmf-core",
+ "mlmf-ggml",
+]
+
+[[package]]
+name = "mlmf-source-file"
+version = "0.5.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "42bba266d5af2ed176135fdea0d5536251ae4ff610decb463d1bb633740c2ddb"
+dependencies = [
+ "memmap2",
+ "mlmf-core",
 ]
 
 [[package]]

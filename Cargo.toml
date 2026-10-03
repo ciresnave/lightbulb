@@ -275,20 +275,20 @@
     #     paths = ["../fuel-lightbulb-port"]
     # — which overrides the git source without touching the manifest, so a
     # working tree stays publishable.
-    fuel             = { git = "https://github.com/ciresnave/fuel", rev = "4910b37a60a17b3111ac909f249bf17926bcb316", package = "fuel-core" }
-    fuel-cpu-backend = { git = "https://github.com/ciresnave/fuel", rev = "4910b37a60a17b3111ac909f249bf17926bcb316" }
+    fuel             = { git = "https://github.com/ciresnave/fuel", rev = "648e122b39d16ed6e2041b165898355f15e39868", package = "fuel-core" }
+    fuel-cpu-backend = { git = "https://github.com/ciresnave/fuel", rev = "648e122b39d16ed6e2041b165898355f15e39868" }
     # `LlamaConfig`/`LlamaModel`/`LlamaWeights` moved out of `fuel-core::lazy`
     # into this crate as of the bump to `4910b37` (fuel-core dissolution, one
     # architecture per crate) -- not mentioned in lightbulb#97's own body,
     # which predates discovering it. Every `fuel::lazy::Llama*` import in
     # `src/model_fuel/` had to move here in the same change as the rev bump.
-    fuel-model-llama = { git = "https://github.com/ciresnave/fuel", rev = "4910b37a60a17b3111ac909f249bf17926bcb316" }
+    fuel-model-llama = { git = "https://github.com/ciresnave/fuel", rev = "648e122b39d16ed6e2041b165898355f15e39868" }
     # `lazy_llama_full`/`lazy_quantized_llama` (the config/quantized-model
     # types `model_fuel/loader.rs` and `loader_gguf.rs` build on) live in this
     # crate's `models` module, not in `fuel-core` -- same dissolution as above.
     # Also where fuel's per-architecture quantized models (`lazy_quantized_qwen3`
     # and siblings, see lightbulb#97's follow-up) would come from.
-    fuel-transformers = { git = "https://github.com/ciresnave/fuel", rev = "4910b37a60a17b3111ac909f249bf17926bcb316" }
+    fuel-transformers = { git = "https://github.com/ciresnave/fuel", rev = "648e122b39d16ed6e2041b165898355f15e39868" }
     # `fuel_loaders::quantized::config_from_gguf::derive_config` -- the
     # architecture-parameterized GGUF config reader lightbulb#97 (step 2)
     # replaces `src/model_fuel/loader_gguf.rs`'s own `llama_full_config_from_gguf`
@@ -296,7 +296,7 @@
     # metadata-only parse distinct from `crate::gguf::Content` (Lightbulb's
     # reader, kept for the tokenizer extraction `derive_config` deliberately
     # does not do).
-    fuel-loaders = { git = "https://github.com/ciresnave/fuel", rev = "4910b37a60a17b3111ac909f249bf17926bcb316" }
+    fuel-loaders = { git = "https://github.com/ciresnave/fuel", rev = "648e122b39d16ed6e2041b165898355f15e39868" }
     # `fuel_ir::probe::BackendId` and `fuel_ir::backend::TransferPath` — neither
     # is re-exported through the `fuel` facade (`fuel-core`'s `lib.rs` has no
     # `pub use fuel_ir::...` at all; it only re-exports the SPECIFIC fuel_ir
@@ -309,7 +309,7 @@
     # `fuel-core/src/lib.rs`'s `pub use fuel_hardware::probe`/
     # `pub use fuel_dispatch::topology`/`pub use fuel_hardware::transfer_cost`),
     # so this is the only new crate-level dependency PR 1 needs.
-    fuel-ir = { git = "https://github.com/ciresnave/fuel", rev = "4910b37a60a17b3111ac909f249bf17926bcb316" }
+    fuel-ir = { git = "https://github.com/ciresnave/fuel", rev = "648e122b39d16ed6e2041b165898355f15e39868" }
     # Only used to CONSTRUCT a `CudaDevice` in the GPU measurement harness.
     # `fuel-core` provides `impl From<CudaDevice> for Device` (its `cuda_backend`
     # module) but re-exports only `builder_arg`, not `CudaDevice` itself — so a
@@ -320,7 +320,7 @@
     # allowed to be optional"), and a PLAIN dev-dependency would run nvcc on
     # every `cargo test` including CPU-only ones. Optional + feature-activated
     # keeps default builds free of it entirely.
-    fuel-cuda-backend = { git = "https://github.com/ciresnave/fuel", rev = "4910b37a60a17b3111ac909f249bf17926bcb316", optional = true }
+    fuel-cuda-backend = { git = "https://github.com/ciresnave/fuel", rev = "648e122b39d16ed6e2041b165898355f15e39868", optional = true }
 
 [[bin]]
 name = "lightbulb-cli"
@@ -349,7 +349,7 @@ kiss-ops-vocab = "0.2.0"
 # DEV-only on purpose — Lightbulb's library does not depend on Fuel's scheduler,
 # it has its own. This is here so the A/B harness in tests/paged_plan_once.rs can
 # drive Fuel's paged decode path directly and measure the plan-once flag.
-fuel-inference = { git = "https://github.com/ciresnave/fuel", rev = "4910b37a60a17b3111ac909f249bf17926bcb316" }
+fuel-inference = { git = "https://github.com/ciresnave/fuel", rev = "648e122b39d16ed6e2041b165898355f15e39868" }
 tempfile       = "3"
 tower          = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
