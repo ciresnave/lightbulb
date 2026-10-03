@@ -99,6 +99,7 @@ pub mod loader;
 pub mod loader_f32;
 pub mod loader_gguf;
 pub mod policies;
+pub mod scheduler_driver;
 pub mod session;
 
 /// Smoke check: build a two-tensor graph on Fuel and realize it, from inside

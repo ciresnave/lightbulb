@@ -56,21 +56,42 @@ pub(crate) enum FinishOutcome {
     Failed(String),
 }
 
+/// Why [`SchedulerDriver::try_admit`] failed to admit a session — the two
+/// cases need opposite handling, so they cannot share one untyped `Err`.
+///
+/// Found while wiring the real `fuel_inference::multi_session::SessionScheduler`
+/// adapter: `SessionScheduler::add_session` can fail for a transient reason
+/// (no KV capacity right now — retry once something is reaped) OR a permanent
+/// one (empty prompt, zero budget — the request itself is invalid and will
+/// NEVER fit, no matter how much capacity frees up). The original single-`Err`
+/// signature could not tell these apart, so [`run_scheduled_jobs`] retried
+/// EVERY admit failure forever — a permanently-invalid prompt would re-queue
+/// at the front of `pending` every tick and silently hang that client forever
+/// instead of ever reporting an error back.
+#[derive(Debug)]
+pub(crate) enum AdmitError {
+    /// No room right now; leave the job unconsumed and retry on a later tick
+    /// once [`SchedulerDriver::reap_finished`] frees capacity.
+    NoCapacity,
+    /// The request itself can never be admitted (e.g. empty prompt, zero
+    /// budget) — report it as a request failure immediately, never retry.
+    Rejected(String),
+}
+
 /// Abstracts a batched multi-session scheduler so [`run_scheduled_jobs`]'s
 /// admission/dispatch logic is testable without a real model or GPU. The real
 /// adapter wraps `fuel_inference::multi_session::SessionScheduler`.
 pub(crate) trait SchedulerDriver {
     type Id: Copy + Eq + std::hash::Hash;
 
-    /// Try to admit a new session. `Err` means "no capacity right now" — the
-    /// caller must leave the job unconsumed and retry on a later tick, not
-    /// drop it or report it as a request failure.
+    /// Try to admit a new session. See [`AdmitError`] for how the two
+    /// failure cases differ.
     fn try_admit(
         &mut self,
         prompt: &[u32],
         max_new: usize,
         temperature: f64,
-    ) -> Result<Self::Id, String>;
+    ) -> Result<Self::Id, AdmitError>;
 
     /// Advance every active session by at most one step. Returns `(id, token)`
     /// for every session that produced a token THIS tick — including a
@@ -163,9 +184,12 @@ pub(crate) fn run_scheduled_jobs<D: SchedulerDriver>(
                         },
                     );
                 }
-                Err(_capacity) => {
+                Err(AdmitError::NoCapacity) => {
                     pending.push_front(job);
                     break;
+                }
+                Err(AdmitError::Rejected(msg)) => {
+                    send_error(job.response_mode, anyhow::anyhow!(msg));
                 }
             }
         }
@@ -263,6 +287,7 @@ mod tests {
         RunToBudget,
         HitEos,
         Fail,
+        RejectAdmit,
     }
 
     struct FakeSession {
@@ -296,15 +321,21 @@ mod tests {
             prompt: &[u32],
             max_new: usize,
             _temperature: f64,
-        ) -> Result<u64, String> {
+        ) -> Result<u64, AdmitError> {
             if self.sessions.len() >= self.capacity {
-                return Err("fake: at capacity".to_string());
+                return Err(AdmitError::NoCapacity);
             }
             let plan = match prompt.first() {
-                Some(69) => FakePlan::HitEos, // 'E'
-                Some(70) => FakePlan::Fail,   // 'F'
+                Some(69) => FakePlan::HitEos,      // 'E'
+                Some(70) => FakePlan::Fail,        // 'F'
+                Some(82) => FakePlan::RejectAdmit, // 'R'
                 _ => FakePlan::RunToBudget,
             };
+            if plan == FakePlan::RejectAdmit {
+                return Err(AdmitError::Rejected(
+                    "fake: permanently invalid prompt".to_string(),
+                ));
+            }
             let id = self.next_id;
             self.next_id += 1;
             self.sessions.insert(
@@ -346,6 +377,11 @@ mod tests {
                     FakePlan::Fail => true,
                     FakePlan::HitEos => s.produced >= 1,
                     FakePlan::RunToBudget => s.produced >= s.max_new,
+                    // Never inserted into `sessions` — try_admit rejects it
+                    // before construction. Listed so this match stays total.
+                    FakePlan::RejectAdmit => {
+                        unreachable!("RejectAdmit sessions are never admitted into `sessions`")
+                    }
                 })
                 .map(|(&id, _)| id)
                 .collect();
@@ -355,6 +391,9 @@ mod tests {
                     let s = self.sessions.remove(&id).unwrap();
                     let outcome = match s.plan {
                         FakePlan::Fail => FinishOutcome::Failed("fake failure".to_string()),
+                        FakePlan::RejectAdmit => {
+                            unreachable!("RejectAdmit sessions are never admitted into `sessions`")
+                        }
                         FakePlan::HitEos | FakePlan::RunToBudget => {
                             let stop = if s.plan == FakePlan::HitEos {
                                 StopReason::Eos
@@ -488,6 +527,28 @@ mod tests {
                 finish_reason: FinishReason::Length
             }
         ));
+    }
+
+    #[test]
+    fn a_permanently_rejected_job_errors_immediately_instead_of_retrying_forever() {
+        let (tx, rx) = mpsc::channel();
+        // 'R' (byte 82) selects the fake permanent-rejection plan.
+        let (bad_job, mut bad_rx) = complete_job("Rxyz", 2);
+        tx.send(bad_job).unwrap();
+        drop(tx);
+
+        // If this regresses to re-queuing Rejected the same as NoCapacity,
+        // the job never leaves `pending` (FakeDriver never admits it and
+        // `has_active_sessions` never becomes true), so `rx.recv()` blocks
+        // forever and this test hangs instead of failing — the exact bug
+        // being guarded against.
+        run_scheduled_jobs(FakeDriver::new(4), rx, fake_encode, fake_decode);
+
+        assert!(
+            bad_rx.try_recv().unwrap().is_err(),
+            "a permanently-invalid prompt must be reported as a request \
+             failure, not retried forever"
+        );
     }
 
     #[test]
