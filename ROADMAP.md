@@ -45,6 +45,37 @@ total src/**/*.rs             112
 Fuel is behind the `fuel-engine` feature and is **not at parity**. candlelight
 is the shipping path.
 
+## Research track: forked-agent latent/activation work (added 2026-10-01 by portfolio PM)
+
+Source: `OverMind/SUBAGENT-FORK-AND-AUDITOR-DESIGN.md` (reviewed by this project 2026-09-30) plus a
+longer external brief CireSnave was handed ("Forked-Agent Orchestration: Architecture Discussion Brief").
+Board item 86 in `CIRESNAVE-DECISIONS.md` tracks this; project placement in that brief puts Fuel on KV-
+cache mechanics and OverMind on orchestration policy, with Lightbulb owning the model-facing pieces below.
+
+1. **Wire the existing prefix-matching logic into the serving path — near-term, not research.** This
+   project's own review (2026-09-30) confirmed the donor-must-stay-open copy-on-write mechanism is correct
+   and real, and that a content-addressed matching layer already exists on top of it — but with **zero
+   callers outside its own tests** today. This is an existing, correct, unwired primitive, not new
+   engineering — wire it in.
+2. **Fix the live-date chat-template rendering hazard**, found during the same review: a Jinja template
+   function (`strftime_now`) renders the current date live, which can break prefix-cache matching across a
+   midnight boundary. General correctness fix, not fork-specific, but surfaced by this work.
+3. **Latent/activation-transfer between live model instances — gated research track, treat as the riskiest
+   of the three technique clusters, not a committed deliverable.** The external brief's "mutual state
+   access" idea (two live instances reading each other's internal activations via learned cross-attention)
+   is genuinely novel, not just an engineering extension of KV-cache prefix sharing. IP due-diligence
+   (2026-10-01, web search, not a legal clearance): nearest prior art is two papers from November 2025
+   ("Enabling Agents to Communicate Entirely in Latent Space" / Interlat, arXiv:2511.09149; "Latent
+   Collaboration in Multi-Agent Systems" / LatentMAS, arXiv:2511.20639) — both describe agents sharing
+   hidden-state representations instead of text, close to but not identical to this brief's exact
+   mechanism. No blocking patent found, but large labs are known aggressive filers on early-stage ideas
+   like this one, and patent publication lag (~18 months) means a recent filing wouldn't be visible to
+   this search yet. **Do not commit engineering budget beyond early prototyping without a professional
+   patent search first** — this is the one technique in the whole brief where "nothing found" is weak
+   evidence of safety, not strong evidence.
+
+---
+
 ## ⚠️ Three COMPLETE claims below are contradicted by the code
 
 **A document asserting completion over unimplemented code is worse than one
