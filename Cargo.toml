@@ -310,6 +310,16 @@
     # `pub use fuel_dispatch::topology`/`pub use fuel_hardware::transfer_cost`),
     # so this is the only new crate-level dependency PR 1 needs.
     fuel-ir = { git = "https://github.com/ciresnave/fuel", rev = "648e122b39d16ed6e2041b165898355f15e39868" }
+    # fuel-inference: `multi_session::SessionScheduler` + `DecodeModel` — the
+    # proven batched multi-session decode driver board item 97 wires in via
+    # `src/model_fuel/scheduler_driver.rs`. PROMOTED from [dev-dependencies]
+    # (2026-10-03): it was dev-only while nothing but `tests/paged_plan_once.rs`
+    # touched it ("Lightbulb's library does not depend on Fuel's scheduler, it
+    # has its own" was true until this point). Consistent with the rest of this
+    # block: `fuel`/`fuel-transformers`/etc. are already unconditional real
+    # dependencies regardless of the `fuel-engine` feature, which only gates
+    # the runtime code path in `model_runner.rs` — this is not a new exception.
+    fuel-inference = { git = "https://github.com/ciresnave/fuel", rev = "648e122b39d16ed6e2041b165898355f15e39868" }
     # Only used to CONSTRUCT a `CudaDevice` in the GPU measurement harness.
     # `fuel-core` provides `impl From<CudaDevice> for Device` (its `cuda_backend`
     # module) but re-exports only `builder_arg`, not `CudaDevice` itself — so a
@@ -345,11 +355,6 @@ path = "src/bin/lightbulb-probe.rs"
 # stops kiss-ref mirroring a consumer's own arithmetic back as agreement.
 kiss-ref-core  = "0.2.0"
 kiss-ops-vocab = "0.2.0"
-# fuel-inference: the serving drivers (PagedSessionScheduler and friends).
-# DEV-only on purpose — Lightbulb's library does not depend on Fuel's scheduler,
-# it has its own. This is here so the A/B harness in tests/paged_plan_once.rs can
-# drive Fuel's paged decode path directly and measure the plan-once flag.
-fuel-inference = { git = "https://github.com/ciresnave/fuel", rev = "648e122b39d16ed6e2041b165898355f15e39868" }
 tempfile       = "3"
 tower          = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
