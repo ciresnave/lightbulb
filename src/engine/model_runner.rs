@@ -302,7 +302,7 @@ impl ModelRunner {
     #[cfg(feature = "fuel-engine")]
     pub fn start(
         model_path: impl Into<PathBuf>,
-        _max_batch_size: usize,
+        max_batch_size: usize,
         context_length: usize,
         dtype: Option<String>,
     ) -> Result<InferenceRequestSender> {
@@ -319,12 +319,17 @@ impl ModelRunner {
         }
 
         std::thread::spawn(move || {
-            // `FuelEngineModel::load` dispatches on `.gguf` vs a SafeTensors
-            // directory itself now (`src/model_fuel/engine_model.rs`,
-            // `LoadedModel::{F32, QuantizedGguf}`) — GGUF-quantized loading
-            // via `fuel::QuantizedLlama3Model::from_gguf` landed 2026-09-24.
-            // See `src/model_fuel/loader_gguf.rs` for the loader and
-            // `docs/FUEL-PORT-STATUS-2026-09-24.md` §6 for how this was
+            // `scheduled_llama_engine::run_fuel_engine` (board item 97) loads
+            // the checkpoint — dispatching on `.gguf` vs a SafeTensors
+            // directory, same as before — and then routes per-checkpoint to
+            // either the batched `FuelSchedulerDriver`/`run_scheduled_jobs`
+            // path (the new multi-session scheduler) or the serial
+            // `FuelEngineModel`/`run_jobs` path (checkpoints declaring
+            // multiple EOS tokens; see that module's "Routing" doc for why).
+            // GGUF-quantized loading via `fuel::QuantizedLlama3Model::
+            // from_gguf` landed 2026-09-24; see `src/model_fuel/
+            // loader_gguf.rs` for the loader and
+            // `docs/FUEL-PORT-STATUS-2026-09-24.md` §6 for how that was
             // scoped. RE-MEASURED 2026-09-26 against fuel's `main` `580540f`
             // (2026-09-25T22:46Z fuel#244) — fuel's dequant dispatch now
             // wires 14 of 15 `GgmlDType` variants, GGUF's `Q6_K`
@@ -337,23 +342,12 @@ impl ModelRunner {
             // `docs/FUEL-CAPABILITY-AUDIT-2026-09-24.md`'s superseded-by
             // note for the full history of this claim.
             println!("Loading Fuel model from {}", model_path.display());
-            match crate::model_fuel::engine_model::FuelEngineModel::load(
+            crate::model_fuel::scheduled_llama_engine::run_fuel_engine(
                 &model_path,
+                max_batch_size,
                 context_length,
-            ) {
-                Ok(model) => {
-                    println!("Fuel model loaded at {}", model_path.display());
-                    run_jobs(model, rx);
-                }
-                Err(e) => {
-                    eprintln!(
-                        "Failed to load Fuel model at {}: {:#}",
-                        model_path.display(),
-                        e
-                    );
-                    drain_with_error(rx, &format!("model load failed: {e}"));
-                }
-            }
+                rx,
+            );
         });
 
         Ok(tx)
@@ -364,7 +358,7 @@ impl ModelRunner {
 ///
 /// Shared by both backends: a load failure must not leave clients blocked on a
 /// channel that will never produce.
-fn drain_with_error(rx: Receiver<InferenceJob>, msg: &str) {
+pub(crate) fn drain_with_error(rx: Receiver<InferenceJob>, msg: &str) {
     while let Ok(job) = rx.recv() {
         match job.response_mode {
             ResponseMode::Complete(resp_tx) => {
@@ -379,7 +373,7 @@ fn drain_with_error(rx: Receiver<InferenceJob>, msg: &str) {
 
 /// The job loop. Identical for every backend, which is why it is generic rather
 /// than duplicated per `cfg`.
-fn run_jobs<M: EngineModel>(mut model: M, rx: Receiver<InferenceJob>) {
+pub(crate) fn run_jobs<M: EngineModel>(mut model: M, rx: Receiver<InferenceJob>) {
     // Process incoming jobs
     while let Ok(job) = rx.recv() {
         let req = Request {
