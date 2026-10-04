@@ -166,28 +166,56 @@ impl<'m> SchedulerDriver for LlamaSchedulerDriver<'m> {
 /// `multi_session.rs` test fixtures use.
 const KV_BLOCK_SIZE: usize = 16;
 
+/// The server-wide (not per-request) pieces of the batched path, bundled so
+/// [`run_batched`] takes one parameter instead of three — `device`/`policy`/
+/// `budget` are all `Copy`, so sharing this by reference costs nothing.
+struct BatchedServeConfig {
+    device: fuel::Device,
+    policy: SchedulePolicy,
+    budget: KvBudget,
+}
+
+impl BatchedServeConfig {
+    fn new(max_batch_size: usize, context_length: usize) -> Self {
+        let max_batch_size = max_batch_size.max(1);
+        Self {
+            device: super::device::select(),
+            policy: SchedulePolicy::Batched {
+                max_batch: max_batch_size,
+            },
+            budget: KvBudget {
+                block_size: KV_BLOCK_SIZE,
+                num_blocks: max_batch_size * context_length.div_ceil(KV_BLOCK_SIZE),
+            },
+        }
+    }
+}
+
 /// Build the batched driver for one already-loaded model and drive it —
 /// shared by both the `.gguf` and SafeTensors-directory branches of
 /// [`run_fuel_engine`], which differ only in the CONCRETE `M` and which
 /// `LlamaSchedulerDriverInner` variant wraps it (`wrap`, a tuple-variant
 /// constructor used as a plain `fn`).
-#[allow(clippy::too_many_arguments)]
 fn run_batched<'m, M: fuel_inference::multi_session::DecodeModel>(
     model: &'m M,
-    device: fuel::Device,
-    policy: SchedulePolicy,
-    budget: KvBudget,
+    config: BatchedServeConfig,
     eos_id: Option<u32>,
     context_length: usize,
     tokenizer: tokenizers::Tokenizer,
     rx: Receiver<InferenceJob>,
     wrap: fn(FuelSchedulerDriver<'m, M>) -> LlamaSchedulerDriverInner<'m>,
 ) {
-    let scheduler =
-        match FuelSchedulerDriver::new(model, device, fuel::DType::F32, policy, budget, eos_id) {
-            Ok(s) => s,
-            Err(e) => return drain_with_error(rx, &format!("building the scheduler: {e}")),
-        };
+    let scheduler = match FuelSchedulerDriver::new(
+        model,
+        config.device,
+        fuel::DType::F32,
+        config.policy,
+        config.budget,
+        eos_id,
+    ) {
+        Ok(s) => s,
+        Err(e) => return drain_with_error(rx, &format!("building the scheduler: {e}")),
+    };
     let driver = LlamaSchedulerDriver {
         inner: wrap(scheduler),
         context_length,
@@ -240,68 +268,75 @@ pub(crate) fn run_fuel_engine(
     context_length: usize,
     rx: Receiver<InferenceJob>,
 ) {
-    let max_batch_size = max_batch_size.max(1);
-    let budget = KvBudget {
-        block_size: KV_BLOCK_SIZE,
-        num_blocks: max_batch_size * context_length.div_ceil(KV_BLOCK_SIZE),
-    };
-    let policy = SchedulePolicy::Batched {
-        max_batch: max_batch_size,
-    };
-    let device = super::device::select();
-
+    let config = BatchedServeConfig::new(max_batch_size, context_length);
     let is_gguf = model_path
         .extension()
         .is_some_and(|ext| ext.eq_ignore_ascii_case("gguf"));
-
     if is_gguf {
-        let loaded = match super::loader_gguf::load_quantized_llama_gguf(model_path) {
-            Ok(l) => l,
-            Err(e) => return load_failed(model_path, e, rx),
-        };
-        println!("Fuel model loaded at {}", model_path.display());
-        if route_for(loaded.eos.as_ref()) == EngineRoute::Serial {
-            log_serial_fallback(model_path);
-            let model =
-                FuelEngineModel::from_loaded(LoadedModel::QuantizedGguf(loaded), context_length);
-            return run_jobs(model, rx);
-        }
-        let eos_id = single_eos_id(loaded.eos.as_ref());
-        run_batched(
-            &loaded.model,
-            device,
-            policy,
-            budget,
-            eos_id,
-            context_length,
-            loaded.tokenizer,
-            rx,
-            LlamaSchedulerDriverInner::QuantizedGguf,
-        );
+        serve_gguf(model_path, context_length, config, rx);
     } else {
-        let loaded = match super::loader_f32::load_llama_f32_from_dir(model_path) {
-            Ok(l) => l,
-            Err(e) => return load_failed(model_path, e, rx),
-        };
-        println!("Fuel model loaded at {}", model_path.display());
-        if route_for(loaded.eos.as_ref()) == EngineRoute::Serial {
-            log_serial_fallback(model_path);
-            let model = FuelEngineModel::from_loaded(LoadedModel::F32(loaded), context_length);
-            return run_jobs(model, rx);
-        }
-        let eos_id = single_eos_id(loaded.eos.as_ref());
-        run_batched(
-            &loaded.model,
-            device,
-            policy,
-            budget,
-            eos_id,
-            context_length,
-            loaded.tokenizer,
-            rx,
-            LlamaSchedulerDriverInner::F32,
-        );
+        serve_f32(model_path, context_length, config, rx);
     }
+}
+
+/// The `.gguf` branch of [`run_fuel_engine`] — split out so that function
+/// stays short; see its own doc for the load/route/batch shape this repeats.
+fn serve_gguf(
+    model_path: &Path,
+    context_length: usize,
+    config: BatchedServeConfig,
+    rx: Receiver<InferenceJob>,
+) {
+    let loaded = match super::loader_gguf::load_quantized_llama_gguf(model_path) {
+        Ok(l) => l,
+        Err(e) => return load_failed(model_path, e, rx),
+    };
+    println!("Fuel model loaded at {}", model_path.display());
+    if route_for(loaded.eos.as_ref()) == EngineRoute::Serial {
+        log_serial_fallback(model_path);
+        let model =
+            FuelEngineModel::from_loaded(LoadedModel::QuantizedGguf(loaded), context_length);
+        return run_jobs(model, rx);
+    }
+    let eos_id = single_eos_id(loaded.eos.as_ref());
+    run_batched(
+        &loaded.model,
+        config,
+        eos_id,
+        context_length,
+        loaded.tokenizer,
+        rx,
+        LlamaSchedulerDriverInner::QuantizedGguf,
+    );
+}
+
+/// The SafeTensors-directory branch of [`run_fuel_engine`] — see [`serve_gguf`].
+fn serve_f32(
+    model_path: &Path,
+    context_length: usize,
+    config: BatchedServeConfig,
+    rx: Receiver<InferenceJob>,
+) {
+    let loaded = match super::loader_f32::load_llama_f32_from_dir(model_path) {
+        Ok(l) => l,
+        Err(e) => return load_failed(model_path, e, rx),
+    };
+    println!("Fuel model loaded at {}", model_path.display());
+    if route_for(loaded.eos.as_ref()) == EngineRoute::Serial {
+        log_serial_fallback(model_path);
+        let model = FuelEngineModel::from_loaded(LoadedModel::F32(loaded), context_length);
+        return run_jobs(model, rx);
+    }
+    let eos_id = single_eos_id(loaded.eos.as_ref());
+    run_batched(
+        &loaded.model,
+        config,
+        eos_id,
+        context_length,
+        loaded.tokenizer,
+        rx,
+        LlamaSchedulerDriverInner::F32,
+    );
 }
 
 /// Report a load failure the same way both branches of [`run_fuel_engine`]
