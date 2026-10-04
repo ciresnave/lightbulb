@@ -110,6 +110,19 @@ fn derive_qwen3_config(path: &Path) -> Result<Qwen3Config> {
     })
 }
 
+/// Log the same "no declared EOS" warning `loader_gguf.rs`'s Llama loader
+/// does, when `no_eos` is true. Split out purely to keep
+/// [`load_quantized_qwen3_gguf`]'s own cyclomatic complexity down.
+fn warn_if_no_eos(path: &Path, no_eos: bool) {
+    if no_eos {
+        tracing::warn!(
+            "GGUF file {} declares no tokenizer.ggml.eos_token_id; generation will stop \
+             only on max_new_tokens",
+            path.display()
+        );
+    }
+}
+
 /// Load a GGUF-quantized Qwen3-shape checkpoint from a single `.gguf` file.
 ///
 /// Tokenizer comes from the GGUF file's own embedded vocabulary, same as
@@ -136,13 +149,7 @@ pub fn load_quantized_qwen3_gguf(path: &Path) -> Result<LoadedQuantizedQwen3> {
     let cfg = derive_qwen3_config(path)?;
 
     let (_bos, eos) = bos_eos_from_metadata(&content);
-    if eos.is_none() {
-        tracing::warn!(
-            "GGUF file {} declares no tokenizer.ggml.eos_token_id; generation will stop \
-             only on max_new_tokens",
-            path.display()
-        );
-    }
+    warn_if_no_eos(path, eos.is_none());
 
     let device = super::device::select();
     let model = QuantizedQwen3Model::from_gguf(path, &cfg).map_err(|e| {
