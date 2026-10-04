@@ -40,7 +40,7 @@ use crate::engine::scheduled_runner::{AdmitError, FinishOutcome, SchedulerDriver
 /// rather than silently assumed equivalent.
 pub(crate) struct FuelSchedulerDriver<'m, M: DecodeModel> {
     scheduler: SessionScheduler<'m, M>,
-    eos_id: Option<u32>,
+    eos_ids: Option<Vec<u32>>,
     next_seed: u64,
     /// How many of each session's `new_tokens` this driver has already
     /// reported out of [`step`](SchedulerDriver::step). **Load-bearing, not
@@ -66,12 +66,12 @@ impl<'m, M: DecodeModel> FuelSchedulerDriver<'m, M> {
         dtype: fuel::DType,
         policy: SchedulePolicy,
         budget: KvBudget,
-        eos_id: Option<u32>,
+        eos_ids: Option<Vec<u32>>,
     ) -> fuel::Result<Self> {
         let scheduler = SessionScheduler::new(model, device, dtype, policy, budget)?;
         Ok(Self {
             scheduler,
-            eos_id,
+            eos_ids,
             next_seed: 0,
             seen_counts: std::collections::HashMap::new(),
         })
@@ -110,16 +110,8 @@ impl<'m, M: DecodeModel> SchedulerDriver for FuelSchedulerDriver<'m, M> {
 
         // Capacity already confirmed above, so any `Err` reaching here is a
         // permanent rejection (empty prompt, zero budget) — never retried.
-        //
-        // `self.eos_id.map(|id| vec![id])`: fuel#307 widened `add_session`'s
-        // eos parameter from `Option<u32>` to `Option<Vec<u32>>` (multiple
-        // stop tokens). This driver still only tracks one id — wrapping it
-        // is a pure type-compat shim for this PR (the pin bump), not a
-        // behavior change; widening `FuelSchedulerDriver` itself to carry a
-        // real set and dropping `scheduled_llama_engine.rs`'s multi-EOS
-        // serial-fallback routing is the next, separate PR.
         self.scheduler
-            .add_session(prompt, strategy, self.eos_id.map(|id| vec![id]), max_new)
+            .add_session(prompt, strategy, self.eos_ids.clone(), max_new)
             .map_err(|e| AdmitError::Rejected(e.to_string()))
     }
 
@@ -150,12 +142,15 @@ impl<'m, M: DecodeModel> SchedulerDriver for FuelSchedulerDriver<'m, M> {
             .map(|(id, tokens)| {
                 self.seen_counts.remove(&id);
                 // Mirrors `SessionState`'s own transition rule exactly
-                // (`fuel-inference/src/multi_session.rs`: `self.eos_id ==
-                // Some(next) || self.remaining == 0` flips a session to
-                // `Finished`) — the only two ways a session stops, and the
-                // same check the scheduler itself used internally.
+                // (`fuel-inference/src/multi_session.rs`: `self.eos_ids
+                // .contains(next) || self.remaining == 0` flips a session to
+                // `Finished`, post fuel#307's multi-id widening) — the only
+                // two ways a session stops, and the same check the scheduler
+                // itself used internally.
                 let stop = match tokens.last() {
-                    Some(&t) if self.eos_id == Some(t) => StopReason::Eos,
+                    Some(t) if self.eos_ids.as_ref().is_some_and(|ids| ids.contains(t)) => {
+                        StopReason::Eos
+                    }
                     _ => StopReason::Budget,
                 };
                 (id, FinishOutcome::Completed { tokens, stop })
@@ -252,7 +247,7 @@ mod tests {
     fn driver(
         model: &LlamaModel,
         budget: KvBudget,
-        eos_id: Option<u32>,
+        eos_ids: Option<Vec<u32>>,
     ) -> FuelSchedulerDriver<'_, LlamaModel> {
         FuelSchedulerDriver::new(
             model,
@@ -260,7 +255,7 @@ mod tests {
             fuel::DType::F32,
             SchedulePolicy::RoundRobin,
             budget,
-            eos_id,
+            eos_ids,
         )
         .expect("tiny model's uniform per-head KV must satisfy ModelDims::from_model")
     }
@@ -381,7 +376,7 @@ mod tests {
             )
         };
 
-        let mut d = driver(&model, generous_budget(), Some(discovered_token));
+        let mut d = driver(&model, generous_budget(), Some(vec![discovered_token]));
         let id = d
             .try_admit(&[1, 2, 3], 10, 0.0)
             .expect("admission must fit");
@@ -404,6 +399,74 @@ mod tests {
             }
             FinishOutcome::Failed(e) => {
                 panic!("session must not fail on a healthy tiny model: {e}")
+            }
+        }
+    }
+
+    /// fuel#307 widened `eos_id: Option<u32>` to `eos_ids: Option<Vec<u32>>` —
+    /// the PM's explicit ask after that: prove a checkpoint declaring TWO
+    /// stop tokens actually stops on EITHER one, not just the first slot
+    /// (which `Vec::contains` already guarantees over a positional/first-only
+    /// match, but is exactly the kind of thing worth proving rather than
+    /// assuming once the type allows more than one).
+    #[test]
+    fn reap_finished_reports_eos_when_either_of_two_configured_ids_matches() {
+        let model = tiny_model(3);
+
+        let mut probe = driver(&model, generous_budget(), None);
+        probe
+            .try_admit(&[1, 2, 3], 1, 0.0)
+            .expect("probe admission must fit");
+        let advanced = probe.step().expect("probe step must not error");
+        let [(_, discovered_token)] = advanced[..] else {
+            panic!(
+                "expected exactly one token from the probe's single active \
+                 session, got {advanced:?}"
+            )
+        };
+        // A dummy id that cannot be the real token: `discovered_token` is a
+        // `u32` sampled from a `vocab_size: 16` tiny model, so anything at or
+        // above that vocab size is never producible.
+        let unreachable_id = 1_000_000;
+
+        for (case, eos_ids) in [
+            (
+                "discovered id first",
+                vec![discovered_token, unreachable_id],
+            ),
+            (
+                "discovered id second",
+                vec![unreachable_id, discovered_token],
+            ),
+        ] {
+            let mut d = driver(&model, generous_budget(), Some(eos_ids));
+            let id = d
+                .try_admit(&[1, 2, 3], 10, 0.0)
+                .unwrap_or_else(|e| panic!("[{case}] admission must fit: {e:?}"));
+            d.step()
+                .unwrap_or_else(|e| panic!("[{case}] step must not error: {e}"));
+            let reaped = d.reap_finished();
+            assert_eq!(
+                reaped.len(),
+                1,
+                "[{case}] a configured eos id matching the first sampled token \
+                 must finish in one step"
+            );
+            let (reaped_id, outcome) = &reaped[0];
+            assert_eq!(*reaped_id, id);
+            match outcome {
+                FinishOutcome::Completed { stop, .. } => {
+                    assert_eq!(
+                        *stop,
+                        StopReason::Eos,
+                        "[{case}] the last token matched one of the configured \
+                         eos ids; must report Eos regardless of its position \
+                         in the set"
+                    );
+                }
+                FinishOutcome::Failed(e) => {
+                    panic!("[{case}] session must not fail on a healthy tiny model: {e}")
+                }
             }
         }
     }
