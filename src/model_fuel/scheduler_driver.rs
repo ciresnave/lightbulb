@@ -110,8 +110,16 @@ impl<'m, M: DecodeModel> SchedulerDriver for FuelSchedulerDriver<'m, M> {
 
         // Capacity already confirmed above, so any `Err` reaching here is a
         // permanent rejection (empty prompt, zero budget) — never retried.
+        //
+        // `self.eos_id.map(|id| vec![id])`: fuel#307 widened `add_session`'s
+        // eos parameter from `Option<u32>` to `Option<Vec<u32>>` (multiple
+        // stop tokens). This driver still only tracks one id — wrapping it
+        // is a pure type-compat shim for this PR (the pin bump), not a
+        // behavior change; widening `FuelSchedulerDriver` itself to carry a
+        // real set and dropping `scheduled_llama_engine.rs`'s multi-EOS
+        // serial-fallback routing is the next, separate PR.
         self.scheduler
-            .add_session(prompt, strategy, self.eos_id, max_new)
+            .add_session(prompt, strategy, self.eos_id.map(|id| vec![id]), max_new)
             .map_err(|e| AdmitError::Rejected(e.to_string()))
     }
 
