@@ -2,18 +2,22 @@
 //! `ModelRunner::start`'s `fuel-engine` arm (board item 97's actual remaining
 //! deliverable: everything before this file only unblocked it).
 //!
-//! `ModelRunner::start`'s `fuel-engine` arm can load either an eager
-//! SafeTensors checkpoint (`LlamaModel`) or a GGUF-quantized one
-//! (`QuantizedLlama3Model`) — two different concrete `DecodeModel` types, so
-//! one `FuelSchedulerDriver<'m, M>` cannot hold either interchangeably.
-//! `LlamaSchedulerDriver` (below, `pub(crate)` — not an intra-doc link, same
-//! reason as `scheduler_driver.rs`'s own module doc) is the small
-//! enum-dispatch wrapper that lets `run_scheduled_jobs` stay generic over ONE
-//! `SchedulerDriver` regardless of which checkpoint format was loaded.
+//! `ModelRunner::start`'s `fuel-engine` arm can load an eager SafeTensors
+//! checkpoint (`LlamaModel`), a GGUF-quantized Llama one
+//! (`QuantizedLlama3Model`), or — since `serve_gguf` reads the file's own
+//! `general.architecture` via `crate::gguf::detect_architecture` — a
+//! GGUF-quantized Qwen3 one (`QuantizedQwen3Model`). Three different
+//! concrete `DecodeModel` types, so one `FuelSchedulerDriver<'m, M>` cannot
+//! hold any two interchangeably. `ServingDriver` (below, `pub(crate)` — not
+//! an intra-doc link, same reason as `scheduler_driver.rs`'s own module doc)
+//! is the small enum-dispatch wrapper that lets `run_scheduled_jobs` stay
+//! generic over ONE `SchedulerDriver` regardless of which checkpoint format
+//! or architecture was loaded.
 //!
-//! Qwen3 GGUF loading is a deliberately separate follow-up — `loader_gguf.rs`
-//! dispatches on architecture for Llama only today; nothing here loads a
-//! Qwen3 checkpoint yet.
+//! The SafeTensors-directory path (`serve_f32`) stays Llama-only — there is
+//! no eager Qwen3 loader in this codebase, and no architecture metadata to
+//! read the way GGUF's `general.architecture` provides it; widening that
+//! path is out of scope here, not an oversight.
 //!
 //! # Multi-token EOS checkpoints: no longer a special case
 //!
@@ -37,6 +41,7 @@ use anyhow::Result;
 use fuel_model_llama::LlamaModel;
 use fuel_transformers::models::lazy_llama_full::LlamaEosToks;
 use fuel_transformers::models::lazy_quantized_llama::QuantizedLlama3Model;
+use fuel_transformers::models::lazy_quantized_qwen3::QuantizedQwen3Model;
 
 use fuel_inference::multi_session::{KvBudget, SchedulePolicy};
 
@@ -46,6 +51,7 @@ use crate::engine::model_runner::{InferenceJob, drain_with_error};
 use crate::engine::scheduled_runner::{
     AdmitError, FinishOutcome, SchedulerDriver, run_scheduled_jobs,
 };
+use crate::gguf::{GgufArchitecture, detect_architecture};
 
 /// The checkpoint's full EOS set, in fuel's `eos_ids: Option<Vec<u32>>`
 /// shape. `LlamaEosToks::Single`/`Multiple`/absent map onto it directly —
@@ -59,26 +65,29 @@ fn eos_ids_from(eos: Option<&LlamaEosToks>) -> Option<Vec<u32>> {
     }
 }
 
-enum LlamaSchedulerDriverInner<'m> {
+enum ServingDriverInner<'m> {
     F32(FuelSchedulerDriver<'m, LlamaModel>),
     QuantizedGguf(FuelSchedulerDriver<'m, QuantizedLlama3Model>),
+    QuantizedGgufQwen3(FuelSchedulerDriver<'m, QuantizedQwen3Model>),
 }
 
-/// Enum-dispatch over the two concrete Llama `DecodeModel` types
-/// `ModelRunner::start`'s fuel-engine arm can load, so `run_scheduled_jobs`
-/// sees one `SchedulerDriver` regardless of checkpoint format.
+/// Enum-dispatch over the concrete `DecodeModel` types `ModelRunner::start`'s
+/// fuel-engine arm can load (Llama eager/GGUF, and — since
+/// `detect_architecture` lets `serve_gguf` pick a loader — Qwen3 GGUF), so
+/// `run_scheduled_jobs` sees one `SchedulerDriver` regardless of checkpoint
+/// format or architecture.
 ///
 /// Owns `context_length` so `try_admit` can apply
 /// [`effective_generation_budget`] itself — the one piece of policy that is
 /// NOT `FuelSchedulerDriver`'s concern (it has no notion of a server-wide
 /// context ceiling), but IS this integration layer's, same role
 /// `FuelEngineModel::step_one` played in the old serial path.
-struct LlamaSchedulerDriver<'m> {
-    inner: LlamaSchedulerDriverInner<'m>,
+struct ServingDriver<'m> {
+    inner: ServingDriverInner<'m>,
     context_length: usize,
 }
 
-impl<'m> SchedulerDriver for LlamaSchedulerDriver<'m> {
+impl<'m> SchedulerDriver for ServingDriver<'m> {
     type Id = fuel_inference::multi_session::SessionId;
 
     fn try_admit(
@@ -101,10 +110,11 @@ impl<'m> SchedulerDriver for LlamaSchedulerDriver<'m> {
             );
         }
         match &mut self.inner {
-            LlamaSchedulerDriverInner::F32(d) => {
+            ServingDriverInner::F32(d) => d.try_admit(prompt, effective_max_new, temperature),
+            ServingDriverInner::QuantizedGguf(d) => {
                 d.try_admit(prompt, effective_max_new, temperature)
             }
-            LlamaSchedulerDriverInner::QuantizedGguf(d) => {
+            ServingDriverInner::QuantizedGgufQwen3(d) => {
                 d.try_admit(prompt, effective_max_new, temperature)
             }
         }
@@ -112,22 +122,25 @@ impl<'m> SchedulerDriver for LlamaSchedulerDriver<'m> {
 
     fn step(&mut self) -> Result<Vec<(Self::Id, u32)>, String> {
         match &mut self.inner {
-            LlamaSchedulerDriverInner::F32(d) => d.step(),
-            LlamaSchedulerDriverInner::QuantizedGguf(d) => d.step(),
+            ServingDriverInner::F32(d) => d.step(),
+            ServingDriverInner::QuantizedGguf(d) => d.step(),
+            ServingDriverInner::QuantizedGgufQwen3(d) => d.step(),
         }
     }
 
     fn reap_finished(&mut self) -> Vec<(Self::Id, FinishOutcome)> {
         match &mut self.inner {
-            LlamaSchedulerDriverInner::F32(d) => d.reap_finished(),
-            LlamaSchedulerDriverInner::QuantizedGguf(d) => d.reap_finished(),
+            ServingDriverInner::F32(d) => d.reap_finished(),
+            ServingDriverInner::QuantizedGguf(d) => d.reap_finished(),
+            ServingDriverInner::QuantizedGgufQwen3(d) => d.reap_finished(),
         }
     }
 
     fn has_active_sessions(&self) -> bool {
         match &self.inner {
-            LlamaSchedulerDriverInner::F32(d) => d.has_active_sessions(),
-            LlamaSchedulerDriverInner::QuantizedGguf(d) => d.has_active_sessions(),
+            ServingDriverInner::F32(d) => d.has_active_sessions(),
+            ServingDriverInner::QuantizedGguf(d) => d.has_active_sessions(),
+            ServingDriverInner::QuantizedGgufQwen3(d) => d.has_active_sessions(),
         }
     }
 }
@@ -166,7 +179,7 @@ impl BatchedServeConfig {
 /// Build the batched driver for one already-loaded model and drive it —
 /// shared by both the `.gguf` and SafeTensors-directory branches of
 /// [`run_fuel_engine`], which differ only in the CONCRETE `M` and which
-/// `LlamaSchedulerDriverInner` variant wraps it (`wrap`, a tuple-variant
+/// `ServingDriverInner` variant wraps it (`wrap`, a tuple-variant
 /// constructor used as a plain `fn`).
 fn run_batched<'m, M: fuel_inference::multi_session::DecodeModel>(
     model: &'m M,
@@ -175,7 +188,7 @@ fn run_batched<'m, M: fuel_inference::multi_session::DecodeModel>(
     context_length: usize,
     tokenizer: tokenizers::Tokenizer,
     rx: Receiver<InferenceJob>,
-    wrap: fn(FuelSchedulerDriver<'m, M>) -> LlamaSchedulerDriverInner<'m>,
+    wrap: fn(FuelSchedulerDriver<'m, M>) -> ServingDriverInner<'m>,
 ) {
     let scheduler = match FuelSchedulerDriver::new(
         model,
@@ -188,7 +201,7 @@ fn run_batched<'m, M: fuel_inference::multi_session::DecodeModel>(
         Ok(s) => s,
         Err(e) => return drain_with_error(rx, &format!("building the scheduler: {e}")),
     };
-    let driver = LlamaSchedulerDriver {
+    let driver = ServingDriver {
         inner: wrap(scheduler),
         context_length,
     };
@@ -249,9 +262,33 @@ pub(crate) fn run_fuel_engine(
     }
 }
 
-/// The `.gguf` branch of [`run_fuel_engine`] — split out so that function
-/// stays short; see its own doc for the load/route/batch shape this repeats.
+/// The `.gguf` branch of [`run_fuel_engine`]: reads the file's own
+/// `general.architecture` declaration FIRST — through a throwaway
+/// `crate::gguf::Content` read, same pattern the loaders' own "up to three
+/// times" safety note already accepts — and picks the loader that actually
+/// matches, instead of hardcoding Llama and discovering a Qwen3 checkpoint's
+/// mismatch as a refusal deep inside `require_llama_architecture`.
 fn serve_gguf(
+    model_path: &Path,
+    context_length: usize,
+    config: BatchedServeConfig,
+    rx: Receiver<InferenceJob>,
+) {
+    let content = match crate::gguf::Content::read(model_path) {
+        Ok(c) => c,
+        Err(e) => return load_failed(model_path, e, rx),
+    };
+    match detect_architecture(content.metadata()) {
+        Ok(GgufArchitecture::Llama) => serve_gguf_llama(model_path, context_length, config, rx),
+        Ok(GgufArchitecture::Qwen3) => serve_gguf_qwen3(model_path, context_length, config, rx),
+        Err(e) => load_failed(model_path, e, rx),
+    }
+}
+
+/// The Llama-architecture half of [`serve_gguf`] — split out so that
+/// function stays short; see its own doc for the load/route/batch shape both
+/// architecture branches repeat.
+fn serve_gguf_llama(
     model_path: &Path,
     context_length: usize,
     config: BatchedServeConfig,
@@ -270,7 +307,31 @@ fn serve_gguf(
         context_length,
         loaded.tokenizer,
         rx,
-        LlamaSchedulerDriverInner::QuantizedGguf,
+        ServingDriverInner::QuantizedGguf,
+    );
+}
+
+/// The Qwen3-architecture half of [`serve_gguf`] — see [`serve_gguf_llama`].
+fn serve_gguf_qwen3(
+    model_path: &Path,
+    context_length: usize,
+    config: BatchedServeConfig,
+    rx: Receiver<InferenceJob>,
+) {
+    let loaded = match super::loader_gguf_qwen3::load_quantized_qwen3_gguf(model_path) {
+        Ok(l) => l,
+        Err(e) => return load_failed(model_path, e, rx),
+    };
+    println!("Fuel model loaded at {}", model_path.display());
+    let eos_ids = eos_ids_from(loaded.eos.as_ref());
+    run_batched(
+        &loaded.model,
+        config,
+        eos_ids,
+        context_length,
+        loaded.tokenizer,
+        rx,
+        ServingDriverInner::QuantizedGgufQwen3,
     );
 }
 
@@ -294,7 +355,7 @@ fn serve_f32(
         context_length,
         loaded.tokenizer,
         rx,
-        LlamaSchedulerDriverInner::F32,
+        ServingDriverInner::F32,
     );
 }
 
