@@ -25,11 +25,9 @@
 //!
 //! Architecture **detection** (reading `general.architecture` to decide
 //! Llama vs. Qwen3 BEFORE calling either loader) is deliberately not this
-//! file's job either — it belongs at the call site that currently hardcodes
-//! the Llama loader for every `.gguf` file
-//! (`engine_model.rs::FuelEngineModel::load`,
-//! `scheduled_llama_engine.rs::run_fuel_engine`), which is unwired follow-up
-//! work, not this PR.
+//! file's job either — it lives in `crate::gguf::detect_architecture`, called
+//! from `scheduled_llama_engine.rs::serve_gguf` to dispatch to this loader or
+//! the Llama one (board item 97, PR #123).
 
 use std::path::Path;
 

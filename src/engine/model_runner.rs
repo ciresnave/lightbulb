@@ -156,10 +156,7 @@ pub(crate) trait EngineModel {
     ///   (`model/parallel_model_manager.rs:1513`) sets an entry to `None` on
     ///   the SAME step it pushes a token to `generated_tokens` and completes
     ///   the request — using `None` for "produced a token and is now done",
-    ///   not "produced no token". `FuelEngineModel::step_batch`
-    ///   (`model_fuel/engine_model.rs`) uses `Some`/`None` closer to the
-    ///   original wording. The two implementations do not agree with each
-    ///   other, let alone with this doc.
+    ///   not "produced no token", contradicting this doc's original wording.
     ///
     /// Do not add a caller that relies on the per-entry `Option` meaning
     /// anything specific until this is reconciled — treat it as an unread
@@ -177,19 +174,20 @@ pub(crate) trait EngineModel {
     ///
     /// This holds today only because the current sole caller (`run_jobs`)
     /// builds one `batch = vec![ctx]` per job and re-steps that same
-    /// single-request batch for the request's entire lifetime — so
-    /// `FuelEngineModel::step_batch`'s per-call session sweep (see
-    /// `model_fuel/engine_model.rs`), which drops any session whose id is not
-    /// in the current `batch`, is safe: "absent ⇒ dead" and "absent ⇒ still
-    /// live but not scheduled this round" are indistinguishable to that
-    /// sweep, and only the single-request-per-batch caller shape makes the
-    /// former the only real case. A future scheduler that steps a SUBSET of
-    /// live requests per call (e.g. true multi-request batching) would
-    /// violate this precondition silently: the sweep would free the KV cache
-    /// of a request that is still running, and the next step for that
-    /// request would either error on a missing session or, worse, get
-    /// handed a fresh session and silently restart from position 0 — a
-    /// cross-tenant correctness bug, not a leak. Any such scheduler must
+    /// single-request batch for the request's entire lifetime — so an
+    /// implementor that sweeps per-request state on every call, dropping
+    /// anything whose id is not in the current `batch` (the now-deleted
+    /// `FuelEngineModel::step_batch` did exactly this), is safe: "absent ⇒
+    /// dead" and "absent ⇒ still live but not scheduled this round" are
+    /// indistinguishable to that sweep, and only the single-request-per-batch
+    /// caller shape makes the former the only real case. A future scheduler
+    /// that steps a SUBSET of live requests per call (e.g. true
+    /// multi-request batching) would violate this precondition silently: the
+    /// sweep would free the KV cache of a request that is still running, and
+    /// the next step for that request would either error on a missing
+    /// session or, worse, get handed a fresh session and silently restart
+    /// from position 0 — a cross-tenant correctness bug, not a leak. Any such
+    /// scheduler must
     /// either keep every live request in every `batch`, or `step_batch`
     /// implementations that free on absence must be changed first.
     fn step_batch(&mut self, batch: &mut [RequestContext]) -> Result<Vec<Option<u32>>>;
@@ -321,11 +319,14 @@ impl ModelRunner {
         std::thread::spawn(move || {
             // `scheduled_llama_engine::run_fuel_engine` (board item 97) loads
             // the checkpoint — dispatching on `.gguf` vs a SafeTensors
-            // directory, same as before — and then routes per-checkpoint to
-            // either the batched `FuelSchedulerDriver`/`run_scheduled_jobs`
-            // path (the new multi-session scheduler) or the serial
-            // `FuelEngineModel`/`run_jobs` path (checkpoints declaring
-            // multiple EOS tokens; see that module's "Routing" doc for why).
+            // directory, same as before — and architecture (Llama vs Qwen3,
+            // from `general.architecture`) — then drives it through the
+            // batched `FuelSchedulerDriver`/`run_scheduled_jobs` path (the
+            // multi-session scheduler). The old serial `FuelEngineModel`/
+            // `run_jobs` fallback for multi-EOS checkpoints was deleted once
+            // fuel#307 widened `eos_ids` to `Vec<u32>` (PR #122); `run_jobs`
+            // itself survives only as the candlelight (`ParallelModelManager`)
+            // path's job loop, above.
             // GGUF-quantized loading via `fuel::QuantizedLlama3Model::
             // from_gguf` landed 2026-09-24; see `src/model_fuel/
             // loader_gguf.rs` for the loader and

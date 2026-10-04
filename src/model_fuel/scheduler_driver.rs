@@ -13,9 +13,10 @@
 //! Qwen3 (`fuel::lazy_qwen3::Qwen3Model`, `fuel::lazy_quantized_qwen3::QuantizedQwen3Model`)
 //! all implement it, so this one adapter serves either family.
 //!
-//! `#[allow(dead_code)]`: unreachable until `ModelRunner::start`'s
-//! `fuel-engine` arm is switched to build this instead of `FuelEngineModel` —
-//! a follow-up, same shape as `scheduled_runner.rs`'s own allowance.
+//! `#[allow(dead_code)]`: this is live under `ModelRunner::start`'s
+//! `fuel-engine` arm, but the default-feature `clippy` gate still builds this
+//! file without that feature enabled, so it has no caller there. Same shape
+//! as `scheduled_runner.rs`'s own allowance.
 #![allow(dead_code)]
 
 use fuel::Device;
@@ -32,12 +33,12 @@ use crate::engine::scheduled_runner::{AdmitError, FinishOutcome, SchedulerDriver
 ///
 /// `SchedulerDriver::try_admit` carries no request identity (by design — see
 /// its doc comment), unlike `crate::sampling::seed_for(request_id, ...)` used
-/// by the existing serial `FuelEngineModel` path. `SessionScheduler` samples
-/// with ONE `SamplingStrategy` fixed at admission (not reseeded per token), so
-/// this driver mints a fresh seed per admitted session from a monotonic
-/// counter instead. That is a real, deliberate difference from the serial
-/// path's determinism model (reproducible by request id) — documented here
-/// rather than silently assumed equivalent.
+/// by the old serial `FuelEngineModel` path (deleted, board item 97 cleanup).
+/// `SessionScheduler` samples with ONE `SamplingStrategy` fixed at admission
+/// (not reseeded per token), so this driver mints a fresh seed per admitted
+/// session from a monotonic counter instead. That was a real, deliberate
+/// difference from the serial path's determinism model (reproducible by
+/// request id) — documented here rather than silently assumed equivalent.
 pub(crate) struct FuelSchedulerDriver<'m, M: DecodeModel> {
     scheduler: SessionScheduler<'m, M>,
     eos_ids: Option<Vec<u32>>,

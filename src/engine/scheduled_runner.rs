@@ -29,11 +29,11 @@
 //! below support streaming at the abstraction level so this file does not
 //! need to change again once that lands.
 //!
-//! `#![allow(dead_code)]`: this whole module is unreachable until the real
-//! `SessionScheduler` adapter + `ModelRunner::start` wiring (a follow-up) call
-//! into it — same shape as `src/model_fuel/engine_model.rs`'s own
-//! `#[allow(dead_code)]` on `LoadedModel` pending its own wiring. Allowed here
-//! at this one site, not by raising the gate's ceiling.
+//! `#![allow(dead_code)]`: this module predates its own wiring into
+//! `ModelRunner::start`'s `fuel-engine` arm (board item 97, PR #118); kept
+//! since the default-feature `clippy` gate still builds this file without
+//! that feature enabled, so some of what it declares is unreachable there.
+//! Allowed here at this one site, not by raising the gate's ceiling.
 #![allow(dead_code)]
 
 use std::sync::mpsc::Receiver;
