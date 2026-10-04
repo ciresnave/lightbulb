@@ -5,8 +5,9 @@
 
 use axum::{
     Json, Router,
-    extract::State,
+    extract::{Extension, State},
     http::StatusCode,
+    middleware,
     response::{IntoResponse, Response},
     routing::{get, post},
 };
@@ -16,8 +17,17 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::api::AppState;
+use crate::api::auth_middleware::{ApiKeyInfo, admin_check_middleware};
 
-/// Create admin API routes
+/// Create admin API routes.
+///
+/// `admin_check_middleware` is attached HERE, not just defined in
+/// `auth_middleware.rs` — it was defined there and never wired to any route
+/// (security audit, board PM task, 2026-10-04): every admin endpoint,
+/// including key creation, was reachable by any authenticated caller
+/// regardless of role. Attaching it as this sub-router's own `.layer()`
+/// scopes the check to exactly these six routes, not the OpenAI-compatible
+/// or Lightbulb-extension routers this one gets `.merge()`d with.
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/v1/lightbulb/admin/cache/stats", get(cache_stats))
@@ -26,6 +36,15 @@ pub fn routes() -> Router<AppState> {
         .route("/v1/lightbulb/admin/scheduler/stats", get(scheduler_stats))
         .route("/v1/lightbulb/admin/metrics", get(system_metrics))
         .route("/v1/lightbulb/admin/api-keys", post(create_api_key))
+        .layer(middleware::from_fn(admin_check_middleware))
+}
+
+/// Privilege rank of an API key role. `"admin"` is the only privileged tier
+/// this codebase recognizes today — `"user"` and `"llm"` are peers below it,
+/// not a further-ordered pair — so a caller may never request a role ranked
+/// above their own.
+fn role_rank(role: &str) -> u8 {
+    if role == "admin" { 1 } else { 0 }
 }
 
 /// Cache statistics response
@@ -231,6 +250,7 @@ pub struct CreateApiKeyResponse {
 #[axum_macros::debug_handler]
 async fn create_api_key(
     State(state): State<AppState>,
+    Extension(caller): Extension<ApiKeyInfo>,
     Json(request): Json<CreateApiKeyRequest>,
 ) -> impl IntoResponse {
     // Validate role
@@ -241,6 +261,27 @@ async fn create_api_key(
                 "error": {
                     "message": "Invalid role. Must be one of: user, admin, llm",
                     "type": "invalid_request_error",
+                }
+            })),
+        )
+            .into_response();
+    }
+
+    // Defense in depth: `routes()` already requires an admin caller to reach
+    // this handler at all (`admin_check_middleware`), but that only ever
+    // enforced "caller is admin", never "requested role is no higher than
+    // caller's role" — the actual escalation this blocks. Checked again
+    // here, independent of the router wiring, so a future looser role on
+    // this route (or a direct unit-test call bypassing the router) cannot
+    // reopen it silently.
+    if role_rank(&request.role) > role_rank(&caller.role) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({
+                "error": {
+                    "message": "cannot create an API key with greater privilege than your own",
+                    "type": "permission_error",
+                    "code": "forbidden",
                 }
             })),
         )
@@ -350,6 +391,190 @@ async fn create_api_key(
                 })),
             )
                 .into_response()
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::api::auth_middleware::ApiKeyInfo;
+    use axum::body::Body;
+    use axum::http::Request;
+    use tower::ServiceExt;
+
+    fn state() -> AppState {
+        use crate::engine::{MemoryAwareConfig, MemoryAwareScheduler};
+        AppState {
+            scheduler: std::sync::Arc::new(MemoryAwareScheduler::new(MemoryAwareConfig::default())),
+            config: crate::api::ApiConfig::default(),
+            db_pool: None,
+            inference_tx: None,
+            chat_template: None,
+            eos_monitor: std::sync::Arc::new(crate::engine::eos_monitor::EosMonitor::default()),
+        }
+    }
+
+    fn key_info(role: &str) -> ApiKeyInfo {
+        ApiKeyInfo {
+            api_key_id: uuid::Uuid::new_v4(),
+            role: role.to_string(),
+        }
+    }
+
+    /// Reproduces the privilege-escalation gap: with no caller-role check at
+    /// all, a "user" key's request for `role: "admin"` sailed past this
+    /// handler and only failed later for an unrelated reason (no database
+    /// configured in the test). A 503 here — not a 403 — would mean the
+    /// escalation path is still open; the test is written to fail for that
+    /// exact reason before the fix.
+    #[tokio::test]
+    async fn create_api_key_refuses_a_user_key_requesting_admin_role() {
+        let req = Request::builder()
+            .method("POST")
+            .uri("/v1/lightbulb/admin/api-keys")
+            .header("content-type", "application/json")
+            .extension(key_info("user"))
+            .body(Body::from(r#"{"role":"admin"}"#))
+            .unwrap();
+
+        let response = routes().with_state(state()).oneshot(req).await.unwrap();
+
+        assert_eq!(
+            response.status(),
+            StatusCode::FORBIDDEN,
+            "a user-role key must not be able to mint an admin-role key"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_api_key_refuses_an_llm_key_requesting_admin_role() {
+        let req = Request::builder()
+            .method("POST")
+            .uri("/v1/lightbulb/admin/api-keys")
+            .header("content-type", "application/json")
+            .extension(key_info("llm"))
+            .body(Body::from(r#"{"role":"admin"}"#))
+            .unwrap();
+
+        let response = routes().with_state(state()).oneshot(req).await.unwrap();
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    /// A caller requesting a role AT or BELOW their own rank must clear the
+    /// privilege check and reach the (here, unconfigured) database — 503,
+    /// not 403. This is what distinguishes "the check ran and passed" from
+    /// "the check never ran": a handler with no check at all would also
+    /// return 503 for the admin case below, but the two preceding REFUSES
+    /// tests prove the check is live, so this one's 503 means passthrough,
+    /// not absence.
+    #[tokio::test]
+    async fn create_api_key_allows_an_admin_key_requesting_admin_role() {
+        let req = Request::builder()
+            .method("POST")
+            .uri("/v1/lightbulb/admin/api-keys")
+            .header("content-type", "application/json")
+            .extension(key_info("admin"))
+            .body(Body::from(r#"{"role":"admin"}"#))
+            .unwrap();
+
+        let response = routes().with_state(state()).oneshot(req).await.unwrap();
+
+        assert_eq!(
+            response.status(),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "an admin key requesting admin must pass the privilege check and \
+             reach the no-database branch, not be forbidden"
+        );
+    }
+
+    /// `admin_check_middleware` gates every admin route on the caller being
+    /// admin, so a non-admin caller never reaches `create_api_key`'s own
+    /// privilege check at all (covered by
+    /// `admin_routes_refuse_a_non_admin_caller_on_every_route`) — only an
+    /// admin caller can reach it, and only a REQUEST for a role ranked at or
+    /// below the caller's clears it. This exercises that admin-requesting-a
+    /// -lower-role case: it must pass the privilege check (not 403) and
+    /// reach the no-database branch (503).
+    #[tokio::test]
+    async fn create_api_key_allows_an_admin_key_requesting_llm_role() {
+        let req = Request::builder()
+            .method("POST")
+            .uri("/v1/lightbulb/admin/api-keys")
+            .header("content-type", "application/json")
+            .extension(key_info("admin"))
+            .body(Body::from(r#"{"role":"llm"}"#))
+            .unwrap();
+
+        let response = routes().with_state(state()).oneshot(req).await.unwrap();
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    /// Router-level, not just handler-level: proves `admin_check_middleware`
+    /// is actually attached to `routes()`, the same `Router` `ApiServer`
+    /// serves — a unit test of the middleware function alone would pass even
+    /// if nobody ever wired it to a route (which was the actual bug: the
+    /// function existed, `grep -rn "admin_check_middleware"` found zero call
+    /// sites besides its own definition).
+    #[tokio::test]
+    async fn admin_routes_refuse_a_non_admin_caller_on_every_route() {
+        let cases: &[(&str, &str)] = &[
+            ("GET", "/v1/lightbulb/admin/cache/stats"),
+            ("POST", "/v1/lightbulb/admin/cache/clear"),
+            ("GET", "/v1/lightbulb/admin/scheduler/queue"),
+            ("GET", "/v1/lightbulb/admin/scheduler/stats"),
+            ("GET", "/v1/lightbulb/admin/metrics"),
+            ("POST", "/v1/lightbulb/admin/api-keys"),
+        ];
+
+        for (method, uri) in cases {
+            let req = Request::builder()
+                .method(*method)
+                .uri(*uri)
+                .header("content-type", "application/json")
+                .extension(key_info("user"))
+                .body(Body::from("{}"))
+                .unwrap();
+
+            let response = routes().with_state(state()).oneshot(req).await.unwrap();
+
+            assert_eq!(
+                response.status(),
+                StatusCode::FORBIDDEN,
+                "{method} {uri} must refuse a non-admin caller"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn admin_routes_allow_an_admin_caller_through_to_the_handler() {
+        // Routes that need no database to answer 200.
+        let cases: &[(&str, &str)] = &[
+            ("GET", "/v1/lightbulb/admin/cache/stats"),
+            ("POST", "/v1/lightbulb/admin/cache/clear"),
+            ("GET", "/v1/lightbulb/admin/scheduler/queue"),
+            ("GET", "/v1/lightbulb/admin/scheduler/stats"),
+            ("GET", "/v1/lightbulb/admin/metrics"),
+        ];
+
+        for (method, uri) in cases {
+            let req = Request::builder()
+                .method(*method)
+                .uri(*uri)
+                .header("content-type", "application/json")
+                .extension(key_info("admin"))
+                .body(Body::from("{}"))
+                .unwrap();
+
+            let response = routes().with_state(state()).oneshot(req).await.unwrap();
+
+            assert_eq!(
+                response.status(),
+                StatusCode::OK,
+                "{method} {uri} must let an admin caller through"
+            );
         }
     }
 }
