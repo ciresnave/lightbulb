@@ -1719,6 +1719,43 @@ pub(crate) fn require_llama_architecture(metadata: &HashMap<String, Value>) -> R
     Ok(())
 }
 
+/// Which model family a GGUF declares via `general.architecture`, for the
+/// Fuel serving path's loader dispatch
+/// (`model_fuel::scheduled_llama_engine::run_fuel_engine`) — unlike
+/// `require_llama_architecture`/`require_qwen3_architecture` (each of which
+/// refuses everything except its own one family), this reads the SAME key
+/// once and classifies it, so a caller can pick the right loader instead of
+/// hardcoding one and discovering the mismatch as a refusal deep inside it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GgufArchitecture {
+    Llama,
+    Qwen3,
+}
+
+/// Read `general.architecture` and classify it, or refuse with the EXACT
+/// string found — never silently default to one family, which would let an
+/// unsupported checkpoint reach a loader built for a different shape (the
+/// same "wrong model, not a missing key" hazard `require_llama_architecture`
+/// exists to prevent, one level higher: dispatch time rather than read time).
+pub(crate) fn detect_architecture(metadata: &HashMap<String, Value>) -> Result<GgufArchitecture> {
+    let architecture = match metadata.get("general.architecture") {
+        Some(Value::String(s)) => s.clone(),
+        _ => bail!(
+            "this GGUF declares no `general.architecture`, so the architecture cannot be \
+             determined. Every GGUF in the reference corpus declares it; a file without it \
+             is malformed or truncated."
+        ),
+    };
+    match architecture.as_str() {
+        "llama" => Ok(GgufArchitecture::Llama),
+        "qwen3" => Ok(GgufArchitecture::Qwen3),
+        other => bail!(
+            "this GGUF declares `general.architecture = {other:?}`, which lightbulb does not \
+             yet serve. Supported: `llama`, `qwen3`."
+        ),
+    }
+}
+
 /// Proof that our metadata reader agrees with candle's, on every corpus file
 /// both can read.
 ///
@@ -2076,7 +2113,7 @@ mod metadata_accessor_tests {
 
 #[cfg(test)]
 mod architecture_gate_tests {
-    use super::{Value, require_llama_architecture};
+    use super::{GgufArchitecture, Value, detect_architecture, require_llama_architecture};
     use std::collections::HashMap;
 
     fn declaring(arch: &str) -> HashMap<String, Value> {
@@ -2135,6 +2172,47 @@ mod architecture_gate_tests {
     #[test]
     fn an_absent_declaration_says_so() {
         let err = require_llama_architecture(&HashMap::new())
+            .expect_err("no architecture must be refused")
+            .to_string();
+        assert!(
+            err.contains("general.architecture"),
+            "the error must name the key that is genuinely absent: {err}"
+        );
+    }
+
+    /// The PM's explicit ask: one test per `detect_architecture` outcome —
+    /// `llama`, `qwen3`, and an architecture that is neither.
+    #[test]
+    fn detect_architecture_classifies_llama() {
+        assert_eq!(
+            detect_architecture(&declaring("llama")).unwrap(),
+            GgufArchitecture::Llama
+        );
+    }
+
+    #[test]
+    fn detect_architecture_classifies_qwen3() {
+        assert_eq!(
+            detect_architecture(&declaring("qwen3")).unwrap(),
+            GgufArchitecture::Qwen3
+        );
+    }
+
+    #[test]
+    fn detect_architecture_refuses_an_unknown_architecture_by_name() {
+        let err = detect_architecture(&declaring("gptneox"))
+            .expect_err("an architecture lightbulb cannot yet serve must be refused")
+            .to_string();
+        assert!(
+            err.contains("gptneox"),
+            "the refusal must NAME the declared architecture, so a reader knows what \
+             was actually found rather than just that something was rejected: {err}"
+        );
+    }
+
+    #[test]
+    fn detect_architecture_refuses_a_missing_declaration() {
+        let err = detect_architecture(&HashMap::new())
             .expect_err("no architecture must be refused")
             .to_string();
         assert!(
