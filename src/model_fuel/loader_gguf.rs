@@ -87,7 +87,15 @@ fn derive_llama_full_config(
 
 /// Read `tokenizer.ggml.{bos,eos}_token_id` — the two fields `derive_config`
 /// deliberately excludes — through Lightbulb's own `crate::gguf` reader.
-fn bos_eos_from_metadata(content: &crate::gguf::Content) -> (Option<u32>, Option<LlamaEosToks>) {
+///
+/// `pub(crate)`: these GGUF keys are a shared tokenizer convention, not a
+/// Llama-specific one, so `loader_gguf_qwen3.rs` reuses this instead of
+/// duplicating it. `LlamaEosToks`'s name is a historical artifact of where it
+/// was first defined — structurally it is just "one id, or several", which
+/// is exactly what both architectures' GGUF files declare the same way.
+pub(crate) fn bos_eos_from_metadata(
+    content: &crate::gguf::Content,
+) -> (Option<u32>, Option<LlamaEosToks>) {
     use crate::gguf::Value;
 
     let bos_token_id = content

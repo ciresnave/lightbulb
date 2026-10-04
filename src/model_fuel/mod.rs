@@ -98,6 +98,7 @@ pub mod generate;
 pub mod loader;
 pub mod loader_f32;
 pub mod loader_gguf;
+pub mod loader_gguf_qwen3;
 pub mod policies;
 pub mod scheduled_llama_engine;
 pub mod scheduler_driver;
