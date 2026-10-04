@@ -166,6 +166,54 @@ impl<'m> SchedulerDriver for LlamaSchedulerDriver<'m> {
 /// `multi_session.rs` test fixtures use.
 const KV_BLOCK_SIZE: usize = 16;
 
+/// Build the batched driver for one already-loaded model and drive it —
+/// shared by both the `.gguf` and SafeTensors-directory branches of
+/// [`run_fuel_engine`], which differ only in the CONCRETE `M` and which
+/// `LlamaSchedulerDriverInner` variant wraps it (`wrap`, a tuple-variant
+/// constructor used as a plain `fn`).
+#[allow(clippy::too_many_arguments)]
+fn run_batched<'m, M: fuel_inference::multi_session::DecodeModel>(
+    model: &'m M,
+    device: fuel::Device,
+    policy: SchedulePolicy,
+    budget: KvBudget,
+    eos_id: Option<u32>,
+    context_length: usize,
+    tokenizer: tokenizers::Tokenizer,
+    rx: Receiver<InferenceJob>,
+    wrap: fn(FuelSchedulerDriver<'m, M>) -> LlamaSchedulerDriverInner<'m>,
+) {
+    let scheduler =
+        match FuelSchedulerDriver::new(model, device, fuel::DType::F32, policy, budget, eos_id) {
+            Ok(s) => s,
+            Err(e) => return drain_with_error(rx, &format!("building the scheduler: {e}")),
+        };
+    let driver = LlamaSchedulerDriver {
+        inner: wrap(scheduler),
+        context_length,
+    };
+    // `tokenizer.encode`/`.decode` each need their own `move` closure below,
+    // and `Tokenizer` is not `Copy` — an `Arc` is what lets both closures
+    // share it rather than one of them moving the only copy.
+    let tokenizer = std::sync::Arc::new(tokenizer);
+    let encode_tokenizer = tokenizer.clone();
+    run_scheduled_jobs(
+        driver,
+        rx,
+        move |text, add_special| {
+            encode_tokenizer
+                .encode(text, add_special)
+                .map_err(|e| anyhow::anyhow!("tokenizing: {e}"))
+                .map(|enc| enc.get_ids().to_vec())
+        },
+        move |tokens, skip_special| {
+            tokenizer
+                .decode(tokens, skip_special)
+                .map_err(|e| anyhow::anyhow!("detokenizing: {e}"))
+        },
+    );
+}
+
 /// Load a checkpoint (dispatching on `.gguf` vs a SafeTensors directory, same
 /// extension check `FuelEngineModel::load` makes) and drive it — through the
 /// real `FuelSchedulerDriver`/`run_scheduled_jobs` batched path for a
@@ -209,113 +257,72 @@ pub(crate) fn run_fuel_engine(
     if is_gguf {
         let loaded = match super::loader_gguf::load_quantized_llama_gguf(model_path) {
             Ok(l) => l,
-            Err(e) => {
-                eprintln!(
-                    "Failed to load Fuel model at {}: {e:#}",
-                    model_path.display()
-                );
-                return drain_with_error(rx, &format!("model load failed: {e:#}"));
-            }
+            Err(e) => return load_failed(model_path, e, rx),
         };
         println!("Fuel model loaded at {}", model_path.display());
         if route_for(loaded.eos.as_ref()) == EngineRoute::Serial {
-            tracing::info!(
-                "{}: checkpoint declares multiple EOS tokens; serving on the serial \
-                 FuelEngineModel path (see scheduled_llama_engine's Routing doc)",
-                model_path.display()
-            );
+            log_serial_fallback(model_path);
             let model =
                 FuelEngineModel::from_loaded(LoadedModel::QuantizedGguf(loaded), context_length);
             return run_jobs(model, rx);
         }
         let eos_id = single_eos_id(loaded.eos.as_ref());
-        let tokenizer = std::sync::Arc::new(loaded.tokenizer);
-        let scheduler = match FuelSchedulerDriver::new(
+        run_batched(
             &loaded.model,
             device,
-            fuel::DType::F32,
             policy,
             budget,
             eos_id,
-        ) {
-            Ok(s) => s,
-            Err(e) => return drain_with_error(rx, &format!("building the scheduler: {e}")),
-        };
-        let driver = LlamaSchedulerDriver {
-            inner: LlamaSchedulerDriverInner::QuantizedGguf(scheduler),
             context_length,
-        };
-        let encode_tokenizer = tokenizer.clone();
-        run_scheduled_jobs(
-            driver,
+            loaded.tokenizer,
             rx,
-            move |text, add_special| {
-                encode_tokenizer
-                    .encode(text, add_special)
-                    .map_err(|e| anyhow::anyhow!("tokenizing: {e}"))
-                    .map(|enc| enc.get_ids().to_vec())
-            },
-            move |tokens, skip_special| {
-                tokenizer
-                    .decode(tokens, skip_special)
-                    .map_err(|e| anyhow::anyhow!("detokenizing: {e}"))
-            },
+            LlamaSchedulerDriverInner::QuantizedGguf,
         );
     } else {
         let loaded = match super::loader_f32::load_llama_f32_from_dir(model_path) {
             Ok(l) => l,
-            Err(e) => {
-                eprintln!(
-                    "Failed to load Fuel model at {}: {e:#}",
-                    model_path.display()
-                );
-                return drain_with_error(rx, &format!("model load failed: {e:#}"));
-            }
+            Err(e) => return load_failed(model_path, e, rx),
         };
         println!("Fuel model loaded at {}", model_path.display());
         if route_for(loaded.eos.as_ref()) == EngineRoute::Serial {
-            tracing::info!(
-                "{}: checkpoint declares multiple EOS tokens; serving on the serial \
-                 FuelEngineModel path (see scheduled_llama_engine's Routing doc)",
-                model_path.display()
-            );
+            log_serial_fallback(model_path);
             let model = FuelEngineModel::from_loaded(LoadedModel::F32(loaded), context_length);
             return run_jobs(model, rx);
         }
         let eos_id = single_eos_id(loaded.eos.as_ref());
-        let tokenizer = std::sync::Arc::new(loaded.tokenizer);
-        let scheduler = match FuelSchedulerDriver::new(
+        run_batched(
             &loaded.model,
             device,
-            fuel::DType::F32,
             policy,
             budget,
             eos_id,
-        ) {
-            Ok(s) => s,
-            Err(e) => return drain_with_error(rx, &format!("building the scheduler: {e}")),
-        };
-        let driver = LlamaSchedulerDriver {
-            inner: LlamaSchedulerDriverInner::F32(scheduler),
             context_length,
-        };
-        let encode_tokenizer = tokenizer.clone();
-        run_scheduled_jobs(
-            driver,
+            loaded.tokenizer,
             rx,
-            move |text, add_special| {
-                encode_tokenizer
-                    .encode(text, add_special)
-                    .map_err(|e| anyhow::anyhow!("tokenizing: {e}"))
-                    .map(|enc| enc.get_ids().to_vec())
-            },
-            move |tokens, skip_special| {
-                tokenizer
-                    .decode(tokens, skip_special)
-                    .map_err(|e| anyhow::anyhow!("detokenizing: {e}"))
-            },
+            LlamaSchedulerDriverInner::F32,
         );
     }
+}
+
+/// Report a load failure the same way both branches of [`run_fuel_engine`]
+/// need to, then drain `rx` so no job is left waiting on a model that will
+/// never load.
+fn load_failed(model_path: &Path, e: anyhow::Error, rx: Receiver<InferenceJob>) {
+    eprintln!(
+        "Failed to load Fuel model at {}: {e:#}",
+        model_path.display()
+    );
+    drain_with_error(rx, &format!("model load failed: {e:#}"));
+}
+
+/// Log the routing decision both branches of [`run_fuel_engine`] make the
+/// same way when a checkpoint's EOS set forces the serial fallback.
+fn log_serial_fallback(model_path: &Path) {
+    tracing::info!(
+        "{}: checkpoint declares multiple EOS tokens; serving on the serial \
+         FuelEngineModel path (see scheduled_llama_engine's Routing doc)",
+        model_path.display()
+    );
 }
 
 #[cfg(test)]
