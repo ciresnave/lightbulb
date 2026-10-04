@@ -403,6 +403,43 @@ mod tests {
         }
     }
 
+    /// One case of
+    /// [`reap_finished_reports_eos_when_either_of_two_configured_ids_matches`]:
+    /// admit a session with the given `eos_ids`, step once, and assert it
+    /// finished with `StopReason::Eos`. Split out purely to keep that test
+    /// under Codacy's per-method line limit.
+    fn assert_stops_on_eos(model: &LlamaModel, case: &str, eos_ids: Vec<u32>) {
+        let mut d = driver(model, generous_budget(), Some(eos_ids));
+        let id = d
+            .try_admit(&[1, 2, 3], 10, 0.0)
+            .unwrap_or_else(|e| panic!("[{case}] admission must fit: {e:?}"));
+        d.step()
+            .unwrap_or_else(|e| panic!("[{case}] step must not error: {e}"));
+        let reaped = d.reap_finished();
+        assert_eq!(
+            reaped.len(),
+            1,
+            "[{case}] a configured eos id matching the first sampled token \
+             must finish in one step"
+        );
+        let (reaped_id, outcome) = &reaped[0];
+        assert_eq!(*reaped_id, id);
+        match outcome {
+            FinishOutcome::Completed { stop, .. } => {
+                assert_eq!(
+                    *stop,
+                    StopReason::Eos,
+                    "[{case}] the last token matched one of the configured \
+                     eos ids; must report Eos regardless of its position \
+                     in the set"
+                );
+            }
+            FinishOutcome::Failed(e) => {
+                panic!("[{case}] session must not fail on a healthy tiny model: {e}")
+            }
+        }
+    }
+
     /// fuel#307 widened `eos_id: Option<u32>` to `eos_ids: Option<Vec<u32>>` —
     /// the PM's explicit ask after that: prove a checkpoint declaring TWO
     /// stop tokens actually stops on EITHER one, not just the first slot
@@ -429,45 +466,15 @@ mod tests {
         // above that vocab size is never producible.
         let unreachable_id = 1_000_000;
 
-        for (case, eos_ids) in [
-            (
-                "discovered id first",
-                vec![discovered_token, unreachable_id],
-            ),
-            (
-                "discovered id second",
-                vec![unreachable_id, discovered_token],
-            ),
-        ] {
-            let mut d = driver(&model, generous_budget(), Some(eos_ids));
-            let id = d
-                .try_admit(&[1, 2, 3], 10, 0.0)
-                .unwrap_or_else(|e| panic!("[{case}] admission must fit: {e:?}"));
-            d.step()
-                .unwrap_or_else(|e| panic!("[{case}] step must not error: {e}"));
-            let reaped = d.reap_finished();
-            assert_eq!(
-                reaped.len(),
-                1,
-                "[{case}] a configured eos id matching the first sampled token \
-                 must finish in one step"
-            );
-            let (reaped_id, outcome) = &reaped[0];
-            assert_eq!(*reaped_id, id);
-            match outcome {
-                FinishOutcome::Completed { stop, .. } => {
-                    assert_eq!(
-                        *stop,
-                        StopReason::Eos,
-                        "[{case}] the last token matched one of the configured \
-                         eos ids; must report Eos regardless of its position \
-                         in the set"
-                    );
-                }
-                FinishOutcome::Failed(e) => {
-                    panic!("[{case}] session must not fail on a healthy tiny model: {e}")
-                }
-            }
-        }
+        assert_stops_on_eos(
+            &model,
+            "discovered id first",
+            vec![discovered_token, unreachable_id],
+        );
+        assert_stops_on_eos(
+            &model,
+            "discovered id second",
+            vec![unreachable_id, discovered_token],
+        );
     }
 }
