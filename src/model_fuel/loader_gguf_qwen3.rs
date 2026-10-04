@@ -87,6 +87,29 @@ fn require_qwen3_architecture(
     Ok(())
 }
 
+/// Derive a `Qwen3Config` by reading the checkpoint's header through fuel's
+/// own `gguf_file::Content` — a second, metadata-only parse of the same
+/// file (not a second mmap of the weights), same shape as `loader_gguf.rs`'s
+/// `derive_llama_full_config`. Split out of [`load_quantized_qwen3_gguf`] to
+/// keep that function's own cyclomatic complexity down, same reasoning as
+/// `derive_llama_full_config`'s own separation from its caller.
+fn derive_qwen3_config(path: &Path) -> Result<Qwen3Config> {
+    let mut file = std::fs::File::open(path).with_context(|| {
+        format!(
+            "opening {} for fuel's own GGUF metadata read",
+            path.display()
+        )
+    })?;
+    let fuel_content = fuel_loaders::quantized::gguf_file::Content::read(&mut file)
+        .map_err(|e| anyhow::anyhow!("fuel gguf_file::Content::read({}): {e:?}", path.display()))?;
+    qwen3_config_from_gguf_content(&fuel_content).map_err(|e| {
+        anyhow::anyhow!(
+            "fuel qwen3_config_from_gguf_content({}): {e}",
+            path.display()
+        )
+    })
+}
+
 /// Load a GGUF-quantized Qwen3-shape checkpoint from a single `.gguf` file.
 ///
 /// Tokenizer comes from the GGUF file's own embedded vocabulary, same as
@@ -96,11 +119,11 @@ fn require_qwen3_architecture(
 ///
 /// Memory-maps or reads the checkpoint's header up to three times: once
 /// through `crate::gguf::Content` (tokenizer + bos/eos), once through fuel's
-/// own `gguf_file::Content` (the metadata `qwen3_config_from_gguf_content`
-/// reads), and once inside `QuantizedQwen3Model::from_gguf` (the actual
-/// weights) — the OS shares page cache across all three. Mutating the file
-/// while any is alive is undefined behaviour. Mirrors
-/// `load_quantized_llama_gguf`'s own safety note exactly.
+/// own `gguf_file::Content` (via `derive_qwen3_config`, private — not an
+/// intra-doc link here since this function is `pub`), and once inside
+/// `QuantizedQwen3Model::from_gguf` (the actual weights) — the OS shares page
+/// cache across all three. Mutating the file while any is alive is undefined
+/// behaviour. Mirrors `load_quantized_llama_gguf`'s own safety note exactly.
 pub fn load_quantized_qwen3_gguf(path: &Path) -> Result<LoadedQuantizedQwen3> {
     let content = crate::gguf::Content::read(path)
         .with_context(|| format!("reading GGUF metadata from {}", path.display()))?;
@@ -110,20 +133,7 @@ pub fn load_quantized_qwen3_gguf(path: &Path) -> Result<LoadedQuantizedQwen3> {
         .extract_tokenizer()
         .with_context(|| format!("extracting tokenizer from {}", path.display()))?;
 
-    let mut file = std::fs::File::open(path).with_context(|| {
-        format!(
-            "opening {} for fuel's own GGUF metadata read",
-            path.display()
-        )
-    })?;
-    let fuel_content = fuel_loaders::quantized::gguf_file::Content::read(&mut file)
-        .map_err(|e| anyhow::anyhow!("fuel gguf_file::Content::read({}): {e:?}", path.display()))?;
-    let cfg = qwen3_config_from_gguf_content(&fuel_content).map_err(|e| {
-        anyhow::anyhow!(
-            "fuel qwen3_config_from_gguf_content({}): {e}",
-            path.display()
-        )
-    })?;
+    let cfg = derive_qwen3_config(path)?;
 
     let (_bos, eos) = bos_eos_from_metadata(&content);
     if eos.is_none() {
