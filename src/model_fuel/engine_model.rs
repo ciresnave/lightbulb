@@ -30,7 +30,7 @@ use super::session::SessionState;
 /// change adds, not by raising the gate's ceiling, so the ratchet still
 /// bites on anything genuinely new elsewhere.
 #[allow(dead_code)]
-enum LoadedModel {
+pub(crate) enum LoadedModel {
     F32(LoadedLlama),
     QuantizedGguf(LoadedQuantizedLlama),
 }
@@ -112,7 +112,7 @@ fn select_token(logits: &[f32], temperature: f64, seed: u64) -> u32 {
 /// % context` reuse of cache slots): silently reusing cache positions changes
 /// what the model attends to. Returning fewer tokens is honest; returning
 /// tokens computed against the wrong context would not be.
-fn effective_generation_budget(
+pub(crate) fn effective_generation_budget(
     prompt_tokens: usize,
     requested_max_new_tokens: usize,
     context_length: usize,
@@ -199,6 +199,21 @@ impl FuelEngineModel {
             sessions: HashMap::new(),
             context_length,
         })
+    }
+
+    /// Build from an already-loaded checkpoint, skipping a second disk read.
+    ///
+    /// Added for `scheduled_llama_engine.rs`'s multi-EOS fallback: it must
+    /// decide the serial-vs-batched routing from the checkpoint's OWN parsed
+    /// `eos` info, which means loading happens there first — this constructor
+    /// lets the serial path reuse that same `LoadedModel` instead of calling
+    /// [`Self::load`] (and reading the checkpoint) a second time.
+    pub(crate) fn from_loaded(loaded: LoadedModel, context_length: usize) -> Self {
+        Self {
+            loaded,
+            sessions: HashMap::new(),
+            context_length,
+        }
     }
 
     /// Advance one request by at most one token.
