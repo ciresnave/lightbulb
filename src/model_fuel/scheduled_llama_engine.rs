@@ -1,7 +1,6 @@
 //! Wires `FuelSchedulerDriver` (`super::scheduler_driver`) into
 //! `ModelRunner::start`'s `fuel-engine` arm (board item 97's actual remaining
-//! deliverable: everything before this file only unblocked it) — but NOT
-//! unconditionally. See "Routing" below.
+//! deliverable: everything before this file only unblocked it).
 //!
 //! `ModelRunner::start`'s `fuel-engine` arm can load either an eager
 //! SafeTensors checkpoint (`LlamaModel`) or a GGUF-quantized one
@@ -9,31 +8,25 @@
 //! one `FuelSchedulerDriver<'m, M>` cannot hold either interchangeably.
 //! `LlamaSchedulerDriver` (below, `pub(crate)` — not an intra-doc link, same
 //! reason as `scheduler_driver.rs`'s own module doc) is the small
-//! enum-dispatch wrapper that lets
-//! `run_scheduled_jobs` stay generic over ONE `SchedulerDriver` regardless of
-//! which checkpoint format was loaded.
+//! enum-dispatch wrapper that lets `run_scheduled_jobs` stay generic over ONE
+//! `SchedulerDriver` regardless of which checkpoint format was loaded.
 //!
 //! Qwen3 GGUF loading is a deliberately separate follow-up — `loader_gguf.rs`
 //! dispatches on architecture for Llama only today; nothing here loads a
 //! Qwen3 checkpoint yet.
 //!
-//! # Routing: multi-token EOS checkpoints stay on the serial path
+//! # Multi-token EOS checkpoints: no longer a special case
 //!
-//! Some checkpoints declare `LlamaEosToks::Multiple` (more than one stop
-//! token). Fuel's own `SessionState` tracks exactly one `eos_id: Option<u32>`
-//! — not a set — so the batched path can only ever honor ONE of several
-//! declared EOS tokens: a checkpoint with multiple EOS tokens would stop
-//! correctly on whichever one was chosen but run PAST the others to the
-//! budget ceiling, a real user-visible regression (not a nuance) against the
-//! old serial `FuelEngineModel` path, which checks the full set every token
-//! via `LlamaEosToks::is_eos`.
-//!
-//! So a `Multiple` checkpoint is routed to the EXISTING serial path instead —
-//! loaded once, reused by `FuelEngineModel::from_loaded` (`pub(crate)`, not an
-//! intra-doc link here either) rather than loaded a second time. `Single`/`None` checkpoints (the common
-//! case) take the new batched path. Tracked with the fuel lane
-//! (`SessionState::eos_id` becoming a set, i.e. `eos_ids`); when that lands,
-//! the `Multiple` branch below can move to the batched path too.
+//! Earlier revisions of this file routed `LlamaEosToks::Multiple` checkpoints
+//! to the serial `FuelEngineModel`/`run_jobs` path instead of the batched
+//! one, because fuel's `SessionState` tracked only ONE `eos_id: Option<u32>`
+//! — a checkpoint with several stop tokens would have stopped on whichever
+//! one was chosen and run PAST the others to the budget ceiling on the
+//! batched path. **fuel#307 widened that to `eos_ids: Option<Vec<u32>>`**
+//! (stop-check is "any configured id"), so every checkpoint — `None`,
+//! `Single`, or `Multiple` — now takes the batched path uniformly via
+//! `eos_ids_from` (private, not an intra-doc link here since this module
+//! is `pub`).
 #![allow(dead_code)]
 
 use std::path::Path;
@@ -47,43 +40,22 @@ use fuel_transformers::models::lazy_quantized_llama::QuantizedLlama3Model;
 
 use fuel_inference::multi_session::{KvBudget, SchedulePolicy};
 
-use super::engine_model::{FuelEngineModel, LoadedModel, effective_generation_budget};
+use super::engine_model::effective_generation_budget;
 use super::scheduler_driver::FuelSchedulerDriver;
-use crate::engine::model_runner::{InferenceJob, drain_with_error, run_jobs};
+use crate::engine::model_runner::{InferenceJob, drain_with_error};
 use crate::engine::scheduled_runner::{
     AdmitError, FinishOutcome, SchedulerDriver, run_scheduled_jobs,
 };
 
-/// Which path a checkpoint takes, decided from its own EOS info — see this
-/// module's "Routing" doc comment for why `Multiple` cannot take `Batched`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum EngineRoute {
-    Batched,
-    Serial,
-}
-
-/// The single decision point both load branches (`.gguf` / SafeTensors
-/// directory) call, so they cannot drift from each other on this choice.
-fn route_for(eos: Option<&LlamaEosToks>) -> EngineRoute {
-    match eos {
-        Some(LlamaEosToks::Multiple(_)) => EngineRoute::Serial,
-        None | Some(LlamaEosToks::Single(_)) => EngineRoute::Batched,
-    }
-}
-
-/// The checkpoint's one EOS id. Callers must have already routed
-/// `LlamaEosToks::Multiple` elsewhere via [`route_for`] — this panics on it
-/// rather than silently picking one, so a future call site that skips that
-/// check fails loudly instead of reintroducing the narrowing this module
-/// exists to avoid.
-fn single_eos_id(eos: Option<&LlamaEosToks>) -> Option<u32> {
+/// The checkpoint's full EOS set, in fuel's `eos_ids: Option<Vec<u32>>`
+/// shape. `LlamaEosToks::Single`/`Multiple`/absent map onto it directly —
+/// see this module's doc comment for why there is no longer a case this
+/// cannot represent.
+fn eos_ids_from(eos: Option<&LlamaEosToks>) -> Option<Vec<u32>> {
     match eos {
         None => None,
-        Some(LlamaEosToks::Single(id)) => Some(*id),
-        Some(LlamaEosToks::Multiple(_)) => unreachable!(
-            "single_eos_id called on a Multiple-EOS checkpoint — route it to \
-             the serial path via has_multiple_eos first"
-        ),
+        Some(LlamaEosToks::Single(id)) => Some(vec![*id]),
+        Some(LlamaEosToks::Multiple(ids)) => Some(ids.clone()),
     }
 }
 
@@ -199,7 +171,7 @@ impl BatchedServeConfig {
 fn run_batched<'m, M: fuel_inference::multi_session::DecodeModel>(
     model: &'m M,
     config: BatchedServeConfig,
-    eos_id: Option<u32>,
+    eos_ids: Option<Vec<u32>>,
     context_length: usize,
     tokenizer: tokenizers::Tokenizer,
     rx: Receiver<InferenceJob>,
@@ -211,7 +183,7 @@ fn run_batched<'m, M: fuel_inference::multi_session::DecodeModel>(
         fuel::DType::F32,
         config.policy,
         config.budget,
-        eos_id,
+        eos_ids,
     ) {
         Ok(s) => s,
         Err(e) => return drain_with_error(rx, &format!("building the scheduler: {e}")),
@@ -242,12 +214,10 @@ fn run_batched<'m, M: fuel_inference::multi_session::DecodeModel>(
     );
 }
 
-/// Load a checkpoint (dispatching on `.gguf` vs a SafeTensors directory, same
-/// extension check `FuelEngineModel::load` makes) and drive it — through the
-/// real `FuelSchedulerDriver`/`run_scheduled_jobs` batched path for a
-/// `Single`/`None`-EOS checkpoint, or through the existing serial
-/// `FuelEngineModel`/`run_jobs` path for a `Multiple`-EOS one (see this
-/// module's "Routing" doc).
+/// Load a checkpoint (dispatching on `.gguf` vs a SafeTensors directory) and
+/// drive it through the real `FuelSchedulerDriver`/`run_scheduled_jobs`
+/// batched path — uniformly, regardless of its EOS shape (see this module's
+/// doc comment).
 ///
 /// `max_batch_size` sizes the KV pool (`max_batch_size` concurrent sessions
 /// of up to `context_length` tokens each) AND selects
@@ -292,17 +262,11 @@ fn serve_gguf(
         Err(e) => return load_failed(model_path, e, rx),
     };
     println!("Fuel model loaded at {}", model_path.display());
-    if route_for(loaded.eos.as_ref()) == EngineRoute::Serial {
-        log_serial_fallback(model_path);
-        let model =
-            FuelEngineModel::from_loaded(LoadedModel::QuantizedGguf(loaded), context_length);
-        return run_jobs(model, rx);
-    }
-    let eos_id = single_eos_id(loaded.eos.as_ref());
+    let eos_ids = eos_ids_from(loaded.eos.as_ref());
     run_batched(
         &loaded.model,
         config,
-        eos_id,
+        eos_ids,
         context_length,
         loaded.tokenizer,
         rx,
@@ -322,16 +286,11 @@ fn serve_f32(
         Err(e) => return load_failed(model_path, e, rx),
     };
     println!("Fuel model loaded at {}", model_path.display());
-    if route_for(loaded.eos.as_ref()) == EngineRoute::Serial {
-        log_serial_fallback(model_path);
-        let model = FuelEngineModel::from_loaded(LoadedModel::F32(loaded), context_length);
-        return run_jobs(model, rx);
-    }
-    let eos_id = single_eos_id(loaded.eos.as_ref());
+    let eos_ids = eos_ids_from(loaded.eos.as_ref());
     run_batched(
         &loaded.model,
         config,
-        eos_id,
+        eos_ids,
         context_length,
         loaded.tokenizer,
         rx,
@@ -350,53 +309,24 @@ fn load_failed(model_path: &Path, e: anyhow::Error, rx: Receiver<InferenceJob>) 
     drain_with_error(rx, &format!("model load failed: {e:#}"));
 }
 
-/// Log the routing decision both branches of [`run_fuel_engine`] make the
-/// same way when a checkpoint's EOS set forces the serial fallback.
-fn log_serial_fallback(model_path: &Path) {
-    tracing::info!(
-        "{}: checkpoint declares multiple EOS tokens; serving on the serial \
-         FuelEngineModel path (see scheduled_llama_engine's Routing doc)",
-        model_path.display()
-    );
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn a_multi_eos_checkpoint_selects_the_serial_path() {
-        // The PM's explicit ask after the multi-EOS finding: a checkpoint
-        // declaring more than one stop token must NOT take the batched path
-        // (which can only honor one), it must fall back to the serial one.
+    fn eos_ids_from_reads_through_none_and_single() {
+        assert_eq!(eos_ids_from(None), None);
+        assert_eq!(eos_ids_from(Some(&LlamaEosToks::Single(2))), Some(vec![2]));
+    }
+
+    #[test]
+    fn eos_ids_from_carries_the_full_multiple_set() {
+        // fuel#307's whole point: a checkpoint with several stop tokens no
+        // longer needs a different code path, it needs its full set carried
+        // through unchanged.
         assert_eq!(
-            route_for(Some(&LlamaEosToks::Multiple(vec![7, 8, 9]))),
-            EngineRoute::Serial,
-            "a checkpoint with multiple EOS tokens must route to the serial \
-             FuelEngineModel/run_jobs path, never the batched one — running \
-             past an unlisted EOS token to the budget ceiling is a \
-             user-visible regression, not an acceptable narrowing"
+            eos_ids_from(Some(&LlamaEosToks::Multiple(vec![7, 8, 9]))),
+            Some(vec![7, 8, 9])
         );
-    }
-
-    #[test]
-    fn a_single_or_no_eos_checkpoint_selects_the_batched_path() {
-        assert_eq!(route_for(None), EngineRoute::Batched);
-        assert_eq!(
-            route_for(Some(&LlamaEosToks::Single(2))),
-            EngineRoute::Batched
-        );
-    }
-
-    #[test]
-    fn single_eos_id_reads_through_none_and_single() {
-        assert_eq!(single_eos_id(None), None);
-        assert_eq!(single_eos_id(Some(&LlamaEosToks::Single(2))), Some(2));
-    }
-
-    #[test]
-    #[should_panic(expected = "route it to the serial path")]
-    fn single_eos_id_refuses_a_multiple_checkpoint_rather_than_picking_one() {
-        let _ = single_eos_id(Some(&LlamaEosToks::Multiple(vec![7, 8, 9])));
     }
 }
