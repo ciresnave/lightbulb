@@ -80,14 +80,28 @@ pub struct EmailSink {
     pub to: String,
 }
 
+impl EmailSink {
+    /// The line `notify` logs, factored out so it's assertable in a test
+    /// without a tracing subscriber.
+    ///
+    /// CIRESNAVE-CONTACT: the alert destination address lives only in the
+    /// deployment secret (`SECURITY_ALERT_EMAIL`) — never in logs, PRs or
+    /// docs. This MUST NOT reference `self.to`'s value anywhere; it states
+    /// only that an address is configured, which is always true once an
+    /// `EmailSink` exists at all (`build_sinks` only constructs one when
+    /// `security_alert_email` is `Some`).
+    fn log_line(&self, event: &SecurityEvent) -> String {
+        format!(
+            "EmailSink is a STUB: an alert address is configured and a security alert email \
+             would be sent to it here, but delivery is not implemented. See \
+             src/api/security_event.rs. event={event:?}"
+        )
+    }
+}
+
 impl SecuritySink for EmailSink {
     fn notify(&self, event: &SecurityEvent) {
-        tracing::warn!(
-            to = %self.to,
-            ?event,
-            "EmailSink is a STUB: this is where a security alert email would be sent to \
-             `to`, but delivery is not implemented. See src/api/security_event.rs."
-        );
+        tracing::warn!("{}", self.log_line(event));
     }
 }
 
@@ -181,5 +195,42 @@ mod tests {
                 assert_eq!(*limit, 20);
             }
         }
+    }
+
+    /// CIRESNAVE-CONTACT: the alert destination address lives only in the
+    /// deployment secret — never in logs, PRs or docs. PM review of #128
+    /// (2026-10-07) caught `notify` logging `to = %self.to` directly, which
+    /// put the configured address into the application's own log output.
+    ///
+    /// Tests `EmailSink::log_line` (the pure string-building half of
+    /// `notify`, factored out so this is assertable without a tracing
+    /// subscriber) rather than `notify` itself.
+    #[test]
+    fn email_sink_log_line_never_contains_the_configured_address() {
+        let sink = EmailSink {
+            to: "ops@example.com".to_string(),
+        };
+        let event = SecurityEvent::RepeatedAuthFailures {
+            client_ip: "1.2.3.4".parse().unwrap(),
+            count: 21,
+            limit: 20,
+        };
+
+        let line = sink.log_line(&event);
+
+        assert!(
+            !line.contains("ops@example.com"),
+            "log line must never contain the configured alert address: {line:?}"
+        );
+
+        // Positive control: prove the assertion above would actually catch
+        // a leak — this is the shape the line had BEFORE this fix
+        // (`to = %self.to` interpolated straight into the message), and the
+        // same `.contains()` check must flag it.
+        let old_style_line = format!("to={} would send an alert here", sink.to);
+        assert!(
+            old_style_line.contains("ops@example.com"),
+            "control itself is broken: it should contain the address"
+        );
     }
 }
