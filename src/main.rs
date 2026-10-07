@@ -34,6 +34,13 @@ async fn main() -> Result<()> {
     let jwt_secret =
         env::var("LIGHTBULB_JWT_SECRET").unwrap_or_else(|_| "change-me-in-production".to_string());
 
+    // `--no-auth` is a CLI flag, deliberately NOT an env var: running
+    // without authentication must be a choice made for this one invocation,
+    // not something that can end up sitting in a deployment's environment
+    // and silently apply to every future start. See
+    // `lightbulb::api::validate_auth_policy`.
+    let no_auth = env::args().any(|arg| arg == "--no-auth");
+
     // Create API configuration
     let config = ApiConfig {
         database_url: database_url.clone(),
@@ -49,6 +56,7 @@ async fn main() -> Result<()> {
         model_context_length: 4096,
         enable_audit_log: database_url.is_some(), // Disable audit logging without database
         tls: Default::default(),                  // TLS disabled by default
+        no_auth,
     };
 
     tracing::info!("Starting Lightbulb API server");

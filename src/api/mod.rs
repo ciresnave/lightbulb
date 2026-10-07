@@ -88,6 +88,15 @@ pub struct ApiConfig {
 
     /// TLS configuration
     pub tls: crate::tls::TlsConfig,
+
+    /// Explicit operator opt-out of authentication (the `--no-auth` CLI
+    /// flag). Only ever lets the server start WITHOUT `database_url` set
+    /// when `bind_address` is also loopback — see `validate_auth_policy`
+    /// (not an intra-doc link here since this field is `pub` and that
+    /// function is `pub(crate)`). Never set this from an env var: it must be
+    /// a deliberate per-invocation choice, not something that silently
+    /// persists in a deployment's environment.
+    pub no_auth: bool,
 }
 
 impl Default for ApiConfig {
@@ -106,8 +115,76 @@ impl Default for ApiConfig {
             model_max_batch_size: 8,
             model_context_length: 2048,
             tls: crate::tls::TlsConfig::default(),
+            no_auth: false,
         }
     }
+}
+
+/// Decide whether `bind_address` ("host:port", or a bare host) resolves to
+/// loopback WITHOUT a DNS lookup — a hostname that merely resolves to
+/// loopback today is not a safety property, since DNS can change. Only the
+/// literal numeric loopback addresses and the literal string `"localhost"`
+/// count; every other hostname, including ones on the operator's own LAN, is
+/// treated as reachable from outside and refused by [`validate_auth_policy`]
+/// when auth is off.
+fn is_loopback_bind(bind_address: &str) -> bool {
+    let host = bind_address
+        .rsplit_once(':')
+        .map(|(host, _port)| host)
+        .unwrap_or(bind_address);
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+
+    host.parse::<std::net::IpAddr>()
+        .map(|ip| ip.is_loopback())
+        .unwrap_or(false)
+}
+
+/// Refuse to construct a server that would run the whole inference API
+/// (and, when `enable_admin_api`/`enable_lightbulb_extensions` are on, the
+/// admin and extension surfaces too) with no authentication, no rate
+/// limiting and no audit logging — the default-no-`DATABASE_URL`
+/// configuration the brute-force-countermeasure audit flagged as the worst
+/// of its findings (board PM task, 2026-10-04): previously nothing stopped
+/// this from being the *production* configuration by omission.
+///
+/// `database_url` set is always fine — that's what turns auth/audit/rate-
+/// limiting on in [`auth_middleware`]. Without it, starting anyway requires
+/// BOTH an explicit `no_auth` opt-in AND a loopback bind: `no_auth` alone on
+/// a reachable address would just be the same hole with an extra flag to
+/// type.
+pub(crate) fn validate_auth_policy(config: &ApiConfig) -> Result<()> {
+    if config.database_url.is_some() {
+        return Ok(());
+    }
+
+    if !config.no_auth {
+        anyhow::bail!(
+            "refusing to start: no DATABASE_URL is set, which disables authentication, rate \
+             limiting and audit logging on every endpoint. Set DATABASE_URL, or pass --no-auth \
+             together with a loopback bind_address (127.0.0.1, ::1, or localhost) if you really \
+             want to run without auth for local development."
+        );
+    }
+
+    if !is_loopback_bind(&config.bind_address) {
+        anyhow::bail!(
+            "refusing to start: --no-auth was given but bind_address {:?} is not loopback. \
+             --no-auth is only accepted on 127.0.0.1, ::1, or localhost — binding it anywhere \
+             else would expose every unauthenticated endpoint to the network.",
+            config.bind_address
+        );
+    }
+
+    tracing::warn!(
+        bind_address = %config.bind_address,
+        "starting with --no-auth on a loopback bind — every endpoint is unauthenticated; \
+         local development only"
+    );
+    Ok(())
 }
 
 /// Shared application state
@@ -164,6 +241,8 @@ pub struct ApiServer {
 impl ApiServer {
     /// Create new API server
     pub async fn new(config: ApiConfig, scheduler: Arc<MemoryAwareScheduler>) -> Result<Self> {
+        validate_auth_policy(&config)?;
+
         // Set up database connection pool if DATABASE_URL is configured
         let db_pool = if let Some(ref database_url) = config.database_url {
             let mut pg_config: tokio_postgres::Config = database_url.parse()?;
@@ -490,5 +569,100 @@ mod tests {
         assert!(config.enable_openai_api);
         assert!(config.enable_admin_api);
         assert!(config.enable_lightbulb_extensions);
+    }
+
+    #[test]
+    fn is_loopback_bind_accepts_ipv4_loopback() {
+        assert!(is_loopback_bind("127.0.0.1:8080"));
+    }
+
+    #[test]
+    fn is_loopback_bind_accepts_ipv6_loopback() {
+        assert!(is_loopback_bind("[::1]:8080"));
+    }
+
+    #[test]
+    fn is_loopback_bind_accepts_localhost() {
+        assert!(is_loopback_bind("localhost:8080"));
+        assert!(is_loopback_bind("LOCALHOST:8080"));
+    }
+
+    #[test]
+    fn is_loopback_bind_refuses_all_interfaces() {
+        assert!(!is_loopback_bind("0.0.0.0:8080"));
+    }
+
+    #[test]
+    fn is_loopback_bind_refuses_a_lan_ip() {
+        assert!(!is_loopback_bind("192.168.1.5:8080"));
+    }
+
+    #[test]
+    fn is_loopback_bind_refuses_a_non_localhost_hostname() {
+        assert!(!is_loopback_bind("mybox.lan:8080"));
+    }
+
+    fn config_with(database_url: Option<&str>, bind_address: &str, no_auth: bool) -> ApiConfig {
+        ApiConfig {
+            database_url: database_url.map(str::to_string),
+            bind_address: bind_address.to_string(),
+            no_auth,
+            ..ApiConfig::default()
+        }
+    }
+
+    #[test]
+    fn validate_auth_policy_allows_when_database_url_is_set_on_any_bind() {
+        // Even a wide-open bind is fine once real auth (DATABASE_URL) is
+        // configured — this policy is only about the no-auth path.
+        assert!(
+            validate_auth_policy(&config_with(Some("postgres://x"), "0.0.0.0:8080", false)).is_ok()
+        );
+    }
+
+    #[test]
+    fn validate_auth_policy_refuses_no_database_and_no_no_auth_flag() {
+        assert!(validate_auth_policy(&config_with(None, "127.0.0.1:8080", false)).is_err());
+    }
+
+    #[test]
+    fn validate_auth_policy_refuses_no_auth_on_all_interfaces() {
+        assert!(validate_auth_policy(&config_with(None, "0.0.0.0:8080", true)).is_err());
+    }
+
+    #[test]
+    fn validate_auth_policy_refuses_no_auth_on_a_lan_ip() {
+        assert!(validate_auth_policy(&config_with(None, "192.168.1.5:8080", true)).is_err());
+    }
+
+    #[test]
+    fn validate_auth_policy_refuses_no_auth_on_a_non_localhost_hostname() {
+        assert!(validate_auth_policy(&config_with(None, "mybox.lan:8080", true)).is_err());
+    }
+
+    #[test]
+    fn validate_auth_policy_allows_no_auth_on_loopback() {
+        assert!(validate_auth_policy(&config_with(None, "127.0.0.1:8080", true)).is_ok());
+    }
+
+    /// End-to-end through the real entry point, not just the pure function:
+    /// `ApiServer::new`'s default-config construction (no `DATABASE_URL`, no
+    /// `--no-auth`) must fail before it ever touches a database or starts a
+    /// model runner thread.
+    #[tokio::test]
+    async fn api_server_new_refuses_default_config_without_auth() {
+        use crate::engine::{MemoryAwareConfig, MemoryAwareScheduler};
+        let scheduler = Arc::new(MemoryAwareScheduler::new(MemoryAwareConfig::default()));
+        let config = ApiConfig {
+            models_dir: None,
+            ..ApiConfig::default()
+        };
+
+        let result = ApiServer::new(config, scheduler).await;
+
+        assert!(
+            result.is_err(),
+            "must refuse to start without auth configured"
+        );
     }
 }
