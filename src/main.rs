@@ -41,6 +41,23 @@ async fn main() -> Result<()> {
     // `lightbulb::api::validate_auth_policy`.
     let no_auth = env::args().any(|arg| arg == "--no-auth");
 
+    // Only a peer IP listed here may supply `X-Forwarded-For` to the
+    // pre-auth attempt limiter (security audit item 3) — see
+    // `ApiConfig::trusted_proxies`'s own doc for why an unconfigured
+    // default must be empty, not "trust everyone" or "trust no one
+    // forever." Comma-separated; an entry that fails to parse as an IP is
+    // dropped rather than refusing startup over it.
+    let trusted_proxies: Vec<std::net::IpAddr> = env::var("LIGHTBULB_TRUSTED_PROXIES")
+        .ok()
+        .map(|v| v.split(',').filter_map(|s| s.trim().parse().ok()).collect())
+        .unwrap_or_default();
+
+    let max_auth_attempts_per_minute_per_ip =
+        env::var("LIGHTBULB_MAX_AUTH_ATTEMPTS_PER_MINUTE_PER_IP")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(300);
+
     // Create API configuration
     let config = ApiConfig {
         database_url: database_url.clone(),
@@ -57,6 +74,8 @@ async fn main() -> Result<()> {
         enable_audit_log: database_url.is_some(), // Disable audit logging without database
         tls: Default::default(),                  // TLS disabled by default
         no_auth,
+        trusted_proxies,
+        max_auth_attempts_per_minute_per_ip,
     };
 
     tracing::info!("Starting Lightbulb API server");
