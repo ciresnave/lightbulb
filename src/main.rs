@@ -56,7 +56,7 @@ async fn main() -> Result<()> {
         env::var("LIGHTBULB_MAX_AUTH_ATTEMPTS_PER_MINUTE_PER_IP")
             .ok()
             .and_then(|v| v.parse().ok())
-            .unwrap_or(20);
+            .unwrap_or(300);
 
     // Create API configuration
     let config = ApiConfig {

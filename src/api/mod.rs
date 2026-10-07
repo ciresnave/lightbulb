@@ -112,6 +112,18 @@ pub struct ApiConfig {
     /// database lookup run, so a guessing campaign is throttled before it
     /// costs a key lookup. Independent of `rate_limit_per_minute`, which
     /// only ever applies to a request that already carries a valid key.
+    ///
+    /// **Counts EVERY request from an IP, successful or not** — it is a
+    /// flood limiter in front of the hash+lookup, not a brute-force
+    /// detector. PM review of #127 (2026-10-07) caught the default too low
+    /// at 20: several ordinary clients behind one NAT/proxy, or one client
+    /// making routine requests, would be throttled by legitimate traffic
+    /// alone, since this has no way to distinguish a valid key's requests
+    /// from a guess. 300/min (~5/s) still stops a flood before it reaches
+    /// the database, without breaking real use. The PROPER brute-force
+    /// limiter — a strict, FAILURES-ONLY counter (post-auth 401s per IP,
+    /// e.g. 10/min) — is tracked as a follow-up, not implemented here; see
+    /// the issue filed alongside this change.
     pub max_auth_attempts_per_minute_per_ip: u32,
 }
 
@@ -133,7 +145,7 @@ impl Default for ApiConfig {
             tls: crate::tls::TlsConfig::default(),
             no_auth: false,
             trusted_proxies: Vec::new(),
-            max_auth_attempts_per_minute_per_ip: 20,
+            max_auth_attempts_per_minute_per_ip: 300,
         }
     }
 }
@@ -667,6 +679,21 @@ mod tests {
         assert!(config.enable_openai_api);
         assert!(config.enable_admin_api);
         assert!(config.enable_lightbulb_extensions);
+    }
+
+    /// Pins the default at 300/min (~5/s) — PM review of #127 (2026-10-07)
+    /// found the original default of 20 too low: this limiter counts
+    /// EVERY request per IP, successful or not, so 20/min would throttle
+    /// ordinary traffic from several clients sharing one NAT/proxy. See
+    /// `ApiConfig::max_auth_attempts_per_minute_per_ip`'s own doc for why
+    /// it stays a generous flood limiter rather than a brute-force
+    /// detector.
+    #[test]
+    fn max_auth_attempts_per_minute_per_ip_defaults_to_300() {
+        assert_eq!(
+            ApiConfig::default().max_auth_attempts_per_minute_per_ip,
+            300
+        );
     }
 
     #[test]
