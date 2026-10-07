@@ -152,6 +152,7 @@ async fn fuel_runner_serves_a_coherent_completion_over_http() {
         // the monitor never fills it and never logs. It is here because
         // `AppState` requires it, not as anything under test.
         eos_monitor: Default::default(),
+        security_sinks: Vec::new(),
     };
 
     let app = lightbulb::api::openai::routes().with_state(state);
@@ -291,6 +292,7 @@ async fn fuel_runner_serves_a_default_temperature_completion() {
         // the monitor never fills it and never logs. It is here because
         // `AppState` requires it, not as anything under test.
         eos_monitor: Default::default(),
+        security_sinks: Vec::new(),
     };
 
     let app = lightbulb::api::openai::routes().with_state(state);

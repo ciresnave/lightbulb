@@ -136,6 +136,7 @@ async fn serve_the_fixed_prompt(path: &Path) -> (StatusCode, serde_json::Value) 
         inference_tx: Some(tx),
         chat_template: chat_template::resolve_for_serving(path),
         eos_monitor: Default::default(),
+        security_sinks: Vec::new(),
     };
     let app = lightbulb::api::openai::routes().with_state(state);
     let body = serde_json::json!({

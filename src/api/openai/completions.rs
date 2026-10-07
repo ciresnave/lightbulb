@@ -276,6 +276,7 @@ mod tests {
             inference_tx,
             chat_template: None,
             eos_monitor: std::sync::Arc::new(crate::engine::eos_monitor::EosMonitor::default()),
+            security_sinks: Vec::new(),
         }
     }
 

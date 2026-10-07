@@ -95,6 +95,7 @@ async fn post_raw(path: &str, body: serde_json::Value) -> (StatusCode, Vec<u8>) 
         // the monitor never fills it and never logs. It is here because
         // `AppState` requires it, not as anything under test.
         eos_monitor: Default::default(),
+        security_sinks: Vec::new(),
     };
     let app = lightbulb::api::openai::routes().with_state(state);
     let resp = app

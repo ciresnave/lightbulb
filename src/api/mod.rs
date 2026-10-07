@@ -31,6 +31,7 @@ pub mod auth_middleware;
 pub mod chat_template;
 pub mod lightbulb;
 pub mod openai;
+pub mod security_event;
 pub mod types;
 
 use anyhow::Result;
@@ -125,6 +126,16 @@ pub struct ApiConfig {
     /// e.g. 10/min) — is tracked as a follow-up, not implemented here; see
     /// the issue filed alongside this change.
     pub max_auth_attempts_per_minute_per_ip: u32,
+
+    /// Destination for the security alert hook (security audit item 4) —
+    /// read from the `SECURITY_ALERT_EMAIL` environment variable ONLY
+    /// (a deployment secret, never a contact file), set via
+    /// `main.rs`. `None` means no `EmailSink` is built; `LogSink` is
+    /// always active regardless. **Alert DELIVERY is not implemented**:
+    /// `EmailSink` logs what it would send and sends nothing — see
+    /// `security_event.rs`'s module doc. Do not treat a non-`None` value
+    /// here as "someone gets paged."
+    pub security_alert_email: Option<String>,
 }
 
 impl Default for ApiConfig {
@@ -146,6 +157,7 @@ impl Default for ApiConfig {
             no_auth: false,
             trusted_proxies: Vec::new(),
             max_auth_attempts_per_minute_per_ip: 300,
+            security_alert_email: None,
         }
     }
 }
@@ -260,6 +272,14 @@ pub struct AppState {
     /// reading" (`stop_rate() == None`), so an absent one would be a second
     /// spelling of the same state.
     pub eos_monitor: Arc<crate::engine::eos_monitor::EosMonitor>,
+
+    /// Security alert sinks (security audit item 4) — always contains a
+    /// `LogSink`, plus an `EmailSink` stub when `security_alert_email` is
+    /// configured. `pub`, matching every other `AppState` field: external
+    /// test crates under `tests/` construct `AppState` with struct-literal
+    /// syntax, which is only possible when every field (and the type each
+    /// one names) is visible outside this crate.
+    pub security_sinks: Vec<Arc<dyn security_event::SecuritySink>>,
 }
 
 /// API server
@@ -341,6 +361,8 @@ impl ApiServer {
             });
         }
 
+        let security_sinks = security_event::build_sinks(&config.security_alert_email);
+
         let mut state = AppState {
             scheduler,
             config: config.clone(),
@@ -348,6 +370,7 @@ impl ApiServer {
             inference_tx: None,
             chat_template: None,
             eos_monitor: Arc::new(crate::engine::eos_monitor::EosMonitor::default()),
+            security_sinks,
         };
 
         // Try to start a model runner thread if a model directory and default model exist

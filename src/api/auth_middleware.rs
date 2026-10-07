@@ -112,6 +112,16 @@ pub async fn pre_auth_attempt_limiter_middleware(
             limit,
             "pre-auth attempt limiter: refusing before the key lookup"
         );
+        if crate::api::security_event::just_crossed_threshold(count, limit) {
+            let event = crate::api::security_event::SecurityEvent::RepeatedAuthFailures {
+                client_ip,
+                count,
+                limit,
+            };
+            for sink in &state.security_sinks {
+                sink.notify(&event);
+            }
+        }
         let error = ErrorResponse {
             error: ErrorDetail {
                 message: "Too many authentication attempts from this client".to_string(),

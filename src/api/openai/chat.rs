@@ -1682,6 +1682,7 @@ mod tests {
             inference_tx,
             chat_template,
             eos_monitor,
+            security_sinks: Vec::new(),
         }
     }
 
