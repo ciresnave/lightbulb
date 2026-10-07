@@ -38,6 +38,7 @@ use axum::{
     Router,
     routing::{get, post},
 };
+use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tower_http::cors::{Any, CorsLayer};
@@ -97,6 +98,21 @@ pub struct ApiConfig {
     /// a deliberate per-invocation choice, not something that silently
     /// persists in a deployment's environment.
     pub no_auth: bool,
+
+    /// Peer IPs allowed to supply `X-Forwarded-For` for the pre-auth
+    /// attempt limiter. Empty by default — behind an unconfigured reverse
+    /// proxy every client would otherwise appear to share the proxy's own
+    /// IP, letting one noisy client lock out everyone (security audit
+    /// item 3). Set this to the reverse proxy's own address(es), never to
+    /// a client-controlled value.
+    pub trusted_proxies: Vec<std::net::IpAddr>,
+
+    /// Requests per minute a single client IP may make before the pre-auth
+    /// attempt limiter refuses with 429 — BEFORE the bearer-token hash and
+    /// database lookup run, so a guessing campaign is throttled before it
+    /// costs a key lookup. Independent of `rate_limit_per_minute`, which
+    /// only ever applies to a request that already carries a valid key.
+    pub max_auth_attempts_per_minute_per_ip: u32,
 }
 
 impl Default for ApiConfig {
@@ -116,6 +132,8 @@ impl Default for ApiConfig {
             model_context_length: 2048,
             tls: crate::tls::TlsConfig::default(),
             no_auth: false,
+            trusted_proxies: Vec::new(),
+            max_auth_attempts_per_minute_per_ip: 20,
         }
     }
 }
@@ -271,6 +289,46 @@ impl ApiServer {
             None
         };
 
+        // `auth_attempt_counts` (security audit item 3) is written on every
+        // request that reaches `pre_auth_attempt_limiter_middleware`,
+        // including every brute-force guess — unlike `api_key_usage`, whose
+        // rows are bounded by the number of PROVISIONED keys, this table's
+        // key space is "every IP that ever made a request," so it needs its
+        // own expiry rather than growing forever. A background task, not a
+        // per-request delete, so the request path pays no extra latency for
+        // it.
+        if let Some(pool) = db_pool.clone() {
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(std::time::Duration::from_secs(300));
+                loop {
+                    interval.tick().await;
+                    match pool.get().await {
+                        Ok(client) => {
+                            if let Err(e) = client
+                                .execute(
+                                    "DELETE FROM auth_attempt_counts \
+                                     WHERE window_start < NOW() - INTERVAL '1 hour'",
+                                    &[],
+                                )
+                                .await
+                            {
+                                tracing::warn!(
+                                    error = %e,
+                                    "auth_attempt_counts cleanup query failed"
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                error = %e,
+                                "auth_attempt_counts cleanup: could not get a database connection"
+                            );
+                        }
+                    }
+                }
+            });
+        }
+
         let mut state = AppState {
             scheduler,
             config: config.clone(),
@@ -353,22 +411,47 @@ impl ApiServer {
             router = router.merge(lightbulb::routes());
         }
 
-        // Add middleware layers
+        // Add middleware layers.
+        //
+        // `Router::layer` makes the layer being ADDED the new OUTERMOST
+        // wrapper around whatever was registered before it — so the layer
+        // added LAST runs FIRST, and sees the response last (after every
+        // inner layer, including a short-circuiting rejection, has already
+        // produced one). Security audit item 3 (2026-10-06) found this
+        // exact ordering backwards: `audit_middleware` was added FIRST,
+        // making it the INNERMOST layer, so a request `auth_middleware`
+        // rejected with 401 before ever calling `next.run()` never reached
+        // audit logging at all — a sustained brute-force guessing campaign
+        // against the bearer-token space produced zero audit rows. The
+        // comments below used to claim the opposite of what the code did;
+        // they now describe what it actually does.
         router
-            // Audit logging (outermost - logs everything)
-            .layer(axum::middleware::from_fn_with_state(
-                self.state.clone(),
-                auth_middleware::audit_middleware,
-            ))
-            // Rate limiting
+            // Rate limiting — innermost of the four. Reads the
+            // `ApiKeyInfo` extension `auth_middleware` inserts, so it must
+            // run strictly AFTER auth, which means added BEFORE it here.
             .layer(axum::middleware::from_fn_with_state(
                 self.state.clone(),
                 auth_middleware::rate_limit_middleware,
             ))
-            // Authentication (innermost - validates before processing)
+            // Authentication. Runs after the pre-auth limiter admits a
+            // request, before rate limiting (which needs what this inserts).
             .layer(axum::middleware::from_fn_with_state(
                 self.state.clone(),
                 auth_middleware::auth_middleware,
+            ))
+            // Pre-auth, connection-keyed attempt limiter (security audit
+            // item 3). Runs BEFORE auth_middleware's hash+DB lookup, so a
+            // guessing campaign is throttled before it costs a key lookup.
+            .layer(axum::middleware::from_fn_with_state(
+                self.state.clone(),
+                auth_middleware::pre_auth_attempt_limiter_middleware,
+            ))
+            // Audit logging — now genuinely outermost, added LAST, so it
+            // sees the final response regardless of which inner layer (this
+            // one, auth, or rate limiting) produced it.
+            .layer(axum::middleware::from_fn_with_state(
+                self.state.clone(),
+                auth_middleware::audit_middleware,
             ))
             // Health check, registered AFTER the auth stack on purpose.
             // `Router::layer` wraps only the routes registered before it, so
@@ -447,16 +530,28 @@ impl ApiServer {
             let http_app = app.clone();
             let https_app = app;
 
-            // HTTP server task
+            // HTTP server task.
+            //
+            // `into_make_service_with_connect_info::<SocketAddr>()`, not
+            // plain `into_make_service()`: `pre_auth_attempt_limiter_middleware`
+            // extracts `ConnectInfo<SocketAddr>`, which only exists on a
+            // request when the service tree was built this way.
             let http_server = tokio::spawn(async move {
-                axum::serve(http_listener, http_app)
-                    .await
-                    .map_err(|e| anyhow::anyhow!("HTTP server error: {}", e))
+                axum::serve(
+                    http_listener,
+                    http_app.into_make_service_with_connect_info::<SocketAddr>(),
+                )
+                .await
+                .map_err(|e| anyhow::anyhow!("HTTP server error: {}", e))
             });
 
             // HTTPS server task with manual TLS handling
             let https_server = tokio::spawn(async move {
-                let make_service = https_app.into_make_service();
+                // Same reason as the HTTP branch above: without
+                // `_with_connect_info`, `make_service.call(remote_addr)`
+                // below would still type-check (it ignores its argument's
+                // type) but would NOT insert `ConnectInfo` into requests.
+                let make_service = https_app.into_make_service_with_connect_info::<SocketAddr>();
 
                 loop {
                     let (tcp_stream, remote_addr) = match https_listener.accept().await {
@@ -540,9 +635,12 @@ impl ApiServer {
                 http_bind_address
             );
 
-            axum::serve(listener, app)
-                .await
-                .map_err(|e| anyhow::anyhow!("HTTP server error: {}", e))?;
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("HTTP server error: {}", e))?;
 
             Ok(())
         }
@@ -664,5 +762,94 @@ mod tests {
             result.is_err(),
             "must refuse to start without auth configured"
         );
+    }
+
+    /// Structural regression test for `build_router`'s layer ordering
+    /// (security audit item 3): the layer added LAST is the OUTERMOST
+    /// wrapper, so it runs first on the way in and sees the final response
+    /// last, even when an inner layer never calls `next.run()` at all.
+    ///
+    /// This doesn't touch `audit_middleware`/`auth_middleware` (both
+    /// database-backed) or a live server — it pins the underlying `axum`
+    /// composition property `build_router` relies on, using two throwaway
+    /// marker middlewares and a shared log, mirroring exactly the call
+    /// pattern `build_router` uses (`.layer(inner)` then `.layer(outer)`).
+    /// If that property ever changed (or `build_router`'s call order
+    /// regressed back to audit-innermost), this fails independently of
+    /// whether a database happens to be reachable.
+    mod layer_ordering {
+        use axum::body::Body;
+        use axum::extract::{Extension, Request};
+        use axum::http::{Request as HttpRequest, StatusCode};
+        use axum::middleware::Next;
+        use axum::response::{IntoResponse, Response};
+        use axum::routing::get;
+        use axum::{Router, middleware};
+        use std::sync::{Arc, Mutex};
+        use tower::ServiceExt;
+
+        type SharedLog = Arc<Mutex<Vec<String>>>;
+
+        async fn marker_outer(
+            Extension(log): Extension<SharedLog>,
+            request: Request,
+            next: Next,
+        ) -> Response {
+            log.lock().unwrap().push("outer-before".to_string());
+            let response = next.run(request).await;
+            log.lock()
+                .unwrap()
+                .push(format!("outer-after:{}", response.status().as_u16()));
+            response
+        }
+
+        /// Stands in for `auth_middleware` rejecting a request: records
+        /// that it ran, then returns WITHOUT ever calling `next.run()` —
+        /// exactly the short-circuit that made the real `audit_middleware`
+        /// invisible to a rejected request when it was wired innermost.
+        async fn marker_reject(
+            Extension(log): Extension<SharedLog>,
+            _request: Request,
+            _next: Next,
+        ) -> Response {
+            log.lock().unwrap().push("reject".to_string());
+            StatusCode::FORBIDDEN.into_response()
+        }
+
+        #[tokio::test]
+        async fn layer_added_last_is_outermost_and_sees_a_short_circuited_response() {
+            let log: SharedLog = Arc::new(Mutex::new(Vec::new()));
+
+            let app = Router::new()
+                .route("/x", get(|| async { "ok" }))
+                // Added first -> innermost, same relative position
+                // `auth_middleware` holds in `build_router` relative to
+                // `audit_middleware`.
+                .layer(middleware::from_fn(marker_reject))
+                // Added last -> outermost, same relative position
+                // `audit_middleware` now holds.
+                .layer(middleware::from_fn(marker_outer))
+                .layer(Extension(log.clone()));
+
+            let request: HttpRequest<Body> = HttpRequest::builder()
+                .uri("/x")
+                .body(Body::empty())
+                .unwrap();
+
+            let response = app.oneshot(request).await.unwrap();
+
+            assert_eq!(response.status(), StatusCode::FORBIDDEN);
+            assert_eq!(
+                *log.lock().unwrap(),
+                vec![
+                    "outer-before".to_string(),
+                    "reject".to_string(),
+                    "outer-after:403".to_string(),
+                ],
+                "the outer marker must run before the rejecting inner one, and must \
+                 observe the rejection's status AFTER next.run() returns — the same \
+                 thing audit_middleware needs from being outermost of auth_middleware"
+            );
+        }
     }
 }
