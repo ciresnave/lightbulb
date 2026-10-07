@@ -94,6 +94,7 @@ async fn complete_raw(path: &Path, prompt: &str, max_tokens: usize) -> serde_jso
         inference_tx: Some(tx),
         chat_template: None,
         eos_monitor: Default::default(),
+        security_sinks: Vec::new(),
     };
     let app = lightbulb::api::openai::routes().with_state(state);
     let body = serde_json::json!({

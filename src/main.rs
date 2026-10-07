@@ -58,6 +58,12 @@ async fn main() -> Result<()> {
             .and_then(|v| v.parse().ok())
             .unwrap_or(300);
 
+    // Security audit item 4. A deployment secret, env var only — never a
+    // contact file. `None` means only `LogSink` is active; see
+    // `ApiConfig::security_alert_email`'s own doc for why a configured
+    // address here does NOT mean alert delivery is implemented.
+    let security_alert_email = env::var("SECURITY_ALERT_EMAIL").ok();
+
     // Create API configuration
     let config = ApiConfig {
         database_url: database_url.clone(),
@@ -76,6 +82,7 @@ async fn main() -> Result<()> {
         no_auth,
         trusted_proxies,
         max_auth_attempts_per_minute_per_ip,
+        security_alert_email,
     };
 
     tracing::info!("Starting Lightbulb API server");
