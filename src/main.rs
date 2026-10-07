@@ -31,8 +31,12 @@ async fn main() -> Result<()> {
     let default_model =
         env::var("LIGHTBULB_DEFAULT_MODEL").unwrap_or_else(|_| "default".to_string());
 
-    let jwt_secret =
-        env::var("LIGHTBULB_JWT_SECRET").unwrap_or_else(|_| "change-me-in-production".to_string());
+    // No fallback (security audit item 5): a hardcoded
+    // "change-me-in-production" default meant every deployment that never
+    // set this started with the same known secret. `None` when unset — see
+    // `ApiConfig::jwt_secret`'s own doc for why that's required rather than
+    // a weaker default now that nothing reads this value yet anyway.
+    let jwt_secret = env::var("LIGHTBULB_JWT_SECRET").ok();
 
     // `--no-auth` is a CLI flag, deliberately NOT an env var: running
     // without authentication must be a choice made for this one invocation,

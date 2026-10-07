@@ -67,8 +67,16 @@ pub struct ApiConfig {
     /// Enable Lightbulb-specific extensions
     pub enable_lightbulb_extensions: bool,
 
-    /// JWT secret for token signing
-    pub jwt_secret: String,
+    /// JWT secret for token signing. `None` unless an operator explicitly
+    /// sets `LIGHTBULB_JWT_SECRET` (security audit item 5, 2026-10-06):
+    /// there used to be a hardcoded fallback here
+    /// (`"change-me-in-production"`), a known string any future JWT
+    /// feature could end up trusting by default. Nothing in this crate
+    /// signs or verifies a JWT with this value today — the `None` default
+    /// means that stays true until a real feature explicitly checks for
+    /// `Some` and is configured for it, rather than silently working with
+    /// a secret everyone who has ever read this source already knows.
+    pub jwt_secret: Option<String>,
 
     /// Maximum requests per minute per API key
     pub rate_limit_per_minute: u32,
@@ -146,7 +154,7 @@ impl Default for ApiConfig {
             enable_openai_api: true,
             enable_admin_api: true,
             enable_lightbulb_extensions: true,
-            jwt_secret: "change-me-in-production".to_string(),
+            jwt_secret: None,
             rate_limit_per_minute: 60,
             enable_audit_log: true,
             models_dir: Some("./models".to_string()),
@@ -717,6 +725,16 @@ mod tests {
             ApiConfig::default().max_auth_attempts_per_minute_per_ip,
             300
         );
+    }
+
+    /// Security audit item 5: the default must NOT be a known, shared
+    /// string — it must be the explicit absence of a configured secret, so
+    /// any future caller that signs or verifies a JWT is forced to check
+    /// for `None` rather than silently trusting whatever the default
+    /// happens to be.
+    #[test]
+    fn jwt_secret_defaults_to_none_not_a_known_string() {
+        assert!(ApiConfig::default().jwt_secret.is_none());
     }
 
     #[test]
