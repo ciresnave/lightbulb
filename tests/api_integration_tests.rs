@@ -99,7 +99,7 @@ mod api_tests {
             enable_openai_api: true,
             enable_admin_api: true,
             enable_lightbulb_extensions: true,
-            jwt_secret: "test-secret".to_string(),
+            jwt_secret: Some("test-secret".to_string()),
             rate_limit_per_minute: 1000,
             enable_audit_log: false, // Disable for tests
             models_dir: None,        // No model loading for tests
