@@ -85,7 +85,8 @@ pub fn load_local_llama(
     }
 
     // Use CUDA if available, otherwise fall back to CPU
-    let device = Device::cuda_if_available(0).unwrap_or(Device::Cpu);
+    let device =
+        Device::cuda_if_available(crate::hardware::cuda_device_index()).unwrap_or(Device::Cpu);
     println!("Loading model on device: {:?}", device);
 
     let dtype = parse_dtype(dtype)?;
@@ -162,7 +163,8 @@ pub fn load_gguf_llama(
     println!("Loading quantized model from: {}", gguf_path);
 
     // Use CUDA if available, otherwise CPU
-    let device = Device::cuda_if_available(0).unwrap_or(Device::Cpu);
+    let device =
+        Device::cuda_if_available(crate::hardware::cuda_device_index()).unwrap_or(Device::Cpu);
     println!("Loading model on device: {:?}", device);
 
     // Load GGUF using our memory-mapped loader for metadata and tokenizer
@@ -368,7 +370,8 @@ pub fn load_awq_llama(
     println!("\nFound {} safetensors files", files.len());
 
     // Use CUDA if available (AWQ requires CUDA for Marlin kernels)
-    let device = Device::cuda_if_available(0).unwrap_or(Device::Cpu);
+    let device =
+        Device::cuda_if_available(crate::hardware::cuda_device_index()).unwrap_or(Device::Cpu);
     if !matches!(device, Device::Cuda(_)) {
         bail!("AWQ inference requires CUDA. CPU inference not yet implemented.");
     }

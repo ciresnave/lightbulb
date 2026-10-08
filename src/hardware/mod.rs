@@ -320,9 +320,47 @@ mod inference_backend_to_device_tests {
     }
 }
 
+/// Parses `LIGHTBULB_CUDA_DEVICE_INDEX`'s raw value. Pure and parameterized
+/// (not reading the env var itself) so it's testable without mutating
+/// process-wide env state, which tests running in parallel would otherwise
+/// race on.
+fn parse_cuda_device_index(raw: Option<&str>) -> usize {
+    raw.and_then(|v| v.parse().ok()).unwrap_or(0)
+}
+
+/// Which CUDA device ordinal to auto-detect on, for a caller that doesn't
+/// receive an explicit `candle_core::Device`/`fuel::Device` override (not
+/// intra-doc links here — neither crate is in scope from this module).
+///
+/// Board PM task (2026-10-07, joint GPU milestone): every auto-detect call
+/// site in this crate hardcoded device index 0 — fine for one GPU per
+/// process, broken for selecting a SPECIFIC card (e.g. a P40 at index 1 on
+/// a box that also has a 4070 at index 0). Read fresh from
+/// `LIGHTBULB_CUDA_DEVICE_INDEX` at each model-load call, not cached, since
+/// it's only read at load time; defaults to 0, matching every prior
+/// hardcoded call site this replaces.
+pub fn cuda_device_index() -> usize {
+    parse_cuda_device_index(std::env::var("LIGHTBULB_CUDA_DEVICE_INDEX").ok().as_deref())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_cuda_device_index_defaults_to_0_when_unset() {
+        assert_eq!(parse_cuda_device_index(None), 0);
+    }
+
+    #[test]
+    fn parse_cuda_device_index_reads_a_valid_index() {
+        assert_eq!(parse_cuda_device_index(Some("1")), 1);
+    }
+
+    #[test]
+    fn parse_cuda_device_index_falls_back_to_0_on_garbage() {
+        assert_eq!(parse_cuda_device_index(Some("not-a-number")), 0);
+    }
 
     #[test]
     fn test_hardware_detection() {

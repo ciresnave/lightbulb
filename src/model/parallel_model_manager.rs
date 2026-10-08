@@ -262,9 +262,10 @@ impl ParallelModelManager {
 
         // Auto-detect device: prefer CUDA, fallback to CPU
         let device = device.unwrap_or_else(|| {
-            if Device::cuda_if_available(0).is_ok() {
-                println!("  🎮 Using CUDA GPU (device 0)");
-                Device::cuda_if_available(0).unwrap()
+            let index = crate::hardware::cuda_device_index();
+            if Device::cuda_if_available(index).is_ok() {
+                println!("  🎮 Using CUDA GPU (device {index})");
+                Device::cuda_if_available(index).unwrap()
             } else {
                 println!("  💻 Using CPU (CUDA not available)");
                 Device::Cpu

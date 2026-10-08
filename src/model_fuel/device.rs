@@ -22,14 +22,15 @@ use fuel::Device;
 pub fn select() -> Device {
     #[cfg(feature = "fuel-cuda")]
     {
-        match fuel_cuda_backend::CudaDevice::new(0) {
+        let index = crate::hardware::cuda_device_index();
+        match fuel_cuda_backend::CudaDevice::new(index) {
             Ok(d) => {
-                tracing::info!("model_fuel: CUDA device 0 selected");
+                tracing::info!("model_fuel: CUDA device {index} selected");
                 return Device::from(d);
             }
             Err(e) => {
                 tracing::warn!(
-                    "model_fuel: `fuel-cuda` is enabled but CUDA device 0 is unavailable \
+                    "model_fuel: `fuel-cuda` is enabled but CUDA device {index} is unavailable \
                      ({e:?}); falling back to CPU"
                 );
             }
