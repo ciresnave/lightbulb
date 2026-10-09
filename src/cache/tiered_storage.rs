@@ -46,13 +46,24 @@ pub trait DiskStore: Send {
 /// backend (atomic replace via a sibling scratch directory — see `scratch_dir_for`).
 pub struct FileDiskStore {
     store: persistant::blocking::Store,
+    /// Held for the store's lifetime: proves exclusive ownership of the scratch directory
+    /// (see `acquire_scratch_dir`) and is removed on drop so a later store can sweep again.
+    scratch_lock: Option<(PathBuf, std::fs::File)>,
 }
 
-/// Scratch directory for atomic replace, as a sibling of `base_dir` (never nested inside
-/// it): `persistant` requires `atomic_write_dir` on the same filesystem as `root` and
-/// outside it, and a sibling keeps `base_dir`'s own listing exactly what callers put there
-/// (see `file_disk_store_composes_with_the_mover` in `model_fuel::policies`, which asserts
-/// `base_dir`'s entry count is zero once every key is deleted).
+/// Name of the lock file inside the scratch directory that proves this `FileDiskStore` is
+/// the only thing sweeping/using it right now (see `acquire_scratch_dir`).
+const SCRATCH_LOCK_NAME: &str = ".filediskstore.lock";
+
+/// Scratch directory for atomic replace, as a sibling of the *resolved* `base_dir` (never
+/// nested inside it, and never beside a symlink rather than its target): `persistant`
+/// requires `atomic_write_dir` on the same filesystem as `root` and outside it, and a
+/// sibling keeps `base_dir`'s own listing exactly what callers put there (see
+/// `file_disk_store_composes_with_the_mover` in `model_fuel::policies`, which asserts
+/// `base_dir`'s entry count is zero once every key is deleted). `base_dir` must already be
+/// canonicalized (absolute, symlinks resolved) — the caller is responsible for that, since
+/// canonicalizing requires the directory to exist — or a relative or `.` root derives a
+/// scratch path that is not reliably outside it.
 fn scratch_dir_for(base_dir: &std::path::Path) -> PathBuf {
     let name = base_dir
         .file_name()
@@ -60,29 +71,65 @@ fn scratch_dir_for(base_dir: &std::path::Path) -> PathBuf {
         .unwrap_or_else(|| "disk-store".to_string());
     base_dir
         .parent()
-        .unwrap_or_else(|| std::path::Path::new("."))
+        .unwrap_or(base_dir)
         .join(format!("{name}.atomic-scratch"))
+}
+
+/// Claim exclusive use of `scratch_dir` and sweep any temp file an earlier, now-dead holder
+/// left behind (a replace interrupted by a crash or kill — `persistant`'s docs note `fs`
+/// does not clean its own scratch directory on a dropped, uncommitted write).
+///
+/// Sweeping a shared directory blindly can delete another live writer's in-progress
+/// replacement or unrelated files it happens to contain. To stay safe without coordinating
+/// with anyone else, this creates `SCRATCH_LOCK_NAME` with `create_new` (atomic: only one
+/// caller can win it) before touching any other entry, and sweeps only on a fresh win —
+/// proof nothing else currently holds this directory. If the lock file already exists
+/// (held by a still-running store, or left behind by one that crashed without dropping it),
+/// this skips the sweep and the open proceeds without it: a stale temp file surviving one
+/// more run is strictly safer than risking someone else's live data.
+fn acquire_scratch_dir(scratch_dir: &std::path::Path) -> std::io::Result<std::fs::File> {
+    let lock_path = scratch_dir.join(SCRATCH_LOCK_NAME);
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&lock_path)
+    {
+        Ok(lock) => {
+            if let Ok(entries) = std::fs::read_dir(scratch_dir) {
+                for entry in entries.flatten() {
+                    if entry.path() != lock_path {
+                        let _ = std::fs::remove_file(entry.path());
+                    }
+                }
+            }
+            Ok(lock)
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            std::fs::OpenOptions::new().write(true).open(&lock_path)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 impl FileDiskStore {
     /// Create a new file-based disk store.
     ///
     /// Creates the directory (and its atomic-replace scratch directory) if they don't
-    /// exist, and sweeps any temp file left behind by a replace that was interrupted
-    /// (crash, kill) before this call — `persistant`'s docs note `fs` does not clean its
-    /// own scratch directory on a dropped, uncommitted write.
+    /// exist, and sweeps any temp file left behind by an interrupted replace — see
+    /// `acquire_scratch_dir` for when that sweep is skipped to stay safe.
     pub fn new(base_dir: impl Into<PathBuf>) -> Result<Self, String> {
         let base_dir = base_dir.into();
         std::fs::create_dir_all(&base_dir)
             .map_err(|e| format!("Failed to create disk store dir: {}", e))?;
+        // Resolve symlinks and relative components (including a bare ".") before deriving
+        // the scratch sibling, so it is always outside the real root directory.
+        let base_dir = std::fs::canonicalize(&base_dir)
+            .map_err(|e| format!("Failed to resolve disk store dir: {}", e))?;
         let scratch_dir = scratch_dir_for(&base_dir);
         std::fs::create_dir_all(&scratch_dir)
             .map_err(|e| format!("Failed to create disk store scratch dir: {}", e))?;
-        if let Ok(entries) = std::fs::read_dir(&scratch_dir) {
-            for entry in entries.flatten() {
-                let _ = std::fs::remove_file(entry.path());
-            }
-        }
+        let scratch_lock = acquire_scratch_dir(&scratch_dir)
+            .map_err(|e| format!("Failed to lock disk store scratch dir: {}", e))?;
 
         let needs = persistant::Needs::new()
             .with(persistant::Need::Read)
@@ -92,17 +139,33 @@ impl FileDiskStore {
         let store = persistant::blocking::Store::open(
             persistant::Config::Fs {
                 root: base_dir,
-                atomic_write_dir: Some(scratch_dir),
+                atomic_write_dir: Some(scratch_dir.clone()),
             },
             needs,
         )
         .map_err(|e| format!("Failed to open disk store: {}", e))?;
-        Ok(Self { store })
+        Ok(Self {
+            store,
+            scratch_lock: Some((scratch_dir, scratch_lock)),
+        })
+    }
+}
+
+impl Drop for FileDiskStore {
+    fn drop(&mut self) {
+        if let Some((scratch_dir, lock)) = self.scratch_lock.take() {
+            drop(lock);
+            let _ = std::fs::remove_file(scratch_dir.join(SCRATCH_LOCK_NAME));
+        }
     }
 }
 
 impl DiskStore for FileDiskStore {
     fn store(&mut self, key: &str, data: &[u8]) -> Result<(), String> {
+        // `persistant::Store::replace` takes ownership of the buffer (it crosses an async
+        // await boundary that may outlive this call's stack frame), so this clone is
+        // structural at the sync-borrow/async-owned boundary, not avoidable without
+        // changing the `DiskStore` trait's `&[u8]` signature.
         self.store
             .replace(key, data.to_vec())
             .map_err(|e| format!("Failed to write {}: {}", key, e))
@@ -824,5 +887,92 @@ mod tests {
 
         let store = FileDiskStore::new(dir.path()).unwrap();
         assert_eq!(store.load("kv_segment_1").unwrap(), b"old-writer-bytes");
+    }
+
+    #[test]
+    fn test_file_disk_store_does_not_sweep_a_scratch_dir_another_store_still_holds() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = FileDiskStore::new(dir.path()).unwrap();
+        let (scratch_dir, _lock) = store.scratch_lock.as_ref().unwrap();
+
+        // A file an in-progress (still-held) replace would have left behind.
+        let decoy = scratch_dir.join("decoy-in-progress-write");
+        std::fs::write(&decoy, b"not abandoned").unwrap();
+
+        // Opening a second store over the same base_dir finds the lock already held
+        // (the first `store` hasn't been dropped) and must not sweep: the decoy survives.
+        let _second = FileDiskStore::new(dir.path()).unwrap();
+        assert!(
+            decoy.exists(),
+            "live store's scratch dir was swept out from under it"
+        );
+    }
+
+    #[test]
+    fn test_file_disk_store_sweeps_scratch_dir_once_the_holder_is_gone() {
+        let dir = tempfile::tempdir().unwrap();
+        let scratch_dir;
+        {
+            let store = FileDiskStore::new(dir.path()).unwrap();
+            scratch_dir = store.scratch_lock.as_ref().unwrap().0.clone();
+            std::fs::write(
+                scratch_dir.join("abandoned-temp-file"),
+                b"crashed mid-write",
+            )
+            .unwrap();
+        } // store dropped: releases the lock, as a crash would not.
+
+        // A fresh store over the same base_dir now sweeps the directory it is first to lock.
+        let _reopened = FileDiskStore::new(dir.path()).unwrap();
+        assert!(!scratch_dir.join("abandoned-temp-file").exists());
+    }
+
+    #[test]
+    fn test_scratch_dir_for_a_bare_dot_would_nest_without_resolving_first() {
+        // `scratch_dir_for` is purely lexical (`Path::parent`/`file_name`, no filesystem
+        // access): fed a literal "." it reads as `file_name() == None` and
+        // `parent() == Some("")`, landing the "sibling" back inside "." itself. This
+        // characterizes that lexical edge case — it is why `FileDiskStore::new`
+        // canonicalizes (resolving "." against the real cwd to an absolute path with a
+        // real parent) *before* ever calling `scratch_dir_for`, rather than a claim that
+        // `scratch_dir_for` handles "." correctly on its own.
+        let scratch = scratch_dir_for(std::path::Path::new("."));
+        assert_eq!(
+            scratch,
+            std::path::PathBuf::from("disk-store.atomic-scratch")
+        );
+    }
+
+    #[test]
+    fn test_file_disk_store_scratch_dir_resolves_a_symlinked_base_dir_to_its_target() {
+        let outer = tempfile::tempdir().unwrap();
+        let target = outer.path().join("real-store-root");
+        std::fs::create_dir_all(&target).unwrap();
+        let link = outer.path().join("store-root-symlink");
+        #[cfg(windows)]
+        let symlinked = std::os::windows::fs::symlink_dir(&target, &link).is_ok();
+        #[cfg(not(windows))]
+        let symlinked = std::os::unix::fs::symlink(&target, &link).is_ok();
+        if !symlinked {
+            // No symlink privilege in this environment (e.g. Windows without Developer
+            // Mode or admin) — nothing to verify here, not a failure of the code under
+            // test.
+            return;
+        }
+
+        // Before canonicalizing, the naive (lexical) sibling derivation would land the
+        // scratch dir beside the *symlink's* own location, not the real target directory
+        // it resolves to — which may be a different directory, or a different filesystem
+        // entirely (the hazard `scratch_dir_for`'s doc comment names).
+        let store = FileDiskStore::new(&link).unwrap();
+        let (scratch_dir, _lock) = store.scratch_lock.as_ref().unwrap();
+        let canonical_target = std::fs::canonicalize(&target).unwrap();
+        assert_eq!(
+            scratch_dir,
+            &canonical_target
+                .parent()
+                .unwrap()
+                .join("real-store-root.atomic-scratch")
+        );
     }
 }
