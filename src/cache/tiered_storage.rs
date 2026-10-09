@@ -804,4 +804,25 @@ mod tests {
         let result = manager.promote_to_gpu(999, |_| Ok(vec![]));
         assert!(result.is_err());
     }
+
+    #[test]
+    fn test_file_disk_store_delete_of_missing_key_is_ok() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = FileDiskStore::new(dir.path()).unwrap();
+        // Old `std::fs`-backed behaviour: deleting a key that was never stored
+        // is not an error (persistant documents the same contract on `delete`).
+        assert!(store.delete("never-stored").is_ok());
+    }
+
+    #[test]
+    fn test_file_disk_store_reads_file_written_by_old_plain_fs_writer() {
+        let dir = tempfile::tempdir().unwrap();
+        // Simulate a pre-existing base_dir populated by the old writer, which
+        // wrote each key as a plain file via `std::fs::write` with no sibling
+        // scratch directory alongside it.
+        std::fs::write(dir.path().join("kv_segment_1"), b"old-writer-bytes").unwrap();
+
+        let store = FileDiskStore::new(dir.path()).unwrap();
+        assert_eq!(store.load("kv_segment_1").unwrap(), b"old-writer-bytes");
+    }
 }
