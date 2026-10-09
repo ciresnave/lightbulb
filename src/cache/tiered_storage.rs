@@ -42,42 +42,82 @@ pub trait DiskStore: Send {
 
 /// File-system backed disk store.
 ///
-/// Stores each KV segment as a file in a directory.
+/// Stores each KV segment as a file in a directory, through `persistant`'s blocking `fs`
+/// backend (atomic replace via a sibling scratch directory — see `scratch_dir_for`).
 pub struct FileDiskStore {
-    base_dir: PathBuf,
+    store: persistant::blocking::Store,
+}
+
+/// Scratch directory for atomic replace, as a sibling of `base_dir` (never nested inside
+/// it): `persistant` requires `atomic_write_dir` on the same filesystem as `root` and
+/// outside it, and a sibling keeps `base_dir`'s own listing exactly what callers put there
+/// (see `file_disk_store_composes_with_the_mover` in `model_fuel::policies`, which asserts
+/// `base_dir`'s entry count is zero once every key is deleted).
+fn scratch_dir_for(base_dir: &std::path::Path) -> PathBuf {
+    let name = base_dir
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "disk-store".to_string());
+    base_dir
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."))
+        .join(format!("{name}.atomic-scratch"))
 }
 
 impl FileDiskStore {
     /// Create a new file-based disk store.
     ///
-    /// Creates the directory if it doesn't exist.
+    /// Creates the directory (and its atomic-replace scratch directory) if they don't
+    /// exist, and sweeps any temp file left behind by a replace that was interrupted
+    /// (crash, kill) before this call — `persistant`'s docs note `fs` does not clean its
+    /// own scratch directory on a dropped, uncommitted write.
     pub fn new(base_dir: impl Into<PathBuf>) -> Result<Self, String> {
         let base_dir = base_dir.into();
         std::fs::create_dir_all(&base_dir)
             .map_err(|e| format!("Failed to create disk store dir: {}", e))?;
-        Ok(Self { base_dir })
+        let scratch_dir = scratch_dir_for(&base_dir);
+        std::fs::create_dir_all(&scratch_dir)
+            .map_err(|e| format!("Failed to create disk store scratch dir: {}", e))?;
+        if let Ok(entries) = std::fs::read_dir(&scratch_dir) {
+            for entry in entries.flatten() {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+
+        let needs = persistant::Needs::new()
+            .with(persistant::Need::Read)
+            .with(persistant::Need::Write)
+            .with(persistant::Need::Delete)
+            .with(persistant::Need::AtomicReplace);
+        let store = persistant::blocking::Store::open(
+            persistant::Config::Fs {
+                root: base_dir,
+                atomic_write_dir: Some(scratch_dir),
+            },
+            needs,
+        )
+        .map_err(|e| format!("Failed to open disk store: {}", e))?;
+        Ok(Self { store })
     }
 }
 
 impl DiskStore for FileDiskStore {
     fn store(&mut self, key: &str, data: &[u8]) -> Result<(), String> {
-        let path = self.base_dir.join(key);
-        std::fs::write(&path, data)
-            .map_err(|e| format!("Failed to write {}: {}", path.display(), e))
+        self.store
+            .replace(key, data.to_vec())
+            .map_err(|e| format!("Failed to write {}: {}", key, e))
     }
 
     fn load(&self, key: &str) -> Result<Vec<u8>, String> {
-        let path = self.base_dir.join(key);
-        std::fs::read(&path).map_err(|e| format!("Failed to read {}: {}", path.display(), e))
+        self.store
+            .read(key)
+            .map_err(|e| format!("Failed to read {}: {}", key, e))
     }
 
     fn delete(&mut self, key: &str) -> Result<(), String> {
-        let path = self.base_dir.join(key);
-        if path.exists() {
-            std::fs::remove_file(&path)
-                .map_err(|e| format!("Failed to delete {}: {}", path.display(), e))?;
-        }
-        Ok(())
+        self.store
+            .delete(key)
+            .map_err(|e| format!("Failed to delete {}: {}", key, e))
     }
 }
 

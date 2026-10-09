@@ -119,6 +119,10 @@
     # resolve to the same 2.x release, so they must move together.
     minijinja-contrib  = { version = "2.23", features = ["pycompat"] }
     parking_lot        = "0.12"
+    # Thin persistence layer over OpenDAL (crates.io, not git/path — CIRESNAVE-EXPECTATIONS §6.8).
+    # Backs `cache::tiered_storage::FileDiskStore`'s disk tier; declares the needs it uses
+    # (read/write/delete/atomic-replace) and is refused at open if the backend can't give them.
+    persistant         = "0.4.1"
     rand               = "0.9"
     rayon              = "1.10"
     regex              = "1"
