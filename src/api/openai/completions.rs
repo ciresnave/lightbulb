@@ -135,11 +135,20 @@ pub async fn completions(
 
     match create_completion(state, request).await {
         Ok(response) => (StatusCode::OK, Json(response)).into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": e.to_string()})),
-        )
-            .into_response(),
+        Err(e) => {
+            // `QueueFullError` gets its own retriable status; every other
+            // enqueue or generation failure keeps the generic 500 — see
+            // `chat::queue_error_response`, which this mirrors.
+            let status = if e
+                .downcast_ref::<crate::engine::model_runner::QueueFullError>()
+                .is_some()
+            {
+                StatusCode::SERVICE_UNAVAILABLE
+            } else {
+                StatusCode::INTERNAL_SERVER_ERROR
+            };
+            (status, Json(serde_json::json!({"error": e.to_string()}))).into_response()
+        }
     }
 }
 
@@ -266,7 +275,9 @@ mod tests {
     }
 
     fn state_with_runner(
-        inference_tx: Option<std::sync::mpsc::Sender<crate::engine::model_runner::InferenceJob>>,
+        inference_tx: Option<
+            std::sync::mpsc::SyncSender<crate::engine::model_runner::InferenceJob>,
+        >,
     ) -> AppState {
         use crate::engine::{MemoryAwareConfig, MemoryAwareScheduler};
         AppState {
@@ -286,11 +297,11 @@ mod tests {
         text: &str,
         finish_reason: crate::engine::model_runner::FinishReason,
     ) -> (
-        std::sync::mpsc::Sender<crate::engine::model_runner::InferenceJob>,
+        std::sync::mpsc::SyncSender<crate::engine::model_runner::InferenceJob>,
         std::thread::JoinHandle<()>,
     ) {
         use crate::engine::model_runner::{CompletionResult, InferenceJob, ResponseMode};
-        let (tx, rx) = std::sync::mpsc::channel::<InferenceJob>();
+        let (tx, rx) = std::sync::mpsc::sync_channel::<InferenceJob>(32);
         let text = text.to_string();
         let handle = std::thread::spawn(move || {
             while let Ok(job) = rx.recv() {
@@ -388,5 +399,27 @@ mod tests {
         drop(runner);
 
         assert_eq!(response.choices[0].text, "prompt</s>text continuation");
+    }
+
+    /// A full queue must answer 503, not block the request task or report a
+    /// generic 500. `sync_channel(0)` is a rendezvous channel: with no
+    /// thread calling `recv`, `try_send` reports `Full` on every attempt,
+    /// deterministically — no timing dependency on a consumer actually
+    /// draining anything.
+    #[tokio::test]
+    async fn completions_returns_503_when_the_inference_queue_is_full() {
+        let (tx, _rx) = std::sync::mpsc::sync_channel(0);
+        let state = state_with_runner(Some(tx));
+        // Must match `state.config.default_model` (the `ApiConfig` default)
+        // or the handler's model-name check rejects the request with 400
+        // before ever reaching the queue.
+        let mut req = request();
+        req.model = state.config.default_model.clone();
+
+        let response = self::completions(State(state), Json(req))
+            .await
+            .into_response();
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 }

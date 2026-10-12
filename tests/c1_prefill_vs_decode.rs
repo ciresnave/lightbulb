@@ -85,7 +85,7 @@ fn gguf_path() -> Option<PathBuf> {
 }
 
 async fn complete_raw(path: &Path, prompt: &str, max_tokens: usize) -> serde_json::Value {
-    let tx = ModelRunner::start(path, 1, 512, Some("f32".to_string()))
+    let tx = ModelRunner::start(path, 1, 512, Some("f32".to_string()), 8)
         .expect("starting the model runner");
     let state = AppState {
         scheduler: Arc::new(MemoryAwareScheduler::new(MemoryAwareConfig::default())),

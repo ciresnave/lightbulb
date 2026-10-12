@@ -1,6 +1,6 @@
 use anyhow::Result;
 use std::path::PathBuf;
-use std::sync::mpsc::{Receiver, Sender};
+use std::sync::mpsc::{Receiver, SyncSender};
 use tokio::sync::{mpsc as async_mpsc, oneshot};
 
 use crate::engine::{Request, RequestContext};
@@ -123,8 +123,32 @@ pub struct InferenceJob {
     pub response_mode: ResponseMode,
 }
 
-/// Sender type used by API handlers to enqueue inference jobs
-pub type InferenceRequestSender = Sender<InferenceJob>;
+/// Sender type used by API handlers to enqueue inference jobs.
+///
+/// `SyncSender`, not the unbounded `Sender` — the channel `ModelRunner::start`
+/// creates has a fixed capacity, and a caller that wants to enqueue without
+/// blocking the async request-handling task uses `try_send`, which returns
+/// [`std::sync::mpsc::TrySendError::Full`] once that capacity is reached
+/// rather than queuing without bound.
+pub type InferenceRequestSender = SyncSender<InferenceJob>;
+
+/// Returned by an enqueue attempt that found the inference queue at capacity.
+///
+/// A distinct type, rather than a bare `anyhow!(...)`, so a handler can tell
+/// "the server is temporarily busy" (HTTP 503, safe to retry) apart from
+/// every other enqueue failure (e.g. the runner thread died — HTTP 500,
+/// retrying the identical request will fail identically forever) without
+/// matching on the error's rendered text.
+#[derive(Debug)]
+pub struct QueueFullError;
+
+impl std::fmt::Display for QueueFullError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "inference queue is full; try again shortly")
+    }
+}
+
+impl std::error::Error for QueueFullError {}
 
 /// What the job loop needs from a model, and nothing more.
 ///
@@ -227,15 +251,20 @@ impl ModelRunner {
     /// * `context_length` - Context window size
     /// * `dtype` - Data type for SafeTensors models ("f32", "f16", "bf16").
     ///   Ignored for GGUF models (dtype embedded in quantization format).
+    /// * `max_queue_depth` - Maximum number of jobs the channel will hold
+    ///   (queued plus the one being processed) before `try_send` on the
+    ///   returned sender starts reporting [`std::sync::mpsc::TrySendError::Full`].
     #[cfg(not(feature = "fuel-engine"))]
     pub fn start(
         model_path: impl Into<PathBuf>,
         max_batch_size: usize,
         context_length: usize,
         dtype: Option<String>,
+        max_queue_depth: usize,
     ) -> Result<InferenceRequestSender> {
         let model_path = model_path.into();
-        let (tx, rx): (Sender<InferenceJob>, Receiver<InferenceJob>) = std::sync::mpsc::channel();
+        let (tx, rx): (SyncSender<InferenceJob>, Receiver<InferenceJob>) =
+            std::sync::mpsc::sync_channel(max_queue_depth);
 
         // Move a cloned dtype into the thread closure as an owned String (if provided)
         let thread_dtype = dtype.clone();
@@ -303,9 +332,11 @@ impl ModelRunner {
         max_batch_size: usize,
         context_length: usize,
         dtype: Option<String>,
+        max_queue_depth: usize,
     ) -> Result<InferenceRequestSender> {
         let model_path = model_path.into();
-        let (tx, rx): (Sender<InferenceJob>, Receiver<InferenceJob>) = std::sync::mpsc::channel();
+        let (tx, rx): (SyncSender<InferenceJob>, Receiver<InferenceJob>) =
+            std::sync::mpsc::sync_channel(max_queue_depth);
 
         if let Some(d) = dtype.as_deref() {
             if d != "f32" {

@@ -81,6 +81,7 @@ async fn main() -> Result<()> {
         default_model,
         model_max_batch_size: 16,
         model_context_length: 4096,
+        model_max_queue_depth: 32,
         enable_audit_log: database_url.is_some(), // Disable audit logging without database
         tls: Default::default(),                  // TLS disabled by default
         no_auth,

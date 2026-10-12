@@ -93,6 +93,12 @@ pub struct ApiConfig {
     /// Model context length
     pub model_context_length: usize,
 
+    /// Maximum number of inference jobs the model runner's channel will
+    /// hold (queued plus the one being processed) before enqueuing a new one
+    /// fails with [`crate::engine::model_runner::QueueFullError`] (surfaced
+    /// to the client as HTTP 503) instead of queuing without bound.
+    pub model_max_queue_depth: usize,
+
     /// Enable audit logging
     pub enable_audit_log: bool,
 
@@ -161,6 +167,7 @@ impl Default for ApiConfig {
             default_model: "lightbulb-default".to_string(),
             model_max_batch_size: 8,
             model_context_length: 2048,
+            model_max_queue_depth: 32,
             tls: crate::tls::TlsConfig::default(),
             no_auth: false,
             trusted_proxies: Vec::new(),
@@ -250,7 +257,8 @@ pub struct AppState {
     pub db_pool: Option<deadpool_postgres::Pool>,
 
     /// Sender to enqueue inference jobs to the model runner thread (if started)
-    pub inference_tx: Option<std::sync::mpsc::Sender<crate::engine::model_runner::InferenceJob>>,
+    pub inference_tx:
+        Option<std::sync::mpsc::SyncSender<crate::engine::model_runner::InferenceJob>>,
 
     /// Chat template for the loaded model, plus the special tokens it renders
     /// with — resolved once at startup.
@@ -390,6 +398,7 @@ impl ApiServer {
                     state.config.model_max_batch_size,
                     state.config.model_context_length,
                     Some("f32".to_string()),
+                    state.config.model_max_queue_depth,
                 ) {
                     Ok(sender) => {
                         state.inference_tx = Some(sender);
