@@ -27,7 +27,7 @@ use lightbulb::contracts::{
 };
 use lightbulb::engine::model_runner::{InferenceJob, ModelRunner, ResponseMode};
 
-type RunnerTx = std::sync::mpsc::Sender<InferenceJob>;
+type RunnerTx = std::sync::mpsc::SyncSender<InferenceJob>;
 
 // ─── Shared runner (loaded once, shared by all tests) ─────────────────────
 
@@ -58,7 +58,7 @@ fn get_template() -> Option<std::sync::Arc<ResolvedTemplate>> {
 fn init_runner() -> RunnerTx {
     let model_dir = find_model_dir();
 
-    let tx = ModelRunner::start(&model_dir, 1, 512, Some("f32".to_string()))
+    let tx = ModelRunner::start(&model_dir, 1, 512, Some("f32".to_string()), 8)
         .expect("ModelRunner::start failed");
 
     // ModelRunner::start always returns Ok(tx) immediately — the real load

@@ -139,7 +139,7 @@ async fn fuel_runner_serves_a_coherent_completion_over_http() {
         "no TinyLlama snapshot — this is an acceptance gate, so it fails rather than skipping",
     );
 
-    let tx = ModelRunner::start(&dir, 1, 512, Some("f32".to_string()))
+    let tx = ModelRunner::start(&dir, 1, 512, Some("f32".to_string()), 8)
         .expect("starting the Fuel model runner");
 
     let state = AppState {
@@ -279,7 +279,7 @@ async fn fuel_runner_serves_a_default_temperature_completion() {
         "no TinyLlama snapshot — this is an acceptance gate, so it fails rather than skipping",
     );
 
-    let tx = ModelRunner::start(&dir, 1, 512, Some("f32".to_string()))
+    let tx = ModelRunner::start(&dir, 1, 512, Some("f32".to_string()), 8)
         .expect("starting the Fuel model runner");
 
     let state = AppState {

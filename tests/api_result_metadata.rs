@@ -118,7 +118,7 @@ fn rendered_prompt(messages: &[(&str, &str)]) -> String {
 /// `Streaming` arm.
 async fn post_raw(path: &str, body: serde_json::Value) -> (StatusCode, Vec<u8>) {
     let dir = tinyllama_dir().expect(MISSING_CHECKPOINT);
-    let tx = ModelRunner::start(&dir, 1, 512, Some("f32".to_string()))
+    let tx = ModelRunner::start(&dir, 1, 512, Some("f32".to_string()), 8)
         .expect("starting the model runner");
     let state = AppState {
         scheduler: Arc::new(MemoryAwareScheduler::new(MemoryAwareConfig::default())),

@@ -58,7 +58,7 @@ use crate::engine::model_runner::{CompletionResult, FinishReason};
 ///
 /// [`ModelRunner`]: crate::engine::model_runner::ModelRunner
 pub async fn execute_contract_with_runner(
-    tx: std::sync::mpsc::Sender<crate::engine::model_runner::InferenceJob>,
+    tx: std::sync::mpsc::SyncSender<crate::engine::model_runner::InferenceJob>,
     template: Option<std::sync::Arc<crate::api::chat_template::ResolvedTemplate>>,
     messages: &[RawMessage],
     model_id: &str,
@@ -101,8 +101,20 @@ pub async fn execute_contract_with_runner(
                     add_special_tokens: prompt.add_special_tokens,
                     response_mode: ResponseMode::Complete(resp_tx),
                 };
-                tx.send(job)
-                    .map_err(|e| anyhow::anyhow!("failed to send inference job: {}", e))?;
+                use std::sync::mpsc::TrySendError;
+                match tx.try_send(job) {
+                    Ok(()) => {}
+                    Err(TrySendError::Full(_)) => {
+                        return Err(anyhow::Error::new(
+                            crate::engine::model_runner::QueueFullError,
+                        ));
+                    }
+                    Err(TrySendError::Disconnected(_)) => {
+                        return Err(anyhow::anyhow!(
+                            "failed to send inference job: the model runner thread is gone"
+                        ));
+                    }
+                }
                 resp_rx
                     .await
                     .map_err(|e| anyhow::anyhow!("inference runner dropped: {}", e))?

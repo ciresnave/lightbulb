@@ -281,7 +281,10 @@ async fn probe(
     // would triple the wall clock and change nothing about the result. The
     // arguments match every test call site exactly (`dtype: None` parses to F32
     // as well, but gratuitously differently).
-    let tx = ModelRunner::start(model_dir, 1, 512, Some("f32".to_string()))?;
+    // A single-shot CLI probe never has more than one job in flight, so any
+    // depth above 1 is never exercised — the bound exists for the HTTP
+    // server's concurrent callers, not this binary.
+    let tx = ModelRunner::start(model_dir, 1, 512, Some("f32".to_string()), 1)?;
 
     let mut rows: Vec<ProbeRow> = Vec::new();
     for (candidate, source) in registry::candidates() {

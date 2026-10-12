@@ -7,12 +7,24 @@ use axum::{
     Json,
     extract::State,
     http::StatusCode,
-    response::{IntoResponse, Sse, sse::Event},
+    response::{IntoResponse, Response, Sse, sse::Event},
 };
-use futures::stream::{self, Stream, StreamExt};
+use futures::stream::{self, StreamExt};
 use serde::{Deserialize, Serialize};
 use std::convert::Infallible;
 use std::time::SystemTime;
+
+/// Pins the SSE stream's error type to the never-constructed [`Infallible`]
+/// — these streams only ever yield `Ok` events, turning generation or
+/// transport errors into an `Ok(Event)` carrying an `"error"` payload
+/// instead of a `Result::Err` (axum's `Sse` has no other way to end a
+/// stream early with a non-200 status once it has started). Explicit
+/// because nothing else in `create_chat_stream` pins the type since its
+/// return type stopped naming `Result<Event, Infallible>` directly.
+#[inline]
+fn sse_event(event: Event) -> Result<Event, Infallible> {
+    Ok(event)
+}
 
 use crate::api::AppState;
 
@@ -397,20 +409,33 @@ pub async fn chat_completions(
     }
 
     if request.stream {
-        // Streaming response
-        let stream = create_chat_stream(state, request);
-        Sse::new(stream).into_response()
+        // Streaming response: `create_chat_stream` already picks its own
+        // status (200 + SSE on success, 503 when the inference queue is
+        // full, 500 if the runner is gone).
+        create_chat_stream(state, request)
     } else {
         // Non-streaming response
         match create_chat_completion(state, request).await {
             Ok(response) => (StatusCode::OK, Json(response)).into_response(),
-            Err(e) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": e.to_string()})),
-            )
-                .into_response(),
+            Err(e) => queue_error_response(e),
         }
     }
+}
+
+/// Map an inference error to a response, giving
+/// [`crate::engine::model_runner::QueueFullError`] its own retriable status
+/// (503) instead of folding it into the generic 500 every other enqueue or
+/// generation failure gets.
+fn queue_error_response(e: anyhow::Error) -> axum::response::Response {
+    let status = if e
+        .downcast_ref::<crate::engine::model_runner::QueueFullError>()
+        .is_some()
+    {
+        StatusCode::SERVICE_UNAVAILABLE
+    } else {
+        StatusCode::INTERNAL_SERVER_ERROR
+    };
+    (status, Json(serde_json::json!({"error": e.to_string()}))).into_response()
 }
 
 /// The pre-template prompt construction: `"{role}: {content}"` per message,
@@ -1065,7 +1090,7 @@ async fn create_chat_completion(
 /// Run a single **complete-mode** inference call by dispatching an
 /// [`InferenceJob`] to the model runner thread and awaiting the result.
 pub(crate) async fn run_inference_once(
-    tx: &std::sync::mpsc::Sender<crate::engine::model_runner::InferenceJob>,
+    tx: &std::sync::mpsc::SyncSender<crate::engine::model_runner::InferenceJob>,
     prompt: BuiltPrompt,
     max_new_tokens: usize,
     temperature: f64,
@@ -1079,8 +1104,20 @@ pub(crate) async fn run_inference_once(
         add_special_tokens: prompt.add_special_tokens,
         response_mode: crate::engine::model_runner::ResponseMode::Complete(resp_tx),
     };
-    tx.send(job)
-        .map_err(|e| anyhow::anyhow!("failed to enqueue inference job: {}", e))?;
+    use std::sync::mpsc::TrySendError;
+    match tx.try_send(job) {
+        Ok(()) => {}
+        Err(TrySendError::Full(_)) => {
+            return Err(anyhow::Error::new(
+                crate::engine::model_runner::QueueFullError,
+            ));
+        }
+        Err(TrySendError::Disconnected(_)) => {
+            return Err(anyhow::anyhow!(
+                "failed to enqueue inference job: the model runner thread is gone"
+            ));
+        }
+    }
     resp_rx
         .await
         .map_err(|e| anyhow::anyhow!("inference runner dropped: {}", e))?
@@ -1089,7 +1126,7 @@ pub(crate) async fn run_inference_once(
 /// Owned-sender variant used by the `execute_contract` closure (which must
 /// be `Fn`, so it clones `tx` on each call rather than borrowing).
 pub(crate) async fn run_inference_once_owned(
-    tx: std::sync::mpsc::Sender<crate::engine::model_runner::InferenceJob>,
+    tx: std::sync::mpsc::SyncSender<crate::engine::model_runner::InferenceJob>,
     prompt: BuiltPrompt,
     max_new_tokens: usize,
     temperature: f64,
@@ -1240,11 +1277,13 @@ fn build_contract_response(
     })
 }
 
-/// Create streaming chat completion
-fn create_chat_stream(
-    state: AppState,
-    request: ChatCompletionRequest,
-) -> impl Stream<Item = Result<Event, Infallible>> {
+/// Create streaming chat completion.
+///
+/// Returns a full [`Response`] rather than a bare stream so the enqueue
+/// attempt — which can fail with a real HTTP status (503 when the queue is
+/// full) before any SSE frame is sent — can report that status instead of
+/// the 200 an already-constructed `Sse` response is stuck with.
+fn create_chat_stream(state: AppState, request: ChatCompletionRequest) -> Response {
     // The SAME prompt construction as the non-streaming path. These two sites
     // drifting apart is not hypothetical: this one was the second of the two
     // `role: content` joins, and it is the one a fix aimed at
@@ -1283,18 +1322,33 @@ fn create_chat_stream(
         };
 
         // Send the job to the model runner thread
-        if tx.send(job).is_err() {
-            // Failed to enqueue - return error stream
-            return stream::once(async {
-                let data = serde_json::json!({
-                    "error": {
-                        "message": "Failed to enqueue inference job",
-                        "type": "internal_error"
-                    }
-                });
-                Ok(Event::default().data(data.to_string()))
-            })
-            .boxed();
+        use std::sync::mpsc::TrySendError;
+        match tx.try_send(job) {
+            Ok(()) => {}
+            Err(TrySendError::Full(_)) => {
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(serde_json::json!({
+                        "error": {
+                            "message": "inference queue is full; try again shortly",
+                            "type": "server_busy"
+                        }
+                    })),
+                )
+                    .into_response();
+            }
+            Err(TrySendError::Disconnected(_)) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({
+                        "error": {
+                            "message": "Failed to enqueue inference job",
+                            "type": "internal_error"
+                        }
+                    })),
+                )
+                    .into_response();
+            }
         }
 
         // Create stream from the receiver using futures combinators
@@ -1321,30 +1375,8 @@ fn create_chat_stream(
 
                 async move {
                     match result {
-                        Ok(StreamItem::Token(token_text)) => Some(Ok(Event::default().data(
-                            serde_json::json!({
-                                "id": chat_id,
-                                "object": "chat.completion.chunk",
-                                "created": created,
-                                "model": model,
-                                "choices": [{
-                                    "index": 0,
-                                    "delta": {
-                                        "role": if first { Some("assistant") } else { None },
-                                        "content": token_text
-                                    },
-                                    "finish_reason": None::<String>
-                                }]
-                            })
-                            .to_string(),
-                        ))),
-                        Ok(StreamItem::Done { finish_reason }) => {
-                            // The stream's one observation of how generation
-                            // ended. It is the same value the frame below
-                            // reports to the client, read here rather than
-                            // re-derived.
-                            record_completion(&eos_monitor, resolved_by, finish_reason);
-                            Some(Ok(Event::default().data(
+                        Ok(StreamItem::Token(token_text)) => Some(sse_event(
+                            Event::default().data(
                                 serde_json::json!({
                                     "id": chat_id,
                                     "object": "chat.completion.chunk",
@@ -1352,27 +1384,55 @@ fn create_chat_stream(
                                     "model": model,
                                     "choices": [{
                                         "index": 0,
-                                        "delta": {},
-                                        "finish_reason": finish_reason.as_str()
+                                        "delta": {
+                                            "role": if first { Some("assistant") } else { None },
+                                            "content": token_text
+                                        },
+                                        "finish_reason": None::<String>
                                     }]
                                 })
                                 .to_string(),
-                            )))
+                            ),
+                        )),
+                        Ok(StreamItem::Done { finish_reason }) => {
+                            // The stream's one observation of how generation
+                            // ended. It is the same value the frame below
+                            // reports to the client, read here rather than
+                            // re-derived.
+                            record_completion(&eos_monitor, resolved_by, finish_reason);
+                            Some(sse_event(
+                                Event::default().data(
+                                    serde_json::json!({
+                                        "id": chat_id,
+                                        "object": "chat.completion.chunk",
+                                        "created": created,
+                                        "model": model,
+                                        "choices": [{
+                                            "index": 0,
+                                            "delta": {},
+                                            "finish_reason": finish_reason.as_str()
+                                        }]
+                                    })
+                                    .to_string(),
+                                ),
+                            ))
                         }
-                        Err(e) => Some(Ok(Event::default().data(
-                            serde_json::json!({
-                                "error": {
-                                    "message": e.to_string(),
-                                    "type": "inference_error"
-                                }
-                            })
-                            .to_string(),
-                        ))),
+                        Err(e) => Some(sse_event(
+                            Event::default().data(
+                                serde_json::json!({
+                                    "error": {
+                                        "message": e.to_string(),
+                                        "type": "inference_error"
+                                    }
+                                })
+                                .to_string(),
+                            ),
+                        )),
                     }
                 }
             });
 
-        return token_stream.boxed();
+        return Sse::new(token_stream.boxed()).into_response();
     }
 
     // Fallback: no model runner available - return mock stream
@@ -1388,7 +1448,7 @@ fn create_chat_stream(
         "path.",
     ];
 
-    stream::iter(chunks.into_iter().enumerate().map(move |(i, chunk)| {
+    let stream = stream::iter(chunks.into_iter().enumerate().map(move |(i, chunk)| {
         let data = serde_json::json!({
             "id": format!("chatcmpl-{}", uuid::Uuid::new_v4()),
             "object": "chat.completion.chunk",
@@ -1406,9 +1466,11 @@ fn create_chat_stream(
             }]
         });
 
-        Ok(Event::default().data(data.to_string()))
+        sse_event(Event::default().data(data.to_string()))
     }))
-    .boxed()
+    .boxed();
+
+    Sse::new(stream).into_response()
 }
 
 fn default_temperature() -> f32 {
@@ -1649,7 +1711,9 @@ mod tests {
 
     fn state_with_runner(
         chat_template: Option<std::sync::Arc<crate::api::chat_template::ResolvedTemplate>>,
-        inference_tx: Option<std::sync::mpsc::Sender<crate::engine::model_runner::InferenceJob>>,
+        inference_tx: Option<
+            std::sync::mpsc::SyncSender<crate::engine::model_runner::InferenceJob>,
+        >,
     ) -> AppState {
         state_with_monitor(
             chat_template,
@@ -1671,7 +1735,9 @@ mod tests {
 
     fn state_with_monitor(
         chat_template: Option<std::sync::Arc<crate::api::chat_template::ResolvedTemplate>>,
-        inference_tx: Option<std::sync::mpsc::Sender<crate::engine::model_runner::InferenceJob>>,
+        inference_tx: Option<
+            std::sync::mpsc::SyncSender<crate::engine::model_runner::InferenceJob>,
+        >,
         eos_monitor: std::sync::Arc<EosMonitor>,
     ) -> AppState {
         use crate::engine::{MemoryAwareConfig, MemoryAwareScheduler};
@@ -1920,7 +1986,7 @@ mod tests {
     /// which is why each caller below lets the value holding the sender go out
     /// of scope before `join`ing.
     fn stub_runner() -> (
-        std::sync::mpsc::Sender<crate::engine::model_runner::InferenceJob>,
+        std::sync::mpsc::SyncSender<crate::engine::model_runner::InferenceJob>,
         std::thread::JoinHandle<Vec<(String, bool)>>,
     ) {
         stub_runner_with(FinishReason::Stop)
@@ -1941,13 +2007,13 @@ mod tests {
     fn stub_runner_with(
         finish_reason: FinishReason,
     ) -> (
-        std::sync::mpsc::Sender<crate::engine::model_runner::InferenceJob>,
+        std::sync::mpsc::SyncSender<crate::engine::model_runner::InferenceJob>,
         std::thread::JoinHandle<Vec<(String, bool)>>,
     ) {
         use crate::engine::model_runner::{
             CompletionResult, InferenceJob, ResponseMode, StreamItem,
         };
-        let (tx, rx) = std::sync::mpsc::channel::<InferenceJob>();
+        let (tx, rx) = std::sync::mpsc::sync_channel::<InferenceJob>(32);
         let handle = std::thread::spawn(move || {
             let mut jobs: Vec<(String, bool)> = Vec::new();
             while let Ok(job) = rx.recv() {
@@ -3450,11 +3516,11 @@ mod tests {
         text: &str,
         finish_reason: FinishReason,
     ) -> (
-        std::sync::mpsc::Sender<crate::engine::model_runner::InferenceJob>,
+        std::sync::mpsc::SyncSender<crate::engine::model_runner::InferenceJob>,
         std::thread::JoinHandle<()>,
     ) {
         use crate::engine::model_runner::{CompletionResult, InferenceJob, ResponseMode};
-        let (tx, rx) = std::sync::mpsc::channel::<InferenceJob>();
+        let (tx, rx) = std::sync::mpsc::sync_channel::<InferenceJob>(32);
         let text = text.to_string();
         let handle = std::thread::spawn(move || {
             while let Ok(job) = rx.recv() {
@@ -3695,6 +3761,41 @@ mod tests {
         // at all (rather than the 400 branch above it) is what this test
         // asserts, via the absence of a BAD_REQUEST status.
         assert_ne!(response.into_response().status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// A full queue must answer 503 for a streaming request too, and before
+    /// any SSE frame is written — not a 200 whose body happens to carry an
+    /// error frame. `sync_channel(0)` is a rendezvous channel: with nothing
+    /// calling `recv`, `try_send` reports `Full` every time, deterministically.
+    #[tokio::test]
+    async fn chat_completions_returns_503_when_the_inference_queue_is_full() {
+        let (tx, _rx) = std::sync::mpsc::sync_channel(0);
+        let state = state_with_runner(None, Some(tx));
+        let mut req = request();
+        req.model = state.config.default_model.clone();
+        req.stream = true;
+
+        let response = chat_completions(State(state), Json(req))
+            .await
+            .into_response();
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    /// The non-streaming twin of the test above: a full queue must answer
+    /// 503, not the generic 500 every other enqueue/generation failure gets.
+    #[tokio::test]
+    async fn chat_completions_non_streaming_returns_503_when_the_inference_queue_is_full() {
+        let (tx, _rx) = std::sync::mpsc::sync_channel(0);
+        let state = state_with_runner(None, Some(tx));
+        let mut req = request();
+        req.model = state.config.default_model.clone();
+
+        let response = chat_completions(State(state), Json(req))
+            .await
+            .into_response();
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 
     #[tokio::test]
