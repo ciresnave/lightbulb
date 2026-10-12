@@ -9,6 +9,20 @@
   generation step and stops as soon as the client is gone, instead of burning a full generation's
   worth of compute for a result nobody can read.
 
+## 0.5.0 (2026-10-12)
+
+### Changed
+- **Breaking:** requests to the model runner queued without bound (`ModelRunner::start` used an
+  unbounded `std::sync::mpsc::channel` for both the candlelight and fuel-engine backends), so a
+  client that keeps submitting faster than the single-threaded runner can drain grows the queue
+  without limit. `ModelRunner::start` now takes a `max_queue_depth` and creates a bounded
+  `std::sync::mpsc::sync_channel` instead, returning a `SyncSender`. Callers enqueue with
+  `try_send` and get `TrySendError::Full` back once the queue is at capacity; every HTTP entry
+  point (`/v1/completions`, `/v1/chat/completions` non-streaming and streaming, the
+  output-contract retry loop) maps that into a 503 via a new `QueueFullError`, distinct from a
+  500 so a client knows this one is safe to retry. `ApiConfig` gains `model_max_queue_depth`
+  (default 32); `main.rs` and the probe pass it through to `ModelRunner::start`.
+
 ## 0.4.2
 
 ### Changed
