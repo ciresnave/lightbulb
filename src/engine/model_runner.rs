@@ -480,10 +480,25 @@ pub(crate) fn run_jobs<M: EngineModel>(mut model: M, rx: Receiver<InferenceJob>)
                 }
             }
             ResponseMode::Complete(resp_tx) => {
-                // Complete mode: generate all tokens then send final text
+                // Complete mode: generate all tokens then send final text.
+                //
+                // Unlike Streaming, nothing here sends anything until the job
+                // is done, so a dropped client would otherwise run to
+                // completion unnoticed — burning a generation's worth of
+                // compute for a `oneshot::Sender::send` whose `Err` nobody
+                // reads. `resp_tx.is_closed()` is checked before every step:
+                // it goes true the moment the handler's `resp_rx` is dropped,
+                // which happens when the client disconnects and the request
+                // future awaiting it is cancelled (see
+                // `chat::run_inference_once`).
                 let mut final_result: Option<anyhow::Result<CompletionResult>> = None;
+                let mut cancelled = false;
 
                 loop {
+                    if resp_tx.is_closed() {
+                        cancelled = true;
+                        break;
+                    }
                     match model.step_batch(&mut batch) {
                         Ok(_) => {
                             if !batch[0].should_continue() {
@@ -497,8 +512,10 @@ pub(crate) fn run_jobs<M: EngineModel>(mut model: M, rx: Receiver<InferenceJob>)
                     }
                 }
 
-                // Decode all generated tokens at once
-                if final_result.is_none() {
+                // Decode all generated tokens at once. Skipped on
+                // cancellation: there is no receiver left to decode for, and
+                // `decode_text` is not free.
+                if !cancelled && final_result.is_none() {
                     let generated_tokens = batch[0].generated_tokens.clone();
                     match model.decode_text(&generated_tokens, false) {
                         Ok(text) => {
@@ -513,7 +530,7 @@ pub(crate) fn run_jobs<M: EngineModel>(mut model: M, rx: Receiver<InferenceJob>)
                     }
                 }
 
-                if let Some(res) = final_result {
+                if !cancelled && let Some(res) = final_result {
                     let _ = resp_tx.send(res);
                 }
             }
@@ -638,5 +655,70 @@ mod tests {
                 seen.as_slice()
             );
         }
+    }
+
+    /// Counts `step_batch` calls and advances the request exactly like a real
+    /// backend would (`start_decoding` on the first step, `record_token` on
+    /// every step) — so a job that is NOT cancelled would keep going for
+    /// `max_new_tokens` steps, and the test can tell "never started" apart
+    /// from "started and then got cut off early" rather than from a model
+    /// that completes on its own regardless of cancellation.
+    struct CountingModel {
+        calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl EngineModel for CountingModel {
+        fn step_batch(&mut self, batch: &mut [RequestContext]) -> Result<Vec<Option<u32>>> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if batch[0].tokens_generated == 0 {
+                batch[0].start_decoding();
+            }
+            batch[0].record_token();
+            Ok(vec![None])
+        }
+
+        fn decode_text(&self, _tokens: &[u32], _skip_special: bool) -> Result<String> {
+            Ok(String::new())
+        }
+    }
+
+    /// A client that disconnected before the job even reached the runner
+    /// must not be generated for at all: `run_jobs` must see
+    /// `resp_tx.is_closed()` before the first `step_batch` call, not only
+    /// between calls that already happened.
+    ///
+    /// Without the fix, `run_jobs` has no way to learn the receiver is gone
+    /// and steps `CountingModel` for the job's full `max_new_tokens` budget
+    /// (5 here) before giving up on sending a result nobody can read.
+    #[test]
+    fn a_dropped_complete_mode_receiver_stops_generation_before_it_starts() {
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (resp_tx, resp_rx) = oneshot::channel::<anyhow::Result<CompletionResult>>();
+        drop(resp_rx); // the client is already gone by the time the job is picked up
+
+        tx.send(InferenceJob {
+            id: "cancelled".to_string(),
+            prompt: "p".to_string(),
+            max_new_tokens: 5,
+            temperature: 0.0,
+            add_special_tokens: true,
+            response_mode: ResponseMode::Complete(resp_tx),
+        })
+        .unwrap();
+        drop(tx);
+
+        run_jobs(
+            CountingModel {
+                calls: calls.clone(),
+            },
+            rx,
+        );
+
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "a job whose client already disconnected must not step the model at all"
+        );
     }
 }
