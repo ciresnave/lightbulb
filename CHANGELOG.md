@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.5.1
+
+### Fixed
+- A disconnecting client in Complete (non-streaming) mode previously ran its job to completion
+  unnoticed: nothing checked whether the response channel was still alive until the final send
+  silently failed. `run_jobs` now checks whether the response channel is closed before every
+  generation step and stops as soon as the client is gone, instead of burning a full generation's
+  worth of compute for a result nobody can read.
+
 ## 0.4.2
 
 ### Changed
