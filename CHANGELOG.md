@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.8.7
+
+### Docs
+- Phase 4 hardening item 1 (`PipelineConfig.timeout_ms`, PM-tasked): marked every
+  `PipelineConfig` field as inert with a doc comment, rather than building an async execution
+  driver nobody asked for. `Pipeline`/`PipelineBuilder` have zero callers anywhere and no
+  `async fn execute` — there is no running path for a timeout (or any other field) to govern.
+  Added a ROADMAP.md entry for the missing execution driver as its own, separately-prioritized
+  feature. No behaviour change.
+
 ## 0.8.6
 
 ### Docs

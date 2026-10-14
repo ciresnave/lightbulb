@@ -272,18 +272,30 @@ pub enum PipelineError {
 }
 
 /// Pipeline configuration
+///
+/// ⚠️ **Every field here is inert** (V1_ROADMAP.md Phase 4 audit, 2026-10-14): `Pipeline` is a
+/// synchronous stage-state tracker only (`get_ready_stages`/`mark_running`/`mark_completed`/
+/// `mark_failed`) — there is no `async fn execute` anywhere in this file, and `grep -rn
+/// "engine::pipeline::Pipeline\b" src/ tests/` outside this file finds zero real callers. A
+/// config field can only be enforced by a driver that reads it while running stages, and no
+/// such driver exists yet. This is not a missing timeout check on a live path — it's config for
+/// a multi-stage execution feature that was never built. See ROADMAP.md's "Pipeline execution
+/// driver" entry. Do not assume any field here does anything until that driver exists and
+/// actually reads it.
 #[derive(Debug, Clone)]
 pub struct PipelineConfig {
-    /// Maximum number of stages to execute concurrently
+    /// Maximum number of stages to execute concurrently. **Inert** — see the struct doc.
     pub max_concurrent_stages: usize,
 
-    /// Enable KV cache sharing between stages
+    /// Enable KV cache sharing between stages. **Inert** — see the struct doc.
     pub enable_cache_sharing: bool,
 
-    /// Timeout for entire pipeline (milliseconds)
+    /// Timeout for entire pipeline (milliseconds). **Inert** — see the struct doc. A future
+    /// execution driver must wrap its run loop in `tokio::time::timeout(Duration::from_millis(..))`
+    /// using this value; nothing does today.
     pub timeout_ms: Option<u64>,
 
-    /// Enable parallel execution of independent stages
+    /// Enable parallel execution of independent stages. **Inert** — see the struct doc.
     pub enable_parallel_execution: bool,
 }
 
