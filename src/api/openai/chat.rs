@@ -1459,6 +1459,14 @@ fn create_chat_stream(state: AppState, request: ChatCompletionRequest) -> Respon
                 }
             });
 
+        // OpenAI's real streaming contract ends with a literal `data: [DONE]`
+        // line, not just the last content/done frame -- appended after
+        // whatever terminal event the stream above produced (`Done` or
+        // `Err`), so every exit path gets it exactly once.
+        let token_stream = token_stream.chain(stream::once(async {
+            sse_event(Event::default().data("[DONE]"))
+        }));
+
         return Sse::new(token_stream.boxed()).into_response();
     }
 
@@ -1494,6 +1502,9 @@ fn create_chat_stream(state: AppState, request: ChatCompletionRequest) -> Respon
         });
 
         sse_event(Event::default().data(data.to_string()))
+    }))
+    .chain(stream::once(async {
+        sse_event(Event::default().data("[DONE]"))
     }))
     .boxed();
 
@@ -2426,6 +2437,12 @@ mod tests {
             .expect("the SSE body is UTF-8")
             .lines()
             .filter_map(|line| line.strip_prefix("data: "))
+            // The literal `[DONE]` stream terminator is a sentinel, not a
+            // content frame -- a real client stops reading on it rather than
+            // parsing it as JSON, and every existing frame-count/frame-index
+            // assertion in this file predates its existence, so it is
+            // excluded here rather than counted.
+            .filter(|data| *data != "[DONE]")
             .map(|data| serde_json::from_str(data).expect("each SSE frame carries JSON"))
             .collect()
     }
@@ -2868,6 +2885,63 @@ mod tests {
                  what the monitor recorded"
             );
         }
+    }
+
+    /// The real-runner streaming path must terminate with the literal
+    /// OpenAI-compatible `data: [DONE]` sentinel, not just its last content
+    /// frame. V1_ROADMAP.md's 2.5 flagged this as untested; reading the
+    /// actual code found it was worse than untested -- `create_chat_stream`
+    /// never sent the marker at all, so this test is written against the
+    /// defect first (confirmed red before the fix) rather than assumed from
+    /// the roadmap note.
+    #[tokio::test]
+    async fn a_streaming_completion_ends_with_the_done_sentinel() {
+        let (tx, runner) = stub_runner_with(FinishReason::Stop);
+        let state = state_with_runner(None, Some(tx));
+
+        let response = chat_completions(State(state), Json(plain_request(true)))
+            .await
+            .into_response();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("reading the SSE body");
+        let body = String::from_utf8(bytes.to_vec()).expect("the SSE body is UTF-8");
+
+        let last_data_line = body
+            .lines()
+            .filter_map(|l| l.strip_prefix("data: "))
+            .next_back();
+        assert_eq!(
+            last_data_line,
+            Some("[DONE]"),
+            "the stream's last `data:` line must be the literal sentinel, not a \
+             JSON frame -- full body: {body:?}"
+        );
+
+        runner.join().expect("stub runner panicked");
+    }
+
+    /// The no-model fallback stream is a real, client-visible response shape
+    /// (see `the_no_model_fallbacks_are_not_recorded` below) -- it must carry
+    /// the same terminator as the real-runner path, not a second, divergent
+    /// streaming contract.
+    #[tokio::test]
+    async fn the_no_runner_fallback_stream_also_ends_with_the_done_sentinel() {
+        let state = state_with(None);
+
+        let response = chat_completions(State(state), Json(plain_request(true)))
+            .await
+            .into_response();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("reading the SSE body");
+        let body = String::from_utf8(bytes.to_vec()).expect("the SSE body is UTF-8");
+
+        let last_data_line = body
+            .lines()
+            .filter_map(|l| l.strip_prefix("data: "))
+            .next_back();
+        assert_eq!(last_data_line, Some("[DONE]"), "full body: {body:?}");
     }
 
     /// Nothing is recorded when there is no model.
