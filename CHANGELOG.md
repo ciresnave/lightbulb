@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.8.2
+
+### Docs / Tests
+- `src/bin/lightbulb-cli.rs`'s network-facing functions (`non_stream_chat`, `stream_chat`) now
+  have tests, run against a real local server (axum, already a dependency — no mocking library
+  needed): success + usage parsing, error-message surfacing, and SSE delta concatenation down to
+  the `[DONE]` sentinel. No code change to the binary itself. The three stdin-loop items (history,
+  system prompt, env var loading) remain untested — harder to test without mocking stdin, left
+  open in `V1_ROADMAP.md`.
+
 ## 0.8.1
 
 ### Docs

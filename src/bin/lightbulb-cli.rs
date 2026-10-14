@@ -347,3 +347,153 @@ async fn stream_chat(
 
     Ok(full_content)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::{Json, Router, response::sse::Event, routing::post};
+    use std::convert::Infallible;
+
+    /// Spawn a real local server on an OS-assigned port and return its base
+    /// URL. `non_stream_chat`/`stream_chat` are plain HTTP clients taking a
+    /// base URL -- no mocking library needed, axum is already a dependency.
+    async fn spawn_server(router: Router) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("binding a loopback port");
+        let addr = listener.local_addr().expect("local_addr");
+        tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+        format!("http://{addr}")
+    }
+
+    fn sample_request() -> ChatCompletionRequest {
+        ChatCompletionRequest {
+            model: "test-model".to_string(),
+            messages: vec![Message {
+                role: "user".to_string(),
+                content: "hi".to_string(),
+            }],
+            temperature: Some(0.7),
+            max_tokens: Some(16),
+            stream: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn non_stream_chat_returns_the_assistant_content_and_usage() {
+        let router = Router::new().route(
+            "/v1/chat/completions",
+            post(|| async {
+                Json(serde_json::json!({
+                    "id": "chatcmpl-1",
+                    "choices": [{
+                        "message": {"role": "assistant", "content": "Paris."},
+                        "finish_reason": "stop"
+                    }],
+                    "usage": {"prompt_tokens": 5, "completion_tokens": 2, "total_tokens": 7}
+                }))
+            }),
+        );
+        let base_url = spawn_server(router).await;
+        let client = reqwest::Client::new();
+
+        let (content, usage) = non_stream_chat(&client, &base_url, "test-key", &sample_request())
+            .await
+            .expect("the mock server's response must parse");
+
+        assert_eq!(content, "Paris.");
+        let usage = usage.expect("usage must be present");
+        assert_eq!(usage.prompt_tokens, 5);
+        assert_eq!(usage.completion_tokens, 2);
+        assert_eq!(usage.total_tokens, 7);
+    }
+
+    /// The error-response path: a non-2xx with the server's own
+    /// `{"error": {"message", "type"}}` shape must surface that message,
+    /// not a generic "HTTP 429" string.
+    #[tokio::test]
+    async fn non_stream_chat_surfaces_the_servers_error_message() {
+        let router = Router::new().route(
+            "/v1/chat/completions",
+            post(|| async {
+                (
+                    axum::http::StatusCode::TOO_MANY_REQUESTS,
+                    Json(serde_json::json!({
+                        "error": {"message": "Rate limit exceeded", "type": "rate_limit_error"}
+                    })),
+                )
+            }),
+        );
+        let base_url = spawn_server(router).await;
+        let client = reqwest::Client::new();
+
+        let err = non_stream_chat(&client, &base_url, "test-key", &sample_request())
+            .await
+            .expect_err("a 429 must be an Err, not a parsed response");
+
+        assert!(
+            err.to_string().contains("Rate limit exceeded"),
+            "error must carry the server's own message, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn stream_chat_concatenates_token_deltas_and_stops_at_the_done_sentinel() {
+        let router = Router::new().route(
+            "/v1/chat/completions",
+            post(|| async {
+                let frames = [
+                    serde_json::json!({
+                        "id": "chatcmpl-1",
+                        "choices": [{"delta": {"content": "Par"}, "finish_reason": null}]
+                    }),
+                    serde_json::json!({
+                        "id": "chatcmpl-1",
+                        "choices": [{"delta": {"content": "is."}, "finish_reason": null}]
+                    }),
+                ];
+                let events = frames
+                    .into_iter()
+                    .map(|f| Ok::<_, Infallible>(Event::default().data(f.to_string())))
+                    .chain(std::iter::once(Ok(Event::default().data("[DONE]"))));
+                axum::response::Sse::new(futures_util::stream::iter(events))
+            }),
+        );
+        let base_url = spawn_server(router).await;
+        let client = reqwest::Client::new();
+
+        let content = stream_chat(&client, &base_url, "test-key", &sample_request())
+            .await
+            .expect("the mock SSE stream must parse");
+
+        assert_eq!(content, "Paris.");
+    }
+
+    #[tokio::test]
+    async fn stream_chat_surfaces_the_servers_error_message() {
+        let router = Router::new().route(
+            "/v1/chat/completions",
+            post(|| async {
+                (
+                    axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                    Json(serde_json::json!({
+                        "error": {"message": "inference queue is full", "type": "server_busy"}
+                    })),
+                )
+            }),
+        );
+        let base_url = spawn_server(router).await;
+        let client = reqwest::Client::new();
+
+        let err = stream_chat(&client, &base_url, "test-key", &sample_request())
+            .await
+            .expect_err("a 503 must be an Err");
+
+        assert!(
+            err.to_string().contains("inference queue is full"),
+            "error must carry the server's own message, got: {err}"
+        );
+    }
+}
