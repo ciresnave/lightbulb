@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.8.5
+
+### Docs
+- **Corrects a mistake in #146 (0.8.4).** That PR's slice plan called `Op::PagedAttn`'s GPU
+  execution path "a genuinely open risk, not yet resolved," having read only the problem
+  statement at the top of `tests/gpu_paged_vs_contiguous.rs`'s doc comment and not far enough
+  into the same file to find it already contains a real, `nsys`-traced, independently
+  cross-checked measurement: no fused CUDA kernel, a host round-trip every token, ~10x the
+  per-token cost of contiguous decode. Confirmed on this machine (real CUDA GPU present) by
+  reading the existing result rather than re-running it. No code change.
+
 ## 0.8.4
 
 ### Docs
