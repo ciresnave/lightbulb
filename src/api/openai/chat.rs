@@ -2907,7 +2907,10 @@ mod tests {
             .expect("reading the SSE body");
         let body = String::from_utf8(bytes.to_vec()).expect("the SSE body is UTF-8");
 
-        let last_data_line = body.lines().filter_map(|l| l.strip_prefix("data: ")).last();
+        let last_data_line = body
+            .lines()
+            .filter_map(|l| l.strip_prefix("data: "))
+            .next_back();
         assert_eq!(
             last_data_line,
             Some("[DONE]"),
@@ -2934,7 +2937,10 @@ mod tests {
             .expect("reading the SSE body");
         let body = String::from_utf8(bytes.to_vec()).expect("the SSE body is UTF-8");
 
-        let last_data_line = body.lines().filter_map(|l| l.strip_prefix("data: ")).last();
+        let last_data_line = body
+            .lines()
+            .filter_map(|l| l.strip_prefix("data: "))
+            .next_back();
         assert_eq!(last_data_line, Some("[DONE]"), "full body: {body:?}");
     }
 
