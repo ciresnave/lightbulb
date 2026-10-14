@@ -925,13 +925,23 @@ in-lightbulb-scope Rust, not a cross-repo ask. **Qwen3 has no `forward_paged_ste
 pinned checkout** (`grep` for it across the whole repo, filtered to Qwen-named files, returns
 nothing) — this path covers Llama only until Fuel ships the Qwen3 equivalent.
 
-### A genuinely open risk, not yet resolved: where `Op::PagedAttn` actually executes on GPU
+### CORRECTED 2026-10-14: `Op::PagedAttn`'s GPU execution path is already measured, not open
 
-`tests/gpu_paged_vs_contiguous.rs`'s own header records **three mutually exclusive prior claims
-and six retractions** about whether paged attention runs on GPU via a fused kernel, a decompose
-path, or falls back to CPU with H2D/D2H copies stitched around it. This was not re-resolved while
-sizing this plan — it is exactly the kind of question slice 1 below must settle (with a measured,
-not argued, answer) before anything downstream can trust a "fast" paged path on CUDA.
+The previous revision of this section said this was "a genuinely open risk, not yet resolved,"
+citing only the *problem statement* at the top of `tests/gpu_paged_vs_contiguous.rs`'s doc
+comment ("three mutually exclusive prior claims and six retractions") without reading far enough
+into the same file to find that it **already contains the resolution**: a real `nsys`-traced
+measurement (2026-08-01, reworked with corrections through 2026-08-06), cross-checked
+independently by the fuel lane, with the measurement's own registered predictions and failure
+modes stated before the runs. **Finding, which survived every correction made to the surrounding
+numbers: `Op::PagedAttn` has no fused CUDA kernel. It round-trips through host memory every
+token, moving ~186x the bytes of the contiguous path's captured arm, and costs ~10x more per
+token** (103.1 ms vs 25.9 ms/token, k=1, corrected steady-state window). This was discovered by
+building the measurement on this same machine (confirmed a real CUDA GPU — RTX 4070 Laptop, 8 GB
+— and `nsys` are both present) and reading the test file fully before concluding anything, not by
+re-running it; the existing recorded result already answers the question. **Not an open risk —
+a known, already-paid-for cost** that slice 2 below must design around (expect paged decode to be
+slower per token than contiguous on this hardware), not re-discover.
 
 ### Slices
 
@@ -942,11 +952,15 @@ not argued, answer) before anything downstream can trust a "fast" paged path on 
    provable bit-for-bit). Entirely within lightbulb's scope — no Fuel-side change needed.
 2. **Swap `scheduler_driver.rs`'s `FuelSchedulerDriver` from `SessionScheduler` to
    `PagedSessionScheduler<LlamaPagedAdapter>`** for admission and stepping — prefix-sharing still
-   NOT wired yet, this slice only changes which scheduler drives requests. Must resolve the
-   `Op::PagedAttn` GPU-execution-path question above as part of this slice (measured, with the
-   measurement recorded), since this is the slice that puts paged attention on the hot path for
-   the first time. Test: an acceptance comparison against the current `SessionScheduler` path's
-   output (same prompt, same seed, same tokens) — parity is the claim, not merely "it runs."
+   NOT wired yet, this slice only changes which scheduler drives requests. The GPU-execution-path
+   question above is already answered (no re-measurement needed), and the answer is a real cost
+   this slice must budget for, not discover: expect this swap alone to make per-token decode
+   slower on CUDA (paged's measured ~10x penalty applies the moment it's on the hot path), before
+   slice 3's prefix-sharing has any chance to pay that cost back by skipping prefill on a hit.
+   Test: an acceptance comparison against the current `SessionScheduler` path's output (same
+   prompt, same seed, same tokens) for correctness — parity is the claim, not merely "it runs" —
+   plus a recorded latency measurement so the regression is stated, not discovered later by a
+   confused caller.
 3. **Wire `BlockPrefixIndex` as the admission-time decision layer**: on each new session,
    `BlockPrefixIndex::lookup` against recorded donors; on a hit, call
    `PagedSessionScheduler::add_session_sharing_prefix` instead of plain `add_session`;
