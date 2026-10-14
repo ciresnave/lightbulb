@@ -71,92 +71,150 @@ For current work, see `docs/superpowers/specs/` and `docs/superpowers/plans/`.
 ---
 
 ## Phase 2: Server Integration Testing (Priority: HIGH)
-**Estimated Time**: 1-2 days  
+**Estimated Time**: 1-2 days
 **Dependencies**: Phase 1 complete
+
+> ⚠️ **Audited against automated test coverage 2026-10-14, at `origin/main` `cee4e324`.** This
+> phase's items were written as a MANUAL testing checklist. Re-auditing them found most are
+> actually about whether an **automated** test covers the claim, not whether someone ran the
+> step by hand once — so each item below is now checked only when a specific test function
+> proves it, named inline. Unchecked items are not "not yet run manually"; they are **genuinely
+> untested**, confirmed by grep with a positive control (the same query style finding real hits
+> elsewhere), not by absence alone. One item (`[DONE]` marker, 2.5) is not a missing test — the
+> behavior itself does not exist in the server.
+>
+> `[x] (gated)` means the test exists and asserts the claim, but is `#[ignore] // Requires
+> PostgreSQL` and does **not** run under plain `cargo test` — only `cargo test -- --ignored`
+> against a live Postgres instance. Treat these as "would catch a regression if run with a DB,"
+> not "runs in CI by default."
 
 ### 2.1 Database Setup Validation
 **Action Items**:
-- [ ] Verify `demo-setup.ps1` runs migrations successfully
-- [ ] Confirm all four migrations apply without errors
-- [ ] Test bootstrap admin key insertion
-- [ ] Validate PostgreSQL connection from server
+- [ ] Verify `demo-setup.ps1` runs migrations successfully — NOT COVERED. `grep -rn
+  "demo-setup\|demo_setup" tests/ src/` → 0 hits (control: the same style grep for `"bootstrap"`
+  finds real hits in `demo-setup.ps1`, confirming the search works).
+- [ ] Confirm all five migrations (`V1`–`V5`, not four — the item itself is stale on the count)
+  apply without errors — NOT COVERED. No test runs or validates migration application;
+  `tests/api_integration_tests.rs`'s `create_test_server()` assumes a pre-migrated DB.
+- [ ] Test bootstrap admin key insertion — NOT COVERED. `provision_test_api_key`
+  (`tests/api_integration_tests.rs:44-69`) inserts an arbitrary admin-role key for test
+  convenience; that is not the `demo-setup.ps1` bootstrap path.
+- [ ] Validate PostgreSQL connection from server — NOT COVERED. `health_check`
+  (`src/api/mod.rs:708-710`) never touches `db_pool`; no test asserts DB-connectivity reporting.
 
 ---
 
 ### 2.2 Server Startup Testing
 **Action Items**:
-- [ ] Run `cargo run --release --bin lightbulb` manually
-- [ ] Verify server binds to port 8080
-- [ ] Check logs for initialization errors
-- [ ] Confirm health check endpoint responds: `curl http://localhost:8080/health`
+- [ ] Run `cargo run --release --bin lightbulb` manually — inherently a manual step, no automated
+  test runs the binary's `main()`.
+- [ ] Verify server binds to port 8080 — NOT COVERED. `ApiConfig::default().bind_address` is never
+  asserted by `test_api_config_default` (`src/api/mod.rs:717-722`), which only checks the
+  `enable_*` flags.
+- [ ] Check logs for initialization errors — NOT COVERED. No test captures/asserts startup log
+  output. (A narrower, different claim IS tested: `api_server_new_refuses_default_config_without_auth`,
+  `src/api/mod.rs:828-842`, asserts `ApiServer::new` errors when auth isn't configured.)
+- [x] (gated) Confirm health check endpoint responds — `test_health_check`,
+  `tests/api_integration_tests.rs:125-142`: builds the real router, `GET /health`, asserts `200`.
 
 ---
 
 ### 2.3 API Endpoint Testing
 **Action Items**:
-- [ ] Test admin endpoint: `POST /v1/lightbulb/admin/api-keys`
-  - Create user API key with admin token
-  - Verify key returned and stored in database
-  - Test role validation (user/admin/llm)
-  - Test optional expiration parameter
-
-- [ ] Test OpenAI endpoints with user key:
-  - `GET /v1/models` - list available models
-  - `POST /v1/chat/completions` (non-streaming)
-  - `POST /v1/chat/completions` (streaming with `stream: true`)
-
-- [ ] Test rate limiting:
-  - Verify per-minute limits enforced
-  - Confirm 429 response when exceeded
-
-- [ ] Test authentication:
-  - Verify requests without API key fail (401)
-  - Verify requests with invalid key fail (401)
-  - Verify requests with expired key fail (401)
+- [ ] Test admin endpoint `POST /v1/lightbulb/admin/api-keys` — create key, verify returned/stored
+  in DB — NOT COVERED. Every `admin.rs` test uses `db_pool: None` and stops at the `503` before
+  the DB insert path (`create_api_key_allows_an_admin_key_requesting_admin_role`,
+  `src/api/admin.rs:473-491`); no test with a real pool exercises the insert or response shape.
+- [x] — role validation (user/admin/llm) — `src/api/admin.rs:432-514`:
+  `create_api_key_refuses_a_user_key_requesting_admin_role` (433),
+  `create_api_key_refuses_an_llm_key_requesting_admin_role` (452),
+  `create_api_key_allows_an_admin_key_requesting_admin_role` (474),
+  `create_api_key_allows_an_admin_key_requesting_llm_role` (502). Minor residual gap: no case for
+  an `llm` key requesting `user`/`llm`.
+- [ ] — optional expiration parameter — NOT COVERED. `expires_in_seconds`/`expires_at`
+  (`src/api/admin.rs:225,305,349-377`) is implemented but no test ever sets or checks it.
+- [ ] `GET /v1/models` list available models — NOT COVERED, and the item itself is wrong: the
+  route is registered as `post(models::list_models)` (`src/api/openai/mod.rs:19`), not `GET`.
+  `src/api/openai/models.rs` has no test module at all.
+- [x] (gated for the full-router case) `POST /v1/chat/completions` non-streaming — two layers:
+  handler-level, `a_contract_completion_is_recorded_once_with_its_final_finish_reason`
+  (`src/api/openai/chat.rs:2933-3013`); full-router, `test_chat_completions_with_auth`
+  (`tests/api_integration_tests.rs:175-205`, `#[ignore] // Requires PostgreSQL`).
+- [x] (handler-level only) `POST /v1/chat/completions` streaming (`stream: true`) —
+  `a_streaming_completion_is_recorded_once_with_the_reason_the_runner_reported`
+  (`src/api/openai/chat.rs:2827-2871`) calls `chat_completions()` directly, not through the
+  auth-wrapped router — no test covers streaming combined with real auth/rate-limit middleware.
+- [ ] Rate limiting — per-minute limits enforced — NOT COVERED. `rate_limit_middleware`
+  (`src/api/auth_middleware.rs:274-340`) exists but has zero tests. (`test_rate_limiter`,
+  `src/engine/production_providers.rs:601-607`, is an unrelated `RateLimiter` struct for
+  knowledge-base providers, not the HTTP API limiter — confirmed by reading it.)
+- [ ] Rate limiting — 429 when exceeded — NOT COVERED, same reason; `TOO_MANY_REQUESTS`
+  (`auth_middleware.rs:327`) is never reached by a test. (A *different* 429 path, the pre-auth
+  attempt limiter, IS tested, but it is a distinct mechanism from the per-key rate limit here.)
+- [x] (gated) Auth — missing key → 401 — `test_chat_completions_without_auth`
+  (`tests/api_integration_tests.rs:144-173`, `#[ignore] // Requires PostgreSQL`).
+- [ ] Auth — invalid key → 401 — NOT COVERED. `grep -i "invalid.*key" tests/` → 0 relevant hits
+  (control: the same grep style found an unrelated real hit elsewhere, confirming it runs).
+  `auth_middleware.rs`'s own test module (447-492) only tests `effective_client_ip`, not the
+  key-lookup/401 branch (`auth_middleware.rs:226-237`).
+- [ ] Auth — expired key → 401 — NOT COVERED. `grep -i "expired" tests/` → 0 hits. The
+  `expires_at > NOW()` check (`auth_middleware.rs:208`) is implemented but never exercised.
 
 ---
 
 ### 2.4 CLI Testing
-**Action Items**:
-- [ ] Test CLI in non-streaming mode:
-  ```bash
-  cargo run --release --bin lightbulb-cli -- --api-key $LIGHTBULB_USER_KEY
-  ```
-
-- [ ] Test CLI in streaming mode:
-  ```bash
-  cargo run --release --bin lightbulb-cli -- --api-key $LIGHTBULB_USER_KEY --stream
-  ```
-
-- [ ] Verify conversation history maintained
-- [ ] Test system prompt functionality
-- [ ] Verify environment variable loading
+**Action Items** — **all NOT COVERED**: `src/bin/lightbulb-cli.rs` has no `#[cfg(test)]` module
+and no test attribute at all; no integration test spawns or drives the binary.
+- [ ] Test CLI in non-streaming mode (`non_stream_chat`, `lightbulb-cli.rs`)
+- [ ] Test CLI in streaming mode (`stream_chat`, `lightbulb-cli.rs:281`)
+- [ ] Verify conversation history maintained (`conversation: Vec<Message>`, `lightbulb-cli.rs:135-225`)
+- [ ] Test system prompt functionality (`args.system`, `lightbulb-cli.rs:138-141`)
+- [ ] Verify environment variable loading (`LIGHTBULB_API_KEY`, `lightbulb-cli.rs:119`)
 
 ---
 
 ### 2.5 Streaming Validation
 **Action Items**:
-- [ ] Confirm SSE format compliance (OpenAI-compatible)
-- [ ] Verify token-by-token emission (not batched)
-- [ ] Check `[DONE]` marker sent on completion
-- [ ] Test error handling during streaming
-- [ ] Validate finish_reason in final chunk
+- [ ] Confirm SSE format compliance (OpenAI-compatible) — NOT COVERED as its own claim. Tests
+  parse `data: ` lines incidentally while testing other things; no test asserts
+  `Content-Type: text/event-stream` or general framing (`grep -n "text/event-stream" src/api/openai/chat.rs`
+  → 0 hits).
+- [ ] Verify token-by-token emission (not batched) — NOT COVERED. Every streaming test stub
+  (`stub_runner_with`, `chat.rs:2038-2069`) sends exactly one `StreamItem::Token` before `Done`;
+  no test sends multiple tokens to prove they arrive unbatched.
+- [ ] Check `[DONE]` marker sent on completion — **NOT A MISSING TEST, A MISSING BEHAVIOR.**
+  `grep -n "DONE" src/` finds only the *client* parsing `[DONE]` (`lightbulb-cli.rs:331`) from a
+  server that never sends it — `create_chat_stream` (`chat.rs:1313-1501`) ends the stream with a
+  `finish_reason`-carrying JSON frame, never a literal `data: [DONE]` line. A real
+  OpenAI-incompatibility; filed as its own item, not fixed here.
+- [ ] Test error handling during streaming — NOT COVERED. The `Err(e) =>` SSE-error-frame branch
+  exists (`chat.rs:1447-1457`) and is fed from three production call sites in
+  `model_runner.rs`, but no test constructs a stub that sends an `Err` through the stream channel.
+- [x] Validate finish_reason in final chunk —
+  `a_streaming_completion_is_recorded_once_with_the_reason_the_runner_reported`
+  (`chat.rs:2827-2871`) asserts `frames[1]["choices"][0]["finish_reason"]` for both `Stop` and
+  `Length`.
 
 ---
 
-### Phase 2 Validation
-**Success Criteria**:
-- [ ] Server starts without crashes
-- [ ] All API endpoints respond correctly
-- [ ] Streaming works end-to-end
-- [ ] CLI can interact with server
-- [ ] Authentication and rate limiting functional
+### Phase 2 Validation — reconciled, not re-checked wholesale
+**Of ~24 original line items: 5 covered (2 of those gated behind a live Postgres), 19 not
+covered.** The success criteria below were never independently meaningful (they just restate the
+items above at a coarser grain) and are retired as a separate checklist rather than re-audited.
+The real open gaps, in priority order if this phase is picked up again: the per-key rate limiter
+has zero test coverage at all; the CLI binary has zero test coverage at all; the `[DONE]` SSE
+marker is a genuine spec-compliance gap, not a test gap.
 
 ---
 
 ## Phase 3: MemoryAwareScheduler Integration (Priority: HIGH)
-**Estimated Time**: 3-5 days  
-**Dependencies**: Phase 2 complete
+**Estimated Time**: 3-5 days
+**Dependencies**: Phase 2 complete — **not actually true in practice**: per the 2026-10-14 audit
+above, Phase 2 is 5/24 covered, not complete, and this project's own `ROADMAP.md` already
+documents that this file's phase dependencies don't hold in general (its Phase 1 shipped while
+the doc still called the whole project blocked). The PM explicitly directed starting Phase 3's
+slice 1 (see `ROADMAP.md`'s "M4 — MemoryAwareScheduler integration: slice plan") without waiting
+on Phase 2 — a deliberate call, not an oversight.
 
 ### 3.1 Architecture Design
 **Current State**:
