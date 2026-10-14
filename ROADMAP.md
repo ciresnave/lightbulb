@@ -821,16 +821,18 @@ its own test, in this order:
    trait method (default-provided, so the two test stub impls in `model_runner.rs` need no
    change). Does **not** touch `scheduler_stats`/`scheduler_queue`/`cache_clear` — those three
    stay mocked because their backing data (the scheduler actually seeing requests) doesn't exist
-   until slice 3.
-2. **Wire real data into `scheduler_stats`/`scheduler_queue`**, once slice 3 makes
-   `AppState.scheduler` meaningful. Deferred until then — wiring it to the still-unfed instance
-   now would just swap one kind of fake data (hardcoded zero) for another (real-but-always-zero).
-3. **Request admission**: route jobs through `MemoryAwareScheduler::submit_request` /
+   until slice 2.
+2. **Request admission**: route jobs through `MemoryAwareScheduler::submit_request` /
    `allocate_pending_requests` before dispatch, as a reject-when-over-memory-budget gate —
    parallel to #134's bounded-queue 503, but keyed on the scheduler's memory estimate instead of
-   raw queue depth. This is what makes slice 2's data real.
+   raw queue depth. This is what makes slice 3's data real.
+3. **Wire real data into `scheduler_stats`/`scheduler_queue`**, now that slice 2 makes
+   `AppState.scheduler` meaningful. Was sequenced before slice 2 in the original numbering
+   (2026-10-14) — corrected (PM-approved) once that was caught as backwards: wiring these to the
+   still-unfed instance before slice 2 lands would just swap one kind of fake data (hardcoded
+   zero) for another (real-but-always-zero).
 4. **Priority**: expose a `priority` field (Lightbulb extension, OpenAI has no such field) on
-   chat/completions requests, mapped to `Priority` on submission into slice 3's admission path.
+   chat/completions requests, mapped to `Priority` on submission into slice 2's admission path.
 5. **Continuous batching**: replace `run_jobs`'s one-job-at-a-time loop with real multi-request
    batching via `SlotPool`. The big one — expect this to need further sub-slicing once reached;
    do not pre-slice it now, the shape of slices 1-4 may change what's left.
