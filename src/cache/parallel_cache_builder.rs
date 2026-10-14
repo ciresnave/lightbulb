@@ -1,12 +1,14 @@
 //! Parallel Cache Builder - Forked from Candle's ScatteredCacheBuilder
 //!
-//! Copyright (c) 2023 Hugging Face
-//! Copyright (c) 2025-2026 Eric Evans
+//! Originates from huggingface/candle, candle-nn/src/kv_cache.rs (`ScatteredCacheBuilder`/
+//! `IndicesAndMask`/`indices_and_mask()`) — upstream's own licence text names no copyright
+//! holder, so none is asserted here (see PROVENANCE.md, G-PCB-1).
+//! Copyright (c) 2025-2026 Eric Evans (modifications in this file)
 //! SPDX-License-Identifier: Apache-2.0 OR MIT
 //!
 //! Modified for parallel batching with variable-length sequences:
 //! - Independent per-slot position tracking
-//! - KV cache clearing capability  
+//! - KV cache clearing capability
 //! - Efficient position setting without iteration
 //!
 //! Original: https://github.com/huggingface/candle/blob/main/candle-nn/src/kv_cache.rs
