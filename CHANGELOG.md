@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.6.0
+
+### Changed
+- **Breaking:** `/v1/chat/completions` now rejects `top_p` values other than `1.0` with a 400,
+  instead of silently dropping the field (`ChatCompletionRequest` had no `top_p` field at all).
+  Same pattern and precedent as #103's `n`/`stop`/completions'-`top_p` fix: a caller sending the
+  spec default (`1.0`, or omitting the field) sees no change; a caller sending a meaningful
+  `top_p` previously got a clean-but-wrong 200 and now gets an explicit 400 naming the value,
+  since nucleus sampling is not wired into either decode path.
+
 ## 0.5.2
 
 ### Changed
