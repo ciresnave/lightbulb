@@ -436,6 +436,16 @@ pub(crate) fn drain_with_error(rx: Receiver<InferenceJob>, msg: &str) {
     }
 }
 
+/// Write `model`'s current prefix-cache stats into the shared handle, for the
+/// `cache_stats` admin endpoint. Pulled out of `run_jobs` so this slice's own
+/// contribution to that already-large function's complexity count is a
+/// single call, not a branch.
+fn publish_cache_stats<M: EngineModel>(model: &M, cache_stats: &SharedCacheStats) {
+    if let Ok(mut guard) = cache_stats.lock() {
+        *guard = model.prefix_cache_stats();
+    }
+}
+
 /// The job loop. Identical for every backend, which is why it is generic rather
 /// than duplicated per `cfg`.
 pub(crate) fn run_jobs<M: EngineModel>(
@@ -575,9 +585,7 @@ pub(crate) fn run_jobs<M: EngineModel>(
 
         // Once per job, regardless of mode -- the one piece of state this
         // thread shares outside the per-job channel (board item M4 slice 1).
-        if let Ok(mut guard) = cache_stats.lock() {
-            *guard = model.prefix_cache_stats();
-        }
+        publish_cache_stats(&model, &cache_stats);
     }
 
     println!("Model runner thread exiting (receiver closed)");
