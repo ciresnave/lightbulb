@@ -354,11 +354,15 @@ path = "src/bin/lightbulb-probe.rs"
 # used as the port's INDEPENDENT differential target (tiers 1 and 2 of the
 # oracle). Differential target, never a verdict source — a disagreement means
 # "determine which of us is wrong".
-# 0.2.0 brings Node::ConstBits (exact bit patterns for tier-1 edge cases),
-# R10-R14 reference fragments, and the ScalarFloat seal — the property that
-# stops kiss-ref mirroring a consumer's own arithmetic back as agreement.
-kiss-ref-core  = "0.2.0"
-kiss-ops-vocab = "0.2.0"
+# 0.4.0 (breaking: Node/NumericKind/Family/etc. gained #[non_exhaustive];
+# diff's NaN quietness check tightened to Tolerance::Exact; reduce_var/std
+# changed to the deviations-about-the-mean form; comparison result dtype is
+# now bool). This file's recipes use Monoid::Sum (not reduce_var/std), no
+# exhaustive match on Node/Family, and no Tolerance::Exact diff call, so none
+# of the 0.4.0 breaking changes apply to this file's usage — verified by
+# running the suite after the bump, not assumed.
+kiss-ref-core  = "0.4.0"
+kiss-ops-vocab = "0.4.0"
 tempfile       = "3"
 tower          = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
