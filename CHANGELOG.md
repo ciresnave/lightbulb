@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.8.8
+
+### Fixed
+- Phase 4 hardening item 2 (PM-tasked): the admin `metrics` endpoint
+  (`/v1/lightbulb/admin/metrics`) reported a hardcoded `cpu_usage_percent: 0.0,
+  memory_total_bytes: 0, memory_used_bytes: 0` behind a `// TODO` comment, never wired to
+  anything. Added `sysinfo` as a direct dependency (`system` feature only) and a persistent
+  `AppState.live_system` sampler (CPU usage is a diff between refreshes, so a fresh `System`
+  per request would always read 0); `cpu_usage_percent`/`memory_total_bytes`/
+  `memory_used_bytes` are now real. `gpu_metrics` stays an honest empty `Vec`: neither
+  `sysinfo` nor `system-analysis` (already a dep) exposes live GPU utilization or
+  temperature, only static capability (name, VRAM size, compute capability) -- that needs
+  vendor-specific NVML bindings, tracked as a new ROADMAP item, not built here.
+
 ## 0.8.7
 
 ### Docs

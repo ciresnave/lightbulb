@@ -1824,6 +1824,7 @@ mod tests {
             cache_stats: std::sync::Arc::new(std::sync::Mutex::new(
                 crate::cache::PrefixCacheStats::default(),
             )),
+            live_system: crate::api::new_shared_system_metrics(),
         }
     }
 

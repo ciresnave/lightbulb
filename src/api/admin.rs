@@ -206,12 +206,34 @@ pub struct GpuMetrics {
 }
 
 /// Get system metrics
-async fn system_metrics(State(_state): State<AppState>) -> impl IntoResponse {
-    // TODO: Get actual system metrics via system-analysis crate
+///
+/// CPU and memory come from a persistent `sysinfo::System` held in
+/// `AppState` (`live_system`) -- CPU usage is a diff between refreshes, so a
+/// freshly-constructed `System` would read 0 on every call; the long-lived
+/// instance lets repeated calls see real deltas.
+///
+/// `gpu_metrics` stays an honest empty `Vec`: no GPU telemetry source is
+/// wired (`sysinfo`'s `system` feature and `system-analysis` both report
+/// only static GPU capability -- name, VRAM size, compute capability -- not
+/// live utilization or temperature; that needs vendor-specific NVML
+/// bindings, tracked as its own ROADMAP item, not built here). An empty Vec
+/// is a true "nothing to report," unlike the previous hardcoded 0.0 scalar.
+async fn system_metrics(State(state): State<AppState>) -> impl IntoResponse {
+    let (cpu_usage_percent, memory_total_bytes, memory_used_bytes) = {
+        let mut sys = state.live_system.lock().unwrap_or_else(|e| e.into_inner());
+        sys.refresh_cpu_usage();
+        sys.refresh_memory();
+        (
+            sys.global_cpu_usage(),
+            sys.total_memory() as usize,
+            sys.used_memory() as usize,
+        )
+    };
+
     let response = SystemMetricsResponse {
-        cpu_usage_percent: 0.0,
-        memory_total_bytes: 0,
-        memory_used_bytes: 0,
+        cpu_usage_percent,
+        memory_total_bytes,
+        memory_used_bytes,
         gpu_metrics: vec![],
     };
 
@@ -422,6 +444,7 @@ mod tests {
             cache_stats: std::sync::Arc::new(std::sync::Mutex::new(
                 crate::cache::PrefixCacheStats::default(),
             )),
+            live_system: crate::api::new_shared_system_metrics(),
         }
     }
 
@@ -625,6 +648,47 @@ mod tests {
         // hit_rate = hits / (hits + misses) = 7 / 10
         assert!(
             (body["hit_rate"].as_f64().unwrap() - 0.7).abs() < 1e-6,
+            "full body: {body:?}"
+        );
+    }
+
+    /// `system_metrics` must report the machine's real total memory (a
+    /// hardcoded-zero stub would read 0 here), and `cpu_usage_percent` must
+    /// be a real, finite reading rather than a fixed sentinel. `gpu_metrics`
+    /// must stay an honest empty `Vec`, not a mocked entry, since no GPU
+    /// telemetry source is wired.
+    #[tokio::test]
+    async fn system_metrics_reports_real_memory_not_a_hardcoded_zero() {
+        let expected_total_bytes = sysinfo::System::new_all().total_memory();
+
+        let req = Request::builder()
+            .method("GET")
+            .uri("/v1/lightbulb/admin/metrics")
+            .extension(key_info("admin"))
+            .body(Body::empty())
+            .unwrap();
+        let response = routes().with_state(state()).oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+
+        assert_eq!(
+            body["memory_total_bytes"].as_u64().unwrap(),
+            expected_total_bytes,
+            "full body: {body:?}"
+        );
+        assert!(
+            body["memory_used_bytes"].as_u64().unwrap() > 0,
+            "full body: {body:?}"
+        );
+        let cpu = body["cpu_usage_percent"].as_f64().unwrap();
+        assert!(cpu.is_finite() && cpu >= 0.0, "full body: {body:?}");
+        assert_eq!(
+            body["gpu_metrics"].as_array().unwrap().len(),
+            0,
             "full body: {body:?}"
         );
     }

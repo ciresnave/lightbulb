@@ -149,6 +149,7 @@ async fn serve_the_fixed_prompt(path: &Path) -> (StatusCode, serde_json::Value) 
         cache_stats: std::sync::Arc::new(std::sync::Mutex::new(
             lightbulb::cache::PrefixCacheStats::default(),
         )),
+        live_system: lightbulb::api::new_shared_system_metrics(),
     };
     let app = lightbulb::api::openai::routes().with_state(state);
     let body = serde_json::json!({

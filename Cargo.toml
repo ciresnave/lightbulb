@@ -4,7 +4,7 @@
     license     = "MIT OR Apache-2.0"
     name        = "lightbulb"
     repository  = "https://github.com/ciresnave/lightbulb"
-    version     = "0.8.7"
+    version     = "0.8.8"
 
 [features]
     # CUDA support with flash attention and fused kernels.
@@ -335,6 +335,7 @@
     # every `cargo test` including CPU-only ones. Optional + feature-activated
     # keeps default builds free of it entirely.
     fuel-cuda-backend = { git = "https://github.com/ciresnave/fuel", rev = "d90b481fde7d84cb25284375274677a37a946703", optional = true }
+sysinfo = { version = "0.39.6", default-features = false, features = ["system"] }
 
 [[bin]]
 name = "lightbulb-cli"
