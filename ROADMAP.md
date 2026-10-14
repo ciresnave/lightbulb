@@ -820,19 +820,29 @@ its own test, in this order:
    same shape as #134's `max_queue_depth` addition) and a new `EngineModel::prefix_cache_stats()`
    trait method (default-provided, so the two test stub impls in `model_runner.rs` need no
    change). Does **not** touch `scheduler_stats`/`scheduler_queue`/`cache_clear` — those three
-   stay mocked because their backing data (the scheduler actually seeing requests) doesn't exist
-   until slice 2.
-2. **Request admission**: route jobs through `MemoryAwareScheduler::submit_request` /
-   `allocate_pending_requests` before dispatch, as a reject-when-over-memory-budget gate —
-   parallel to #134's bounded-queue 503, but keyed on the scheduler's memory estimate instead of
-   raw queue depth. This is what makes slice 3's data real.
-3. **Wire real data into `scheduler_stats`/`scheduler_queue`**, now that slice 2 makes
-   `AppState.scheduler` meaningful. Was sequenced before slice 2 in the original numbering
-   (2026-10-14) — corrected (PM-approved) once that was caught as backwards: wiring these to the
-   still-unfed instance before slice 2 lands would just swap one kind of fake data (hardcoded
-   zero) for another (real-but-always-zero).
+   stay mocked because their backing data (the scheduler actually seeing requests) doesn't exist.
+   **Updated 2026-10-14**: this was originally written assuming slice 2 would close that gap; it
+   does not (see slice 2's own note below) — these three stay mocked until slice 5.
+2. **Request admission — DONE, lightbulb#142, differently than planned here.** This entry
+   originally said "route jobs through `MemoryAwareScheduler::submit_request` /
+   `allocate_pending_requests`" — what actually landed is `MemoryAwareScheduler::check_admission`,
+   a read-only dry-run estimate check (handler-level `chars/4 + max_tokens` heuristic vs the
+   configured budget), wired into both endpoints as a 503 before dispatch. It never calls
+   `submit_request`/`allocate_pending_requests`, so it does **not** make `AppState.scheduler`'s
+   internal state (`queued_count`/`used_bytes`/`active_slots`) live — those stay at zero
+   permanently. **This was caught (2026-10-14) before starting slice 3, which assumed otherwise**;
+   see slice 3 below for the resolution.
+3. **`scheduler_stats`/`scheduler_queue` — deferred to slice 5 (2026-10-14, PM-ruled).**
+   Originally planned as "wire real data, now that slice 2 makes `AppState.scheduler`
+   meaningful" — that premise doesn't hold (see slice 2's note above). There is no live
+   concurrent scheduler state to report until `run_jobs` is genuinely concurrent, which is slice
+   5's job, not slice 2's. Reporting on `check_admission`'s call history instead of live state
+   was considered and rejected as not worth building before slice 5 settles what state actually
+   exists. Not reattempted until slice 5 lands.
 4. **Priority**: expose a `priority` field (Lightbulb extension, OpenAI has no such field) on
-   chat/completions requests, mapped to `Priority` on submission into slice 2's admission path.
+   chat/completions requests, mapped to `Priority` on submission into slice 2's admission path —
+   **also blocked on the same gap**: there is no `submit_request` call for a priority to attach
+   to yet. Revisit together with slice 5.
 5. **Continuous batching**: replace `run_jobs`'s one-job-at-a-time loop with real multi-request
    batching via `SlotPool`. The big one — expect this to need further sub-slicing once reached;
    do not pre-slice it now, the shape of slices 1-4 may change what's left.
