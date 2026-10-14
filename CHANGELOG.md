@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.8.0
+
+### Changed
+- **Breaking:** `/v1/chat/completions` and `/v1/completions` now reject a request with `503` if
+  its own estimated cost (a `chars/4 + max_tokens` heuristic) alone exceeds the scheduler's
+  configured memory budget, before dispatch. Board item M4 slice 2 — same shape and precedent as
+  #103 (a new rejection path where there was none before). With the default 8 GB budget, no
+  realistic request changes behavior; the breaking surface is the *possibility* of a new 503, not
+  an observed regression in default configurations.
+
 ## 0.7.2
 
 ### Docs / CI
