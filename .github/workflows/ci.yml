@@ -100,8 +100,24 @@ jobs:
           Write-Host "---- pg_hba.conf (auth mode) ----"
           Get-Content "C:\PostgreSQL\17\data\pg_hba.conf" -ErrorAction SilentlyContinue | Select-String -NotMatch '^\s*#|^\s*$' | Out-String | Write-Host
 
-          Write-Host "---- starting postgresql-x64-17 ----"
-          Start-Service postgresql-x64-17
+          Write-Host "---- whoami / is this process elevated? ----"
+          whoami
+          ([Security.Principal.WindowsIdentity]::GetCurrent().Groups -contains 'S-1-5-32-544') | Out-String | Write-Host
+
+          Write-Host "---- Get-CimInstance Win32_Service (full detail) ----"
+          Get-CimInstance Win32_Service -Filter "Name='postgresql-x64-17'" |
+            Select-Object Name,State,Status,StartMode,StartName,ExitCode | Format-List | Out-String | Write-Host
+
+          Write-Host "---- starting postgresql-x64-17 (full error record) ----"
+          try {
+            Start-Service postgresql-x64-17 -ErrorAction Stop
+            Write-Host "Start-Service: OK"
+          } catch {
+            Write-Host "Start-Service FAILED:"
+            Write-Host ($_ | Format-List * -Force | Out-String)
+            Write-Host "---- falling back to sc.exe start ----"
+            sc.exe start postgresql-x64-17 2>&1 | Out-String | Write-Host
+          }
           Start-Sleep -Seconds 3
           Get-Service postgresql-x64-17 | Format-Table | Out-String | Write-Host
 
