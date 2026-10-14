@@ -60,6 +60,7 @@ jobs:
 
       - name: can windows-latest start a Linux container?
         shell: bash
+        continue-on-error: true
         run: |
           if docker run --rm hello-world:linux; then
             echo "PROBE RESULT: Linux container STARTED"
@@ -67,6 +68,23 @@ jobs:
             echo "PROBE RESULT: Linux container FAILED to start"
             exit 1
           fi
+
+      # Measured directly on the runner, not read from the runner-images
+      # README -- the README documents intent, this checks what is actually
+      # on the box this job landed on.
+      - name: does the runner image ship PostgreSQL?
+        shell: pwsh
+        run: |
+          Write-Host "---- where.exe pg_ctl ----"
+          where.exe pg_ctl 2>&1 | Out-String | Write-Host
+          Write-Host "---- where.exe psql ----"
+          where.exe psql 2>&1 | Out-String | Write-Host
+          Write-Host "---- Get-Service postgresql* ----"
+          Get-Service -Name "postgresql*" -ErrorAction SilentlyContinue | Format-Table | Out-String | Write-Host
+          Write-Host "---- Get-Package -like *PostgreSQL* ----"
+          Get-Package -Name "*PostgreSQL*" -ErrorAction SilentlyContinue | Format-Table Name,Version | Out-String | Write-Host
+          Write-Host "---- Env:PGBIN / Env:PGROOT / Env:PGDATA ----"
+          @('PGBIN','PGROOT','PGDATA') | ForEach-Object { Write-Host "$_ = $([Environment]::GetEnvironmentVariable($_))" }
 
   gates:
     # WINDOWS, NOT LINUX, AND THIS IS A MEASURED CONSTRAINT RATHER THAN A
