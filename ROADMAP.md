@@ -57,9 +57,12 @@ cache mechanics and OverMind on orchestration policy, with Lightbulb owning the 
    and real, and that a content-addressed matching layer already exists on top of it — but with **zero
    callers outside its own tests** today. This is an existing, correct, unwired primitive, not new
    engineering — wire it in.
-2. **Fix the live-date chat-template rendering hazard**, found during the same review: a Jinja template
-   function (`strftime_now`) renders the current date live, which can break prefix-cache matching across a
-   midnight boundary. General correctness fix, not fork-specific, but surfaced by this work.
+2. **Fix the live-date chat-template rendering hazard — DONE, #107 (2026-09-30).** Was already
+   fixed the same day as the review that surfaced it; this entry was never updated. `strftime_now`
+   now caches its rendered string per calendar day (`cached_strftime_now`,
+   `src/api/chat_template.rs:68`), so repeated renders on the same day are deterministic — the
+   date still changes at midnight, which is correct "today's date" behavior, not the bug. Found
+   stale while surveying this section 2026-10-14; confirmed via `git log -S cached_strftime_now`.
 3. **Latent/activation-transfer between live model instances — gated research track, treat as the riskiest
    of the three technique clusters, not a committed deliverable.** The external brief's "mutual state
    access" idea (two live instances reading each other's internal activations via learned cross-attention)
