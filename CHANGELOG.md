@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.6.1
+
+### Docs
+- Audited V1_ROADMAP.md's Phase 2 manual-testing checklist against the real test suite: 5/24
+  items genuinely covered (2 gated behind `#[ignore] // Requires PostgreSQL`), 19/24 not covered.
+  Found the missing `data: [DONE]` SSE terminator is a real implementation gap, not a missing
+  test (tracked as its own fix, next). Added a 5-slice plan for Phase 3 (MemoryAwareScheduler
+  integration) to ROADMAP.md. No code changes.
+
 ## 0.6.0
 
 ### Changed
