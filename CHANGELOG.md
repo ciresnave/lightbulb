@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.8.1
+
+### Docs
+- Corrected ROADMAP.md's M4 slice plan: slice 2 (request admission) landed as a read-only dry-run
+  check (`MemoryAwareScheduler::check_admission`), not the `submit_request`/
+  `allocate_pending_requests` flow the plan originally described, so it does not make
+  `AppState.scheduler`'s internal state live. Slice 3 (`scheduler_stats`/`scheduler_queue` wiring)
+  and the priority field in slice 4 are deferred to slice 5 (continuous batching), which is what
+  will actually give the scheduler concurrent state worth reporting. No code change.
+
 ## 0.8.0
 
 ### Changed
