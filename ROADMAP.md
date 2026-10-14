@@ -838,6 +838,14 @@ its own test, in this order:
 Each slice must land green on `cargo test --lib` plus its own new test proving the specific claim
 (a mock replaced with live data, a real rejection, etc.) — not just "compiles."
 
+**6. `run_jobs` refactor (added 2026-10-14, found while landing slice 1).** Codacy flags it at
+cyclomatic complexity 18 (limit 12) and 99 lines (limit 50) — pre-existing debt (it was already
+~130 lines on `origin/main` before slice 1 touched it at all), surfaced as "new" only because
+slice 1's own one-line addition fell inside the function. Splitting the streaming/complete-mode
+branches apart is real, separate work; not pre-sliced here since slices 1-5 above may change what
+`run_jobs` looks like by the time this is picked up. Sequenced after slice 5, not before — doing
+it earlier risks conflicting with every one of slices 1-5 touching the same function.
+
 ---
 
 ## Status Legend

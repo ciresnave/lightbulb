@@ -284,7 +284,16 @@ async fn probe(
     // A single-shot CLI probe never has more than one job in flight, so any
     // depth above 1 is never exercised — the bound exists for the HTTP
     // server's concurrent callers, not this binary.
-    let tx = ModelRunner::start(model_dir, 1, 512, Some("f32".to_string()), 1)?;
+    let tx = ModelRunner::start(
+        model_dir,
+        1,
+        512,
+        Some("f32".to_string()),
+        1,
+        std::sync::Arc::new(std::sync::Mutex::new(
+            lightbulb::cache::PrefixCacheStats::default(),
+        )),
+    )?;
 
     let mut rows: Vec<ProbeRow> = Vec::new();
     for (candidate, source) in registry::candidates() {

@@ -58,8 +58,17 @@ fn get_template() -> Option<std::sync::Arc<ResolvedTemplate>> {
 fn init_runner() -> RunnerTx {
     let model_dir = find_model_dir();
 
-    let tx = ModelRunner::start(&model_dir, 1, 512, Some("f32".to_string()), 8)
-        .expect("ModelRunner::start failed");
+    let tx = ModelRunner::start(
+        &model_dir,
+        1,
+        512,
+        Some("f32".to_string()),
+        8,
+        std::sync::Arc::new(std::sync::Mutex::new(
+            lightbulb::cache::PrefixCacheStats::default(),
+        )),
+    )
+    .expect("ModelRunner::start failed");
 
     // ModelRunner::start always returns Ok(tx) immediately — the real load
     // happens on a spawned thread.  Wait, then probe to detect failures.

@@ -1791,6 +1791,9 @@ mod tests {
             chat_template,
             eos_monitor,
             security_sinks: Vec::new(),
+            cache_stats: std::sync::Arc::new(std::sync::Mutex::new(
+                crate::cache::PrefixCacheStats::default(),
+            )),
         }
     }
 

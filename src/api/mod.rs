@@ -296,6 +296,14 @@ pub struct AppState {
     /// syntax, which is only possible when every field (and the type each
     /// one names) is visible outside this crate.
     pub security_sinks: Vec<Arc<dyn security_event::SecuritySink>>,
+
+    /// Live prefix-cache stats, written by the model-runner thread after
+    /// every job — the `cache_stats` admin endpoint's real data source
+    /// (board item M4 slice 1). Not `Option`, same reasoning as
+    /// `eos_monitor`: no model loaded (or no job run yet) already reports as
+    /// `PrefixCacheStats::default()`, which is a valid "nothing to report"
+    /// reading, not a second spelling of absence.
+    pub cache_stats: crate::engine::model_runner::SharedCacheStats,
 }
 
 /// API server
@@ -387,6 +395,9 @@ impl ApiServer {
             chat_template: None,
             eos_monitor: Arc::new(crate::engine::eos_monitor::EosMonitor::default()),
             security_sinks,
+            cache_stats: Arc::new(std::sync::Mutex::new(
+                crate::cache::PrefixCacheStats::default(),
+            )),
         };
 
         // Try to start a model runner thread if a model directory and default model exist
@@ -399,6 +410,7 @@ impl ApiServer {
                     state.config.model_context_length,
                     Some("f32".to_string()),
                     state.config.model_max_queue_depth,
+                    state.cache_stats.clone(),
                 ) {
                     Ok(sender) => {
                         state.inference_tx = Some(sender);

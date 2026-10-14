@@ -83,8 +83,17 @@ fn chat_template_for(
 /// too: the stream ends when the runner drops `stream_tx`.
 async fn post_raw(path: &str, body: serde_json::Value) -> (StatusCode, Vec<u8>) {
     let dir = tinyllama_dir().expect(MISSING_CHECKPOINT);
-    let tx = ModelRunner::start(&dir, 1, 512, Some("f32".to_string()), 8)
-        .expect("starting the model runner");
+    let tx = ModelRunner::start(
+        &dir,
+        1,
+        512,
+        Some("f32".to_string()),
+        8,
+        std::sync::Arc::new(std::sync::Mutex::new(
+            lightbulb::cache::PrefixCacheStats::default(),
+        )),
+    )
+    .expect("starting the model runner");
     let state = AppState {
         scheduler: Arc::new(MemoryAwareScheduler::new(MemoryAwareConfig::default())),
         config: ApiConfig::default(),
@@ -96,6 +105,9 @@ async fn post_raw(path: &str, body: serde_json::Value) -> (StatusCode, Vec<u8>) 
         // `AppState` requires it, not as anything under test.
         eos_monitor: Default::default(),
         security_sinks: Vec::new(),
+        cache_stats: std::sync::Arc::new(std::sync::Mutex::new(
+            lightbulb::cache::PrefixCacheStats::default(),
+        )),
     };
     let app = lightbulb::api::openai::routes().with_state(state);
     let resp = app

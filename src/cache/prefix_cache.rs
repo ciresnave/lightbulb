@@ -107,6 +107,13 @@ pub struct PrefixCacheStats {
     pub insertions: usize,
     pub evictions: usize,
     pub total_saved_tokens: usize,
+    /// Entries currently held, and their total size in bytes. Populated by
+    /// [`PrefixKvCache::stats`] from `entry_count()`/`current_size_bytes()` at
+    /// snapshot time — these two are tracked in separate locks from the
+    /// hit/miss counters above, so this struct is a composed snapshot, not a
+    /// single atomic read.
+    pub entries: usize,
+    pub size_bytes: usize,
 }
 
 impl PrefixCacheStats {
@@ -294,7 +301,10 @@ impl PrefixKvCache {
 
     /// Get cache statistics
     pub fn stats(&self) -> PrefixCacheStats {
-        self.stats.lock().unwrap().clone()
+        let mut stats = self.stats.lock().unwrap().clone();
+        stats.entries = self.entry_count();
+        stats.size_bytes = self.current_size_bytes();
+        stats
     }
 
     /// Clear the entire cache
