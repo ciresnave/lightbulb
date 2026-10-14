@@ -41,6 +41,16 @@ pub struct ChatCompletionRequest {
     #[serde(default = "default_temperature")]
     pub temperature: f32,
 
+    /// Top-p sampling. `1.0` (the default) is a no-op; any other value is
+    /// rejected with a 400 — nucleus sampling is not implemented on either
+    /// decode path. Same reasoning as `completions::CompletionRequest::top_p`;
+    /// this struct never had the field at all, so a caller sending `top_p`
+    /// here got it silently dropped by serde and a clean 200 back — the
+    /// same accepted-and-discarded defect board item 71 closed for `n`/
+    /// `stop`/completions' `top_p`, just missed on this endpoint.
+    #[serde(default = "default_top_p")]
+    pub top_p: f32,
+
     /// Maximum tokens to generate
     #[serde(default)]
     pub max_tokens: Option<usize>,
@@ -380,6 +390,23 @@ pub async fn chat_completions(
         return (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({"error": msg})),
+        )
+            .into_response();
+    }
+
+    // Same reasoning as completions' `top_p` rejection: nucleus sampling is
+    // not wired into either decode path, so anything but the no-op default
+    // is rejected rather than silently ignored.
+    if request.top_p != 1.0 {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": format!(
+                    "top_p={} is not supported: nucleus sampling is not wired into either \
+                     decode path. Send top_p=1.0 (the default) or omit the field.",
+                    request.top_p
+                )
+            })),
         )
             .into_response();
     }
@@ -1474,6 +1501,10 @@ fn create_chat_stream(state: AppState, request: ChatCompletionRequest) -> Respon
 }
 
 fn default_temperature() -> f32 {
+    1.0
+}
+
+fn default_top_p() -> f32 {
     1.0
 }
 
@@ -3731,6 +3762,46 @@ mod tests {
             .await
             .into_response();
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn chat_completions_rejects_top_p_not_equal_one() {
+        let state = state_with(None);
+        let mut req = request();
+        req.top_p = 0.9;
+
+        let response = chat_completions(State(state), Json(req))
+            .await
+            .into_response();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn chat_completions_accepts_the_default_top_p() {
+        // Not a reject test: top_p=1.0 is the no-op default and must reach
+        // the ordinary (no-runner) fallback path, not a 400.
+        let state = state_with(None);
+        let req = request();
+        assert_eq!(req.top_p, 1.0);
+
+        let response = chat_completions(State(state), Json(req))
+            .await
+            .into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[test]
+    fn chat_request_without_top_p_field_defaults_to_the_noop_value() {
+        // The regression this whole change closes: `top_p` sent on this
+        // endpoint used to have no field to deserialize into at all, so
+        // serde silently dropped it. Confirm the field now exists and a
+        // request omitting it gets the spec no-op, not a missing/zero value.
+        let req: ChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "hi"}],
+        }))
+        .unwrap();
+        assert_eq!(req.top_p, 1.0);
     }
 
     #[tokio::test]
