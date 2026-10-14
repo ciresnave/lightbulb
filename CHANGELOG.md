@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.8.4
+
+### Docs
+- Sizing/slice plan for research-track item 1 ("wire prefix-matching into the Fuel serving
+  path"), PM-tasked. Found the real dependency chain is deeper than the original note described:
+  two unwired primitives (`BlockPrefixIndex`, `BatchedPagedDecoder`), both built against Fuel's
+  `PagedSessionScheduler` rather than the `SessionScheduler` actually in use; `PagedDecodeModel`
+  has zero implementors anywhere (Fuel or lightbulb) today, though `fuel-model-llama` already has
+  the matching inherent method, making a lightbulb-owned newtype wrapper the fix rather than new
+  cross-repo engineering; Qwen3 has no equivalent yet; and `Op::PagedAttn`'s actual GPU execution
+  path is an open, previously-contested question per `tests/gpu_paged_vs_contiguous.rs`. 5 slices
+  proposed. **Not started** — sizing only, build begins once the PM confirms priority. No code
+  change. Scope note: the default candlelight path is unaffected by any of this; `fuel-engine` is
+  opt-in and not at parity.
+
 ## 0.8.3
 
 ### Docs

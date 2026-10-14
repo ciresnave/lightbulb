@@ -863,6 +863,114 @@ it earlier risks conflicting with every one of slices 1-5 touching the same func
 
 ---
 
+## Research track item 1 — prefix-matching into the Fuel serving path: slice plan (added 2026-10-14, PM-tasked)
+
+**Scope correction up front, the single most important fact in this section:** the default,
+shipping path is **candlelight** (`cargo build` with no features) — that is what serves requests
+today. **Fuel is opt-in** (`--features fuel-engine`) and **not at parity**. Everything below
+changes only the `fuel-engine` path. A caller running the default build sees no change from any
+slice here, ever, until a future, separate decision flips the default (that is Phase D of
+`docs/fuel-migration-pr-sequence.md`, an unrelated migration, not this one).
+
+### What's actually live on the fuel-engine path today
+
+`src/engine/model_runner.rs`'s `fuel-engine` arm of `ModelRunner::start` drives
+`crate::model_fuel::scheduled_llama_engine::run_fuel_engine`, which uses
+`FuelSchedulerDriver` (`scheduler_driver.rs`) wrapping Fuel's **`SessionScheduler`**
+(`fuel_inference::multi_session::SessionScheduler<M: DecodeModel>`) — a simple scheduler with no
+paged attention and no prefix-sharing primitives. Confirmed by reading
+`fuel-inference/src/multi_session.rs` at the pinned rev (`d90b481f`, via a local
+`~/.cargo/git/checkouts` clone — no network needed, the dependency is already vendored by cargo):
+`SessionScheduler` has `add_session`/`step`/`reap_finished` and nothing prefix-related.
+
+### What's built in lightbulb but genuinely unwired — TWO primitives, not one
+
+The original research-track note named one ("a content-addressed matching layer... zero callers
+outside its own tests"). Re-surveying while sizing this plan found a **second, independent**
+unwired primitive the note didn't mention, and the two are more entangled than "wire it in"
+suggested:
+
+1. **`BlockPrefixIndex`** (`src/model_fuel/policies.rs`, ~3,100 lines, extensively designed —
+   see its own module doc for the granularity-mismatch analysis already worked out). Zero callers
+   outside its own file (`grep -rln "BlockPrefixIndex::new" src/` outside `policies.rs` → 0 hits).
+   Its `lookup`/`record`/`splice_prefix` are written against `fuel::kv_block_pool_device::
+   DeviceKvPool` — the **paged** pool type, not the plain `KvBlockPool` the live
+   `SessionScheduler` uses.
+2. **`BatchedPagedDecoder`** (`src/model_fuel/batched.rs`, its own hand-rolled batched paged-decode
+   loop, extensively tested against Fuel's own single-sequence `forward_paged_step` for parity).
+   Zero callers outside its own file (`grep -rln "BatchedPagedDecoder" src/` outside `batched.rs`
+   → 0 hits). Not named in the original research-track note at all.
+
+**Both exist because they were built against Fuel's `PagedSessionScheduler`
+(`fuel_inference::multi_session::PagedSessionScheduler<M: PagedDecodeModel>`) — a *second,
+newer* scheduler Fuel ships, separate from the `SessionScheduler` actually in use.**
+`PagedSessionScheduler` is the one with `register_prefix`/`release_prefix`/
+`add_session_sharing_prefix` (confirmed in `multi_session.rs`, lines ~1583-1716) — prefix-sharing
+is a feature of the scheduler lightbulb is NOT using, not a missing feature of the one it is.
+
+### The real blocker: `PagedDecodeModel` has zero implementors, anywhere — but it's closer than it looks
+
+`PagedSessionScheduler<M>` requires `M: PagedDecodeModel`
+(`fn forward_paged_step(&self, token, pool: &mut DeviceKvPool, session) -> Result<Vec<f32>>` +
+a batched sibling). `grep -rn "impl.*PagedDecodeModel for" ` over the **entire** pinned Fuel
+checkout returns zero hits — nothing implements this trait today, not in Fuel, not in lightbulb.
+That sounds like new engineering, but checking closer: **`fuel-model-llama`'s `LlamaModel` already
+has an inherent `forward_paged_step` with the exact signature the trait wants** (same pool type,
+same session handle type, same error type — `fuel-model-llama/src/lib.rs:898`), already exercised
+by lightbulb's own (also-unwired) `BatchedPagedDecoder` tests. The method exists; only the trait
+label is missing. Rust's orphan rule means lightbulb can't `impl PagedDecodeModel for
+fuel_model_llama::LlamaModel` directly (lightbulb owns neither the trait nor the type) — but a
+thin newtype wrapper owned by lightbulb, forwarding to the existing inherent methods, is ordinary,
+in-lightbulb-scope Rust, not a cross-repo ask. **Qwen3 has no `forward_paged_step` anywhere in the
+pinned checkout** (`grep` for it across the whole repo, filtered to Qwen-named files, returns
+nothing) — this path covers Llama only until Fuel ships the Qwen3 equivalent.
+
+### A genuinely open risk, not yet resolved: where `Op::PagedAttn` actually executes on GPU
+
+`tests/gpu_paged_vs_contiguous.rs`'s own header records **three mutually exclusive prior claims
+and six retractions** about whether paged attention runs on GPU via a fused kernel, a decompose
+path, or falls back to CPU with H2D/D2H copies stitched around it. This was not re-resolved while
+sizing this plan — it is exactly the kind of question slice 1 below must settle (with a measured,
+not argued, answer) before anything downstream can trust a "fast" paged path on CUDA.
+
+### Slices
+
+1. **`LlamaPagedAdapter`**: a lightbulb-owned newtype wrapping `fuel_model_llama::LlamaModel`,
+   implementing Fuel's `PagedDecodeModel` by forwarding to the model's existing inherent
+   `forward_paged_step`/`forward_paged_step_batched`. Test: a trivial paged step through the
+   trait must produce output identical to calling the inherent method directly (pure forwarding,
+   provable bit-for-bit). Entirely within lightbulb's scope — no Fuel-side change needed.
+2. **Swap `scheduler_driver.rs`'s `FuelSchedulerDriver` from `SessionScheduler` to
+   `PagedSessionScheduler<LlamaPagedAdapter>`** for admission and stepping — prefix-sharing still
+   NOT wired yet, this slice only changes which scheduler drives requests. Must resolve the
+   `Op::PagedAttn` GPU-execution-path question above as part of this slice (measured, with the
+   measurement recorded), since this is the slice that puts paged attention on the hot path for
+   the first time. Test: an acceptance comparison against the current `SessionScheduler` path's
+   output (same prompt, same seed, same tokens) — parity is the claim, not merely "it runs."
+3. **Wire `BlockPrefixIndex` as the admission-time decision layer**: on each new session,
+   `BlockPrefixIndex::lookup` against recorded donors; on a hit, call
+   `PagedSessionScheduler::add_session_sharing_prefix` instead of plain `add_session`;
+   `BlockPrefixIndex::record` the donor once prefill completes. Test: two requests sharing an
+   identical prefix must produce bit-identical completions AND measurably skip prefill for the
+   shared portion (inspect `prefill_start`/`session_realize_count`, not just the output text).
+4. **`BatchedPagedDecoder` (`batched.rs`) reconciliation** — once slice 2 lands, decide whether
+   `scheduler_driver.rs`'s per-session stepping or `batched.rs`'s hand-rolled batched loop is the
+   one that survives; they overlap in purpose. Not decided here; flagged so slice 2 doesn't
+   accidentally leave two competing paged-decode implementations both half-wired.
+5. **Qwen3 support** — blocked on Fuel shipping a `forward_paged_step` for a Qwen3 model type.
+   Cross-repo; message the fuel lane before scheduling, don't build a wrapper for a method that
+   doesn't exist yet.
+
+Each slice must land green on `cargo test --lib` (and, for slices touching the `fuel-engine`
+feature, `cargo test --features fuel-engine --tests --no-run` at minimum — no GPU runner exists
+to execute them, same limit `ci.yml` already states) plus its own new test proving the specific
+claim.
+
+**Not started.** This is a sizing document only, per the task that produced it — build begins only
+once the PM confirms priority against the rest of the roadmap.
+
+---
+
 ## Status Legend
 
 - **PLANNED**: Feature designed with acceptance criteria defined, not yet started
