@@ -29,7 +29,7 @@ are not silently forgotten and so a future sweep does not re-raise them as new.
 
 | item | origin | licence | pinned? | class / status |
 |---|---|---|---|---|
-| `src/cache/parallel_cache_builder.rs` | `huggingface/candle`, `candle-nn/src/kv_cache.rs` (`ScatteredCacheBuilder`/`IndicesAndMask`/`indices_and_mask()` — confirmed present upstream, same names) | Apache-2.0 OR MIT (confirmed via candle's own `LICENSE-APACHE`/`LICENSE-MIT`; `candle-nn`'s `Cargo.toml` uses `license.workspace = true` inheriting it) | **no** — vendored 2025-10-23 (first commit `0b1dc79`), no upstream commit SHA recorded then or since | MODIFIED (file's own header: "Modified for parallel batching with variable-length sequences") |
+| `src/cache/parallel_cache_builder.rs` | `huggingface/candle`, `candle-nn/src/kv_cache.rs` (`ScatteredCacheBuilder`/`IndicesAndMask`/`indices_and_mask()` — confirmed present upstream, same names) | Apache-2.0 OR MIT (confirmed via candle's own `LICENSE-APACHE`/`LICENSE-MIT`; `candle-nn`'s `Cargo.toml` uses `license.workspace = true` inheriting it) | **yes, date-bounded**: `3b35cfca9462b88ab66f726277571ffb4a35378d` (2025-09-09, "Update kv_cache.rs (#3035)") — the last upstream commit to this file on or before our vendor date (2025-10-23, first commit `0b1dc79`); no exact vendor-time SHA was recorded, so this is a lower bound, not a recovered fact | MODIFIED, confirmed by blob-level comparison (§below), not just the file's own claim |
 | `src/backend/marlin_ffi.rs` + its CUDA symbol declarations | `guoqingbao/attention.rs`, `src/kernels/src/ffi.rs` (per the file's own in-tree ruling, dated 2026-08-20) | MIT (attention.rs; no LICENSE file in that repo, hence GitHub reports `license: null`) | n/a — ABI-mandated interface, ruled not independently copyrightable | **RESOLVED** (CireSnave ruling already in the file; not re-litigated here) |
 | CUDA kernel sources formerly under `kernels/` | unattributed, MIT-only third party (never identified by name in the deleted code; see commit message) | MIT (as found) | n/a | **RESOLVED BY DELETION**, commit `1e16b8a4`, 2026-08-19: "Remove vendored third-party CUDA kernels — unattributed and MIT-only" |
 
@@ -46,14 +46,41 @@ are not silently forgotten and so a future sweep does not re-raise them as new.
   `LICENSE-APACHE`/`LICENSE-MIT` files, not inferred from this project's own default.
 - No NOTICE file is owed: candle ships no NOTICE file (confirmed), and the Apache-2.0 §4(d)
   requirement only applies where the origin has one.
+- **Follow-up (2026-10-14, PM-ruled): G-PCB-2 and G-PCB-3 resolved.** Cloned
+  `huggingface/candle` (`git clone --filter=blob:none`) into a scratch dir outside
+  `C:\Projects` (not a shared tree). `candle-nn/src/kv_cache.rs`'s commit history shows the file
+  last touched, before our 2025-10-23 vendor date, at `3b35cfca9462b88ab66f726277571ffb4a35378d`
+  (2025-09-09) — pinned above as the (date-bounded) origin commit.
+  - **Whole-file diff is not the right test here**: our file has grown to 3118 lines against
+    upstream's ~238-line `ScatteredCacheBuilder` section (13x), from unrelated additions
+    (eviction, streaming, H2O policy wiring) accumulated since the fork — a naive full-file diff
+    (3358 changed lines) measures that growth, not the fork's fidelity.
+  - **Line-level comparison of the actually-forked pieces** instead: our `IndicesAndMask` struct
+    (`parallel_cache_builder.rs:42-58`) matches upstream's (`kv_cache.rs:404-412` at the pinned
+    commit) field-for-field, plus an added `active: Vec<bool>` field and doc comments. Our
+    `indices_and_mask()` (`parallel_cache_builder.rs:2232-2340`) opens with the same early-return
+    guard, the same per-slot loop structure, and — strongest single piece of evidence — the exact
+    same performance-rationale comment, byte-for-byte: `// up being almost 10x faster with candle
+    0.9.0. This has been fixed in candle 0.9.1.` (our line 2331, upstream line 572 of the pinned
+    blob). `git log -S` on that exact string against `kv_cache.rs` finds only one commit,
+    `cd96fa80` (2025-05-01, "Add a scattered kv cache", PR #2936) — unchanged through the pinned
+    commit, confirming this isn't convergent phrasing. Our version then diverges to add
+    streaming-config-aware indexing and eviction-aware masking (the real "Modified for parallel
+    batching" content), substantiating the class rather than just repeating the file's own claim.
+  - Licence files were NOT re-verified for byte-identity against candle's root `LICENSE-MIT`/
+    `LICENSE-APACHE` (hashed and found to differ from lightbulb's own, as expected: these are
+    whole-project licence files, not a vendored copy of candle's — there is no `vendor/`
+    directory here for a byte-identity check to apply to, unlike baracuda's audit). The *type*
+    (Apache-2.0 OR MIT) was already confirmed correct in §2 above; that is the only claim this
+    file's SPDX line makes.
 
 ## 3. Gap register
 
 | id | gap | status |
 |---|---|---|
 | G-PCB-1 | `parallel_cache_builder.rs`'s header claims `Copyright (c) 2023 Hugging Face`, but candle's own `LICENSE-MIT` text (fetched directly) carries **no copyright line at all** — the claim is not verifiable from anything upstream states, only from "Hugging Face" being the GitHub org that hosts `candle`. Per the method's rule ("do not invent a holder... the header then names the origin... never a person"), this is corrected below to name the origin repository rather than assert an unverified legal copyright holder. | **FIXED** (this PR, comment-only — see below) |
-| G-PCB-2 | No upstream candle commit SHA is pinned for the fork, and none was recorded at vendor time (2025-10-23). Per the method, this should read "last upstream commit on or before the vendor date, date-bounded and not recovered" rather than nothing — but identifying that specific commit requires cloning candle's full history (`git clone --filter=blob:none --no-checkout`), not done here (no local clone available this session). | **open** — needs a PM-authorized follow-up with an actual candle clone to resolve, or an explicit decision to accept it as permanently date-bounded |
-| G-PCB-3 | No blob-level diff was performed against candle's current `kv_cache.rs` (would require the same clone as G-PCB-2) — class MODIFIED is asserted from the file's own "Modified for..." comment and the structural match (`IndicesAndMask`, `indices_and_mask()`, `ScatteredCacheBuilder` all present upstream with the same names, confirmed via direct fetch), not from a byte-level diff. | **open** — same follow-up as G-PCB-2 would resolve this too |
+| G-PCB-2 | No upstream candle commit SHA was pinned for the fork. | **FIXED** (follow-up, this PR) — pinned to `3b35cfca9462b88ab66f726277571ffb4a35378d`, date-bounded (see §2) |
+| G-PCB-3 | No blob-level diff was performed against candle. | **FIXED** (follow-up, this PR) — line-level comparison of the forked struct/function against the pinned commit, including a verbatim-matched comment proving direct copying (see §2); not a whole-file diff, which would have measured 13x of unrelated growth instead of fork fidelity |
 
 No gap in this register touches a vendored file, a licence file, or more than a comment-line header
 — per the task's own constraint, **no code bytes were changed by this PR**.

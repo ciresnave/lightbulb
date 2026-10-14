@@ -10,6 +10,11 @@
   sources). Comment-only fix: the fork's header asserted an unverifiable `Copyright (c) 2023
   Hugging Face` line (candle's own licence text names no holder); corrected to name the origin
   repository instead of an unverified legal holder. No code bytes changed.
+  Follow-up: cloned `huggingface/candle` to resolve the two open gaps left by the initial audit
+  (no commit pinned, no blob diff) — pinned the fork to `3b35cfca9` (date-bounded) and confirmed
+  the derivation with a verbatim-matched comment plus struct/function-level comparison, not a
+  naive whole-file diff (which would have measured 13x of unrelated growth instead of fork
+  fidelity).
 
 ## 0.7.0
 
