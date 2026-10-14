@@ -28,6 +28,13 @@ on:
     branches: [main]
   pull_request:
 
+# SUP-008 (CodeRipper, 2026-10-14): least-privilege default. The `gates` job
+# below only builds, tests and reads the repo -- no deploy, no write, no
+# package publish -- so `contents: read` covers it with no per-job override
+# needed.
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
   # Full parallelism ICEs rustc on the maintainer's machine; -j 4 is the
@@ -72,7 +79,7 @@ jobs:
     # a red gate on the one we would like to.
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Show the toolchain CI actually resolved
         # Printed rather than assumed: a green whose compiler is unnamed is a
@@ -83,7 +90,7 @@ jobs:
           rustc --version
           cargo fmt --version
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
       - name: fmt
         shell: bash
@@ -202,7 +209,7 @@ jobs:
       # The Rust toolchain gets this treatment above by being pinned in
       # rust-toolchain.toml and printed; Python has no such file, so it is named
       # here.
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: '3.12'
 

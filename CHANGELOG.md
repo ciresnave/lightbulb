@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.7.2
+
+### Docs / CI
+- CodeRipper portfolio-triage hygiene fixes (WSP-001, SUP-008, DOC-009), no behaviour change:
+  - Added `.github/CODEOWNERS` (`* @ciresnave`).
+  - Pinned `ci.yml`'s three `uses:` to full commit SHAs (`actions/checkout@...` v4.4.0,
+    `Swatinem/rust-cache@...` v2.9.2, `actions/setup-python@...` v5.6.0), each with the version in
+    a trailing comment. Added a top-level `permissions: contents: read` (the single `gates` job
+    needs nothing more).
+  - Added `GLOSSARY.md` (59 tracked doc pages clears the >=10-page DOC-009 threshold).
+  - Verified before/after with a local build of `coderipper` 0.6.27 (`origin/main` 4375a87):
+    before, WSP-001/DOC-009/SUP-008 = 1/1/5 findings, matching the triage doc exactly; after, all
+    three clean.
+
 ## 0.7.1
 
 ### Docs
