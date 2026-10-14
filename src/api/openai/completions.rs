@@ -133,6 +133,27 @@ pub async fn completions(
             .into_response();
     }
 
+    // Same check and reasoning as `openai::chat::chat_completions` (board
+    // item M4 slice 2): a `chars/4 + max_tokens` estimate, not a real token
+    // count -- see that function's doc comment for why.
+    let estimated_prompt_chars: usize = match &request.prompt {
+        PromptInput::Single(s) => s.len(),
+        PromptInput::Multiple(v) => v.iter().map(|s| s.len()).sum(),
+    };
+    let estimated_tokens = estimated_prompt_chars / 4 + request.max_tokens.unwrap_or(100);
+    if let Err(reason) = state.scheduler.check_admission(estimated_tokens) {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({
+                "error": {
+                    "message": reason,
+                    "type": "server_busy"
+                }
+            })),
+        )
+            .into_response();
+    }
+
     match create_completion(state, request).await {
         Ok(response) => (StatusCode::OK, Json(response)).into_response(),
         Err(e) => {
@@ -343,6 +364,25 @@ mod tests {
             .await
             .into_response();
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    /// Board item M4 slice 2, completions' twin of the chat.rs test of the
+    /// same shape: a tiny budget rejects any request regardless of token
+    /// count (the base per-slot cost alone exceeds it).
+    #[tokio::test]
+    async fn completions_rejects_a_request_over_the_memory_budget() {
+        use crate::engine::{MemoryAwareConfig, MemoryAwareScheduler};
+
+        let mut state = state_with_runner(None);
+        state.scheduler = std::sync::Arc::new(MemoryAwareScheduler::new(MemoryAwareConfig {
+            max_memory_bytes: 1_000,
+            ..Default::default()
+        }));
+
+        let response = self::completions(State(state), Json(request()))
+            .await
+            .into_response();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 
     #[tokio::test]
