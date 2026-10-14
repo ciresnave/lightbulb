@@ -304,6 +304,21 @@ pub struct AppState {
     /// `PrefixCacheStats::default()`, which is a valid "nothing to report"
     /// reading, not a second spelling of absence.
     pub cache_stats: crate::engine::model_runner::SharedCacheStats,
+
+    /// Live CPU/memory sampler backing the `metrics` admin endpoint (Phase 4
+    /// hardening item 2). A persistent `sysinfo::System`, not one created
+    /// per request: `sysinfo` computes CPU usage as a diff between two
+    /// refreshes, so a fresh instance always reads 0 on its first use.
+    pub live_system: SharedSystemMetrics,
+}
+
+/// Shared, persistent system sampler for CPU/memory metrics. See
+/// `AppState::live_system`.
+pub type SharedSystemMetrics = std::sync::Arc<std::sync::Mutex<sysinfo::System>>;
+
+/// Construct a fresh `live_system` handle for `AppState`.
+pub fn new_shared_system_metrics() -> SharedSystemMetrics {
+    std::sync::Arc::new(std::sync::Mutex::new(sysinfo::System::new_all()))
 }
 
 /// API server
@@ -398,6 +413,7 @@ impl ApiServer {
             cache_stats: Arc::new(std::sync::Mutex::new(
                 crate::cache::PrefixCacheStats::default(),
             )),
+            live_system: new_shared_system_metrics(),
         };
 
         // Try to start a model runner thread if a model directory and default model exist

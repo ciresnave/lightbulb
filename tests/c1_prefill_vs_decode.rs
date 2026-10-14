@@ -107,6 +107,7 @@ async fn complete_raw(path: &Path, prompt: &str, max_tokens: usize) -> serde_jso
         cache_stats: std::sync::Arc::new(std::sync::Mutex::new(
             lightbulb::cache::PrefixCacheStats::default(),
         )),
+        live_system: lightbulb::api::new_shared_system_metrics(),
     };
     let app = lightbulb::api::openai::routes().with_state(state);
     let body = serde_json::json!({
