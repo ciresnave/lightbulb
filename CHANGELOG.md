@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.8.3
+
+### Docs
+- Corrected ROADMAP.md's research-track item 2 (the `strftime_now` live-date rendering hazard):
+  it was already fixed the same day as the review that surfaced it (#107, 2026-09-30) and the
+  roadmap entry was never updated to say so. No code change.
+
 ## 0.8.2
 
 ### Docs / Tests
