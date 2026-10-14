@@ -800,6 +800,46 @@ proving each byte-identical against a reference, which
 
 ---
 
+## M4 — MemoryAwareScheduler integration: slice plan (added 2026-10-14, PM-approved)
+
+V1_ROADMAP.md's Phase 3 names this as one block ("MemoryAwareScheduler Integration"). Confirmed
+still genuinely unbuilt (2026-10-14): `grep -rn MemoryAwareScheduler src/engine/model_runner.rs`
+→ zero hits, and `AppState.scheduler`'s only production reader (`admin.rs::cache_stats` and its
+three siblings) returns hardcoded mock data behind a `TODO`. But it is not one PR — the serving
+path (`ModelRunner::start` → `run_jobs`, a dedicated thread talking to the HTTP layer only via
+an `mpsc` channel) has no cross-thread readable state at all today, and `AppState.scheduler` is a
+disconnected instance nothing ever submits a request to. Sliced so each lands as its own PR with
+its own test, in this order:
+
+1. **Wire real prefix-cache stats into the `cache_stats` admin endpoint**, replacing the
+   hardcoded-zero mock. Smallest real win: `ParallelModelManager`'s `PrefixKvCache` is already
+   live in the serving path (`parallel_model_manager.rs:1138,1427,1431`) and already exposes
+   `prefix_cache_stats()`/`entry_count()`/`current_size_bytes()` — the gap is purely that nothing
+   threads a readable handle from the model-runner thread out to the HTTP layer. Needs a new
+   `Arc<Mutex<_>>` snapshot handle threaded through `ModelRunner::start`'s signature (breaking,
+   same shape as #134's `max_queue_depth` addition) and a new `EngineModel::prefix_cache_stats()`
+   trait method (default-provided, so the two test stub impls in `model_runner.rs` need no
+   change). Does **not** touch `scheduler_stats`/`scheduler_queue`/`cache_clear` — those three
+   stay mocked because their backing data (the scheduler actually seeing requests) doesn't exist
+   until slice 3.
+2. **Wire real data into `scheduler_stats`/`scheduler_queue`**, once slice 3 makes
+   `AppState.scheduler` meaningful. Deferred until then — wiring it to the still-unfed instance
+   now would just swap one kind of fake data (hardcoded zero) for another (real-but-always-zero).
+3. **Request admission**: route jobs through `MemoryAwareScheduler::submit_request` /
+   `allocate_pending_requests` before dispatch, as a reject-when-over-memory-budget gate —
+   parallel to #134's bounded-queue 503, but keyed on the scheduler's memory estimate instead of
+   raw queue depth. This is what makes slice 2's data real.
+4. **Priority**: expose a `priority` field (Lightbulb extension, OpenAI has no such field) on
+   chat/completions requests, mapped to `Priority` on submission into slice 3's admission path.
+5. **Continuous batching**: replace `run_jobs`'s one-job-at-a-time loop with real multi-request
+   batching via `SlotPool`. The big one — expect this to need further sub-slicing once reached;
+   do not pre-slice it now, the shape of slices 1-4 may change what's left.
+
+Each slice must land green on `cargo test --lib` plus its own new test proving the specific claim
+(a mock replaced with live data, a real rejection, etc.) — not just "compiles."
+
+---
+
 ## Status Legend
 
 - **PLANNED**: Feature designed with acceptance criteria defined, not yet started
