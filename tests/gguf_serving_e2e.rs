@@ -127,8 +127,17 @@ fn gguf_path() -> Option<PathBuf> {
 /// comparison between them. `chat_template.rs`'s own docs call out exactly
 /// this failure mode for the four copies `resolve_for_serving` replaced.
 async fn serve_the_fixed_prompt(path: &Path) -> (StatusCode, serde_json::Value) {
-    let tx = ModelRunner::start(path, 1, 512, Some("f32".to_string()), 8)
-        .expect("starting the model runner");
+    let tx = ModelRunner::start(
+        path,
+        1,
+        512,
+        Some("f32".to_string()),
+        8,
+        std::sync::Arc::new(std::sync::Mutex::new(
+            lightbulb::cache::PrefixCacheStats::default(),
+        )),
+    )
+    .expect("starting the model runner");
     let state = AppState {
         scheduler: Arc::new(MemoryAwareScheduler::new(MemoryAwareConfig::default())),
         config: ApiConfig::default(),
@@ -137,6 +146,9 @@ async fn serve_the_fixed_prompt(path: &Path) -> (StatusCode, serde_json::Value) 
         chat_template: chat_template::resolve_for_serving(path),
         eos_monitor: Default::default(),
         security_sinks: Vec::new(),
+        cache_stats: std::sync::Arc::new(std::sync::Mutex::new(
+            lightbulb::cache::PrefixCacheStats::default(),
+        )),
     };
     let app = lightbulb::api::openai::routes().with_state(state);
     let body = serde_json::json!({

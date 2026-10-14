@@ -132,6 +132,14 @@ pub struct InferenceJob {
 /// rather than queuing without bound.
 pub type InferenceRequestSender = SyncSender<InferenceJob>;
 
+/// Shared, cross-thread-readable snapshot of the prefix cache's stats — the
+/// `cache_stats` admin endpoint's data source (board item M4 slice 1). The
+/// model-runner thread owns the real `ParallelModelManager`/`PrefixKvCache`
+/// and never shares it; this is the one piece of state that crosses that
+/// boundary outside the per-job `mpsc` channel, written by `run_jobs` after
+/// each job and read by the HTTP layer without going through it.
+pub type SharedCacheStats = std::sync::Arc<std::sync::Mutex<crate::cache::PrefixCacheStats>>;
+
 /// Returned by an enqueue attempt that found the inference queue at capacity.
 ///
 /// A distinct type, rather than a bare `anyhow!(...)`, so a handler can tell
@@ -218,6 +226,14 @@ pub(crate) trait EngineModel {
 
     /// Detokenize.
     fn decode_text(&self, tokens: &[u32], skip_special: bool) -> Result<String>;
+
+    /// Snapshot of the prefix cache's current stats, for diagnostics (the
+    /// `cache_stats` admin endpoint — board item M4 slice 1). Default-provided
+    /// and empty for an implementor with no such cache, so the test stubs in
+    /// this module's own tests need no change.
+    fn prefix_cache_stats(&self) -> crate::cache::PrefixCacheStats {
+        crate::cache::PrefixCacheStats::default()
+    }
 }
 
 impl EngineModel for crate::model::ParallelModelManager {
@@ -227,6 +243,13 @@ impl EngineModel for crate::model::ParallelModelManager {
 
     fn decode_text(&self, tokens: &[u32], skip_special: bool) -> Result<String> {
         self.decode(tokens, skip_special)
+    }
+
+    fn prefix_cache_stats(&self) -> crate::cache::PrefixCacheStats {
+        // Resolves to the inherent method of the same name
+        // (`ParallelModelManager::prefix_cache_stats`), which Rust prefers
+        // over recursing into this trait method.
+        self.prefix_cache_stats()
     }
 }
 
@@ -254,6 +277,9 @@ impl ModelRunner {
     /// * `max_queue_depth` - Maximum number of jobs the channel will hold
     ///   (queued plus the one being processed) before `try_send` on the
     ///   returned sender starts reporting [`std::sync::mpsc::TrySendError::Full`].
+    /// * `cache_stats` - Shared handle `run_jobs` writes the prefix cache's
+    ///   stats into after every job, for the `cache_stats` admin endpoint to
+    ///   read without going through the inference channel.
     #[cfg(not(feature = "fuel-engine"))]
     pub fn start(
         model_path: impl Into<PathBuf>,
@@ -261,6 +287,7 @@ impl ModelRunner {
         context_length: usize,
         dtype: Option<String>,
         max_queue_depth: usize,
+        cache_stats: SharedCacheStats,
     ) -> Result<InferenceRequestSender> {
         let model_path = model_path.into();
         let (tx, rx): (SyncSender<InferenceJob>, Receiver<InferenceJob>) =
@@ -305,7 +332,7 @@ impl ModelRunner {
                         if is_gguf { "GGUF" } else { "SafeTensors" }
                     );
 
-                    run_jobs(manager, rx);
+                    run_jobs(manager, rx, cache_stats);
                 }
                 Err(e) => {
                     // Model failed to load; consume any pending jobs and return error message
@@ -326,6 +353,11 @@ impl ModelRunner {
     /// is value-lossless but NOT accumulation-preserving. Silently honouring a
     /// "bf16" request would change numerics against every golden captured on
     /// the f32 path. The parameter stays for signature compatibility.
+    ///
+    /// `cache_stats` is accepted for signature compatibility with the
+    /// candlelight path and never written: this path's scheduling (board
+    /// item 97) doesn't go through `run_jobs`, which is the only writer,
+    /// and has no prefix-cache concept of its own today.
     #[cfg(feature = "fuel-engine")]
     pub fn start(
         model_path: impl Into<PathBuf>,
@@ -333,6 +365,7 @@ impl ModelRunner {
         context_length: usize,
         dtype: Option<String>,
         max_queue_depth: usize,
+        _cache_stats: SharedCacheStats,
     ) -> Result<InferenceRequestSender> {
         let model_path = model_path.into();
         let (tx, rx): (SyncSender<InferenceJob>, Receiver<InferenceJob>) =
@@ -405,7 +438,11 @@ pub(crate) fn drain_with_error(rx: Receiver<InferenceJob>, msg: &str) {
 
 /// The job loop. Identical for every backend, which is why it is generic rather
 /// than duplicated per `cfg`.
-pub(crate) fn run_jobs<M: EngineModel>(mut model: M, rx: Receiver<InferenceJob>) {
+pub(crate) fn run_jobs<M: EngineModel>(
+    mut model: M,
+    rx: Receiver<InferenceJob>,
+    cache_stats: SharedCacheStats,
+) {
     // Process incoming jobs
     while let Ok(job) = rx.recv() {
         let req = Request {
@@ -535,6 +572,12 @@ pub(crate) fn run_jobs<M: EngineModel>(mut model: M, rx: Receiver<InferenceJob>)
                 }
             }
         }
+
+        // Once per job, regardless of mode -- the one piece of state this
+        // thread shares outside the per-job channel (board item M4 slice 1).
+        if let Ok(mut guard) = cache_stats.lock() {
+            *guard = model.prefix_cache_stats();
+        }
     }
 
     println!("Model runner thread exiting (receiver closed)");
@@ -645,7 +688,13 @@ mod tests {
             .unwrap();
             drop(tx); // so `run_jobs` returns rather than blocking forever
 
-            run_jobs(SpyModel { seen: seen.clone() }, rx);
+            run_jobs(
+                SpyModel { seen: seen.clone() },
+                rx,
+                std::sync::Arc::new(std::sync::Mutex::new(
+                    crate::cache::PrefixCacheStats::default(),
+                )),
+            );
 
             let seen = seen.lock().unwrap();
             assert_eq!(
@@ -713,6 +762,9 @@ mod tests {
                 calls: calls.clone(),
             },
             rx,
+            std::sync::Arc::new(std::sync::Mutex::new(
+                crate::cache::PrefixCacheStats::default(),
+            )),
         );
 
         assert_eq!(

@@ -67,17 +67,23 @@ pub struct LayerCacheStats {
 }
 
 /// Get cache statistics
+///
+/// Reports the prefix cache's real stats (board item M4 slice 1), written by
+/// the model-runner thread after every job -- see `AppState::cache_stats`.
+/// `layers` stays empty: no per-layer breakdown exists in the prefix cache
+/// today, so this is an honest absence, not a mock.
 async fn cache_stats(State(state): State<AppState>) -> impl IntoResponse {
-    // Get stats from scheduler's cache
-    let scheduler = &state.scheduler;
+    let stats = state
+        .cache_stats
+        .lock()
+        .map(|guard| guard.clone())
+        .unwrap_or_default();
 
-    // TODO: Implement actual cache stats retrieval
-    // For now, return mock data
     let response = CacheStatsResponse {
-        total_entries: 0,
-        total_size_bytes: 0,
-        hit_rate: 0.0,
-        eviction_count: 0,
+        total_entries: stats.entries,
+        total_size_bytes: stats.size_bytes,
+        hit_rate: stats.hit_rate() as f32,
+        eviction_count: stats.evictions,
         layers: vec![],
     };
 
@@ -413,6 +419,9 @@ mod tests {
             chat_template: None,
             eos_monitor: std::sync::Arc::new(crate::engine::eos_monitor::EosMonitor::default()),
             security_sinks: Vec::new(),
+            cache_stats: std::sync::Arc::new(std::sync::Mutex::new(
+                crate::cache::PrefixCacheStats::default(),
+            )),
         }
     }
 
@@ -577,5 +586,46 @@ mod tests {
                 "{method} {uri} must let an admin caller through"
             );
         }
+    }
+
+    /// Board item M4 slice 1: `cache_stats` must report whatever is in
+    /// `AppState.cache_stats`, not a hardcoded mock. Populate the shared
+    /// handle with values a real model-runner thread would never produce by
+    /// coincidence (asymmetric, non-zero, non-default), then assert the HTTP
+    /// response carries exactly those values through the real router.
+    #[tokio::test]
+    async fn cache_stats_reports_the_shared_handles_real_values_not_a_mock() {
+        let app_state = state();
+        {
+            let mut guard = app_state.cache_stats.lock().unwrap();
+            guard.hits = 7;
+            guard.misses = 3;
+            guard.evictions = 2;
+            guard.entries = 5;
+            guard.size_bytes = 4096;
+        }
+
+        let req = Request::builder()
+            .method("GET")
+            .uri("/v1/lightbulb/admin/cache/stats")
+            .extension(key_info("admin"))
+            .body(Body::empty())
+            .unwrap();
+        let response = routes().with_state(app_state).oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+
+        assert_eq!(body["total_entries"], 5, "full body: {body:?}");
+        assert_eq!(body["total_size_bytes"], 4096, "full body: {body:?}");
+        assert_eq!(body["eviction_count"], 2, "full body: {body:?}");
+        // hit_rate = hits / (hits + misses) = 7 / 10
+        assert!(
+            (body["hit_rate"].as_f64().unwrap() - 0.7).abs() < 1e-6,
+            "full body: {body:?}"
+        );
     }
 }
