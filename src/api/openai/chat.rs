@@ -315,6 +315,36 @@ pub async fn chat_completions(
             .into_response();
     }
 
+    // Memory-budget admission (board item M4 slice 2): reject, synchronously
+    // and before dispatch, a request whose own estimated cost alone would
+    // exceed the scheduler's configured memory budget. Parallel to the
+    // bounded-queue 503 the inference channel itself returns on `try_send`,
+    // but keyed on an estimated memory COST rather than queue depth.
+    //
+    // The estimate is `chars/4 + max_tokens`, not a real token count — real
+    // tokenization happens later, inside the model-runner thread, and this
+    // check runs before that (and before template rendering) so it costs
+    // nothing on the hot path. `chars/4` UNDER-counts non-ASCII text
+    // (multi-byte UTF-8 sequences cost more tokens per byte than ASCII), so
+    // this is conservative toward acceptance: it can let through a request a
+    // real tokenizer would have rejected, never reject one that would have
+    // fit. A post-tokenization check is tracked as a follow-up in
+    // ROADMAP.md's M4 slice plan, not attempted here.
+    let estimated_prompt_chars: usize = request.messages.iter().map(|m| m.content.len()).sum();
+    let estimated_tokens = estimated_prompt_chars / 4 + request.max_tokens.unwrap_or(100);
+    if let Err(reason) = state.scheduler.check_admission(estimated_tokens) {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({
+                "error": {
+                    "message": reason,
+                    "type": "server_busy"
+                }
+            })),
+        )
+            .into_response();
+    }
+
     // BEFORE the `stream` routing below, deliberately, and not inside either
     // branch of it. Only `create_chat_completion` consults
     // `lightbulb.output_contract`; `create_chat_stream` has never read
@@ -3944,6 +3974,43 @@ mod tests {
             .into_response();
 
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    /// Board item M4 slice 2: a request whose own estimated memory cost
+    /// exceeds the scheduler's configured budget is rejected before
+    /// dispatch, not silently served. A budget this tiny rejects any
+    /// request regardless of its token count (the base per-slot cost alone
+    /// exceeds it), which is what makes this test robust rather than
+    /// dependent on getting the chars/4 arithmetic exactly right.
+    #[tokio::test]
+    async fn chat_completions_rejects_a_request_over_the_memory_budget() {
+        use crate::engine::{MemoryAwareConfig, MemoryAwareScheduler};
+
+        let mut state = state_with(None);
+        state.scheduler = std::sync::Arc::new(MemoryAwareScheduler::new(MemoryAwareConfig {
+            max_memory_bytes: 1_000, // far below even one slot's base cost
+            ..Default::default()
+        }));
+
+        let response = chat_completions(State(state), Json(request()))
+            .await
+            .into_response();
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    /// Control for the test above: the SAME request against the default
+    /// (large) budget must reach the ordinary no-runner fallback, not a
+    /// 503 -- proving the check is a real gate, not an always-reject.
+    #[tokio::test]
+    async fn chat_completions_accepts_a_request_within_the_default_memory_budget() {
+        let state = state_with(None);
+
+        let response = chat_completions(State(state), Json(request()))
+            .await
+            .into_response();
+
+        assert_eq!(response.status(), StatusCode::OK);
     }
 
     #[tokio::test]

@@ -292,6 +292,40 @@ impl MemoryAwareScheduler {
         max_memory.saturating_sub(self.current_memory_usage)
     }
 
+    /// Estimate the memory a request would need, in bytes. Same formula
+    /// `allocate_pending_requests` uses, exposed so a caller can ask the
+    /// question before actually submitting anything.
+    pub fn estimate_request_memory(&self, estimated_tokens: usize) -> usize {
+        self.config.memory_per_slot_base + estimated_tokens * self.config.memory_per_token
+    }
+
+    /// Dry-run admission check (board item M4 slice 2): would a request
+    /// with this many estimated tokens fit in the configured memory
+    /// budget right now? Reads only -- does not queue, submit or mutate
+    /// anything, unlike `submit_request`/`allocate_pending_requests`.
+    ///
+    /// This is deliberately simpler than those two: `current_memory_usage`
+    /// never moves off zero in the live serving path today (nothing calls
+    /// `submit_request` there yet -- that is slice 3's job, once this
+    /// slice gives `AppState.scheduler` a reason to be fed), so in
+    /// practice this checks one request's estimate against the *whole*
+    /// configured budget, not against concurrent load. That is still a
+    /// real, useful check: it rejects a single request whose own
+    /// `max_tokens` alone would blow the budget, which nothing does today.
+    pub fn check_admission(&self, estimated_tokens: usize) -> Result<(), String> {
+        let estimated_memory = self.estimate_request_memory(estimated_tokens);
+        let available = self.get_available_memory();
+        if estimated_memory > available {
+            return Err(format!(
+                "request's estimated memory ({} MB) exceeds what the configured budget has \
+                 available ({} MB)",
+                estimated_memory / (1024 * 1024),
+                available / (1024 * 1024),
+            ));
+        }
+        Ok(())
+    }
+
     /// Update statistics
     fn update_stats(&mut self) {
         self.stats.used_bytes = self.current_memory_usage;
@@ -392,6 +426,46 @@ mod tests {
         let stats = scheduler.get_memory_stats();
         assert!(stats.used_bytes > 0);
         assert!(stats.eviction_pressure > 0.0);
+    }
+
+    /// Board item M4 slice 2: `check_admission` reads only, never mutates.
+    /// Calling it twice must give the same answer -- a dry-run that moved
+    /// state would make a caller's second check wrong.
+    #[test]
+    fn check_admission_does_not_mutate_state() {
+        let config = MemoryAwareConfig {
+            max_memory_bytes: 500 * 1024 * 1024,
+            memory_per_slot_base: 100 * 1024 * 1024,
+            memory_per_token: 50 * 1024,
+            ..Default::default()
+        };
+        let scheduler = MemoryAwareScheduler::new(config);
+
+        assert!(scheduler.check_admission(10).is_ok());
+        assert!(scheduler.check_admission(10).is_ok());
+    }
+
+    #[test]
+    fn check_admission_rejects_a_request_whose_estimate_exceeds_the_budget() {
+        let config = MemoryAwareConfig {
+            max_memory_bytes: 1_000,
+            ..Default::default()
+        };
+        let scheduler = MemoryAwareScheduler::new(config);
+
+        let err = scheduler
+            .check_admission(10)
+            .expect_err("a budget this tiny must reject any request");
+        assert!(
+            err.contains("MB"),
+            "rejection should name the sizes involved: {err}"
+        );
+    }
+
+    #[test]
+    fn check_admission_accepts_a_request_within_a_realistic_budget() {
+        let scheduler = MemoryAwareScheduler::new(MemoryAwareConfig::default());
+        assert!(scheduler.check_admission(100).is_ok());
     }
 
     #[test]
