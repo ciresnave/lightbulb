@@ -163,10 +163,15 @@ For current work, see `docs/superpowers/specs/` and `docs/superpowers/plans/`.
 ---
 
 ### 2.4 CLI Testing
-**Action Items** — **all NOT COVERED**: `src/bin/lightbulb-cli.rs` has no `#[cfg(test)]` module
-and no test attribute at all; no integration test spawns or drives the binary.
-- [ ] Test CLI in non-streaming mode (`non_stream_chat`, `lightbulb-cli.rs`)
-- [ ] Test CLI in streaming mode (`stream_chat`, `lightbulb-cli.rs:281`)
+**Updated 2026-10-14**: `non_stream_chat`/`stream_chat` take `client`/`base_url` as plain
+parameters, so they're testable against a real local server (axum, already a dependency) with no
+mocking library needed. The remaining three items are inside `main()`'s interactive stdin loop,
+genuinely harder to test without stdin mocking — still open.
+- [x] Test CLI in non-streaming mode — `non_stream_chat_returns_the_assistant_content_and_usage`,
+  `non_stream_chat_surfaces_the_servers_error_message` (`lightbulb-cli.rs` test module)
+- [x] Test CLI in streaming mode —
+  `stream_chat_concatenates_token_deltas_and_stops_at_the_done_sentinel`,
+  `stream_chat_surfaces_the_servers_error_message`
 - [ ] Verify conversation history maintained (`conversation: Vec<Message>`, `lightbulb-cli.rs:135-225`)
 - [ ] Test system prompt functionality (`args.system`, `lightbulb-cli.rs:138-141`)
 - [ ] Verify environment variable loading (`LIGHTBULB_API_KEY`, `lightbulb-cli.rs:119`)
@@ -198,12 +203,14 @@ and no test attribute at all; no integration test spawns or drives the binary.
 ---
 
 ### Phase 2 Validation — reconciled, not re-checked wholesale
-**Of ~24 original line items: 5 covered (2 of those gated behind a live Postgres), 19 not
-covered.** The success criteria below were never independently meaningful (they just restate the
-items above at a coarser grain) and are retired as a separate checklist rather than re-audited.
-The real open gaps, in priority order if this phase is picked up again: the per-key rate limiter
-has zero test coverage at all; the CLI binary has zero test coverage at all; the `[DONE]` SSE
-marker is a genuine spec-compliance gap, not a test gap.
+**Of ~24 original line items, as of 2026-10-14: 7 covered (2 of those gated behind a live
+Postgres), 17 not covered.** The `[DONE]` SSE marker gap was a real missing behavior, now fixed
+(#138). The CLI binary's two network-facing functions now have tests (this entry); its three
+stdin-loop items remain open. The success criteria below were never independently meaningful
+(they just restate the items above at a coarser grain) and are retired as a separate checklist
+rather than re-audited. The real open gap left, in priority order if this phase is picked up
+again: the per-key rate limiter has zero test coverage at all (needs a live Postgres to verify
+here, not available in this environment).
 
 ---
 
