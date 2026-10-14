@@ -431,66 +431,136 @@ loop {
 ---
 
 ## Phase 4: Production Hardening (Priority: MEDIUM)
-**Estimated Time**: 2-3 days  
+**Estimated Time**: 2-3 days
 **Dependencies**: Phase 3 complete
+
+> ⚠️ **Audited against real code 2026-10-14, at `origin/main` `58396d3`.** Same method as the
+> Phase 2 audit: each item checked against actual code (file:line evidence), not re-run as a
+> manual checklist. Unlike Phase 2 (5/24 covered, mostly just untested), **Phase 4 is
+> substantially unimplemented**: roughly 3/27 fully done, 6/27 partial, ~18/27 genuinely missing
+> — the unchecked `[ ]` boxes below are, for once, an accurate reading, not stale pessimism.
+> Several gaps are worse than "missing" — a real defect wearing the shape of a feature:
+> - **The admin `/metrics`-adjacent endpoint is a hardcoded zero stub.** `system_metrics()`
+>   (`src/api/admin.rs:209-219`) literally returns `cpu_usage_percent: 0.0`,
+>   `memory_total_bytes: 0`, `gpu_metrics: vec![]`, with a `// TODO` comment — not partially
+>   working, never wired to anything. There is no Prometheus-format endpoint at all (no
+>   `prometheus`/`metrics` crate in `Cargo.toml`).
+> - **`PipelineConfig.timeout_ms` is dead configuration.** Has a real default
+>   (`Some(300_000)`, `src/engine/pipeline.rs:284`) and looks like a working timeout, but is
+>   never read anywhere outside its own struct. `grep -rn "tokio::time::timeout" src/` → 0 hits
+>   in the whole crate — there is no request-timeout enforcement anywhere, despite the config
+>   field implying there is.
+> - **API key management is create-only.** No revoke or rotate endpoint exists
+>   (`grep -rni "revoke\|delete.*api_key" src/` → 0 hits) — a compromised key cannot be
+>   invalidated through the API at all.
+> - **`tracing-subscriber`'s `json` Cargo feature isn't enabled** (`Cargo.toml:137`:
+>   `features = ["env-filter"]` only) — "structured JSON logging" isn't an unused capability,
+>   the crate can't produce it without a dependency change first.
+> - CORS (`src/api/mod.rs:532-537`) and rate limiting (`auth_middleware.rs:274-340`) both have
+>   real, serving-path mechanisms — not dead code — but neither has the granularity its item
+>   implies: CORS is unconditionally `allow_origin(Any)` with no policy knob at all, and the
+>   rate limiter is one global per-API-key limit with no per-endpoint logic, silently disabled
+>   whenever no database is configured.
 
 ### 4.1 Error Handling
 **Action Items**:
-- [ ] Graceful degradation when model fails
-- [ ] Timeout handling for long-running requests
-- [ ] Proper error responses for all failure modes
-- [ ] Request cancellation support
-- [ ] Circuit breaker for repeated failures
+- [x] Graceful degradation when model fails — `queue_error_response()`
+  (`src/api/openai/chat.rs:486-496`) maps `QueueFullError` → 503, everything else → 500 with a
+  JSON body; `grep -n "panic!\|\.expect(" src/engine/model_runner.rs` → 0 hits.
+- [ ] Timeout handling for long-running requests — NOT DONE. `tokio::time::timeout` has 0 uses
+  anywhere in `src/` (positive control: the same grep style for `StatusCode::` finds 94 real
+  hits). See `PipelineConfig.timeout_ms` note above — the config field exists, the enforcement
+  does not.
+- [ ] Proper error responses for all failure modes — PARTIAL. Real differentiated 400/503/500
+  responses exist for validation and queue/runner failures, but request-size-DoS and timeout
+  failure modes have no error path because the underlying checks (below) don't exist.
+- [ ] Request cancellation support — NOT DONE. `grep -rn "CancellationToken" src/` → 0 hits; the
+  streaming handler has no logic reacting to a dropped client connection.
+- [ ] Circuit breaker for repeated failures — NOT DONE. `grep -rin "breaker" src/` → 0 hits.
 
 ---
 
 ### 4.2 Observability
 **Action Items**:
-- [ ] Structured logging (JSON format)
-- [ ] Request tracing with correlation IDs
-- [ ] Metrics endpoint (`/metrics` with Prometheus format)
-  - Request latency histograms
-  - Throughput (requests/sec)
-  - Error rates by endpoint
-  - Queue depth by priority
-  - Memory usage over time
-  - Slot utilization
-
-- [ ] Health check improvements:
-  - Deep health (check database, model loaded)
-  - Liveness vs readiness probes
+- [ ] Structured logging (JSON format) — NOT DONE, and the dependency itself isn't enabled (see
+  note above). `main.rs`/`lightbulb-probe.rs` both use `tracing_subscriber::fmt::layer()`
+  (human-readable only).
+- [ ] Request tracing with correlation IDs — NOT DONE. `TraceLayer::new_for_http()`
+  (`src/api/mod.rs:538`) is tower-http's internal span logging, not a client-visible correlation
+  ID; `grep -rn "x-request-id\|SetRequestIdLayer\|MakeRequestUuid" src/` → 0 hits. The
+  `RequestId` types that do exist (`slot_pool.rs:60`, `batched_llama.rs:36`,
+  `batch_metadata.rs:13`) are internal scheduler bookkeeping, never propagated to HTTP.
+- [ ] Metrics endpoint (`/metrics` with Prometheus format) — NOT DONE, worse than missing (see
+  note above: hardcoded-zero stub, wrong route, wrong format, no dependency).
+  - [ ] Request latency histograms — NOT DONE (`grep -rn "histogram\|Histogram" src/` finds only
+    an unrelated GGUF dtype-count comment)
+  - [ ] Throughput (requests/sec) — NOT DONE
+  - [ ] Error rates by endpoint — NOT DONE
+  - [ ] Queue depth by priority — NOT DONE
+  - [ ] Memory usage over time — NOT DONE
+  - [ ] Slot utilization — NOT DONE
+- [ ] Health check improvements — NOT DONE. `health_check()` (`src/api/mod.rs:720-722`) is
+  `async fn health_check() -> &'static str { "OK" }` — no DB check, no model-loaded check, no
+  liveness/readiness split.
 
 ---
 
 ### 4.3 Configuration Management
 **Action Items**:
-- [ ] Move hardcoded values to config file
-- [ ] Support environment variable overrides
-- [ ] Validate configuration on startup
-- [ ] Document all configuration options
-- [ ] Provide example configs for common scenarios
+- [ ] Move hardcoded values to config file — NOT DONE. No app config file format exists (only
+  `Cargo.toml`/`rust-toolchain.toml`); `rate_limit_per_minute`, `model_max_batch_size`,
+  `model_context_length`, `model_max_queue_depth`, and all of `MemoryAwareConfig`
+  (`main.rs:72-107`) are hardcoded constants with no file or env override.
+- [x] Support environment variable overrides — PARTIAL, credited as done for what it covers:
+  `main.rs:24-69` reads 8 real env vars (`DATABASE_URL`, `LIGHTBULB_BIND_ADDRESS`,
+  `LIGHTBULB_MODELS_DIR`, `LIGHTBULB_DEFAULT_MODEL`, `LIGHTBULB_JWT_SECRET`,
+  `LIGHTBULB_TRUSTED_PROXIES`, `LIGHTBULB_MAX_AUTH_ATTEMPTS_PER_MINUTE_PER_IP`,
+  `SECURITY_ALERT_EMAIL`) — but the hardcoded values above have no env equivalent at all, so
+  coverage is partial, not systemic.
+- [x] Validate configuration on startup — PARTIAL, real and wired:
+  `validate_auth_policy()` (`src/api/mod.rs:216-245`) is actually called from `ApiServer::new`
+  (`mod.rs:318`) and refuses to start on an unsafe no-DB/no-auth combination — but it validates
+  only the auth policy, nothing else (no checks on batch sizes, context length, port conflicts).
+- [ ] Document all configuration options — NOT DONE. All 8 env vars above are documented only as
+  inline Rust comments; `grep -rln "LIGHTBULB_BIND_ADDRESS\|LIGHTBULB_JWT_SECRET" docs/ *.md` →
+  0 hits.
+- [ ] Provide example configs for common scenarios — NOT DONE. No `.env.example` or
+  `config.example.*` file exists.
 
 ---
 
 ### 4.4 Security Hardening
 **Action Items**:
-- [ ] Rate limiting per endpoint
-- [ ] Request size limits (prevent DoS)
-- [ ] API key rotation support
-- [ ] Audit log retention policy
-- [ ] HTTPS/TLS support
-- [ ] CORS configuration
+- [ ] Rate limiting per endpoint — PARTIAL (see note above): real, Postgres-backed, but one
+  global per-key limit applied uniformly, not per-endpoint, and a no-op with no database.
+- [ ] Request size limits (prevent DoS) — NOT DONE. `grep -rn "RequestBodyLimitLayer\|
+  DefaultBodyLimit\|body_limit" src/` → 0 hits anywhere.
+- [ ] API key rotation support — NOT DONE (see note above: create-only, no revoke).
+- [ ] Audit log retention policy — NOT DONE. `grep -rni "retention\|purge" src/` → only an
+  unrelated KV-cache-compression comment about token retention, not audit logs.
+- [x] HTTPS/TLS support — DONE, confirmed live serving-path code, not a dead type:
+  `ApiServer::serve()` (`src/api/mod.rs:542-650+`) builds a real `rustls::ServerConfig`, binds a
+  second `TcpListener` for HTTPS, and runs a manual `TlsAcceptor` accept loop alongside HTTP.
+- [ ] CORS configuration — NOT DONE as a *policy* (see note above): the mechanism exists, wide
+  open, with no config knob — "configuration" implies a choice, and there isn't one.
 
 ---
 
 ### 4.5 Documentation
 **Action Items**:
-- [ ] API reference documentation
-- [ ] Architecture documentation
-- [ ] Deployment guide
-- [ ] Performance tuning guide
-- [ ] Troubleshooting guide
-- [ ] Migration guide (v0.x → v1.0)
+- [x] API reference documentation — DONE. `docs/API.md` (508 lines) is a genuine
+  endpoint-by-endpoint reference with request/response schemas.
+- [ ] Architecture documentation — PARTIAL. `docs/M3_6_MULTI_GPU_ARCHITECTURE.md` and a README
+  subsection cover only the multi-GPU slice; no overall system/request-flow architecture doc
+  exists.
+- [ ] Deployment guide — PARTIAL. README has a substantial TLS/SSL configuration section, but no
+  general deployment guidance (process manager, scaling, container deployment).
+- [ ] Performance tuning guide — NOT DONE. No dedicated file; `docs/` keyword hits are all
+  unrelated internal design docs (quantization research, kernel fusion analysis).
+- [ ] Troubleshooting guide — PARTIAL. README's "Troubleshooting" subsection is scoped only to
+  TLS, not general operational troubleshooting.
+- [ ] Migration guide (v0.x → v1.0) — NOT DONE. `docs/fuel-migration-*.md` are about the internal
+  candle→Fuel backend port, unrelated to a user-facing version-upgrade guide.
 
 ---
 
