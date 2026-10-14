@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.8.6
+
+### Docs
+- Audited V1_ROADMAP.md's Phase 4 ("Production Hardening") against real code, same method as
+  the earlier Phase 2 audit: ~3/27 items fully done, 6/27 partial, ~18/27 genuinely missing.
+  Unlike Phase 2 (mostly untested-but-working), several Phase 4 gaps are real defects wearing
+  the shape of a feature: the admin metrics endpoint is a hardcoded-zero stub with a `// TODO`
+  behind it; a `timeout_ms` config field exists but is never read anywhere (no request-timeout
+  enforcement exists at all); API keys can be created but never revoked or rotated; and
+  `tracing-subscriber`'s `json` feature isn't even enabled, so "structured logging" can't be
+  turned on without a dependency change first. No code change.
+
 ## 0.8.5
 
 ### Docs
