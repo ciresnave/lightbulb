@@ -85,6 +85,13 @@ jobs:
           Get-Package -Name "*PostgreSQL*" -ErrorAction SilentlyContinue | Format-Table Name,Version | Out-String | Write-Host
           Write-Host "---- Env:PGBIN / Env:PGROOT / Env:PGDATA ----"
           @('PGBIN','PGROOT','PGDATA') | ForEach-Object { Write-Host "$_ = $([Environment]::GetEnvironmentVariable($_))" }
+          # `where.exe` not finding a match sets a non-zero $LASTEXITCODE that
+          # otherwise becomes THIS STEP's exit code under pwsh (a documented
+          # Actions gotcha, not a cmdlet failure) -- which silently skipped
+          # every later step in this job on the prior run, before any of them
+          # printed a line. Measured: the previous run's log ends right after
+          # this step with no trace of the next step ever starting.
+          exit 0
 
       - name: start the bundled PostgreSQL and probe auth
         shell: pwsh
