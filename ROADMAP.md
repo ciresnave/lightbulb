@@ -985,6 +985,27 @@ once the PM confirms priority against the rest of the roadmap.
 
 ---
 
+## Pipeline execution driver — unbuilt (found 2026-10-14, Phase 4 audit follow-up)
+
+`src/engine/pipeline.rs`'s `Pipeline`/`PipelineBuilder`/`PipelineConfig` (multi-stage DAG
+orchestration with dependency tracking, parallel execution, KV cache sharing across stages — see
+the file's own module doc for the design) have **zero callers anywhere**, production or test
+(`grep -rn "engine::pipeline::Pipeline\b" src/ tests/` outside the file itself → 0 hits). `Pipeline`
+is a synchronous stage-state tracker only — `get_ready_stages`/`mark_running`/`mark_completed`/
+`mark_failed` — with no `async fn execute` anywhere, confirmed by its own test module being 100%
+`#[test]`, zero `#[tokio::test]`. Every `PipelineConfig` field (`max_concurrent_stages`,
+`enable_cache_sharing`, `timeout_ms`, `enable_parallel_execution`) is written and read back in a
+test asserting storage, never consulted by anything that runs stages — because nothing does.
+
+This is scaffolding for a feature (actual async multi-stage pipeline execution, dispatching each
+ready stage to the model runner and respecting `timeout_ms`/`max_concurrent_stages`) that was
+never built, not a live path missing one check. Building the driver — not pre-sliced here, size
+of effort unclear until someone reads the whole file and its intended caller surface (if the
+multi-stage-reasoning use case named in the module doc still applies) — is a real feature, PM's
+to prioritize against the rest of the roadmap.
+
+---
+
 ## Status Legend
 
 - **PLANNED**: Feature designed with acceptance criteria defined, not yet started
