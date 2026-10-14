@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.5.2
+
+### Changed
+- `kiss-ref-core`/`kiss-ops-vocab` dev-dependencies bumped 0.2.0 -> 0.4.0 (the actual crates.io
+  latest; closes a roadmap-flagged drift). 0.4.0 is a breaking release upstream
+  (`#[non_exhaustive]` on several enums, tightened NaN-quietness in `diff`, changed
+  `reduce_var`/`reduce_std` form, bool comparison dtype) but none of those surfaces are exercised
+  by `tests/kissref_differential.rs` -- verified by running the full differential and lib suites
+  against the bumped version, not assumed from the changelog. Dev-dependency only, no lightbulb
+  API change.
+
 ## 0.5.1
 
 ### Fixed
