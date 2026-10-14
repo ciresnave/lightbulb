@@ -43,6 +43,31 @@ env:
   CARGO_BUILD_JOBS: 4
 
 jobs:
+  # THROWAWAY PROBE, not a gate. Answers one question before Phase 4 item 3
+  # (API key revoke/rotate) builds a Postgres-integration CI job on top of
+  # an assumption: can windows-latest run a Linux Docker image at all?
+  # PersistAnt's Postgres service-container pattern runs on ubuntu-latest;
+  # lightbulb's only job runs on windows-latest (see the comment on `gates`
+  # below -- this repo does not build on Linux today). `services:` itself
+  # needs a Linux runner outright, so this probes the manual-`docker run`
+  # fallback instead. To be deleted once the question is answered either way.
+  windows_docker_probe:
+    runs-on: windows-latest
+    steps:
+      - name: docker version
+        shell: bash
+        run: docker version
+
+      - name: can windows-latest start a Linux container?
+        shell: bash
+        run: |
+          if docker run --rm hello-world:linux; then
+            echo "PROBE RESULT: Linux container STARTED"
+          else
+            echo "PROBE RESULT: Linux container FAILED to start"
+            exit 1
+          fi
+
   gates:
     # WINDOWS, NOT LINUX, AND THIS IS A MEASURED CONSTRAINT RATHER THAN A
     # PREFERENCE. Lightbulb does not currently build on Linux at all:
