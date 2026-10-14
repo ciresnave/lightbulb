@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.7.0
+
+### Changed
+- **Breaking:** `ModelRunner::start` gained a required `cache_stats: SharedCacheStats` parameter
+  (both the candlelight and fuel-engine arms), same shape and reasoning as #134's
+  `max_queue_depth` addition. Board item M4 slice 1: wires the `cache_stats` admin endpoint to
+  the prefix cache's real, already-live stats instead of a hardcoded mock. `fuel-engine` accepts
+  but never writes it — that path has no prefix-cache concept today.
+
 ## 0.6.2
 
 ### Fixed
