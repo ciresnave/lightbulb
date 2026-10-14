@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.6.2
+
+### Fixed
+- `/v1/chat/completions` streaming responses (both the real model-runner path and the no-model
+  fallback) now send a literal `data: [DONE]` line as the final SSE frame, matching the OpenAI
+  streaming contract. Found during the V1_ROADMAP Phase 2 test-coverage audit: the server never
+  sent it at all (not a missing test, a missing behavior) — `lightbulb-cli` already parsed for it
+  on the client side, so this closes a real client/server mismatch, not just adds coverage.
+
 ## 0.6.1
 
 ### Docs
