@@ -257,6 +257,24 @@ pub(crate) fn validate_auth_policy(config: &ApiConfig) -> Result<()> {
     Ok(())
 }
 
+/// Sourcery review of #155: `tokio::time::timeout` with a zero duration
+/// expires immediately, so `request_timeout_ms: 0` (e.g. a typo'd
+/// `LIGHTBULB_REQUEST_TIMEOUT_MS=0`) would reject every inference request
+/// with a 504 before the runner ever saw it. Rejected at startup, named,
+/// rather than silently accepted and discovered later as "every single
+/// request times out."
+pub(crate) fn validate_request_timeout(config: &ApiConfig) -> Result<()> {
+    if config.request_timeout_ms == 0 {
+        anyhow::bail!(
+            "refusing to start: request_timeout_ms is 0, which would time out every \
+             inference request immediately (tokio::time::timeout(0) always expires). Set \
+             LIGHTBULB_REQUEST_TIMEOUT_MS to a positive value, or omit it for the default \
+             (300000ms / 5 minutes)."
+        );
+    }
+    Ok(())
+}
+
 /// Shared application state
 #[derive(Clone)]
 pub struct AppState {
@@ -344,6 +362,7 @@ impl ApiServer {
     /// Create new API server
     pub async fn new(config: ApiConfig, scheduler: Arc<MemoryAwareScheduler>) -> Result<Self> {
         validate_auth_policy(&config)?;
+        validate_request_timeout(&config)?;
 
         // Set up database connection pool if DATABASE_URL is configured
         let db_pool = if let Some(ref database_url) = config.database_url {
@@ -861,6 +880,32 @@ mod tests {
     #[test]
     fn validate_auth_policy_allows_no_auth_on_loopback() {
         assert!(validate_auth_policy(&config_with(None, "127.0.0.1:8080", true)).is_ok());
+    }
+
+    /// Sourcery review of #155: `request_timeout_ms: 0` would silently
+    /// accept and then reject every single inference request (`timeout(0)`
+    /// always expires immediately).
+    #[test]
+    fn validate_request_timeout_refuses_zero() {
+        let config = ApiConfig {
+            request_timeout_ms: 0,
+            ..ApiConfig::default()
+        };
+        assert!(validate_request_timeout(&config).is_err());
+    }
+
+    #[test]
+    fn validate_request_timeout_allows_the_default() {
+        assert!(validate_request_timeout(&ApiConfig::default()).is_ok());
+    }
+
+    #[test]
+    fn validate_request_timeout_allows_any_positive_value() {
+        let config = ApiConfig {
+            request_timeout_ms: 1,
+            ..ApiConfig::default()
+        };
+        assert!(validate_request_timeout(&config).is_ok());
     }
 
     /// End-to-end through the real entry point, not just the pure function:
