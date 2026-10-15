@@ -5,11 +5,11 @@
 
 use axum::{
     Json, Router,
-    extract::{Extension, State},
+    extract::{Extension, Path, State},
     http::StatusCode,
     middleware,
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::{delete, get, post},
 };
 use chrono::NaiveDateTime;
 use rand::RngCore;
@@ -26,7 +26,7 @@ use crate::api::auth_middleware::{ApiKeyInfo, admin_check_middleware};
 /// (security audit, board PM task, 2026-10-04): every admin endpoint,
 /// including key creation, was reachable by any authenticated caller
 /// regardless of role. Attaching it as this sub-router's own `.layer()`
-/// scopes the check to exactly these six routes, not the OpenAI-compatible
+/// scopes the check to exactly these routes, not the OpenAI-compatible
 /// or Lightbulb-extension routers this one gets `.merge()`d with.
 pub fn routes() -> Router<AppState> {
     Router::new()
@@ -36,6 +36,11 @@ pub fn routes() -> Router<AppState> {
         .route("/v1/lightbulb/admin/scheduler/stats", get(scheduler_stats))
         .route("/v1/lightbulb/admin/metrics", get(system_metrics))
         .route("/v1/lightbulb/admin/api-keys", post(create_api_key))
+        .route("/v1/lightbulb/admin/api-keys/{id}", delete(revoke_api_key))
+        .route(
+            "/v1/lightbulb/admin/api-keys/{id}/rotate",
+            post(rotate_api_key),
+        )
         .layer(middleware::from_fn(admin_check_middleware))
 }
 
@@ -421,6 +426,373 @@ async fn create_api_key(
                 .into_response()
         }
     }
+}
+
+/// Revoke an API key response
+#[derive(Debug, Clone, Serialize)]
+pub struct RevokeApiKeyResponse {
+    pub key_id: String,
+    pub revoked: bool,
+}
+
+/// Revoke an API key.
+///
+/// Idempotent on an already-revoked key's id (0 rows updated reads as "not
+/// found", matching the already-gone case rather than inventing a third
+/// state). Refuses to revoke the caller's OWN key unless another unexpired,
+/// unrevoked admin key exists -- otherwise this would be the request that
+/// locks every admin out of every admin route, including the one that could
+/// undo it. This does **not** generalize to "the last admin key anywhere":
+/// only self-revocation is guarded, per the PM's scoping of this item.
+async fn revoke_api_key(
+    State(state): State<AppState>,
+    Extension(caller): Extension<ApiKeyInfo>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let key_id: uuid::Uuid = match id.parse() {
+        Ok(id) => id,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": {
+                        "message": "key id must be a UUID",
+                        "type": "invalid_request_error",
+                    }
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    let db_pool = match &state.db_pool {
+        Some(pool) => pool,
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({
+                    "error": {
+                        "message": "Database not configured",
+                        "type": "service_unavailable",
+                    }
+                })),
+            )
+                .into_response();
+        }
+    };
+    let client = match db_pool.get().await {
+        Ok(client) => client,
+        Err(e) => {
+            eprintln!("DB connection error: {}", e);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "error": {
+                        "message": "Failed to connect to database",
+                        "type": "internal_error",
+                    }
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    if key_id == caller.api_key_id {
+        let other_admin_key_exists = client
+            .query_one(
+                r#"SELECT EXISTS (
+                    SELECT 1 FROM api_keys
+                    WHERE role = 'admin'
+                      AND id != $1
+                      AND revoked_at IS NULL
+                      AND (expires_at IS NULL OR expires_at > NOW())
+                ) AS exists_flag"#,
+                &[&key_id],
+            )
+            .await;
+
+        match other_admin_key_exists {
+            Ok(row) => {
+                let exists: bool = row.get("exists_flag");
+                if !exists {
+                    return (
+                        StatusCode::CONFLICT,
+                        Json(serde_json::json!({
+                            "error": {
+                                "message": "refusing to revoke your own key: it is the only \
+                                    unexpired admin key, and revoking it would lock out all \
+                                    admin access",
+                                "type": "conflict_error",
+                                "code": "would_lock_out_admin_access",
+                            }
+                        })),
+                    )
+                        .into_response();
+                }
+            }
+            Err(e) => {
+                eprintln!("Failed to check for another admin key: {}", e);
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({
+                        "error": {
+                            "message": "Failed to revoke API key",
+                            "type": "internal_error",
+                        }
+                    })),
+                )
+                    .into_response();
+            }
+        }
+    }
+
+    let result = client
+        .execute(
+            "UPDATE api_keys SET revoked_at = NOW() WHERE id = $1 AND revoked_at IS NULL",
+            &[&key_id],
+        )
+        .await;
+
+    match result {
+        Ok(0) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "error": {
+                    "message": "API key not found or already revoked",
+                    "type": "not_found_error",
+                }
+            })),
+        )
+            .into_response(),
+        Ok(_) => (
+            StatusCode::OK,
+            Json(RevokeApiKeyResponse {
+                key_id: key_id.to_string(),
+                revoked: true,
+            }),
+        )
+            .into_response(),
+        Err(e) => {
+            eprintln!("Failed to revoke API key: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "error": {
+                        "message": "Failed to revoke API key",
+                        "type": "internal_error",
+                    }
+                })),
+            )
+                .into_response()
+        }
+    }
+}
+
+/// Rotate an API key response
+#[derive(Debug, Clone, Serialize)]
+pub struct RotateApiKeyResponse {
+    /// The new raw API key (only shown once!)
+    pub api_key: String,
+    pub key_id: String,
+    pub role: String,
+    pub rotated_from: String,
+}
+
+/// Rotate an API key: issue a replacement with the same role and
+/// description, and revoke the original -- in one database transaction, so
+/// a crash or connection drop between the two halves can never leave both
+/// keys live (a privilege-duplication window) or neither live (a self-
+/// inflicted lockout). No self-lockout check is needed here the way
+/// `revoke_api_key` needs one: the replacement key exists, committed
+/// atomically with the old one's revocation, before any caller could
+/// observe the old key as gone.
+async fn rotate_api_key(
+    State(state): State<AppState>,
+    Extension(_caller): Extension<ApiKeyInfo>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let old_id: uuid::Uuid = match id.parse() {
+        Ok(id) => id,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": {
+                        "message": "key id must be a UUID",
+                        "type": "invalid_request_error",
+                    }
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    let db_pool = match &state.db_pool {
+        Some(pool) => pool,
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({
+                    "error": {
+                        "message": "Database not configured",
+                        "type": "service_unavailable",
+                    }
+                })),
+            )
+                .into_response();
+        }
+    };
+    let mut client = match db_pool.get().await {
+        Ok(client) => client,
+        Err(e) => {
+            eprintln!("DB connection error: {}", e);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "error": {
+                        "message": "Failed to connect to database",
+                        "type": "internal_error",
+                    }
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    let txn = match client.transaction().await {
+        Ok(txn) => txn,
+        Err(e) => {
+            eprintln!("Failed to start transaction: {}", e);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "error": {
+                        "message": "Failed to rotate API key",
+                        "type": "internal_error",
+                    }
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    // Lock the row for the duration of the transaction: a concurrent rotate
+    // or revoke on the same id waits rather than racing.
+    let old_row = txn
+        .query_opt(
+            "SELECT role, description FROM api_keys \
+             WHERE id = $1 AND revoked_at IS NULL FOR UPDATE",
+            &[&old_id],
+        )
+        .await;
+
+    let (role, description): (String, Option<String>) = match old_row {
+        Ok(Some(row)) => (row.get("role"), row.get("description")),
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({
+                    "error": {
+                        "message": "API key not found or already revoked",
+                        "type": "not_found_error",
+                    }
+                })),
+            )
+                .into_response();
+        }
+        Err(e) => {
+            eprintln!("Failed to read API key: {}", e);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "error": {
+                        "message": "Failed to rotate API key",
+                        "type": "internal_error",
+                    }
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    let api_key = {
+        let mut rng = rand::rng();
+        let mut random_bytes = [0u8; 32];
+        rng.fill_bytes(&mut random_bytes);
+        format!("lb-{}", hex::encode(random_bytes))
+    };
+    let mut hasher = Sha256::new();
+    hasher.update(api_key.as_bytes());
+    let key_hash = format!("{:x}", hasher.finalize());
+
+    let new_id: uuid::Uuid = match txn
+        .query_one(
+            "INSERT INTO api_keys (key_hash, role, description) VALUES ($1, $2, $3) \
+             RETURNING id",
+            &[&key_hash, &role, &description],
+        )
+        .await
+    {
+        Ok(row) => row.get("id"),
+        Err(e) => {
+            eprintln!("Failed to insert rotated API key: {}", e);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "error": {
+                        "message": "Failed to rotate API key",
+                        "type": "internal_error",
+                    }
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    if let Err(e) = txn
+        .execute(
+            "UPDATE api_keys SET revoked_at = NOW() WHERE id = $1",
+            &[&old_id],
+        )
+        .await
+    {
+        eprintln!("Failed to revoke the rotated-out API key: {}", e);
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "error": {
+                    "message": "Failed to rotate API key",
+                    "type": "internal_error",
+                }
+            })),
+        )
+            .into_response();
+    }
+
+    if let Err(e) = txn.commit().await {
+        eprintln!("Failed to commit API key rotation: {}", e);
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "error": {
+                    "message": "Failed to rotate API key",
+                    "type": "internal_error",
+                }
+            })),
+        )
+            .into_response();
+    }
+
+    (
+        StatusCode::CREATED,
+        Json(RotateApiKeyResponse {
+            api_key,
+            key_id: new_id.to_string(),
+            role,
+            rotated_from: old_id.to_string(),
+        }),
+    )
+        .into_response()
 }
 
 #[cfg(test)]

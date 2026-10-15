@@ -68,6 +68,42 @@ mod api_tests {
             .expect("provision the test API key");
     }
 
+    /// Same contract as `provision_test_api_key`, but returns the row's id
+    /// -- needed to call the revoke/rotate admin routes, which address a
+    /// key by id, not by its (secret, never-looked-up-by-value-again) hash.
+    async fn provision_test_api_key_returning_id(
+        db_url: &str,
+        token: &str,
+        role: &str,
+    ) -> uuid::Uuid {
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(token.as_bytes());
+        let key_hash: String = hasher
+            .finalize()
+            .iter()
+            .map(|b| format!("{:02x}", b))
+            .collect();
+
+        let (client, connection) = tokio_postgres::connect(db_url, tokio_postgres::NoTls)
+            .await
+            .expect("connect to the test database — is the container up on this URL?");
+        tokio::spawn(async move {
+            let _ = connection.await;
+        });
+        let row = client
+            .query_one(
+                "INSERT INTO api_keys (key_hash, role, description) \
+                 VALUES ($1, $2, 'lightbulb integration test key') \
+                 ON CONFLICT (key_hash) DO UPDATE SET role = EXCLUDED.role \
+                 RETURNING id",
+                &[&key_hash, &role],
+            )
+            .await
+            .expect("provision the test API key");
+        row.get("id")
+    }
+
     // Overridable, because these tests WRITE to whatever database they are
     // handed and 5432 is routinely occupied on a shared machine — pointing
     // them at someone else's instance by default is how a test suite
@@ -124,11 +160,13 @@ mod api_tests {
         let scheduler = Arc::new(MemoryAwareScheduler::new(scheduler_config));
 
         // `ApiServer::new` runs the embedded migrations -- this MUST happen
-        // before any `provision_test_api_key*` call, not after. A genuinely
-        // fresh database (this repo's `postgres_integration` CI job,
-        // `initdb`-created every run) hits "relation \"api_keys\" does not
-        // exist" on the very first provisioning call otherwise, before
-        // migrations ever run at all.
+        // before any `provision_test_api_key*` call, not after. It used to
+        // run after (provisioning sat above this call), which silently
+        // depended on a persistent, already-migrated database from some
+        // earlier run; a genuinely fresh database (this repo's
+        // `postgres_integration` CI job, `initdb`-created every run) hit
+        // "relation \"api_keys\" does not exist" on the very first
+        // provisioning call, before migrations ever ran at all.
         let server = ApiServer::new(config, scheduler)
             .await
             .expect("Failed to create test server");
@@ -411,6 +449,216 @@ mod api_tests {
             "a single, ordinary, nowhere-near-the-limit request must reach auth (and 401 \
              there, with no Authorization header) -- a 503 here means the pre-auth limiter's \
              own database call is failing, not that the client did anything wrong"
+        );
+    }
+
+    /// Phase 4 hardening item 3 (API key revoke/rotate), PM condition 3:
+    /// this is the one behaviour from this item that must have a test that
+    /// RUNS, not an `#[ignore]`-only assertion -- see the CI job
+    /// `postgres_integration` in `.github/workflows/ci.yml`, which starts a
+    /// fresh `initdb`-created Postgres and runs exactly the tests in this
+    /// block by name filter, `--include-ignored`.
+    ///
+    /// Drives the real `DELETE /v1/lightbulb/admin/api-keys/{id}` handler
+    /// through the real router, against the real `auth_middleware` lookup
+    /// -- not a direct database mutation standing in for the endpoint.
+    #[tokio::test]
+    #[ignore] // Requires PostgreSQL
+    async fn test_revoking_an_api_key_rejects_it_on_the_next_request() {
+        let db_url = test_db_url();
+        let server = create_test_server().await; // provisions admin "test-token"
+        let target_id =
+            provision_test_api_key_returning_id(&db_url, "revoke-target-token", "user").await;
+        let app = server.build_router().with_state(server.state().clone());
+
+        // The target key authenticates before revocation.
+        let before = app
+            .clone()
+            .oneshot(with_fake_peer(
+                Request::builder()
+                    .uri("/v1/lightbulb/admin/cache/stats")
+                    .header("authorization", "Bearer revoke-target-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            ))
+            .await
+            .unwrap();
+        // "user" role authenticates fine but isn't admin, so
+        // admin_check_middleware returns exactly 403, not 401 -- asserted
+        // precisely (not assert_ne! against UNAUTHORIZED alone) because
+        // that weaker check would also pass on a 503, which is exactly the
+        // failure this test needs to catch, not let through silently.
+        assert_eq!(
+            before.status(),
+            StatusCode::FORBIDDEN,
+            "the key must be live before revocation"
+        );
+
+        let revoke_response = app
+            .clone()
+            .oneshot(with_fake_peer(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/v1/lightbulb/admin/api-keys/{target_id}"))
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(revoke_response.status(), StatusCode::OK);
+
+        let after = app
+            .oneshot(with_fake_peer(
+                Request::builder()
+                    .uri("/v1/lightbulb/admin/cache/stats")
+                    .header("authorization", "Bearer revoke-target-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            after.status(),
+            StatusCode::UNAUTHORIZED,
+            "a revoked key must be rejected on its very next request"
+        );
+    }
+
+    /// PM condition 2: revoking the caller's OWN key must be refused unless
+    /// another unexpired, unrevoked admin key exists -- otherwise this
+    /// endpoint is the request that locks every admin out of every admin
+    /// route, including the one that could undo it.
+    ///
+    /// Self-contained rather than order-dependent: revokes every OTHER
+    /// admin key first (there may be several, left over from
+    /// `create_test_server()` calls in other tests sharing this database),
+    /// so this test's own result does not depend on what ran before it. Only
+    /// the new CI job's dedicated, name-filtered Postgres sees this
+    /// disruption -- see the module doc comment on the test above.
+    #[tokio::test]
+    #[ignore] // Requires PostgreSQL
+    async fn test_revoke_refuses_to_lock_out_the_last_admin_key() {
+        let db_url = test_db_url();
+        // Migrations must run (inside create_test_server, via ApiServer::new)
+        // before any provisioning call against a fresh database -- same
+        // ordering bug as create_test_server's own fix above, and the exact
+        // reason this test itself first failed with "relation \"api_keys\"
+        // does not exist" against the new postgres_integration CI job.
+        let server = create_test_server().await;
+        let only_admin_id =
+            provision_test_api_key_returning_id(&db_url, "lockout-test-admin-token", "admin").await;
+
+        let (client, connection) = tokio_postgres::connect(&db_url, tokio_postgres::NoTls)
+            .await
+            .expect("connect to the test database");
+        tokio::spawn(async move {
+            let _ = connection.await;
+        });
+        client
+            .execute(
+                "UPDATE api_keys SET revoked_at = NOW() \
+                 WHERE role = 'admin' AND id != $1 AND revoked_at IS NULL",
+                &[&only_admin_id],
+            )
+            .await
+            .expect("revoke every other admin key");
+
+        let app = server.build_router().with_state(server.state().clone());
+
+        let response = app
+            .oneshot(with_fake_peer(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/v1/lightbulb/admin/api-keys/{only_admin_id}"))
+                    .header("authorization", "Bearer lockout-test-admin-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            response.status(),
+            StatusCode::CONFLICT,
+            "revoking the only live admin key via itself must be refused, not honoured"
+        );
+    }
+
+    /// PM condition 1: rotate must be one transaction -- the old key dead
+    /// and the new key live, never both or neither. Observed from outside
+    /// the transaction (the only vantage a caller has): the old token is
+    /// rejected and the new token (returned once, in the response body) is
+    /// accepted, on the very next requests after the rotate call returns.
+    #[tokio::test]
+    #[ignore] // Requires PostgreSQL
+    async fn test_rotating_an_api_key_revokes_the_old_and_issues_a_live_new_one() {
+        let db_url = test_db_url();
+        let server = create_test_server().await; // provisions admin "test-token"
+        let old_id =
+            provision_test_api_key_returning_id(&db_url, "rotate-target-token", "user").await;
+        let app = server.build_router().with_state(server.state().clone());
+
+        let rotate_response = app
+            .clone()
+            .oneshot(with_fake_peer(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/v1/lightbulb/admin/api-keys/{old_id}/rotate"))
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(rotate_response.status(), StatusCode::CREATED);
+
+        let body = rotate_response
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let new_api_key = body["api_key"]
+            .as_str()
+            .expect("api_key in response")
+            .to_string();
+        assert_eq!(body["rotated_from"].as_str().unwrap(), old_id.to_string());
+
+        let old_token_response = app
+            .clone()
+            .oneshot(with_fake_peer(
+                Request::builder()
+                    .uri("/v1/lightbulb/admin/cache/stats")
+                    .header("authorization", "Bearer rotate-target-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            old_token_response.status(),
+            StatusCode::UNAUTHORIZED,
+            "the rotated-out key must be dead"
+        );
+
+        let new_token_response = app
+            .oneshot(with_fake_peer(
+                Request::builder()
+                    .uri("/v1/lightbulb/admin/cache/stats")
+                    .header("authorization", format!("Bearer {new_api_key}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            new_token_response.status(),
+            StatusCode::FORBIDDEN,
+            "the rotated-in key must be live, same role as the old key ('user'): exactly 403 \
+             on this admin-only route, not 401 (dead) and not a weaker assert_ne! that would \
+             also pass on a 503"
         );
     }
 

@@ -43,20 +43,36 @@ env:
   CARGO_BUILD_JOBS: 4
 
 jobs:
-  # Regression coverage for a critical, pre-existing bug (found via this
-  # same mechanism on a sibling PR, lightbulb#152): pre_auth_attempt_limiter_
-  # middleware bound a String to a $1::inet-cast parameter, which fails to
-  # encode on EVERY call, unconditionally -- any real deployment with a
-  # database configured 503'd on every single authenticated request. None
-  # of this file's Postgres-gated tests have ever run in CI before, since
-  # `gates` (below) runs on windows-latest with no Postgres reachable.
+  # Runs real Postgres-gated integration tests. `gates` (below) runs on
+  # windows-latest and none of this file's DB-gated tests execute there
+  # (no Postgres reachable) -- measured via a throwaway probe
+  # (lightbulb#151, closed): windows-latest's Docker is Windows-native
+  # only (cannot start a Linux image, confirmed: "no matching manifest for
+  # windows/amd64"), ruling out a Linux service container; the bundled
+  # `postgresql-x64-17` Windows service exists but failed to start and
+  # wasn't worth root-causing.
   #
-  # `initdb` a fresh, throwaway cluster every run using the PostgreSQL the
-  # runner image already ships ($env:PGBIN), on a non-default port -- no
-  # container, no digest to pin. `gates` runs on windows-latest, which
-  # cannot start a Linux container (measured via a throwaway probe,
-  # lightbulb#151, closed), and this repo does not build on Linux at all
-  # today, ruling out a Postgres service container.
+  # So: `initdb` a FRESH cluster into a throwaway directory under
+  # `RUNNER_TEMP` every run, using the `PGBIN`/`PGROOT` the runner image
+  # already sets (not a hardcoded version path -- a runner-image bump to a
+  # new Postgres major changes this job's behaviour with zero edits here,
+  # which is exactly why the version is PRINTED below rather than only
+  # implied by the path). This depends on nothing but what the runner
+  # already ships; no container, no digest to pin.
+  #
+  # First used for a critical, pre-existing bug (lightbulb#153, merged):
+  # pre_auth_attempt_limiter_middleware bound a String to a $1::inet-cast
+  # parameter, which failed to encode on EVERY call, unconditionally -- any
+  # real deployment with a database configured 503'd on every single
+  # authenticated request. Extended here for Phase 4 hardening item 3 (API
+  # key revoke/rotate), PM condition 3: the revoked-key-is-rejected
+  # behaviour needs a test that RUNS, not an `#[ignore]`-only assertion.
+  #
+  # SCOPE: only these four tests run here, by name filter. The remaining
+  # pre-existing `#[ignore]`d integration tests (health check, chat
+  # completions, the rest of the pre-auth limiter's own tests) stay
+  # ignored and unexecuted in CI -- that gap is the Phase 2 audit's, not
+  # either of these items' to close.
   postgres_integration:
     runs-on: windows-latest
     steps:
@@ -74,12 +90,20 @@ jobs:
           & "$env:PGBIN\createdb.exe" -h localhost -p 55432 -U lightbulb lightbulb
           "LIGHTBULB_TEST_DATABASE_URL=postgresql://lightbulb@localhost:55432/lightbulb" >> $env:GITHUB_ENV
 
-      - name: cargo test -- just the pre-auth-limiter regression test
+      - name: cargo test -- just the pre-auth-limiter regression + revoke/rotate tests
         shell: bash
         run: |
           cargo test --test api_integration_tests -- --ignored --test-threads=1 \
-            pre_auth_attempt_limiter_does_not_503_an_ordinary_request
+            pre_auth_attempt_limiter_does_not_503_an_ordinary_request \
+            revoking_an_api_key_rejects_it_on_the_next_request \
+            revoke_refuses_to_lock_out_the_last_admin_key \
+            rotating_an_api_key_revokes_the_old_and_issues_a_live_new_one
 
+      # tracing::error! calls in the request path (e.g. the pre-auth
+      # attempt limiter failing its own DB query) go nowhere in a test
+      # binary with no subscriber installed -- a 503 in the test output is
+      # all that's visible from the Rust side. The server's own log has
+      # the real error.
       - name: dump the Postgres server log on failure
         if: failure()
         shell: pwsh

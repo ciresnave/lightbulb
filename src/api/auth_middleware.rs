@@ -211,6 +211,7 @@ pub async fn auth_middleware(
                    FROM api_keys
                    WHERE key_hash = $1
                      AND (expires_at IS NULL OR expires_at > NOW())
+                     AND revoked_at IS NULL
                    LIMIT 1"#,
                 &[&key_hash],
             )
