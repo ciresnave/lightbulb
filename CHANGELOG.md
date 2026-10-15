@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.8.9
+
+### Fixed
+- **Critical, pre-existing bug:** every authenticated request returned 503 when a database
+  was configured. `pre_auth_attempt_limiter_middleware` (security audit item 3, 2026-10-06)
+  bound a `String` (the client IP's `.to_string()`) to a `$1::inet`-cast parameter in its
+  rate-limiting query. `String`'s `ToSql` only covers TEXT-family OIDs, so encoding failed on
+  *every* call, unconditionally -- not past-the-threshold, every single one -- and this
+  middleware runs in front of every route whenever `database_url` is configured. Fixed by
+  binding the already-in-scope `client_ip: std::net::IpAddr` directly; `IpAddr` has a native
+  `ToSql` for `INET`.
+  - Found via the new `postgres_integration` CI job (added alongside #152, this repo's first
+    CI job that actually runs any of this file's Postgres-gated tests against a real
+    database) -- none of the 8 pre-existing `#[ignore]`d integration tests gated on Postgres
+    have ever executed in CI before this. New regression test
+    `test_pre_auth_attempt_limiter_does_not_503_an_ordinary_request` reproduces it with a
+    single, ordinary, nowhere-near-the-rate-limit request.
+  - Whether any real lightbulb deployment has ever actually run with `database_url`
+    configured is not something this lane has visibility into -- noted here rather than
+    assumed either way, since that determines whether this was a live-production outage or
+    an always-broken, never-exercised configuration path.
+
 ## 0.8.8
 
 ### Fixed

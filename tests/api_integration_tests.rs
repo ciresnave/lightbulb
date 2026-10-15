@@ -68,30 +68,36 @@ mod api_tests {
             .expect("provision the test API key");
     }
 
+    // Overridable, because these tests WRITE to whatever database they are
+    // handed and 5432 is routinely occupied on a shared machine — pointing
+    // them at someone else's instance by default is how a test suite
+    // corrupts a neighbour's data. Set `LIGHTBULB_TEST_DATABASE_URL` to a
+    // throwaway container, e.g.:
+    //
+    //   docker run -d --name lightbulb-test-db \
+    //     -e POSTGRES_USER=lightbulb -e POSTGRES_PASSWORD=... \
+    //     -e POSTGRES_DB=lightbulb -p 5433:5432 postgres:18
+    //   $env:LIGHTBULB_TEST_DATABASE_URL =
+    //     "postgresql://lightbulb:...@localhost:5433/lightbulb"
+    fn test_db_url() -> String {
+        std::env::var("LIGHTBULB_TEST_DATABASE_URL").unwrap_or_else(|_| {
+            "postgresql://lightbulb:vKTbmBA5RXIauMrNHxzs@localhost:5432/lightbulb".to_string()
+        })
+    }
+
     /// Create test API server
     async fn create_test_server() -> ApiServer {
-        // Overridable, because these tests WRITE to whatever database they are
-        // handed and 5432 is routinely occupied on a shared machine — pointing
-        // them at someone else's instance by default is how a test suite
-        // corrupts a neighbour's data. Set `LIGHTBULB_TEST_DATABASE_URL` to a
-        // throwaway container, e.g.:
-        //
-        //   docker run -d --name lightbulb-test-db \
-        //     -e POSTGRES_USER=lightbulb -e POSTGRES_PASSWORD=... \
-        //     -e POSTGRES_DB=lightbulb -p 5433:5432 postgres:18
-        //   $env:LIGHTBULB_TEST_DATABASE_URL =
-        //     "postgresql://lightbulb:...@localhost:5433/lightbulb"
-        let db_url = std::env::var("LIGHTBULB_TEST_DATABASE_URL").unwrap_or_else(|_| {
-            "postgresql://lightbulb:vKTbmBA5RXIauMrNHxzs@localhost:5432/lightbulb".to_string()
-        });
+        // Otherwise every `tracing::error!` in the request path (e.g. the
+        // pre-auth attempt limiter failing closed on its own DB error) goes
+        // nowhere: no subscriber means the event is silently dropped, and a
+        // resulting 503 shows up with no indication of why. `try_init`
+        // because multiple tests in this binary each call this function.
+        let _ = tracing_subscriber::fmt()
+            .with_test_writer()
+            .with_env_filter("warn")
+            .try_init();
 
-        // Real auth needs a real key. Before this existed the authenticated
-        // cases sent `Bearer test-token` and expected 200 on the strength of a
-        // comment reading "mock auth allows any token" — a premise that has not
-        // been true since auth started validating against the database. They
-        // were asserting that an arbitrary bearer token grants access, which is
-        // the opposite of what should be pinned.
-        provision_test_api_key(&db_url, "test-token", "admin").await;
+        let db_url = test_db_url();
 
         let config = ApiConfig {
             database_url: Some(db_url.clone()),
@@ -117,9 +123,25 @@ mod api_tests {
         let scheduler_config = MemoryAwareConfig::default();
         let scheduler = Arc::new(MemoryAwareScheduler::new(scheduler_config));
 
-        ApiServer::new(config, scheduler)
+        // `ApiServer::new` runs the embedded migrations -- this MUST happen
+        // before any `provision_test_api_key*` call, not after. A genuinely
+        // fresh database (this repo's `postgres_integration` CI job,
+        // `initdb`-created every run) hits "relation \"api_keys\" does not
+        // exist" on the very first provisioning call otherwise, before
+        // migrations ever run at all.
+        let server = ApiServer::new(config, scheduler)
             .await
-            .expect("Failed to create test server")
+            .expect("Failed to create test server");
+
+        // Real auth needs a real key. Before this existed the authenticated
+        // cases sent `Bearer test-token` and expected 200 on the strength of a
+        // comment reading "mock auth allows any token" — a premise that has not
+        // been true since auth started validating against the database. They
+        // were asserting that an arbitrary bearer token grants access, which is
+        // the opposite of what should be pinned.
+        provision_test_api_key(&db_url, "test-token", "admin").await;
+
+        server
     }
 
     #[tokio::test]
@@ -358,6 +380,37 @@ mod api_tests {
             "a different peer IP must not inherit another IP's attempt count — it should \
              reach auth (and 401 there, with no Authorization header) rather than being \
              refused by the limiter"
+        );
+    }
+
+    /// Regression test for a critical pre-existing bug (found via the new
+    /// `postgres_integration` CI job -- this is the first time any of this
+    /// file's Postgres-gated tests have ever run against a real database in
+    /// CI): `pre_auth_attempt_limiter_middleware` bound a `String` (the
+    /// client IP's `.to_string()`) to a `$1::inet`-cast parameter.
+    /// `String`'s `ToSql` only covers TEXT-family OIDs, so encoding failed
+    /// on EVERY call, unconditionally -- not just past the rate limit. On
+    /// any real deployment with a database configured, this meant every
+    /// single authenticated request failed closed with a 503, since this
+    /// middleware runs in front of every route. A single ordinary request,
+    /// nowhere near the attempt limit, is enough to reproduce it.
+    #[tokio::test]
+    #[ignore] // Requires PostgreSQL
+    async fn test_pre_auth_attempt_limiter_does_not_503_an_ordinary_request() {
+        let server = create_test_server().await;
+        let app = server.build_router().with_state(server.state().clone());
+
+        let response = app
+            .oneshot(with_fake_peer(unauthenticated_chat_request()))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            response.status(),
+            StatusCode::UNAUTHORIZED,
+            "a single, ordinary, nowhere-near-the-limit request must reach auth (and 401 \
+             there, with no Authorization header) -- a 503 here means the pre-auth limiter's \
+             own database call is failing, not that the client did anything wrong"
         );
     }
 
