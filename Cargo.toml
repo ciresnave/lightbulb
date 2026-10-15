@@ -4,7 +4,7 @@
     license     = "MIT OR Apache-2.0"
     name        = "lightbulb"
     repository  = "https://github.com/ciresnave/lightbulb"
-    version     = "0.8.10"
+    version     = "0.8.11"
 
 [features]
     # CUDA support with flash attention and fused kernels.
@@ -134,7 +134,7 @@
     tokio              = { version = "1", features = ["macros", "rt-multi-thread"] }
     tokio-stream       = "0.1"
     tracing            = "0.1"
-    tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+    tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
     uuid               = { version = "1.0", features = ["v4", "serde"] }
 
     # HTTP API dependencies

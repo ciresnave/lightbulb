@@ -482,9 +482,13 @@ loop {
 
 ### 4.2 Observability
 **Action Items**:
-- [ ] Structured logging (JSON format) — NOT DONE, and the dependency itself isn't enabled (see
-  note above). `main.rs`/`lightbulb-probe.rs` both use `tracing_subscriber::fmt::layer()`
-  (human-readable only).
+- [x] Structured logging (JSON format) — DONE (Phase 4 hardening item 4, #154). The
+  `tracing-subscriber` `json` feature is enabled; `lightbulb::logging::init_tracing`, shared by
+  `main.rs` and `lightbulb-probe.rs`, switches to `fmt::layer().json()` when
+  `LIGHTBULB_LOG_FORMAT=json` is set (default stays plain-text, unchanged for existing
+  deployments). Per-request `println!`/`eprintln!` call sites in `src/api/admin.rs` and
+  `src/api/auth_middleware.rs` still bypass tracing and would mix plain lines into JSON output
+  during live serving -- same class of defect, not fixed here, tracked as its own item.
 - [ ] Request tracing with correlation IDs — NOT DONE. `TraceLayer::new_for_http()`
   (`src/api/mod.rs:538`) is tower-http's internal span logging, not a client-visible correlation
   ID; `grep -rn "x-request-id\|SetRequestIdLayer\|MakeRequestUuid" src/` → 0 hits. The

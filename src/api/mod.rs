@@ -351,10 +351,10 @@ impl ApiServer {
             refinery::embed_migrations!("./migrations");
             migrations::runner().run_async(&mut **client).await?;
 
-            println!("Database connected and migrations applied");
+            tracing::info!("Database connected and migrations applied");
             Some(pool)
         } else {
-            println!(
+            tracing::info!(
                 "No DATABASE_URL set — running without database (auth/audit/rate-limiting disabled)"
             );
             None
@@ -442,7 +442,7 @@ impl ApiServer {
                         // this line builds.
                         state.chat_template = chat_template::resolve_for_serving(&model_path);
                         if let Some(t) = &state.chat_template {
-                            println!(
+                            tracing::info!(
                                 "Chat template for {} resolved via {:?} (bos {:?}, eos {:?})",
                                 model_path.display(),
                                 t.resolved_by(),
@@ -451,10 +451,10 @@ impl ApiServer {
                             );
                         }
 
-                        println!("Started model runner for {}", model_path.display());
+                        tracing::info!("Started model runner for {}", model_path.display());
                     }
                     Err(e) => {
-                        eprintln!(
+                        tracing::error!(
                             "Failed to start model runner for {}: {}",
                             model_path.display(),
                             e
@@ -462,7 +462,7 @@ impl ApiServer {
                     }
                 }
             } else {
-                println!(
+                tracing::warn!(
                     "Model path {} not found; skipping model runner startup",
                     model_path.display()
                 );
@@ -603,9 +603,11 @@ impl ApiServer {
             let http_listener = TcpListener::bind(&http_bind_address).await?;
             let https_listener = TcpListener::bind(&https_bind_address).await?;
 
-            println!("Lightbulb API server listening on:");
-            println!("  HTTP:  {}", http_bind_address);
-            println!("  HTTPS: {}", https_bind_address);
+            tracing::info!(
+                http = %http_bind_address,
+                https = %https_bind_address,
+                "Lightbulb API server listening"
+            );
 
             let http_app = app.clone();
             let https_app = app;
@@ -710,9 +712,9 @@ impl ApiServer {
         } else {
             // HTTP only
             let listener = TcpListener::bind(&http_bind_address).await?;
-            println!(
-                "Lightbulb API server listening on HTTP: {}",
-                http_bind_address
+            tracing::info!(
+                http = %http_bind_address,
+                "Lightbulb API server listening"
             );
 
             axum::serve(

@@ -113,7 +113,6 @@ use std::path::Path;
 
 use anyhow::{anyhow, bail};
 use clap::Parser;
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use lightbulb::api::chat_template::{
     ChatTemplate, ProbeOverride, ProbeRow, Resolution, Sidecar, fingerprint, first_line_of,
@@ -192,14 +191,11 @@ async fn main() -> anyhow::Result<()> {
     // `special_tokens` saying a checkpoint declares no BOS/EOS. `ModelRunner`'s
     // own `println!`/`eprintln!` would still appear, so the output would look
     // healthy while the single warning that invalidates the measurement was
-    // silently dropped.
-    tracing_subscriber::registry()
-        .with(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info,lightbulb=debug".into()),
-        )
-        .with(tracing_subscriber::fmt::layer())
-        .init();
+    // silently dropped. Shares `main.rs`'s LIGHTBULB_LOG_FORMAT toggle
+    // (Sourcery review, #154): a second, separate subscriber that ignored
+    // it was a real defect, not a deliberate "the probe stays plain-text"
+    // choice.
+    lightbulb::logging::init_tracing("info,lightbulb=debug");
 
     let args = Args::parse();
     probe(

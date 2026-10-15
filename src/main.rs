@@ -7,18 +7,10 @@ use lightbulb::api::{ApiConfig, ApiServer};
 use lightbulb::engine::{MemoryAwareScheduler, memory_aware_scheduler::MemoryAwareConfig};
 use std::env;
 use std::sync::Arc;
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Initialize tracing
-    tracing_subscriber::registry()
-        .with(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info,lightbulb=debug".into()),
-        )
-        .with(tracing_subscriber::fmt::layer())
-        .init();
+    lightbulb::logging::init_tracing("info,lightbulb=debug");
 
     // Load configuration from environment
     let database_url = env::var("DATABASE_URL").ok();

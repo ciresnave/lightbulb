@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.8.11
+
+### Added
+- Phase 4 hardening item 4 (PM-tasked): `tracing-subscriber`'s `json` feature wasn't enabled,
+  so "structured logging" couldn't be turned on without a dependency change first (found by
+  the Phase 4 audit, #148). Investigated first: enabling just the Cargo feature alone has no
+  observable effect by itself -- nothing called `.json()`. Enabled the feature and wired a
+  runtime toggle: `LIGHTBULB_LOG_FORMAT=json` switches `main.rs`'s tracing subscriber to JSON
+  output; any other value (including unset, the default) keeps today's plain-text format, so
+  no existing deployment's logs change under it. Verified both formats by actually running the
+  binary (not just compiling): plain-text unchanged, `LIGHTBULB_LOG_FORMAT=json` produces real
+  structured JSON lines.
+
 ## 0.8.10
 
 ### Added
