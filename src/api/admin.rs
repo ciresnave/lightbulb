@@ -452,6 +452,53 @@ fn api_error(status: StatusCode, message: &str, error_type: &str, code: Option<&
     (status, Json(serde_json::json!({ "error": error }))).into_response()
 }
 
+/// Parse a path-extracted key id, or the 400 `revoke_api_key`/`rotate_api_key` share for one that isn't a UUID.
+/// `(status, message, error_type)` -- small and `Copy`, unlike a full
+/// `Response` (clippy::result_large_err: axum's `Response` is well past the
+/// 128-byte threshold for an `Err` variant). The caller turns this into an
+/// actual `Response` via `api_error` only once it has decided to return.
+type ApiErrorParts = (StatusCode, &'static str, &'static str);
+
+fn parse_key_id(id: &str) -> Result<uuid::Uuid, ApiErrorParts> {
+    id.parse().map_err(|_| {
+        (
+            StatusCode::BAD_REQUEST,
+            "key id must be a UUID",
+            "invalid_request_error",
+        )
+    })
+}
+
+/// Get a pooled DB connection, or the 503/500 `revoke_api_key`/`rotate_api_key` share when no
+/// database is configured or the pool can't hand one out.
+async fn get_db_client(state: &AppState) -> Result<deadpool_postgres::Client, ApiErrorParts> {
+    let db_pool = state.db_pool.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Database not configured",
+        "service_unavailable",
+    ))?;
+    db_pool.get().await.map_err(|e| {
+        eprintln!("DB connection error: {}", e);
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Failed to connect to database",
+            "internal_error",
+        )
+    })
+}
+
+/// The 500 every internal step of `rotate_api_key`'s transaction shares,
+/// logging `context` (which step failed) alongside the real error.
+fn rotate_internal_error(e: impl std::fmt::Display, context: &str) -> Response {
+    eprintln!("{context}: {e}");
+    api_error(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "Failed to rotate API key",
+        "internal_error",
+        None,
+    )
+}
+
 /// Revoke an API key.
 ///
 /// Idempotent on an already-revoked key's id (0 rows updated reads as "not
@@ -466,40 +513,13 @@ async fn revoke_api_key(
     Extension(caller): Extension<ApiKeyInfo>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    let key_id: uuid::Uuid = match id.parse() {
+    let key_id = match parse_key_id(&id) {
         Ok(id) => id,
-        Err(_) => {
-            return api_error(
-                StatusCode::BAD_REQUEST,
-                "key id must be a UUID",
-                "invalid_request_error",
-                None,
-            );
-        }
+        Err((status, msg, ty)) => return api_error(status, msg, ty, None),
     };
-
-    let db_pool = match &state.db_pool {
-        Some(pool) => pool,
-        None => {
-            return api_error(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "Database not configured",
-                "service_unavailable",
-                None,
-            );
-        }
-    };
-    let client = match db_pool.get().await {
+    let client = match get_db_client(&state).await {
         Ok(client) => client,
-        Err(e) => {
-            eprintln!("DB connection error: {}", e);
-            return api_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to connect to database",
-                "internal_error",
-                None,
-            );
-        }
+        Err((status, msg, ty)) => return api_error(status, msg, ty, None),
     };
 
     if key_id == caller.api_key_id {
@@ -598,53 +618,18 @@ async fn rotate_api_key(
     Extension(_caller): Extension<ApiKeyInfo>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    let old_id: uuid::Uuid = match id.parse() {
+    let old_id = match parse_key_id(&id) {
         Ok(id) => id,
-        Err(_) => {
-            return api_error(
-                StatusCode::BAD_REQUEST,
-                "key id must be a UUID",
-                "invalid_request_error",
-                None,
-            );
-        }
+        Err((status, msg, ty)) => return api_error(status, msg, ty, None),
     };
-
-    let db_pool = match &state.db_pool {
-        Some(pool) => pool,
-        None => {
-            return api_error(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "Database not configured",
-                "service_unavailable",
-                None,
-            );
-        }
-    };
-    let mut client = match db_pool.get().await {
+    let mut client = match get_db_client(&state).await {
         Ok(client) => client,
-        Err(e) => {
-            eprintln!("DB connection error: {}", e);
-            return api_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to connect to database",
-                "internal_error",
-                None,
-            );
-        }
+        Err((status, msg, ty)) => return api_error(status, msg, ty, None),
     };
 
     let txn = match client.transaction().await {
         Ok(txn) => txn,
-        Err(e) => {
-            eprintln!("Failed to start transaction: {}", e);
-            return api_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to rotate API key",
-                "internal_error",
-                None,
-            );
-        }
+        Err(e) => return rotate_internal_error(e, "Failed to start transaction"),
     };
 
     // Lock the row for the duration of the transaction: a concurrent rotate
@@ -667,15 +652,7 @@ async fn rotate_api_key(
                 None,
             );
         }
-        Err(e) => {
-            eprintln!("Failed to read API key: {}", e);
-            return api_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to rotate API key",
-                "internal_error",
-                None,
-            );
-        }
+        Err(e) => return rotate_internal_error(e, "Failed to read API key"),
     };
 
     let api_key = {
@@ -697,15 +674,7 @@ async fn rotate_api_key(
         .await
     {
         Ok(row) => row.get("id"),
-        Err(e) => {
-            eprintln!("Failed to insert rotated API key: {}", e);
-            return api_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to rotate API key",
-                "internal_error",
-                None,
-            );
-        }
+        Err(e) => return rotate_internal_error(e, "Failed to insert rotated API key"),
     };
 
     if let Err(e) = txn
@@ -715,23 +684,11 @@ async fn rotate_api_key(
         )
         .await
     {
-        eprintln!("Failed to revoke the rotated-out API key: {}", e);
-        return api_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Failed to rotate API key",
-            "internal_error",
-            None,
-        );
+        return rotate_internal_error(e, "Failed to revoke the rotated-out API key");
     }
 
     if let Err(e) = txn.commit().await {
-        eprintln!("Failed to commit API key rotation: {}", e);
-        return api_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Failed to rotate API key",
-            "internal_error",
-            None,
-        );
+        return rotate_internal_error(e, "Failed to commit API key rotation");
     }
 
     (
