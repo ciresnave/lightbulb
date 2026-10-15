@@ -435,6 +435,23 @@ pub struct RevokeApiKeyResponse {
     pub revoked: bool,
 }
 
+/// Build the `{"error": {"message", "type", "code"?}}` body this module's
+/// handlers share. Extracted once the duplicated-inline form pushed
+/// `revoke_api_key`/`rotate_api_key` well past Codacy's per-method line
+/// limit (each error path was ~9 lines of identical shape) -- not a
+/// pre-existing-debt case like `run_jobs`' complexity finding (board item
+/// M4 slice 1), so minimizing it for real rather than disputing the count.
+fn api_error(status: StatusCode, message: &str, error_type: &str, code: Option<&str>) -> Response {
+    let mut error = serde_json::json!({
+        "message": message,
+        "type": error_type,
+    });
+    if let Some(code) = code {
+        error["code"] = serde_json::json!(code);
+    }
+    (status, Json(serde_json::json!({ "error": error }))).into_response()
+}
+
 /// Revoke an API key.
 ///
 /// Idempotent on an already-revoked key's id (0 rows updated reads as "not
@@ -452,48 +469,36 @@ async fn revoke_api_key(
     let key_id: uuid::Uuid = match id.parse() {
         Ok(id) => id,
         Err(_) => {
-            return (
+            return api_error(
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({
-                    "error": {
-                        "message": "key id must be a UUID",
-                        "type": "invalid_request_error",
-                    }
-                })),
-            )
-                .into_response();
+                "key id must be a UUID",
+                "invalid_request_error",
+                None,
+            );
         }
     };
 
     let db_pool = match &state.db_pool {
         Some(pool) => pool,
         None => {
-            return (
+            return api_error(
                 StatusCode::SERVICE_UNAVAILABLE,
-                Json(serde_json::json!({
-                    "error": {
-                        "message": "Database not configured",
-                        "type": "service_unavailable",
-                    }
-                })),
-            )
-                .into_response();
+                "Database not configured",
+                "service_unavailable",
+                None,
+            );
         }
     };
     let client = match db_pool.get().await {
         Ok(client) => client,
         Err(e) => {
             eprintln!("DB connection error: {}", e);
-            return (
+            return api_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({
-                    "error": {
-                        "message": "Failed to connect to database",
-                        "type": "internal_error",
-                    }
-                })),
-            )
-                .into_response();
+                "Failed to connect to database",
+                "internal_error",
+                None,
+            );
         }
     };
 
@@ -515,33 +520,23 @@ async fn revoke_api_key(
             Ok(row) => {
                 let exists: bool = row.get("exists_flag");
                 if !exists {
-                    return (
+                    return api_error(
                         StatusCode::CONFLICT,
-                        Json(serde_json::json!({
-                            "error": {
-                                "message": "refusing to revoke your own key: it is the only \
-                                    unexpired admin key, and revoking it would lock out all \
-                                    admin access",
-                                "type": "conflict_error",
-                                "code": "would_lock_out_admin_access",
-                            }
-                        })),
-                    )
-                        .into_response();
+                        "refusing to revoke your own key: it is the only unexpired admin key, \
+                         and revoking it would lock out all admin access",
+                        "conflict_error",
+                        Some("would_lock_out_admin_access"),
+                    );
                 }
             }
             Err(e) => {
                 eprintln!("Failed to check for another admin key: {}", e);
-                return (
+                return api_error(
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(serde_json::json!({
-                        "error": {
-                            "message": "Failed to revoke API key",
-                            "type": "internal_error",
-                        }
-                    })),
-                )
-                    .into_response();
+                    "Failed to revoke API key",
+                    "internal_error",
+                    None,
+                );
             }
         }
     }
@@ -554,16 +549,12 @@ async fn revoke_api_key(
         .await;
 
     match result {
-        Ok(0) => (
+        Ok(0) => api_error(
             StatusCode::NOT_FOUND,
-            Json(serde_json::json!({
-                "error": {
-                    "message": "API key not found or already revoked",
-                    "type": "not_found_error",
-                }
-            })),
-        )
-            .into_response(),
+            "API key not found or already revoked",
+            "not_found_error",
+            None,
+        ),
         Ok(_) => (
             StatusCode::OK,
             Json(RevokeApiKeyResponse {
@@ -574,16 +565,12 @@ async fn revoke_api_key(
             .into_response(),
         Err(e) => {
             eprintln!("Failed to revoke API key: {}", e);
-            (
+            api_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({
-                    "error": {
-                        "message": "Failed to revoke API key",
-                        "type": "internal_error",
-                    }
-                })),
+                "Failed to revoke API key",
+                "internal_error",
+                None,
             )
-                .into_response()
         }
     }
 }
@@ -614,48 +601,36 @@ async fn rotate_api_key(
     let old_id: uuid::Uuid = match id.parse() {
         Ok(id) => id,
         Err(_) => {
-            return (
+            return api_error(
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({
-                    "error": {
-                        "message": "key id must be a UUID",
-                        "type": "invalid_request_error",
-                    }
-                })),
-            )
-                .into_response();
+                "key id must be a UUID",
+                "invalid_request_error",
+                None,
+            );
         }
     };
 
     let db_pool = match &state.db_pool {
         Some(pool) => pool,
         None => {
-            return (
+            return api_error(
                 StatusCode::SERVICE_UNAVAILABLE,
-                Json(serde_json::json!({
-                    "error": {
-                        "message": "Database not configured",
-                        "type": "service_unavailable",
-                    }
-                })),
-            )
-                .into_response();
+                "Database not configured",
+                "service_unavailable",
+                None,
+            );
         }
     };
     let mut client = match db_pool.get().await {
         Ok(client) => client,
         Err(e) => {
             eprintln!("DB connection error: {}", e);
-            return (
+            return api_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({
-                    "error": {
-                        "message": "Failed to connect to database",
-                        "type": "internal_error",
-                    }
-                })),
-            )
-                .into_response();
+                "Failed to connect to database",
+                "internal_error",
+                None,
+            );
         }
     };
 
@@ -663,16 +638,12 @@ async fn rotate_api_key(
         Ok(txn) => txn,
         Err(e) => {
             eprintln!("Failed to start transaction: {}", e);
-            return (
+            return api_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({
-                    "error": {
-                        "message": "Failed to rotate API key",
-                        "type": "internal_error",
-                    }
-                })),
-            )
-                .into_response();
+                "Failed to rotate API key",
+                "internal_error",
+                None,
+            );
         }
     };
 
@@ -689,29 +660,21 @@ async fn rotate_api_key(
     let (role, description): (String, Option<String>) = match old_row {
         Ok(Some(row)) => (row.get("role"), row.get("description")),
         Ok(None) => {
-            return (
+            return api_error(
                 StatusCode::NOT_FOUND,
-                Json(serde_json::json!({
-                    "error": {
-                        "message": "API key not found or already revoked",
-                        "type": "not_found_error",
-                    }
-                })),
-            )
-                .into_response();
+                "API key not found or already revoked",
+                "not_found_error",
+                None,
+            );
         }
         Err(e) => {
             eprintln!("Failed to read API key: {}", e);
-            return (
+            return api_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({
-                    "error": {
-                        "message": "Failed to rotate API key",
-                        "type": "internal_error",
-                    }
-                })),
-            )
-                .into_response();
+                "Failed to rotate API key",
+                "internal_error",
+                None,
+            );
         }
     };
 
@@ -736,16 +699,12 @@ async fn rotate_api_key(
         Ok(row) => row.get("id"),
         Err(e) => {
             eprintln!("Failed to insert rotated API key: {}", e);
-            return (
+            return api_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({
-                    "error": {
-                        "message": "Failed to rotate API key",
-                        "type": "internal_error",
-                    }
-                })),
-            )
-                .into_response();
+                "Failed to rotate API key",
+                "internal_error",
+                None,
+            );
         }
     };
 
@@ -757,30 +716,22 @@ async fn rotate_api_key(
         .await
     {
         eprintln!("Failed to revoke the rotated-out API key: {}", e);
-        return (
+        return api_error(
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({
-                "error": {
-                    "message": "Failed to rotate API key",
-                    "type": "internal_error",
-                }
-            })),
-        )
-            .into_response();
+            "Failed to rotate API key",
+            "internal_error",
+            None,
+        );
     }
 
     if let Err(e) = txn.commit().await {
         eprintln!("Failed to commit API key rotation: {}", e);
-        return (
+        return api_error(
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({
-                "error": {
-                    "message": "Failed to rotate API key",
-                    "type": "internal_error",
-                }
-            })),
-        )
-            .into_response();
+            "Failed to rotate API key",
+            "internal_error",
+            None,
+        );
     }
 
     (
