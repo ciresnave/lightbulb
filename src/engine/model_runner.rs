@@ -158,6 +158,23 @@ impl std::fmt::Display for QueueFullError {
 
 impl std::error::Error for QueueFullError {}
 
+/// Returned when an enqueued job's response didn't arrive within
+/// `ApiConfig::request_timeout_ms`. A distinct type, same reasoning as
+/// [`QueueFullError`]: a handler maps this to HTTP 504 (the request may
+/// still be running server-side when the client gives up on it; retrying
+/// is not obviously safe the way a 503 retry is) rather than folding it
+/// into the generic 500 every other failure gets.
+#[derive(Debug)]
+pub struct RequestTimeoutError;
+
+impl std::fmt::Display for RequestTimeoutError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "inference request timed out")
+    }
+}
+
+impl std::error::Error for RequestTimeoutError {}
+
 /// What the job loop needs from a model, and nothing more.
 ///
 /// **Deliberately tensor-free.** No Fuel or candlelight type appears here, which

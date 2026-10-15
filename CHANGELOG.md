@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.9.0
+
+### Changed
+- **Breaking:** Phase 4 hardening -- "Timeout handling for long-running requests" from the
+  Phase 4 audit (#148): `tokio::time::timeout` had zero uses anywhere in `src/`, and
+  `resp_rx.await` in `openai::chat::run_inference_once` (the chokepoint every non-streaming
+  completion and the n>1 retry loop shares) had no upper bound at all -- a stuck or
+  pathologically slow generation held the HTTP connection open indefinitely.
+  `/v1/chat/completions` (non-streaming) and `/v1/completions` now return `504` after
+  `ApiConfig.request_timeout_ms` (default 300000ms / 5 minutes, env
+  `LIGHTBULB_REQUEST_TIMEOUT_MS`) if the model runner hasn't answered. New response code where
+  there was none before -- same shape as #103/#142's precedent for a new rejection path.
+  Does not cancel the job server-side (no `CancellationToken` exists in `src/` either); the
+  runner thread keeps generating, the timed-out response is just never read.
+
 ## 0.8.11
 
 ### Added

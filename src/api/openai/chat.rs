@@ -480,15 +480,22 @@ pub async fn chat_completions(
 }
 
 /// Map an inference error to a response, giving
-/// [`crate::engine::model_runner::QueueFullError`] its own retriable status
-/// (503) instead of folding it into the generic 500 every other enqueue or
-/// generation failure gets.
+/// [`crate::engine::model_runner::QueueFullError`] (503, safe to retry) and
+/// [`crate::engine::model_runner::RequestTimeoutError`] (504, not obviously
+/// safe to retry -- the job may still be running) their own statuses
+/// instead of folding every enqueue or generation failure into the
+/// generic 500.
 fn queue_error_response(e: anyhow::Error) -> axum::response::Response {
     let status = if e
         .downcast_ref::<crate::engine::model_runner::QueueFullError>()
         .is_some()
     {
         StatusCode::SERVICE_UNAVAILABLE
+    } else if e
+        .downcast_ref::<crate::engine::model_runner::RequestTimeoutError>()
+        .is_some()
+    {
+        StatusCode::GATEWAY_TIMEOUT
     } else {
         StatusCode::INTERNAL_SERVER_ERROR
     };
@@ -1022,7 +1029,14 @@ async fn create_chat_completion(
 
     // If a model runner is available, enqueue the request and wait for generated text.
     if let Some(tx) = &state.inference_tx {
-        let result = run_inference_once(tx, prompt, max_new_tokens, temperature).await?;
+        let result = run_inference_once(
+            tx,
+            prompt,
+            max_new_tokens,
+            temperature,
+            state.config.request_timeout_ms,
+        )
+        .await?;
 
         record_completion(
             &state.eos_monitor,
@@ -1146,11 +1160,21 @@ async fn create_chat_completion(
 
 /// Run a single **complete-mode** inference call by dispatching an
 /// [`InferenceJob`] to the model runner thread and awaiting the result.
+///
+/// `timeout_ms` bounds ONLY the wait for the result (`ApiConfig::
+/// request_timeout_ms`), not the enqueue itself, which already fails fast
+/// (`try_send`) rather than blocking. A stuck or pathologically slow
+/// generation returns [`crate::engine::model_runner::RequestTimeoutError`]
+/// instead of holding the HTTP connection open indefinitely -- it does NOT
+/// cancel the job in the runner thread, which has no cancellation
+/// mechanism (`CancellationToken` has zero uses in `src/`) and keeps
+/// running to completion; the timed-out response is simply never read.
 pub(crate) async fn run_inference_once(
     tx: &std::sync::mpsc::SyncSender<crate::engine::model_runner::InferenceJob>,
     prompt: BuiltPrompt,
     max_new_tokens: usize,
     temperature: f64,
+    timeout_ms: u64,
 ) -> anyhow::Result<crate::engine::model_runner::CompletionResult> {
     let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
     let job = crate::engine::model_runner::InferenceJob {
@@ -1175,9 +1199,16 @@ pub(crate) async fn run_inference_once(
             ));
         }
     }
-    resp_rx
-        .await
-        .map_err(|e| anyhow::anyhow!("inference runner dropped: {}", e))?
+    match tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), resp_rx).await {
+        // The inner `Result` is already `anyhow::Result<CompletionResult>` --
+        // `resp_tx` is `oneshot::Sender<anyhow::Result<CompletionResult>>` --
+        // so it's returned as-is, not re-wrapped.
+        Ok(Ok(result)) => result,
+        Ok(Err(e)) => Err(anyhow::anyhow!("inference runner dropped: {}", e)),
+        Err(_) => Err(anyhow::Error::new(
+            crate::engine::model_runner::RequestTimeoutError,
+        )),
+    }
 }
 
 /// Owned-sender variant used by the `execute_contract` closure (which must
@@ -1187,8 +1218,9 @@ pub(crate) async fn run_inference_once_owned(
     prompt: BuiltPrompt,
     max_new_tokens: usize,
     temperature: f64,
+    timeout_ms: u64,
 ) -> anyhow::Result<crate::engine::model_runner::CompletionResult> {
-    run_inference_once(&tx, prompt, max_new_tokens, temperature).await
+    run_inference_once(&tx, prompt, max_new_tokens, temperature, timeout_ms).await
 }
 
 /// Drive the contract retry loop for a request that carries an
@@ -1232,9 +1264,10 @@ async fn create_chat_completion_with_contract(
         })
         .collect();
 
-    // Cloned out of `state` before the closure, because the closure must be
-    // `Fn` and outlives this borrow.
+    // Cloned/copied out of `state` before the closure, because the closure
+    // must be `Fn` and outlives this borrow.
     let template = state.chat_template.clone();
+    let timeout_ms = state.config.request_timeout_ms;
 
     let exec = execute_contract(
         &msgs,
@@ -1262,7 +1295,9 @@ async fn create_chat_completion_with_contract(
         move |msgs: Vec<RawMessage>| {
             let tx = tx.clone();
             let prompt = build_prompt_from_raw(template.as_deref(), &msgs);
-            async move { run_inference_once_owned(tx, prompt, max_new_tokens, temperature).await }
+            async move {
+                run_inference_once_owned(tx, prompt, max_new_tokens, temperature, timeout_ms).await
+            }
         },
     )
     .await?;
@@ -4053,5 +4088,57 @@ mod tests {
 
         assert_eq!(response.choices[0].message.content, "ordinary answer");
         assert_eq!(response.choices[0].finish_reason, "stop");
+    }
+
+    /// Phase 4 hardening: `tokio::time::timeout` had zero uses anywhere in
+    /// `src/` before this -- `resp_rx.await` could block forever. A runner
+    /// thread that enqueues the job but never answers it (the job sits in
+    /// `ResponseMode::Complete`'s channel, unresponded, for the life of the
+    /// test) must make `run_inference_once` return
+    /// `RequestTimeoutError`, not hang the test (or a real request) forever.
+    #[tokio::test]
+    async fn run_inference_once_times_out_when_the_runner_never_answers() {
+        use crate::engine::model_runner::InferenceJob;
+        let (tx, rx) = std::sync::mpsc::sync_channel::<InferenceJob>(1);
+        // Received but deliberately never answered -- `_job`'s `resp_tx`
+        // half is simply dropped at the end of this closure's scope, same
+        // observable shape as a runner that is still working on it when
+        // the caller's patience (timeout_ms) runs out.
+        let handle = std::thread::spawn(move || {
+            let _job = rx.recv();
+            std::thread::sleep(std::time::Duration::from_secs(5));
+        });
+
+        let result = run_inference_once(&tx, BuiltPrompt::raw("hi".to_string()), 8, 0.0, 20).await;
+
+        drop(tx);
+        // Not joining `handle`: it deliberately outlives this test's own
+        // assertion window (that's what "never answers within the timeout"
+        // means) -- joining it would just re-impose the same unbounded wait
+        // run_inference_once's timeout exists to avoid.
+        drop(handle);
+
+        let err = result.expect_err("a never-answered job must time out, not hang or succeed");
+        assert!(
+            err.downcast_ref::<crate::engine::model_runner::RequestTimeoutError>()
+                .is_some(),
+            "expected RequestTimeoutError, got: {err}"
+        );
+    }
+
+    /// Companion to the timeout test: an ordinary, promptly-answered job
+    /// with a generous timeout must still succeed -- the new timeout
+    /// parameter must not turn a fast, healthy request into a failure.
+    #[tokio::test]
+    async fn run_inference_once_succeeds_well_within_its_timeout() {
+        let (tx, runner) = stub_runner_with_text("fast answer", FinishReason::Stop);
+
+        let result =
+            run_inference_once(&tx, BuiltPrompt::raw("hi".to_string()), 8, 0.0, 30_000).await;
+        drop(tx);
+        let _ = runner.join();
+
+        let completion = result.expect("a promptly-answered job must not time out");
+        assert_eq!(completion.text, "fast answer");
     }
 }

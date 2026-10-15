@@ -99,6 +99,18 @@ pub struct ApiConfig {
     /// to the client as HTTP 503) instead of queuing without bound.
     pub model_max_queue_depth: usize,
 
+    /// How long an inference job may sit between being enqueued and the
+    /// model runner thread finishing it, before the HTTP handler gives up
+    /// and returns 504 instead of waiting forever. Phase 4 hardening
+    /// (board PM task): `tokio::time::timeout` previously had zero uses
+    /// anywhere in `src/`, and `resp_rx.await` in
+    /// `openai::chat::run_inference_once` (the chokepoint every
+    /// non-streaming completion and the n>1 retry loop share) had no
+    /// upper bound at all -- a stuck or pathologically slow generation
+    /// held the HTTP connection open indefinitely, with no server-side
+    /// path back to the client.
+    pub request_timeout_ms: u64,
+
     /// Enable audit logging
     pub enable_audit_log: bool,
 
@@ -168,6 +180,7 @@ impl Default for ApiConfig {
             model_max_batch_size: 8,
             model_context_length: 2048,
             model_max_queue_depth: 32,
+            request_timeout_ms: 300_000,
             tls: crate::tls::TlsConfig::default(),
             no_auth: false,
             trusted_proxies: Vec::new(),
