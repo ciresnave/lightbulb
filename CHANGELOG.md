@@ -1,5 +1,37 @@
 # Changelog
 
+## 0.9.0
+
+### Changed
+- **Breaking:** Phase 4 hardening -- "Timeout handling for long-running requests" from the
+  Phase 4 audit (#148): `tokio::time::timeout` had zero uses anywhere in `src/`, and
+  `resp_rx.await` in `openai::chat::run_inference_once` (the chokepoint every non-streaming
+  completion and the n>1 retry loop shares) had no upper bound at all -- a stuck or
+  pathologically slow generation held the HTTP connection open indefinitely.
+  `/v1/chat/completions` (non-streaming) and `/v1/completions` now return `504` after
+  `ApiConfig.request_timeout_ms` (default 300000ms / 5 minutes, env
+  `LIGHTBULB_REQUEST_TIMEOUT_MS`) if the model runner hasn't answered. New response code where
+  there was none before -- same shape as #103/#142's precedent for a new rejection path.
+  No explicit cancellation mechanism exists (`CancellationToken` has zero uses in `src/`), but
+  dropping the response channel on timeout closes it, and `model_runner::run_jobs`'s normal
+  complete-mode loop checks whether that channel is closed before every generation step -- a
+  timeout does stop generation there. A different runner implementation that doesn't make that
+  check would keep running past the timeout regardless.
+  - Sourcery review caught three further gaps before merge, all fixed in the same PR: the
+    streaming path (`stream: true`) had no timeout at all -- a stalled runner left an SSE
+    client waiting forever, the exact hang this item otherwise fixes. Added a per-chunk idle
+    timeout on the streaming path: if no token arrives within `request_timeout_ms` of the
+    previous one, the stream emits one `timeout_error` SSE frame and ends (followed by the
+    usual `[DONE]`).
+  - The contract-retry and fallback-contract paths started a fresh `request_timeout_ms` on
+    every attempt, so a request retried 3 times could hold the HTTP connection open up to 3x
+    the configured limit before returning. `execute_contract` now computes one deadline for
+    the whole call and passes each attempt only the time remaining, so the total is bounded by
+    `request_timeout_ms` regardless of attempt count.
+  - `LIGHTBULB_REQUEST_TIMEOUT_MS=0` was accepted and meant every request timed out
+    immediately (`tokio::time::timeout(0)` always expires). Rejected at startup now, with a
+    named error.
+
 ## 0.8.11
 
 ### Added

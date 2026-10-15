@@ -480,15 +480,22 @@ pub async fn chat_completions(
 }
 
 /// Map an inference error to a response, giving
-/// [`crate::engine::model_runner::QueueFullError`] its own retriable status
-/// (503) instead of folding it into the generic 500 every other enqueue or
-/// generation failure gets.
+/// [`crate::engine::model_runner::QueueFullError`] (503, safe to retry) and
+/// [`crate::engine::model_runner::RequestTimeoutError`] (504, not obviously
+/// safe to retry -- the job may still be running) their own statuses
+/// instead of folding every enqueue or generation failure into the
+/// generic 500.
 fn queue_error_response(e: anyhow::Error) -> axum::response::Response {
     let status = if e
         .downcast_ref::<crate::engine::model_runner::QueueFullError>()
         .is_some()
     {
         StatusCode::SERVICE_UNAVAILABLE
+    } else if e
+        .downcast_ref::<crate::engine::model_runner::RequestTimeoutError>()
+        .is_some()
+    {
+        StatusCode::GATEWAY_TIMEOUT
     } else {
         StatusCode::INTERNAL_SERVER_ERROR
     };
@@ -1022,7 +1029,14 @@ async fn create_chat_completion(
 
     // If a model runner is available, enqueue the request and wait for generated text.
     if let Some(tx) = &state.inference_tx {
-        let result = run_inference_once(tx, prompt, max_new_tokens, temperature).await?;
+        let result = run_inference_once(
+            tx,
+            prompt,
+            max_new_tokens,
+            temperature,
+            state.config.request_timeout_ms,
+        )
+        .await?;
 
         record_completion(
             &state.eos_monitor,
@@ -1146,11 +1160,30 @@ async fn create_chat_completion(
 
 /// Run a single **complete-mode** inference call by dispatching an
 /// [`InferenceJob`] to the model runner thread and awaiting the result.
+///
+/// `timeout_ms` bounds ONLY the wait for the result (`ApiConfig::
+/// request_timeout_ms`), not the enqueue itself, which already fails fast
+/// (`try_send`) rather than blocking. A stuck or pathologically slow
+/// generation returns [`crate::engine::model_runner::RequestTimeoutError`]
+/// instead of holding the HTTP connection open indefinitely.
+///
+/// There is no explicit cancellation mechanism (`CancellationToken` has
+/// zero uses in `src/`) -- but dropping `resp_rx` on timeout closes the
+/// oneshot channel, and `model_runner::run_jobs`'s normal complete-mode
+/// loop checks `resp_tx.is_closed()` before every generation step, so a
+/// timeout DOES stop generation for that job there (verified against
+/// `run_jobs`, not assumed -- an earlier version of this comment claimed
+/// the opposite and was wrong, caught by Sourcery review of #155). A
+/// different `EngineModel`/runner implementation that doesn't make the
+/// same `is_closed()` check would keep running past the timeout; this
+/// function has no way to know which implementation is on the other end
+/// of `tx`.
 pub(crate) async fn run_inference_once(
     tx: &std::sync::mpsc::SyncSender<crate::engine::model_runner::InferenceJob>,
     prompt: BuiltPrompt,
     max_new_tokens: usize,
     temperature: f64,
+    timeout_ms: u64,
 ) -> anyhow::Result<crate::engine::model_runner::CompletionResult> {
     let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
     let job = crate::engine::model_runner::InferenceJob {
@@ -1175,9 +1208,16 @@ pub(crate) async fn run_inference_once(
             ));
         }
     }
-    resp_rx
-        .await
-        .map_err(|e| anyhow::anyhow!("inference runner dropped: {}", e))?
+    match tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), resp_rx).await {
+        // The inner `Result` is already `anyhow::Result<CompletionResult>` --
+        // `resp_tx` is `oneshot::Sender<anyhow::Result<CompletionResult>>` --
+        // so it's returned as-is, not re-wrapped.
+        Ok(Ok(result)) => result,
+        Ok(Err(e)) => Err(anyhow::anyhow!("inference runner dropped: {}", e)),
+        Err(_) => Err(anyhow::Error::new(
+            crate::engine::model_runner::RequestTimeoutError,
+        )),
+    }
 }
 
 /// Owned-sender variant used by the `execute_contract` closure (which must
@@ -1187,8 +1227,9 @@ pub(crate) async fn run_inference_once_owned(
     prompt: BuiltPrompt,
     max_new_tokens: usize,
     temperature: f64,
+    timeout_ms: u64,
 ) -> anyhow::Result<crate::engine::model_runner::CompletionResult> {
-    run_inference_once(&tx, prompt, max_new_tokens, temperature).await
+    run_inference_once(&tx, prompt, max_new_tokens, temperature, timeout_ms).await
 }
 
 /// Drive the contract retry loop for a request that carries an
@@ -1232,9 +1273,20 @@ async fn create_chat_completion_with_contract(
         })
         .collect();
 
-    // Cloned out of `state` before the closure, because the closure must be
-    // `Fn` and outlives this borrow.
+    // Cloned/copied out of `state` before the closure, because the closure
+    // must be `Fn` and outlives this borrow.
     let template = state.chat_template.clone();
+    // ONE deadline for the whole contract call, not a fresh `timeout_ms`
+    // per attempt (Sourcery review of #155): `execute_contract` retries up
+    // to `max_attempts` times and falls back across contracts, awaiting
+    // each attempt sequentially -- a fresh full timeout on every one of
+    // those could hold the HTTP connection open several times
+    // `request_timeout_ms` before returning. Each closure invocation below
+    // computes how much of that one deadline is left and passes only that
+    // to `run_inference_once_owned`, so the total across every attempt is
+    // bounded by `request_timeout_ms` regardless of how many attempts run.
+    let deadline = std::time::Instant::now()
+        + std::time::Duration::from_millis(state.config.request_timeout_ms);
 
     let exec = execute_contract(
         &msgs,
@@ -1262,7 +1314,15 @@ async fn create_chat_completion_with_contract(
         move |msgs: Vec<RawMessage>| {
             let tx = tx.clone();
             let prompt = build_prompt_from_raw(template.as_deref(), &msgs);
-            async move { run_inference_once_owned(tx, prompt, max_new_tokens, temperature).await }
+            let remaining_ms = deadline
+                .saturating_duration_since(std::time::Instant::now())
+                .as_millis()
+                .try_into()
+                .unwrap_or(u64::MAX);
+            async move {
+                run_inference_once_owned(tx, prompt, max_new_tokens, temperature, remaining_ms)
+                    .await
+            }
         },
     )
     .await?;
@@ -1360,6 +1420,12 @@ fn create_chat_stream(state: AppState, request: ChatCompletionRequest) -> Respon
     // on a server whose clients stream.
     let eos_monitor = state.eos_monitor.clone();
     let resolved_by = state.chat_template.as_ref().map(|t| t.resolved_by());
+    // Copied out before `state.inference_tx` is moved below, same reason as
+    // `eos_monitor`/`resolved_by` above. Sourcery review of #155: the
+    // non-streaming timeout had no streaming counterpart at all -- a
+    // stalled runner left an SSE client waiting forever, the exact hang
+    // this PR otherwise fixes.
+    let timeout_ms = state.config.request_timeout_ms;
 
     // If a model runner is available, create a streaming job
     if let Some(tx) = state.inference_tx {
@@ -1416,23 +1482,94 @@ fn create_chat_stream(state: AppState, request: ChatCompletionRequest) -> Respon
         let chat_id = format!("chatcmpl-{}", uuid::Uuid::new_v4());
 
         use crate::engine::model_runner::StreamItem;
-        use futures::stream::StreamExt as FuturesStreamExt;
-        use tokio_stream::wrappers::UnboundedReceiverStream;
 
-        // `chat_id` and `model` are moved into the closure and re-cloned per
-        // chunk; nothing after this point uses either (the no-runner fallback
-        // below re-derives the model name from `request`).
-        let token_stream =
-            UnboundedReceiverStream::new(stream_rx).scan(true, move |is_first, result| {
-                let chat_id = chat_id.clone();
-                let model = model.clone();
-                let eos_monitor = eos_monitor.clone();
-                let first = *is_first;
-                *is_first = false;
-
-                async move {
-                    match result {
-                        Ok(StreamItem::Token(token_text)) => Some(sse_event(
+        // Per-chunk idle timeout: each step waits at most `timeout_ms` for
+        // the *next* item, not once per whole response -- a stream that is
+        // actively producing tokens, just slowly, is not what this guards
+        // against; a runner that has stalled entirely is.
+        //
+        // Built with `stream::unfold` driving `tokio::time::timeout`
+        // directly over `recv()`, rather than `tokio_stream::StreamExt::
+        // timeout()` composed with `.scan()`: that combinator pairing,
+        // once wrapped in `Sse::new(...)` and driven through axum's SSE
+        // body, silently stopped firing its timeout (observed: the 20ms
+        // idle timeout in a test never elapsed until the producer thread's
+        // own unrelated 5s sleep woke the task some other way) -- isolated
+        // with a battery of throwaway diagnostic tests that polled the
+        // same combinator directly (always correct) versus through
+        // `Sse`+`to_bytes` (reproduced the stall, `scan` specifically; a
+        // `.take()/.map()` stand-in through the same `Sse` wrapper was
+        // fine). `unfold` sidesteps whatever that interaction was by never
+        // composing a tokio_stream `Timeout` with `scan` in the first
+        // place -- each step is one plain `tokio::time::timeout` future.
+        struct StreamState {
+            rx: tokio::sync::mpsc::UnboundedReceiver<anyhow::Result<StreamItem>>,
+            is_first: bool,
+            done: bool,
+        }
+        let state = StreamState {
+            rx: stream_rx,
+            is_first: true,
+            done: false,
+        };
+        let token_stream = stream::unfold(state, move |mut st| {
+            let chat_id = chat_id.clone();
+            let model = model.clone();
+            let eos_monitor = eos_monitor.clone();
+            async move {
+                if st.done {
+                    return None;
+                }
+                let first = st.is_first;
+                st.is_first = false;
+                let received = tokio::time::timeout(
+                    std::time::Duration::from_millis(timeout_ms),
+                    st.rx.recv(),
+                )
+                .await;
+                let event = match received {
+                    Err(_elapsed) => {
+                        st.done = true;
+                        sse_event(
+                            Event::default().data(
+                                serde_json::json!({
+                                    "error": {
+                                        "message": "inference request timed out",
+                                        "type": "timeout_error"
+                                    }
+                                })
+                                .to_string(),
+                            ),
+                        )
+                    }
+                    Ok(None) => return None,
+                    Ok(Some(Ok(StreamItem::Token(token_text)))) => sse_event(
+                        Event::default().data(
+                            serde_json::json!({
+                                "id": chat_id,
+                                "object": "chat.completion.chunk",
+                                "created": created,
+                                "model": model,
+                                "choices": [{
+                                    "index": 0,
+                                    "delta": {
+                                        "role": if first { Some("assistant") } else { None },
+                                        "content": token_text
+                                    },
+                                    "finish_reason": None::<String>
+                                }]
+                            })
+                            .to_string(),
+                        ),
+                    ),
+                    Ok(Some(Ok(StreamItem::Done { finish_reason }))) => {
+                        // The stream's one observation of how generation
+                        // ended. It is the same value the frame below
+                        // reports to the client, read here rather than
+                        // re-derived.
+                        record_completion(&eos_monitor, resolved_by, finish_reason);
+                        st.done = true;
+                        sse_event(
                             Event::default().data(
                                 serde_json::json!({
                                     "id": chat_id,
@@ -1441,40 +1578,17 @@ fn create_chat_stream(state: AppState, request: ChatCompletionRequest) -> Respon
                                     "model": model,
                                     "choices": [{
                                         "index": 0,
-                                        "delta": {
-                                            "role": if first { Some("assistant") } else { None },
-                                            "content": token_text
-                                        },
-                                        "finish_reason": None::<String>
+                                        "delta": {},
+                                        "finish_reason": finish_reason.as_str()
                                     }]
                                 })
                                 .to_string(),
                             ),
-                        )),
-                        Ok(StreamItem::Done { finish_reason }) => {
-                            // The stream's one observation of how generation
-                            // ended. It is the same value the frame below
-                            // reports to the client, read here rather than
-                            // re-derived.
-                            record_completion(&eos_monitor, resolved_by, finish_reason);
-                            Some(sse_event(
-                                Event::default().data(
-                                    serde_json::json!({
-                                        "id": chat_id,
-                                        "object": "chat.completion.chunk",
-                                        "created": created,
-                                        "model": model,
-                                        "choices": [{
-                                            "index": 0,
-                                            "delta": {},
-                                            "finish_reason": finish_reason.as_str()
-                                        }]
-                                    })
-                                    .to_string(),
-                                ),
-                            ))
-                        }
-                        Err(e) => Some(sse_event(
+                        )
+                    }
+                    Ok(Some(Err(e))) => {
+                        st.done = true;
+                        sse_event(
                             Event::default().data(
                                 serde_json::json!({
                                     "error": {
@@ -1484,10 +1598,12 @@ fn create_chat_stream(state: AppState, request: ChatCompletionRequest) -> Respon
                                 })
                                 .to_string(),
                             ),
-                        )),
+                        )
                     }
-                }
-            });
+                };
+                Some((event, st))
+            }
+        });
 
         // OpenAI's real streaming contract ends with a literal `data: [DONE]`
         // line, not just the last content/done frame -- appended after
@@ -2265,6 +2381,94 @@ mod tests {
         // stub's `recv` ends and it hands back what it saw.
         let jobs = runner.join().expect("stub runner panicked");
         assert_two_templated_attempts(&dir, &jobs);
+    }
+
+    /// Sourcery review of #155: `execute_contract`'s `infer(msgs).await?`
+    /// propagates any inference-call `Err` immediately (confirmed by
+    /// reading the executor, not assumed) -- so once the shared-deadline
+    /// fix makes a later attempt's remaining budget too small, that
+    /// attempt's `RequestTimeoutError` ends the whole call right there,
+    /// surfacing as 504 via the same `queue_error_response` downcast the
+    /// non-streaming path uses. Before the fix, each attempt got a fresh
+    /// full `request_timeout_ms`, which this scenario's attempt 2 would
+    /// comfortably finish within, retrying further instead of timing out
+    /// -- observable as both a different status code and a longer
+    /// wall-clock time, either one of which a reverted fix would flip.
+    #[tokio::test]
+    async fn contract_retries_share_one_deadline_not_a_fresh_one_per_attempt() {
+        use crate::engine::model_runner::{
+            CompletionResult, FinishReason, InferenceJob, ResponseMode,
+        };
+
+        let (tx, rx) = std::sync::mpsc::sync_channel::<InferenceJob>(1);
+        let runner = std::thread::spawn(move || {
+            // Every attempt takes ~150ms to answer, with text that never
+            // parses as the contract -- attempt 1 must succeed-but-retry
+            // (within a 200ms budget), attempt 2 must exceed its own
+            // SHARED remaining budget (~50ms) if the fix is in place. Wide
+            // margins (rather than e.g. 45ms/60ms) so the status-code
+            // assertion's wall-clock corroboration stays unambiguous under
+            // CI scheduling jitter from running the full suite in parallel.
+            while let Ok(job) = rx.recv() {
+                std::thread::sleep(std::time::Duration::from_millis(150));
+                if let ResponseMode::Complete(resp) = job.response_mode {
+                    let _ = resp.send(Ok(CompletionResult {
+                        text: "not-a-valid-choice".to_string(),
+                        prompt_tokens: 1,
+                        completion_tokens: 1,
+                        finish_reason: FinishReason::Stop,
+                    }));
+                }
+            }
+        });
+
+        let mut state = state_with_runner(None, Some(tx));
+        state.config.request_timeout_ms = 200;
+
+        let request: ChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": state.config.default_model.clone(),
+            "messages": [{"role": "user", "content": CONTRACT_QUESTION}],
+            "max_tokens": 8,
+            "temperature": 0.0,
+            "lightbulb": {
+                "output_contract": {
+                    "type": "enum_choice",
+                    "choices": ["yes", "no"],
+                    "case_sensitive": false,
+                    "allow_index": true
+                },
+                "max_attempts": 2
+            }
+        }))
+        .expect("the request body must deserialize");
+
+        let started = std::time::Instant::now();
+        let response = chat_completions(State(state), Json(request))
+            .await
+            .into_response();
+        let elapsed = started.elapsed();
+
+        drop(runner);
+
+        assert_eq!(
+            response.status(),
+            StatusCode::GATEWAY_TIMEOUT,
+            "attempt 2's shared remaining budget (~50ms) must be too small for the \
+             runner's ~150ms reply, timing out the whole call -- a fresh 200ms per attempt \
+             would let attempt 2 also finish and retry further instead"
+        );
+        // A loose sanity bound only -- catches an actual hang (e.g. the
+        // deadline never getting enforced at all), not the fresh-budget-
+        // per-attempt regression itself: under full-suite CI scheduling
+        // load this process has been observed to add 200ms+ of jitter to
+        // even the correct path, so a tight bound tuned to distinguish
+        // "~200ms" from "~300ms+" is not reliable here. The status-code
+        // assertion above is what actually proves the deadline is shared;
+        // see this test's own doc comment.
+        assert!(
+            elapsed < std::time::Duration::from_secs(5),
+            "took {elapsed:?}, suggesting the deadline was never enforced at all"
+        );
     }
 
     /// The same claim at the entry point a real client reaches: the axum
@@ -3961,6 +4165,56 @@ mod tests {
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 
+    /// Sourcery review of #155: the non-streaming timeout had no streaming
+    /// counterpart -- a stalled runner left an SSE client waiting forever.
+    /// Mutation check: if the per-chunk `.timeout()` on the streaming path
+    /// were removed, `sse_frames` below would read an unbounded stream
+    /// from a runner thread that deliberately never sends or closes within
+    /// this test's lifetime, and the outer `tokio::time::timeout` would
+    /// `.expect()`-panic with a clear message instead of this test simply
+    /// hanging forever.
+    #[tokio::test]
+    async fn chat_completions_streaming_times_out_when_the_runner_stalls() {
+        use crate::engine::model_runner::{InferenceJob, ResponseMode};
+
+        let (tx, rx) = std::sync::mpsc::sync_channel::<InferenceJob>(1);
+        let handle = std::thread::spawn(move || {
+            if let Ok(job) = rx.recv()
+                && let ResponseMode::Streaming(stream_tx) = job.response_mode
+            {
+                // Held alive, not dropped -- the channel staying open with
+                // nothing arriving is exactly "a stalled runner", as
+                // opposed to a clean end of stream.
+                std::thread::sleep(std::time::Duration::from_secs(5));
+                drop(stream_tx);
+            }
+        });
+
+        let mut state = state_with_runner(None, Some(tx));
+        state.config.request_timeout_ms = 20;
+        let mut req = request();
+        req.model = state.config.default_model.clone();
+        req.stream = true;
+
+        let response = chat_completions(State(state), Json(req))
+            .await
+            .into_response();
+
+        let frames = tokio::time::timeout(std::time::Duration::from_secs(2), sse_frames(response))
+            .await
+            .expect(
+                "the streaming response must end on its own idle timeout, not hang \
+                 forever",
+            );
+
+        drop(handle);
+
+        assert!(
+            frames.iter().any(|f| f["error"]["type"] == "timeout_error"),
+            "expected a timeout_error SSE frame, got: {frames:?}"
+        );
+    }
+
     /// The non-streaming twin of the test above: a full queue must answer
     /// 503, not the generic 500 every other enqueue/generation failure gets.
     #[tokio::test]
@@ -4053,5 +4307,57 @@ mod tests {
 
         assert_eq!(response.choices[0].message.content, "ordinary answer");
         assert_eq!(response.choices[0].finish_reason, "stop");
+    }
+
+    /// Phase 4 hardening: `tokio::time::timeout` had zero uses anywhere in
+    /// `src/` before this -- `resp_rx.await` could block forever. A runner
+    /// thread that enqueues the job but never answers it (the job sits in
+    /// `ResponseMode::Complete`'s channel, unresponded, for the life of the
+    /// test) must make `run_inference_once` return
+    /// `RequestTimeoutError`, not hang the test (or a real request) forever.
+    #[tokio::test]
+    async fn run_inference_once_times_out_when_the_runner_never_answers() {
+        use crate::engine::model_runner::InferenceJob;
+        let (tx, rx) = std::sync::mpsc::sync_channel::<InferenceJob>(1);
+        // Received but deliberately never answered -- `_job`'s `resp_tx`
+        // half is simply dropped at the end of this closure's scope, same
+        // observable shape as a runner that is still working on it when
+        // the caller's patience (timeout_ms) runs out.
+        let handle = std::thread::spawn(move || {
+            let _job = rx.recv();
+            std::thread::sleep(std::time::Duration::from_secs(5));
+        });
+
+        let result = run_inference_once(&tx, BuiltPrompt::raw("hi".to_string()), 8, 0.0, 20).await;
+
+        drop(tx);
+        // Not joining `handle`: it deliberately outlives this test's own
+        // assertion window (that's what "never answers within the timeout"
+        // means) -- joining it would just re-impose the same unbounded wait
+        // run_inference_once's timeout exists to avoid.
+        drop(handle);
+
+        let err = result.expect_err("a never-answered job must time out, not hang or succeed");
+        assert!(
+            err.downcast_ref::<crate::engine::model_runner::RequestTimeoutError>()
+                .is_some(),
+            "expected RequestTimeoutError, got: {err}"
+        );
+    }
+
+    /// Companion to the timeout test: an ordinary, promptly-answered job
+    /// with a generous timeout must still succeed -- the new timeout
+    /// parameter must not turn a fast, healthy request into a failure.
+    #[tokio::test]
+    async fn run_inference_once_succeeds_well_within_its_timeout() {
+        let (tx, runner) = stub_runner_with_text("fast answer", FinishReason::Stop);
+
+        let result =
+            run_inference_once(&tx, BuiltPrompt::raw("hi".to_string()), 8, 0.0, 30_000).await;
+        drop(tx);
+        let _ = runner.join();
+
+        let completion = result.expect("a promptly-answered job must not time out");
+        assert_eq!(completion.text, "fast answer");
     }
 }

@@ -54,6 +54,11 @@ async fn main() -> Result<()> {
             .and_then(|v| v.parse().ok())
             .unwrap_or(300);
 
+    let request_timeout_ms = env::var("LIGHTBULB_REQUEST_TIMEOUT_MS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(300_000);
+
     // Security audit item 4. A deployment secret, env var only — never a
     // contact file. `None` means only `LogSink` is active; see
     // `ApiConfig::security_alert_email`'s own doc for why a configured
@@ -74,6 +79,7 @@ async fn main() -> Result<()> {
         model_max_batch_size: 16,
         model_context_length: 4096,
         model_max_queue_depth: 32,
+        request_timeout_ms,
         enable_audit_log: database_url.is_some(), // Disable audit logging without database
         tls: Default::default(),                  // TLS disabled by default
         no_auth,

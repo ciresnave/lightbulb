@@ -157,14 +157,20 @@ pub async fn completions(
     match create_completion(state, request).await {
         Ok(response) => (StatusCode::OK, Json(response)).into_response(),
         Err(e) => {
-            // `QueueFullError` gets its own retriable status; every other
-            // enqueue or generation failure keeps the generic 500 — see
-            // `chat::queue_error_response`, which this mirrors.
+            // `QueueFullError` (503, safe to retry) and `RequestTimeoutError`
+            // (504, not obviously safe to retry) get their own statuses;
+            // every other enqueue or generation failure keeps the generic
+            // 500 — see `chat::queue_error_response`, which this mirrors.
             let status = if e
                 .downcast_ref::<crate::engine::model_runner::QueueFullError>()
                 .is_some()
             {
                 StatusCode::SERVICE_UNAVAILABLE
+            } else if e
+                .downcast_ref::<crate::engine::model_runner::RequestTimeoutError>()
+                .is_some()
+            {
+                StatusCode::GATEWAY_TIMEOUT
             } else {
                 StatusCode::INTERNAL_SERVER_ERROR
             };
@@ -219,6 +225,7 @@ async fn create_completion(
         crate::api::openai::chat::BuiltPrompt::raw(prompt_text.clone()),
         max_new_tokens,
         temperature,
+        state.config.request_timeout_ms,
     )
     .await?;
 
