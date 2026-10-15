@@ -43,6 +43,55 @@ env:
   CARGO_BUILD_JOBS: 4
 
 jobs:
+  # Regression coverage for a critical, pre-existing bug (found via this
+  # same mechanism on a sibling PR, lightbulb#152): pre_auth_attempt_limiter_
+  # middleware bound a String to a $1::inet-cast parameter, which fails to
+  # encode on EVERY call, unconditionally -- any real deployment with a
+  # database configured 503'd on every single authenticated request. None
+  # of this file's Postgres-gated tests have ever run in CI before, since
+  # `gates` (below) runs on windows-latest with no Postgres reachable.
+  #
+  # `initdb` a fresh, throwaway cluster every run using the PostgreSQL the
+  # runner image already ships ($env:PGBIN), on a non-default port -- no
+  # container, no digest to pin. `gates` runs on windows-latest, which
+  # cannot start a Linux container (measured via a throwaway probe,
+  # lightbulb#151, closed), and this repo does not build on Linux at all
+  # today, ruling out a Postgres service container.
+  postgres_integration:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      - name: initdb a fresh throwaway cluster
+        shell: pwsh
+        run: |
+          & "$env:PGBIN\postgres.exe" --version
+          $dataDir = "$env:RUNNER_TEMP\lightbulb-pgdata"
+          & "$env:PGBIN\initdb.exe" -D $dataDir -U lightbulb -A trust -E UTF8 --no-locale
+          & "$env:PGBIN\pg_ctl.exe" -D $dataDir -l "$env:RUNNER_TEMP\lightbulb-pg.log" -o "-p 55432" start -w
+          & "$env:PGBIN\createdb.exe" -h localhost -p 55432 -U lightbulb lightbulb
+          "LIGHTBULB_TEST_DATABASE_URL=postgresql://lightbulb@localhost:55432/lightbulb" >> $env:GITHUB_ENV
+
+      - name: cargo test -- just the pre-auth-limiter regression test
+        shell: bash
+        run: |
+          cargo test --test api_integration_tests -- --ignored --test-threads=1 \
+            pre_auth_attempt_limiter_does_not_503_an_ordinary_request
+
+      - name: dump the Postgres server log on failure
+        if: failure()
+        shell: pwsh
+        run: Get-Content "$env:RUNNER_TEMP\lightbulb-pg.log" -ErrorAction SilentlyContinue | Out-String | Write-Host
+
+      - name: stop the throwaway cluster
+        if: always()
+        shell: pwsh
+        run: |
+          & "$env:PGBIN\pg_ctl.exe" -D "$env:RUNNER_TEMP\lightbulb-pgdata" stop -m fast
+        continue-on-error: true
+
   gates:
     # WINDOWS, NOT LINUX, AND THIS IS A MEASURED CONSTRAINT RATHER THAN A
     # PREFERENCE. Lightbulb does not currently build on Linux at all:

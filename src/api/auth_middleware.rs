@@ -76,18 +76,23 @@ pub async fn pre_auth_attempt_limiter_middleware(
     };
 
     let limit = state.config.max_auth_attempts_per_minute_per_ip as i64;
-    let ip_text = client_ip.to_string();
 
+    // `client_ip` (a `std::net::IpAddr`) must be bound directly, not as its
+    // `.to_string()`. `$1::inet`'s cast resolves the bind parameter's wire
+    // type to INET, and `String`'s `ToSql` only covers TEXT-family OIDs --
+    // encoding a text value against an INET-typed parameter fails on every
+    // single call ("error serializing parameter 0"), unconditionally, not
+    // just past the rate limit. `IpAddr` has a native `ToSql` for INET.
     let count: i64 = match client
         .query_one(
             r#"
             INSERT INTO auth_attempt_counts (client_ip, window_start, request_count)
-            VALUES ($1::inet, date_trunc('minute', now())::timestamp, 1)
+            VALUES ($1, date_trunc('minute', now())::timestamp, 1)
             ON CONFLICT (client_ip, window_start) DO UPDATE
               SET request_count = auth_attempt_counts.request_count + 1
             RETURNING request_count
             "#,
-            &[&ip_text],
+            &[&client_ip],
         )
         .await
     {
