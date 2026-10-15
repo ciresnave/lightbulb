@@ -555,14 +555,28 @@ mod api_tests {
         tokio::spawn(async move {
             let _ = connection.await;
         });
-        client
-            .execute(
+        // Capture exactly which rows this blanket UPDATE touches (not just
+        // its row count) so they can be restored afterward -- this
+        // database is shared with every other test in the same CI run,
+        // including the "test-token" admin key `create_test_server`
+        // provisions for all of them. Revoking it here and never
+        // restoring it broke two sibling tests the first time this ran in
+        // CI (their own "Bearer test-token" admin calls got 401, not the
+        // 200/201 they expected) -- a real, order-dependent bug this
+        // comment originally only claimed not to have, rather than one
+        // this code actually prevented.
+        let revoked_ids: Vec<uuid::Uuid> = client
+            .query(
                 "UPDATE api_keys SET revoked_at = NOW() \
-                 WHERE role = 'admin' AND id != $1 AND revoked_at IS NULL",
+                 WHERE role = 'admin' AND id != $1 AND revoked_at IS NULL \
+                 RETURNING id",
                 &[&only_admin_id],
             )
             .await
-            .expect("revoke every other admin key");
+            .expect("revoke every other admin key")
+            .iter()
+            .map(|row| row.get("id"))
+            .collect();
 
         let app = server.build_router().with_state(server.state().clone());
 
@@ -577,6 +591,14 @@ mod api_tests {
             ))
             .await
             .unwrap();
+
+        client
+            .execute(
+                "UPDATE api_keys SET revoked_at = NULL WHERE id = ANY($1)",
+                &[&revoked_ids],
+            )
+            .await
+            .expect("restore the admin keys this test revoked");
 
         assert_eq!(
             response.status(),
