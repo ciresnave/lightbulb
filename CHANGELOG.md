@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.8.10
+
+### Added
+- Phase 4 hardening item 3 (PM-tasked): API keys could be created but never revoked or
+  rotated -- the only way to disable one was deleting the row directly in the database,
+  outside any API path. Added `DELETE /v1/lightbulb/admin/api-keys/{id}` (revoke) and
+  `POST /v1/lightbulb/admin/api-keys/{id}/rotate` (issue a replacement with the same
+  role/description, revoke the original). Purely additive: no existing key's behavior
+  changes, so this is a feature addition, not a breaking bump.
+  - `revoke_api_key` refuses to revoke the caller's own key unless another unexpired,
+    unrevoked admin key exists -- otherwise it is the request that locks every admin out
+    of every admin route, including the one that could undo it.
+  - `rotate_api_key` inserts the replacement and revokes the original in one database
+    transaction: a crash between the two halves can never leave both keys live or
+    neither live.
+  - Migration `V6__add_api_key_revocation.sql` adds `revoked_at`; the auth lookup in
+    `auth_middleware.rs` now also requires `revoked_at IS NULL`. Stays one indexed read
+    on the hot path (keyed on the already-unique, already-indexed `key_hash`); the new
+    `revoked_at` index serves the cold paths (an admin listing, the lockout check) instead.
+  - Extends the `postgres_integration` CI job (#153): the revoked-key-is-rejected behavior
+    needed a test that actually runs, not an `#[ignore]`-only assertion. Runs three new
+    tests by name filter, alongside #153's pre-auth-limiter regression test -- the
+    remaining pre-existing `#[ignore]`d integration tests stay unexecuted in CI, unrelated
+    to this item.
+
 ## 0.8.9
 
 ### Fixed
@@ -11,10 +36,10 @@
   middleware runs in front of every route whenever `database_url` is configured. Fixed by
   binding the already-in-scope `client_ip: std::net::IpAddr` directly; `IpAddr` has a native
   `ToSql` for `INET`.
-  - Found via the new `postgres_integration` CI job (added alongside #152, this repo's first
-    CI job that actually runs any of this file's Postgres-gated tests against a real
-    database) -- none of the 8 pre-existing `#[ignore]`d integration tests gated on Postgres
-    have ever executed in CI before this. New regression test
+  - Found via a new `postgres_integration` CI job, this repo's first CI job that actually
+    runs any of this file's Postgres-gated tests against a real database -- none of the 8
+    pre-existing `#[ignore]`d integration tests gated on Postgres have ever executed in CI
+    before this. New regression test
     `test_pre_auth_attempt_limiter_does_not_503_an_ordinary_request` reproduces it with a
     single, ordinary, nowhere-near-the-rate-limit request.
   - Whether any real lightbulb deployment has ever actually run with `database_url`
