@@ -23,6 +23,7 @@ pub mod hardware; // Hardware detection and adaptive configuration
 pub mod init; // Hardware-aware system initialization
 pub mod kernels;
 pub mod loaders;
+pub mod logging; // Shared tracing-subscriber init (plain vs JSON) for every binary
 pub mod lora; // LoRA (Low-Rank Adaptation) support with name mapping (M5.4)
 pub mod memory; // Unified memory estimation for models and caches
 pub mod model;

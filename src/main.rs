@@ -7,39 +7,10 @@ use lightbulb::api::{ApiConfig, ApiServer};
 use lightbulb::engine::{MemoryAwareScheduler, memory_aware_scheduler::MemoryAwareConfig};
 use std::env;
 use std::sync::Arc;
-use tracing_subscriber::{Layer, layer::SubscriberExt, util::SubscriberInitExt};
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Initialize tracing. Plain-text by default (LIGHTBULB_LOG_FORMAT unset
-    // or anything other than "json") -- no existing deployment's log format
-    // changes under its feet. `fmt::layer()` and `fmt::layer().json()` are
-    // different concrete types (different event formatters), so they can't
-    // both feed `.with()` directly; boxed as `dyn Layer` to pick one at
-    // runtime instead of compile time. The trait object's subscriber
-    // parameter is the type `.with()` accumulates so far (env-filter over
-    // the base registry), not the bare `Registry` -- `.with()` on the next
-    // step requires a `Layer` of exactly that accumulated type.
-    let json_logs = env::var("LIGHTBULB_LOG_FORMAT").is_ok_and(|v| v == "json");
-    let registry = tracing_subscriber::registry().with(
-        tracing_subscriber::EnvFilter::try_from_default_env()
-            .unwrap_or_else(|_| "info,lightbulb=debug".into()),
-    );
-    let fmt_layer: Box<
-        dyn Layer<
-                tracing_subscriber::layer::Layered<
-                    tracing_subscriber::EnvFilter,
-                    tracing_subscriber::Registry,
-                >,
-            > + Send
-            + Sync,
-    > = if json_logs {
-        Box::new(tracing_subscriber::fmt::layer().json())
-    } else {
-        Box::new(tracing_subscriber::fmt::layer())
-    };
-
-    registry.with(fmt_layer).init();
+    lightbulb::logging::init_tracing("info,lightbulb=debug");
 
     // Load configuration from environment
     let database_url = env::var("DATABASE_URL").ok();
