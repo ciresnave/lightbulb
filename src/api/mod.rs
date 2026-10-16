@@ -1079,6 +1079,31 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
     }
 
+    /// Red test for the database branch, independent of a real Postgres:
+    /// a pool pointed at a port nothing listens on. `Pool::builder(...).
+    /// build()` is lazy (no connection attempt), so this needs no network
+    /// access to construct — only `pool.get().await` in `check_database`
+    /// actually tries to connect, and that's what must fail fast here.
+    #[tokio::test]
+    async fn readiness_check_is_not_ready_when_database_is_unreachable() {
+        let pg_config: tokio_postgres::Config = "postgresql://nouser:nopass@127.0.0.1:1/nodb"
+            .parse()
+            .expect("valid connection string syntax");
+        let manager = deadpool_postgres::Manager::new(pg_config, tokio_postgres::NoTls);
+        let pool = deadpool_postgres::Pool::builder(manager)
+            .max_size(1)
+            .build()
+            .expect("lazy pool construction never touches the network");
+
+        let mut state = bare_state(None, false);
+        state.db_pool = Some(pool);
+
+        let response = readiness_check(axum::extract::State(state))
+            .await
+            .into_response();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
     /// End-to-end through the real entry point, not just the pure function:
     /// `ApiServer::new`'s default-config construction (no `DATABASE_URL`, no
     /// `--no-auth`) must fail before it ever touches a database or starts a
