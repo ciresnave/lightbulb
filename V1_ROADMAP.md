@@ -474,8 +474,19 @@ loop {
 - [ ] Proper error responses for all failure modes — PARTIAL. Real differentiated 400/503/500
   responses exist for validation and queue/runner failures, but request-size-DoS and timeout
   failure modes have no error path because the underlying checks (below) don't exist.
-- [ ] Request cancellation support — NOT DONE. `grep -rn "CancellationToken" src/` → 0 hits; the
-  streaming handler has no logic reacting to a dropped client connection.
+- [x] Request cancellation support — DONE (re-verified, this item's prior justification was
+  wrong). `grep -rn "CancellationToken" src/` still finds 0 hits -- there is no first-class
+  cancellation primitive -- but that's not a behavioral gap: both response modes already stop
+  generation on client disconnect via channel-drop detection. Complete mode checks
+  `resp_tx.is_closed()` proactively before every step (0 wasted steps, PR #133). Streaming mode
+  discovers the drop reactively, via `stream_tx.send(...).is_err()` after producing one token
+  (1 wasted step, not "no logic reacting to a dropped client connection" as previously
+  claimed) -- the same mechanism #155's timeout path relies on. Pinned by a new test,
+  `a_dropped_streaming_receiver_stops_generation_after_one_wasted_step`
+  (`src/engine/model_runner.rs`), alongside the existing Complete-mode one; mutation-checked
+  (disabling the `is_err()` break makes it run the full `max_new_tokens` budget instead of
+  stopping at 1). No `CancellationToken` refactor built: nothing today needs the extra
+  abstraction over the channel-drop mechanism that already works.
 - [ ] Circuit breaker for repeated failures — NOT DONE. `grep -rin "breaker" src/` → 0 hits.
 
 ---
