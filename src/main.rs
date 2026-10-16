@@ -65,6 +65,27 @@ async fn main() -> Result<()> {
     // address here does NOT mean alert delivery is implemented.
     let security_alert_email = env::var("SECURITY_ALERT_EMAIL").ok();
 
+    // Phase 4 config-management item: these four had no env override at
+    // all before this -- a deployment that needed a different batch
+    // size, context length, queue depth or rate limit than the hardcoded
+    // default had no way to set one short of recompiling.
+    let rate_limit_per_minute = env::var("LIGHTBULB_RATE_LIMIT_PER_MINUTE")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(60);
+    let model_max_batch_size = env::var("LIGHTBULB_MODEL_MAX_BATCH_SIZE")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(16);
+    let model_context_length = env::var("LIGHTBULB_MODEL_CONTEXT_LENGTH")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(4096);
+    let model_max_queue_depth = env::var("LIGHTBULB_MODEL_MAX_QUEUE_DEPTH")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(32);
+
     // Create API configuration
     let config = ApiConfig {
         database_url: database_url.clone(),
@@ -74,12 +95,12 @@ async fn main() -> Result<()> {
         enable_lightbulb_extensions: true,
         enable_metrics_endpoint: true,
         jwt_secret,
-        rate_limit_per_minute: 60,
+        rate_limit_per_minute,
         models_dir,
         default_model,
-        model_max_batch_size: 16,
-        model_context_length: 4096,
-        model_max_queue_depth: 32,
+        model_max_batch_size,
+        model_context_length,
+        model_max_queue_depth,
         request_timeout_ms,
         enable_audit_log: database_url.is_some(), // Disable audit logging without database
         tls: Default::default(),                  // TLS disabled by default
@@ -96,14 +117,32 @@ async fn main() -> Result<()> {
     }
     tracing::info!("Listening on: {}", config.bind_address);
 
-    // Create memory-aware scheduler
+    // Create memory-aware scheduler. Phase 4 config-management item:
+    // these five had no env override and no startup validation at all
+    // before this -- see MemoryAwareConfig::validate's own doc comment.
     let scheduler_config = MemoryAwareConfig {
-        max_memory_bytes: 8 * 1024 * 1024 * 1024, // 8GB
-        memory_per_slot_base: 100 * 1024 * 1024,  // 100MB
-        memory_per_token: 50 * 1024,              // 50KB per token
-        eviction_pressure_threshold: 0.85,
-        memory_safety_margin: 0.1,
+        max_memory_bytes: env::var("LIGHTBULB_MAX_MEMORY_BYTES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(8 * 1024 * 1024 * 1024), // 8GB
+        memory_per_slot_base: env::var("LIGHTBULB_MEMORY_PER_SLOT_BASE")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(100 * 1024 * 1024), // 100MB
+        memory_per_token: env::var("LIGHTBULB_MEMORY_PER_TOKEN")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(50 * 1024), // 50KB per token
+        eviction_pressure_threshold: env::var("LIGHTBULB_EVICTION_PRESSURE_THRESHOLD")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0.85),
+        memory_safety_margin: env::var("LIGHTBULB_MEMORY_SAFETY_MARGIN")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0.1),
     };
+    scheduler_config.validate()?;
 
     let scheduler = Arc::new(MemoryAwareScheduler::new(scheduler_config));
 
