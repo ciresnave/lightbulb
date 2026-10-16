@@ -36,9 +36,13 @@ pub mod types;
 
 use anyhow::Result;
 use axum::{
-    Router,
+    Json, Router,
+    extract::State,
+    http::StatusCode,
+    response::IntoResponse,
     routing::{get, post},
 };
+use serde::Serialize;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::TcpListener;
@@ -576,6 +580,17 @@ impl ApiServer {
             // returns a static string, so nothing is disclosed by leaving it
             // open. CORS and tracing below still apply to it.
             .route("/health", get(health_check))
+            // Readiness: whether this instance can actually SERVE traffic,
+            // not just whether the process is up. Deliberately separate
+            // from `/health` (liveness) rather than folding checks into it:
+            // an orchestrator uses liveness to decide whether to restart
+            // the process and readiness to decide whether to route traffic
+            // to it, and those are different questions with different
+            // answers during, e.g., startup before a model finishes
+            // loading. Same placement/reasoning as `/health` above —
+            // outside the auth stack, so a load balancer with no bearer
+            // token can still read it.
+            .route("/health/ready", get(readiness_check))
             // CORS and tracing
             .layer(
                 CorsLayer::new()
@@ -771,6 +786,83 @@ async fn health_check() -> &'static str {
     "OK"
 }
 
+/// One check's result: whether this *configured* dependency is working, not
+/// whether it exists at all. `not_configured` is a success state for
+/// readiness, not a failure — a deployment that never asked for a database
+/// or a model is not "broken" for lacking one, the way a deployment that
+/// asked for a model and failed to load it is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum CheckStatus {
+    Ok,
+    NotConfigured,
+    Unreachable,
+    NotLoaded,
+}
+
+impl CheckStatus {
+    /// Only `Unreachable`/`NotLoaded` block readiness. `NotConfigured` is a
+    /// deliberate choice the operator made, not a fault this instance can
+    /// fix by restarting.
+    fn blocks_readiness(self) -> bool {
+        matches!(self, CheckStatus::Unreachable | CheckStatus::NotLoaded)
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct ReadinessResponse {
+    status: &'static str,
+    database: CheckStatus,
+    model: CheckStatus,
+}
+
+/// Readiness check: can this instance actually serve a request right now,
+/// as opposed to `/health`'s "is the process up at all." Checked fresh on
+/// every call rather than cached — the whole point is reporting the
+/// CURRENT state of dependencies that can change after startup (a database
+/// that was reachable five minutes ago and is down now).
+async fn readiness_check(State(state): State<AppState>) -> impl IntoResponse {
+    let database = match &state.db_pool {
+        None => CheckStatus::NotConfigured,
+        Some(pool) => match pool.get().await {
+            Ok(client) => match client.query_one("SELECT 1", &[]).await {
+                Ok(_) => CheckStatus::Ok,
+                Err(_) => CheckStatus::Unreachable,
+            },
+            Err(_) => CheckStatus::Unreachable,
+        },
+    };
+
+    // `inference_tx` is `None` both when no model was ever requested and
+    // when one was requested but failed to start (`ApiServer::new` logs
+    // the failure and continues rather than refusing to start — see the
+    // call site). `config.models_dir` is what distinguishes those two: it
+    // is set only when the operator asked for a model at all.
+    let model = if state.inference_tx.is_some() {
+        CheckStatus::Ok
+    } else if state.config.models_dir.is_some() {
+        CheckStatus::NotLoaded
+    } else {
+        CheckStatus::NotConfigured
+    };
+
+    let ready = !database.blocks_readiness() && !model.blocks_readiness();
+    let code = if ready {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+
+    (
+        code,
+        Json(ReadinessResponse {
+            status: if ready { "ready" } else { "not_ready" },
+            database,
+            model,
+        }),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -906,6 +998,77 @@ mod tests {
             ..ApiConfig::default()
         };
         assert!(validate_request_timeout(&config).is_ok());
+    }
+
+    /// Builds a bare `AppState` directly rather than through `ApiServer::new`
+    /// — these tests exercise `readiness_check`'s own branching on
+    /// `db_pool`/`inference_tx`/`config.models_dir`, not startup. Every
+    /// field is `pub` for exactly this (see the field's own doc comment).
+    fn bare_state(models_dir: Option<&str>, inference_tx_present: bool) -> AppState {
+        use crate::engine::{MemoryAwareConfig, MemoryAwareScheduler};
+
+        let inference_tx = if inference_tx_present {
+            let (tx, _rx) = std::sync::mpsc::sync_channel(1);
+            Some(tx)
+        } else {
+            None
+        };
+
+        AppState {
+            scheduler: Arc::new(MemoryAwareScheduler::new(MemoryAwareConfig::default())),
+            config: ApiConfig {
+                models_dir: models_dir.map(str::to_string),
+                ..ApiConfig::default()
+            },
+            db_pool: None,
+            inference_tx,
+            chat_template: None,
+            eos_monitor: Arc::new(crate::engine::eos_monitor::EosMonitor::default()),
+            security_sinks: Vec::new(),
+            cache_stats: Arc::new(std::sync::Mutex::new(
+                crate::cache::PrefixCacheStats::default(),
+            )),
+            live_system: new_shared_system_metrics(),
+        }
+    }
+
+    /// A deployment that never configured a database or a model is READY —
+    /// `not_configured` is not a fault. Guards against the readiness check
+    /// treating "nothing to check" the same as "something is broken."
+    #[tokio::test]
+    async fn readiness_check_is_ready_with_nothing_configured() {
+        let state = bare_state(None, false);
+        let response = readiness_check(axum::extract::State(state))
+            .await
+            .into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    /// `models_dir` set but `inference_tx` absent means the model runner
+    /// was asked for and failed to start (`ApiServer::new` logs and
+    /// continues rather than refusing to start — see the `Err(e)` arm
+    /// where the model runner is started). That is a real fault, not an
+    /// operator choice, and must fail readiness.
+    #[tokio::test]
+    async fn readiness_check_is_not_ready_when_model_was_requested_but_not_loaded() {
+        let state = bare_state(Some("/some/models/dir"), false);
+        let response = readiness_check(axum::extract::State(state))
+            .await
+            .into_response();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    /// The positive control for the test above: the same configured
+    /// `models_dir`, but with `inference_tx` present (the model actually
+    /// started) — proves the prior test's 503 came from the missing
+    /// `inference_tx`, not from `models_dir` being set at all.
+    #[tokio::test]
+    async fn readiness_check_is_ready_when_model_is_loaded() {
+        let state = bare_state(Some("/some/models/dir"), true);
+        let response = readiness_check(axum::extract::State(state))
+            .await
+            .into_response();
+        assert_eq!(response.status(), StatusCode::OK);
     }
 
     /// End-to-end through the real entry point, not just the pure function:
