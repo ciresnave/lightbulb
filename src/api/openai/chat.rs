@@ -1031,6 +1031,7 @@ async fn create_chat_completion(
     if let Some(tx) = &state.inference_tx {
         let result = run_inference_once(
             tx,
+            &state.queue_depth,
             prompt,
             max_new_tokens,
             temperature,
@@ -1180,11 +1181,20 @@ async fn create_chat_completion(
 /// of `tx`.
 pub(crate) async fn run_inference_once(
     tx: &std::sync::mpsc::SyncSender<crate::engine::model_runner::InferenceJob>,
+    queue_depth: &crate::engine::model_runner::SharedQueueDepth,
     prompt: BuiltPrompt,
     max_new_tokens: usize,
     temperature: f64,
     timeout_ms: u64,
 ) -> anyhow::Result<crate::engine::model_runner::CompletionResult> {
+    // Counts this job from the moment it's handed to `try_send` to every
+    // exit from this function below -- including a `Full`/`Disconnected`
+    // enqueue failure, where the job never really entered the queue at
+    // all and the guard's `Drop` runs almost immediately. Declared before
+    // `try_send` so it covers every `return` after this point without
+    // each one having to decrement by hand.
+    let _queue_depth_guard = crate::engine::model_runner::QueueDepthGuard::new(queue_depth.clone());
+
     let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
     let job = crate::engine::model_runner::InferenceJob {
         id: uuid::Uuid::new_v4().to_string(),
@@ -1224,12 +1234,21 @@ pub(crate) async fn run_inference_once(
 /// be `Fn`, so it clones `tx` on each call rather than borrowing).
 pub(crate) async fn run_inference_once_owned(
     tx: std::sync::mpsc::SyncSender<crate::engine::model_runner::InferenceJob>,
+    queue_depth: crate::engine::model_runner::SharedQueueDepth,
     prompt: BuiltPrompt,
     max_new_tokens: usize,
     temperature: f64,
     timeout_ms: u64,
 ) -> anyhow::Result<crate::engine::model_runner::CompletionResult> {
-    run_inference_once(&tx, prompt, max_new_tokens, temperature, timeout_ms).await
+    run_inference_once(
+        &tx,
+        &queue_depth,
+        prompt,
+        max_new_tokens,
+        temperature,
+        timeout_ms,
+    )
+    .await
 }
 
 /// Drive the contract retry loop for a request that carries an
@@ -1263,6 +1282,7 @@ async fn create_chat_completion_with_contract(
     let Some(tx) = state.inference_tx.clone() else {
         return Err(anyhow::anyhow!("no model runner available"));
     };
+    let queue_depth = state.queue_depth.clone();
 
     let msgs: Vec<RawMessage> = request
         .messages
@@ -1313,6 +1333,7 @@ async fn create_chat_completion_with_contract(
         // from the one covering `execute_contract_with_runner`'s call.
         move |msgs: Vec<RawMessage>| {
             let tx = tx.clone();
+            let queue_depth = queue_depth.clone();
             let prompt = build_prompt_from_raw(template.as_deref(), &msgs);
             let remaining_ms = deadline
                 .saturating_duration_since(std::time::Instant::now())
@@ -1320,8 +1341,15 @@ async fn create_chat_completion_with_contract(
                 .try_into()
                 .unwrap_or(u64::MAX);
             async move {
-                run_inference_once_owned(tx, prompt, max_new_tokens, temperature, remaining_ms)
-                    .await
+                run_inference_once_owned(
+                    tx,
+                    queue_depth,
+                    prompt,
+                    max_new_tokens,
+                    temperature,
+                    remaining_ms,
+                )
+                .await
             }
         },
     )
@@ -1426,6 +1454,8 @@ fn create_chat_stream(state: AppState, request: ChatCompletionRequest) -> Respon
     // stalled runner left an SSE client waiting forever, the exact hang
     // this PR otherwise fixes.
     let timeout_ms = state.config.request_timeout_ms;
+    // Same reason as the other clones above.
+    let queue_depth = state.queue_depth.clone();
 
     // If a model runner is available, create a streaming job
     if let Some(tx) = state.inference_tx {
@@ -1443,6 +1473,13 @@ fn create_chat_stream(state: AppState, request: ChatCompletionRequest) -> Respon
             add_special_tokens: prompt.add_special_tokens,
             response_mode: crate::engine::model_runner::ResponseMode::Streaming(stream_tx),
         };
+
+        // Counts this job from here until `StreamState` (below, which holds
+        // this guard) is dropped -- whether the stream finishes normally,
+        // the client disconnects early, or `try_send` below fails and the
+        // job never really entered the queue (same reasoning as
+        // `run_inference_once`'s guard).
+        let queue_depth_guard = crate::engine::model_runner::QueueDepthGuard::new(queue_depth);
 
         // Send the job to the model runner thread
         use std::sync::mpsc::TrySendError;
@@ -1506,11 +1543,18 @@ fn create_chat_stream(state: AppState, request: ChatCompletionRequest) -> Respon
             rx: tokio::sync::mpsc::UnboundedReceiver<anyhow::Result<StreamItem>>,
             is_first: bool,
             done: bool,
+            // Held only so its `Drop` runs when THIS struct is dropped --
+            // i.e. when the stream itself ends, whether that's normal
+            // completion or the client disconnecting early -- not when
+            // `create_chat_stream` (which returns almost immediately after
+            // building the response) returns.
+            _queue_depth_guard: crate::engine::model_runner::QueueDepthGuard,
         }
         let state = StreamState {
             rx: stream_rx,
             is_first: true,
             done: false,
+            _queue_depth_guard: queue_depth_guard,
         };
         let token_stream = stream::unfold(state, move |mut st| {
             let chat_id = chat_id.clone();
@@ -1941,6 +1985,7 @@ mod tests {
                 crate::cache::PrefixCacheStats::default(),
             )),
             live_system: crate::api::new_shared_system_metrics(),
+            queue_depth: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         }
     }
 
@@ -4328,7 +4373,16 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_secs(5));
         });
 
-        let result = run_inference_once(&tx, BuiltPrompt::raw("hi".to_string()), 8, 0.0, 20).await;
+        let queue_depth = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let result = run_inference_once(
+            &tx,
+            &queue_depth,
+            BuiltPrompt::raw("hi".to_string()),
+            8,
+            0.0,
+            20,
+        )
+        .await;
 
         drop(tx);
         // Not joining `handle`: it deliberately outlives this test's own
@@ -4352,8 +4406,16 @@ mod tests {
     async fn run_inference_once_succeeds_well_within_its_timeout() {
         let (tx, runner) = stub_runner_with_text("fast answer", FinishReason::Stop);
 
-        let result =
-            run_inference_once(&tx, BuiltPrompt::raw("hi".to_string()), 8, 0.0, 30_000).await;
+        let queue_depth = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let result = run_inference_once(
+            &tx,
+            &queue_depth,
+            BuiltPrompt::raw("hi".to_string()),
+            8,
+            0.0,
+            30_000,
+        )
+        .await;
         drop(tx);
         let _ = runner.join();
 

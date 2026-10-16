@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.9.4
+
+### Added
+- Phase 4 observability, v1 slice: `GET /metrics` in Prometheus text format
+  (`ApiConfig.enable_metrics_endpoint`, default `true`), unauthenticated same as
+  `/health`/`/health/ready`. Two gauges, no labels: `lightbulb_memory_total_bytes`/
+  `_used_bytes` (the same live `sysinfo` sampler the admin `metrics` endpoint already reads)
+  and `lightbulb_queue_depth` (new `AppState.queue_depth`, an RAII counter via
+  `engine::model_runner::QueueDepthGuard` spanning enqueue-to-response-delivered, not a raw
+  channel length -- `std::sync::mpsc::sync_channel` exposes none). New dependencies `metrics`
+  and `metrics-exporter-prometheus` (latest crates.io versions; the latter with
+  `default-features = false` to keep its push-gateway/second-listener features, and the
+  `aws-lc-rs` they'd pull in, out of the tree). Request latency/throughput/error-rate, queue
+  depth by priority, and slot utilization are NOT in this slice -- see `V1_ROADMAP.md` for why
+  each is deferred.
+
 ## 0.9.3
 
 ### Fixed

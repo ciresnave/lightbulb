@@ -72,6 +72,7 @@ async fn main() -> Result<()> {
         enable_openai_api: true,
         enable_admin_api: database_url.is_some(), // Disable admin API without database
         enable_lightbulb_extensions: true,
+        enable_metrics_endpoint: true,
         jwt_secret,
         rate_limit_per_minute: 60,
         models_dir,

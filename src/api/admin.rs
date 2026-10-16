@@ -725,6 +725,7 @@ mod tests {
                 crate::cache::PrefixCacheStats::default(),
             )),
             live_system: crate::api::new_shared_system_metrics(),
+            queue_depth: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         }
     }
 

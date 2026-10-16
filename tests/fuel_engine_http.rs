@@ -166,6 +166,7 @@ async fn fuel_runner_serves_a_coherent_completion_over_http() {
             lightbulb::cache::PrefixCacheStats::default(),
         )),
         live_system: lightbulb::api::new_shared_system_metrics(),
+        queue_depth: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
     };
 
     let app = lightbulb::api::openai::routes().with_state(state);
@@ -319,6 +320,7 @@ async fn fuel_runner_serves_a_default_temperature_completion() {
             lightbulb::cache::PrefixCacheStats::default(),
         )),
         live_system: lightbulb::api::new_shared_system_metrics(),
+        queue_depth: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
     };
 
     let app = lightbulb::api::openai::routes().with_state(state);

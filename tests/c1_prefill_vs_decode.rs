@@ -108,6 +108,7 @@ async fn complete_raw(path: &Path, prompt: &str, max_tokens: usize) -> serde_jso
             lightbulb::cache::PrefixCacheStats::default(),
         )),
         live_system: lightbulb::api::new_shared_system_metrics(),
+        queue_depth: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
     };
     let app = lightbulb::api::openai::routes().with_state(state);
     let body = serde_json::json!({

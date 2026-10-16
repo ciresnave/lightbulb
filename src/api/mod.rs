@@ -71,6 +71,14 @@ pub struct ApiConfig {
     /// Enable Lightbulb-specific extensions
     pub enable_lightbulb_extensions: bool,
 
+    /// Enable the Prometheus-format `GET /metrics` endpoint (Phase 4
+    /// observability). Default `true`. Unauthenticated, same reasoning as
+    /// `/health`/`/health/ready` -- a Prometheus scraper cannot present a
+    /// bearer token -- so this is the one real lever an operator who does
+    /// NOT want it reachable has, short of a network-level block; there is
+    /// no separate per-route auth for it the way admin/OpenAI routes have.
+    pub enable_metrics_endpoint: bool,
+
     /// JWT secret for token signing. `None` unless an operator explicitly
     /// sets `LIGHTBULB_JWT_SECRET` (security audit item 5, 2026-10-06):
     /// there used to be a hardcoded fallback here
@@ -176,6 +184,7 @@ impl Default for ApiConfig {
             enable_openai_api: true,
             enable_admin_api: true,
             enable_lightbulb_extensions: true,
+            enable_metrics_endpoint: true,
             jwt_secret: None,
             rate_limit_per_minute: 60,
             enable_audit_log: true,
@@ -345,6 +354,12 @@ pub struct AppState {
     /// per request: `sysinfo` computes CPU usage as a diff between two
     /// refreshes, so a fresh instance always reads 0 on its first use.
     pub live_system: SharedSystemMetrics,
+
+    /// Live count of inference jobs enqueued or in flight -- the
+    /// `/metrics` endpoint's queue-depth gauge. See
+    /// `engine::model_runner::QueueDepthGuard`, which owns incrementing and
+    /// decrementing it.
+    pub queue_depth: crate::engine::model_runner::SharedQueueDepth,
 }
 
 /// Shared, persistent system sampler for CPU/memory metrics. See
@@ -450,6 +465,7 @@ impl ApiServer {
                 crate::cache::PrefixCacheStats::default(),
             )),
             live_system: new_shared_system_metrics(),
+            queue_depth: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         };
 
         // Try to start a model runner thread if a model directory and default model exist
@@ -527,6 +543,21 @@ impl ApiServer {
             router = router.merge(lightbulb::routes());
         }
 
+        // Health, readiness and metrics, built as their own router so the
+        // conditional `/metrics` route can be `.merge()`d in at the same
+        // point in the chain as the always-present two below -- all three
+        // need to land AFTER the auth-stack `.layer()` calls below (so
+        // they bypass auth) but BEFORE CORS/tracing, and an `if` inside
+        // that single `.route().route()` method-chain expression isn't
+        // possible the way a separate router merged into it is.
+        let mut unauthenticated_router = Router::new()
+            .route("/health", get(health_check))
+            .route("/health/ready", get(readiness_check));
+        if self.state.config.enable_metrics_endpoint {
+            unauthenticated_router =
+                unauthenticated_router.route("/metrics", get(metrics_endpoint));
+        }
+
         // Add middleware layers.
         //
         // `Router::layer` makes the layer being ADDED the new OUTERMOST
@@ -569,28 +600,26 @@ impl ApiServer {
                 self.state.clone(),
                 auth_middleware::audit_middleware,
             ))
-            // Health check, registered AFTER the auth stack on purpose.
-            // `Router::layer` wraps only the routes registered before it, so
-            // placing `/health` here keeps it reachable without credentials.
-            // It used to be registered first, which put it behind
-            // `auth_middleware` and made every unauthenticated probe 401 — load
-            // balancers, container orchestrators and uptime monitors cannot
-            // present a bearer token, so a health endpoint that demands one
-            // reports the service as down precisely when it is up. The handler
-            // returns a static string, so nothing is disclosed by leaving it
-            // open. CORS and tracing below still apply to it.
-            .route("/health", get(health_check))
-            // Readiness: whether this instance can actually SERVE traffic,
-            // not just whether the process is up. Deliberately separate
-            // from `/health` (liveness) rather than folding checks into it:
-            // an orchestrator uses liveness to decide whether to restart
-            // the process and readiness to decide whether to route traffic
-            // to it, and those are different questions with different
-            // answers during, e.g., startup before a model finishes
-            // loading. Same placement/reasoning as `/health` above —
-            // outside the auth stack, so a load balancer with no bearer
-            // token can still read it.
-            .route("/health/ready", get(readiness_check))
+            // Health, readiness and metrics (built above), registered
+            // AFTER the auth stack on purpose. `Router::layer` wraps only
+            // the routes registered before it, so merging this router here
+            // keeps all three reachable without credentials. `/health`
+            // used to be registered first, which put it behind
+            // `auth_middleware` and made every unauthenticated probe 401 —
+            // load balancers, container orchestrators and uptime monitors
+            // cannot present a bearer token, so a health endpoint that
+            // demands one reports the service as down precisely when it is
+            // up. Same reasoning extends to `/health/ready` (an
+            // orchestrator uses liveness to decide whether to restart the
+            // process and readiness to decide whether to route traffic to
+            // it) and to `/metrics` (a Prometheus scraper has no bearer
+            // token to present either). None of the three disclose
+            // anything by being open: `/health` is a static string,
+            // `/health/ready` reports only coarse up/down per dependency,
+            // and `/metrics` carries no per-user/per-key labels (see
+            // `metrics_endpoint`'s own doc comment). CORS and tracing below
+            // still apply to all three.
+            .merge(unauthenticated_router)
             // CORS and tracing
             .layer(
                 CorsLayer::new()
@@ -871,6 +900,78 @@ async fn readiness_check(State(state): State<AppState>) -> impl IntoResponse {
     )
 }
 
+/// The process-wide Prometheus recorder/handle. A `OnceLock`, not built
+/// fresh per request or per `ApiServer`: `metrics::set_global_recorder`
+/// (which `PrometheusBuilder::install_recorder` calls internally) can only
+/// succeed ONCE per process, and `ApiServer::new` runs repeatedly within a
+/// single test binary -- a second `install_recorder()` call there would
+/// fail. Every `AppState` in the same process shares this one recorder and
+/// renders the same global metric set; that's correct for this crate,
+/// which never runs more than one `ApiServer` as truly independent
+/// processes serving different traffic.
+fn prometheus_handle() -> &'static metrics_exporter_prometheus::PrometheusHandle {
+    static HANDLE: std::sync::OnceLock<metrics_exporter_prometheus::PrometheusHandle> =
+        std::sync::OnceLock::new();
+    HANDLE.get_or_init(|| {
+        metrics_exporter_prometheus::PrometheusBuilder::new()
+            .install_recorder()
+            .expect("install the Prometheus recorder -- OnceLock guarantees this runs exactly once")
+    })
+}
+
+/// Prometheus-format `GET /metrics` (Phase 4 observability, v1 slice).
+///
+/// Deliberately global gauges with NO labels at all, let alone a
+/// per-user/per-key one: this route is unauthenticated (see
+/// `build_router`'s doc comment on why), so anything exposed here is
+/// exposed to anyone who can reach the port. A per-key request count, for
+/// instance, would leak which keys exist and how active each one is to an
+/// unauthenticated caller. `request_timeout_ms`-shaped per-endpoint/
+/// per-status-code metrics (planned as a separate PR, not v1) will need
+/// the same discipline applied to their label sets, not just this gauge
+/// pair.
+///
+/// Only two gauges in this slice -- `lightbulb_memory_total_bytes`/
+/// `_used_bytes` (same `live_system` sampler the admin `metrics` endpoint
+/// reads, refreshed fresh here too) and `lightbulb_queue_depth` (`AppState::
+/// queue_depth`, via `engine::model_runner::QueueDepthGuard`). Latency
+/// histograms, throughput and error-rate-by-endpoint need request-path
+/// instrumentation this PR doesn't add; queue depth BY PRIORITY and slot
+/// utilization are their own roadmap rows (see `V1_ROADMAP.md`) -- neither
+/// has a real, live-tracked value to report today.
+///
+/// No histograms recorded here, so `PrometheusHandle::run_upkeep`'s
+/// periodic bucket-draining is not needed yet; the crate's own docs flag
+/// it as something a future histogram-recording addition would need to
+/// start calling on an interval.
+async fn metrics_endpoint(State(state): State<AppState>) -> impl IntoResponse {
+    // `prometheus_handle()` is what actually installs the Prometheus
+    // recorder as `metrics`'s global recorder (see its own doc comment).
+    // It MUST run before the first `gauge!` call below: `gauge!` records
+    // against whatever recorder is current, a no-op default until one is
+    // installed, and a `gauge!` call made before this line would silently
+    // go nowhere -- caught exactly this way, by the body coming back empty
+    // in `metrics_endpoint_reports_the_current_queue_depth` with `gauge!`
+    // called first and this line last.
+    let handle = prometheus_handle();
+
+    metrics::gauge!("lightbulb_queue_depth")
+        .set(state.queue_depth.load(std::sync::atomic::Ordering::Relaxed) as f64);
+
+    {
+        let mut sys = state.live_system.lock().unwrap_or_else(|e| e.into_inner());
+        sys.refresh_memory();
+        metrics::gauge!("lightbulb_memory_total_bytes").set(sys.total_memory() as f64);
+        metrics::gauge!("lightbulb_memory_used_bytes").set(sys.used_memory() as f64);
+    }
+
+    (
+        StatusCode::OK,
+        [(axum::http::header::CONTENT_TYPE, "text/plain")],
+        handle.render(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1037,6 +1138,7 @@ mod tests {
                 crate::cache::PrefixCacheStats::default(),
             )),
             live_system: new_shared_system_metrics(),
+            queue_depth: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         }
     }
 
@@ -1102,6 +1204,73 @@ mod tests {
             .await
             .into_response();
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    /// `metrics_endpoint` installs and reads ONE process-wide Prometheus
+    /// recorder (`prometheus_handle`'s `OnceLock`) -- cargo runs tests in
+    /// parallel by default, so two tests calling it concurrently would
+    /// race on the same global gauge, each able to observe the other's
+    /// value. Both tests below take this lock for their full body to
+    /// serialize against each other; nothing else in this file touches
+    /// the Prometheus recorder, so no other test needs it.
+    static METRICS_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Pins the one number this test can control without a real database
+    /// or model: the queue-depth gauge reflects whatever `AppState::
+    /// queue_depth` currently holds, rendered in Prometheus text format.
+    /// Does not assert on the memory gauges -- their value is whatever
+    /// `sysinfo` reports for this machine, not something this test
+    /// controls or should pin a number to.
+    #[tokio::test]
+    async fn metrics_endpoint_reports_the_current_queue_depth() {
+        let _guard = METRICS_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let state = bare_state(None, false);
+        state
+            .queue_depth
+            .store(3, std::sync::atomic::Ordering::Relaxed);
+
+        let response = metrics_endpoint(axum::extract::State(state))
+            .await
+            .into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        assert!(
+            body.contains("lightbulb_queue_depth 3"),
+            "expected the queue-depth gauge in the Prometheus body, got: {body}"
+        );
+    }
+
+    /// Red test for the gauge name itself: proves the assertion above would
+    /// actually fail on a wrong value, not just on a missing metric
+    /// (mutation-style, inline rather than a separate push-then-revert
+    /// since there's no CI round trip needed to check a pure function).
+    #[tokio::test]
+    async fn metrics_endpoint_queue_depth_changes_with_the_counter() {
+        let _guard = METRICS_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let state = bare_state(None, false);
+        state
+            .queue_depth
+            .store(7, std::sync::atomic::Ordering::Relaxed);
+
+        let response = metrics_endpoint(axum::extract::State(state))
+            .await
+            .into_response();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        assert!(
+            !body.contains("lightbulb_queue_depth 3"),
+            "a stale value from a prior test must not still be rendered: {body}"
+        );
+        assert!(
+            body.contains("lightbulb_queue_depth 7"),
+            "expected the updated queue-depth gauge, got: {body}"
+        );
     }
 
     /// End-to-end through the real entry point, not just the pure function:
