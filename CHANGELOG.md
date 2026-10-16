@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.9.5
+
+### Added
+- Phase 4 observability: request latency, throughput and error-rate-by-endpoint, completing
+  the `/metrics` item started in 0.9.4. `request_metrics_middleware` (`src/api/mod.rs`) is the
+  outermost router layer -- times and counts EVERY request, `/health`/`/metrics` included.
+  One histogram (`lightbulb_http_request_duration_seconds`, the exporter's default quantile
+  summary, no hand-picked buckets) and one counter (`lightbulb_http_requests_total`, labeled
+  `route`+`method`+`status`); throughput and error rate are both PromQL computations over that
+  one counter, not separate metrics. `route` comes from `axum::extract::MatchedPath` -- the
+  registered route PATTERN, never the resolved URI, which would be unbounded cardinality and
+  would leak which specific ids/keys were requested to an unauthenticated `/metrics` caller.
+  Added a periodic `run_upkeep()` background task (`ApiServer::new`): the first metric needing
+  it, since `install_recorder`/`build_recorder` don't spawn one automatically and 0.9.4's plain
+  gauges never recorded histogram/summary data that would need draining.
+
 ## 0.9.4
 
 ### Added
