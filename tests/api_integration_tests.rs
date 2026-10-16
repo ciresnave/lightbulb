@@ -454,8 +454,7 @@ mod api_tests {
             let _ = app.clone().oneshot(request).await.unwrap();
         }
 
-        let other_peer_request =
-            with_fake_peer_at(unauthenticated_chat_request(), [10, 0, 0, 9]);
+        let other_peer_request = with_fake_peer_at(unauthenticated_chat_request(), [10, 0, 0, 9]);
 
         let response = app.oneshot(other_peer_request).await.unwrap();
 
@@ -486,9 +485,10 @@ mod api_tests {
         let app = server.build_router().with_state(server.state().clone());
 
         let response = app
-            .oneshot(with_fake_peer_at(unauthenticated_chat_request(), [
-                10, 0, 0, 10,
-            ]))
+            .oneshot(with_fake_peer_at(
+                unauthenticated_chat_request(),
+                [10, 0, 0, 10],
+            ))
             .await
             .unwrap();
 
