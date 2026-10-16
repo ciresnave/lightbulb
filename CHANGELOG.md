@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.10.0
+
+### Changed
+- **Breaking:** `GET /v1/lightbulb/admin/scheduler/queue` and `/admin/scheduler/stats` no
+  longer return `0`/`0.0`/`[]` for fields with no real backing -- a hardcoded-zero stub found
+  while adding `/metrics` (0.9.4/0.9.5), which looked like a real (idle) reading and was not.
+  Every such field is now `null`, and both responses gained a new `unavailable_reason` string
+  explaining why, pointing to `GET /metrics` for request count/latency/throughput.
+  `scheduler/stats.memory_usage_bytes` is the one field that stayed a real number (same
+  `live_system` source `/admin/metrics` already reads); `scheduler/queue`'s
+  `pending_requests`/`running_requests`/`queue` have no real backing at all and are `null`
+  unconditionally -- the scheduler's priority queue is never populated by the live request
+  path. A caller parsing these fields as plain numbers (rather than nullable) will break.
+
 ## 0.9.5
 
 ### Added

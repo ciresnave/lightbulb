@@ -132,12 +132,22 @@ async fn cache_clear(
     (StatusCode::OK, Json(response))
 }
 
-/// Scheduler queue response
+/// Scheduler queue response.
+///
+/// All three fields are `None`/empty, always, with `unavailable_reason`
+/// explaining why -- NOT the `0`/`[]` a previous version of this returned,
+/// which looked like a real (empty) queue reading rather than no reading
+/// at all. `MemoryAwareScheduler`'s `priority_queue`/`slot_pool` exist
+/// (`src/engine/memory_aware_scheduler.rs`) but nothing in the live
+/// request path calls `submit_priority_request`/`allocate_pending_requests`
+/// -- only `check_admission`, a pure memory-budget check, is used. There
+/// is no real priority-queued-request flow to report a depth for.
 #[derive(Debug, Clone, Serialize)]
 pub struct SchedulerQueueResponse {
-    pub pending_requests: usize,
-    pub running_requests: usize,
-    pub queue: Vec<QueuedRequest>,
+    pub pending_requests: Option<usize>,
+    pub running_requests: Option<usize>,
+    pub queue: Option<Vec<QueuedRequest>>,
+    pub unavailable_reason: Option<String>,
 }
 
 /// Queued request info
@@ -153,39 +163,69 @@ pub struct QueuedRequest {
 async fn scheduler_queue(State(state): State<AppState>) -> impl IntoResponse {
     let _scheduler = &state.scheduler;
 
-    // TODO: Get actual queue from scheduler
     let response = SchedulerQueueResponse {
-        pending_requests: 0,
-        running_requests: 0,
-        queue: vec![],
+        pending_requests: None,
+        running_requests: None,
+        queue: None,
+        unavailable_reason: Some(
+            "the scheduler's priority queue is not populated by the live request path -- \
+             there is no real per-priority queue depth to report"
+                .to_string(),
+        ),
     };
 
     (StatusCode::OK, Json(response))
 }
 
-/// Scheduler statistics response
+/// Scheduler statistics response.
+///
+/// Only `memory_usage_bytes` is a real reading (same live `sysinfo`
+/// sampler `GET /v1/lightbulb/admin/metrics` already reads). The other
+/// five are `None`, always, with `unavailable_reason` explaining why --
+/// NOT the `0`/`0.0` a previous version of this returned, which looked
+/// like real zero-valued readings rather than no reading at all. Request
+/// count, latency and throughput ARE tracked, just not here: `GET
+/// /metrics` (Phase 4 observability, Prometheus format) records
+/// `lightbulb_http_requests_total` (a counter, labeled route/method/
+/// status) and `lightbulb_http_request_duration_seconds` (a histogram) --
+/// reading a live number back out of the installed `PrometheusHandle`
+/// to answer with here isn't something that crate's API supports (only
+/// scrape-format text rendering), and duplicating those counters in a
+/// second, parallel shape was rejected (PM, 2026-10-16) as the wrong kind
+/// of effort.
 #[derive(Debug, Clone, Serialize)]
 pub struct SchedulerStatsResponse {
-    pub total_requests: usize,
-    pub completed_requests: usize,
-    pub failed_requests: usize,
-    pub average_latency_ms: f32,
-    pub throughput_tokens_per_sec: f32,
+    pub total_requests: Option<usize>,
+    pub completed_requests: Option<usize>,
+    pub failed_requests: Option<usize>,
+    pub average_latency_ms: Option<f32>,
+    pub throughput_tokens_per_sec: Option<f32>,
     pub memory_usage_bytes: usize,
+    pub unavailable_reason: Option<String>,
 }
 
 /// Get scheduler statistics
 async fn scheduler_stats(State(state): State<AppState>) -> impl IntoResponse {
     let _scheduler = &state.scheduler;
 
-    // TODO: Get actual stats from scheduler
+    let memory_usage_bytes = {
+        let mut sys = state.live_system.lock().unwrap_or_else(|e| e.into_inner());
+        sys.refresh_memory();
+        sys.used_memory() as usize
+    };
+
     let response = SchedulerStatsResponse {
-        total_requests: 0,
-        completed_requests: 0,
-        failed_requests: 0,
-        average_latency_ms: 0.0,
-        throughput_tokens_per_sec: 0.0,
-        memory_usage_bytes: 0,
+        total_requests: None,
+        completed_requests: None,
+        failed_requests: None,
+        average_latency_ms: None,
+        throughput_tokens_per_sec: None,
+        memory_usage_bytes,
+        unavailable_reason: Some(
+            "request count, latency and throughput are not tracked at this endpoint -- see \
+             GET /metrics (lightbulb_http_requests_total, lightbulb_http_request_duration_seconds)"
+                .to_string(),
+        ),
     };
 
     (StatusCode::OK, Json(response))
@@ -971,6 +1011,84 @@ mod tests {
             body["gpu_metrics"].as_array().unwrap().len(),
             0,
             "full body: {body:?}"
+        );
+    }
+
+    /// Breaking change (version bump per project rule): the hardcoded-zero
+    /// stub this replaces returned `0`/`0.0`/`[]`, which LOOKS like a real
+    /// (idle) reading. Every field with no real backing must now be
+    /// `null`, with `unavailable_reason` explaining why -- a caller
+    /// checking `== 0` to mean "idle" would have been silently wrong
+    /// either way, but `null` at least cannot be mistaken for a number.
+    #[tokio::test]
+    async fn scheduler_queue_reports_unavailable_not_zero() {
+        let req = Request::builder()
+            .method("GET")
+            .uri("/v1/lightbulb/admin/scheduler/queue")
+            .extension(key_info("admin"))
+            .body(Body::empty())
+            .unwrap();
+        let response = routes().with_state(state()).oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+
+        assert!(body["pending_requests"].is_null(), "full body: {body:?}");
+        assert!(body["running_requests"].is_null(), "full body: {body:?}");
+        assert!(body["queue"].is_null(), "full body: {body:?}");
+        assert!(
+            body["unavailable_reason"].is_string(),
+            "full body: {body:?}"
+        );
+    }
+
+    /// Same discipline as the queue endpoint above, but `memory_usage_bytes`
+    /// is the one field that IS real now (same `live_system` source
+    /// `system_metrics` already reads) -- it must stay a real number, not
+    /// also go `null`, while every other field does.
+    #[tokio::test]
+    async fn scheduler_stats_reports_real_memory_and_unavailable_for_the_rest() {
+        let expected_used_bytes = sysinfo::System::new_all().used_memory();
+
+        let req = Request::builder()
+            .method("GET")
+            .uri("/v1/lightbulb/admin/scheduler/stats")
+            .extension(key_info("admin"))
+            .body(Body::empty())
+            .unwrap();
+        let response = routes().with_state(state()).oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+
+        assert!(body["total_requests"].is_null(), "full body: {body:?}");
+        assert!(body["completed_requests"].is_null(), "full body: {body:?}");
+        assert!(body["failed_requests"].is_null(), "full body: {body:?}");
+        assert!(body["average_latency_ms"].is_null(), "full body: {body:?}");
+        assert!(
+            body["throughput_tokens_per_sec"].is_null(),
+            "full body: {body:?}"
+        );
+        assert!(
+            body["unavailable_reason"].is_string(),
+            "full body: {body:?}"
+        );
+
+        // Real memory reading, not null and not a hardcoded zero. Exact
+        // equality would be flaky (another process could change used
+        // memory between the two samples); a generous tolerance pins
+        // "real and in the right ballpark" without asserting a snapshot.
+        let actual = body["memory_usage_bytes"].as_u64().unwrap();
+        let tolerance = expected_used_bytes / 10; // 10%
+        assert!(
+            actual.abs_diff(expected_used_bytes) <= tolerance,
+            "expected memory_usage_bytes near {expected_used_bytes}, got {actual}: full body: {body:?}"
         );
     }
 }
