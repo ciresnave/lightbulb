@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.9.3
+
+### Fixed
+- Phase 4 audit's "Request cancellation support" was marked NOT DONE on a wrong premise ("the
+  streaming handler has no logic reacting to a dropped client connection"). It does: both
+  response modes already stop generation on client disconnect via channel-drop detection --
+  Complete mode proactively (`resp_tx.is_closed()` before every step, #133), streaming
+  reactively (`stream_tx.send(...).is_err()` after one token, the same mechanism #155's timeout
+  path relies on). No behavioral change; added the missing regression-pin test for the
+  streaming path (Complete mode already had one) and corrected the roadmap. No
+  `CancellationToken` added -- nothing today needs that abstraction over a mechanism that
+  already works.
+
 ## 0.9.2
 
 ### Added
