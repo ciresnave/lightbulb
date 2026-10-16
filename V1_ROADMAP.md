@@ -503,9 +503,13 @@ loop {
   - [ ] Queue depth by priority — NOT DONE
   - [ ] Memory usage over time — NOT DONE
   - [ ] Slot utilization — NOT DONE
-- [ ] Health check improvements — NOT DONE. `health_check()` (`src/api/mod.rs:720-722`) is
-  `async fn health_check() -> &'static str { "OK" }` — no DB check, no model-loaded check, no
-  liveness/readiness split.
+- [x] Health check improvements — DONE. `GET /health` stays the bare liveness check
+  (`health_check()`, `src/api/mod.rs`); added `GET /health/ready` (`readiness_check`) for
+  deep health, both outside the auth stack so a load balancer with no bearer token can read
+  either. Checks `db_pool` (via a real `SELECT 1`, when a database is configured) and
+  `inference_tx` (vs. `config.models_dir`, so "never asked for a model" reads
+  `not_configured` and "asked for one and it failed to start" reads `not_loaded` and blocks
+  readiness) fresh on every call. Returns 503 + JSON detail when not ready, 200 when ready.
 
 ---
 

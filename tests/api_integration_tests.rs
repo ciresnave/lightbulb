@@ -215,6 +215,38 @@ mod api_tests {
         server
     }
 
+    /// `create_test_server` configures a real database and no model
+    /// (`models_dir: None`) -- the readiness check's real-world "database
+    /// configured and reachable, model never requested" shape. Database
+    /// `ok` here is itself the interesting assertion: `pool.get()` plus a
+    /// real `SELECT 1` against `postgres_integration`'s live cluster, not a
+    /// stand-in.
+    #[tokio::test]
+    #[ignore] // Requires PostgreSQL
+    async fn test_readiness_check_reports_ready_with_db_configured_and_no_model() {
+        let server = create_test_server().await;
+        let app = server.build_router().with_state(server.state().clone());
+
+        let response = app
+            .oneshot(with_fake_peer_at(
+                Request::builder()
+                    .uri("/health/ready")
+                    .body(Body::empty())
+                    .unwrap(),
+                [10, 0, 0, 14],
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["status"], "ready");
+        assert_eq!(body["database"], "ok");
+        assert_eq!(body["model"], "not_configured");
+    }
+
     #[tokio::test]
     #[ignore] // Requires PostgreSQL
     async fn test_health_check() {
