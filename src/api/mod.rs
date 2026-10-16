@@ -451,6 +451,35 @@ impl ApiServer {
             });
         }
 
+        // Install the Prometheus recorder NOW, not lazily on the first
+        // `/metrics` request. `request_metrics_middleware` (Phase 4
+        // observability, latency/throughput/error-rate PR) records
+        // against whatever recorder is globally current the moment EVERY
+        // request is handled, starting with the very first one this
+        // server ever serves -- if that happened before anything called
+        // `prometheus_handle()`, the recording would silently go to the
+        // no-op default recorder and be lost, the same bug class
+        // `metrics_endpoint` itself hit during development (see its own
+        // doc comment). Calling it here, unconditionally, removes the
+        // "first request wins or loses the race" question entirely.
+        let metrics_handle = prometheus_handle();
+
+        // Recording histogram/summary data (unlike the plain gauges
+        // `metrics_endpoint` sets) needs periodic upkeep -- the crate's
+        // own docs: `install_recorder`/`build_recorder` (unlike `install`)
+        // don't spawn this automatically, and skipping it lets internal
+        // bucket/decay state grow unbounded. Same pattern as the
+        // `auth_attempt_counts` cleanup task above, but unconditional: the
+        // Prometheus recorder exists regardless of whether a database is
+        // configured.
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
+            loop {
+                interval.tick().await;
+                metrics_handle.run_upkeep();
+            }
+        });
+
         let security_sinks = security_event::build_sinks(&config.security_alert_email);
 
         let mut state = AppState {
@@ -628,6 +657,17 @@ impl ApiServer {
                     .allow_headers(Any),
             )
             .layer(TraceLayer::new_for_http())
+            // Request-duration histogram + request-count counter, added
+            // LAST so it is the truly outermost layer and times EVERY
+            // request this server serves -- `/health`/`/health/ready`/
+            // `/metrics` included, not just the authenticated routes.
+            // Placed after CORS/tracing rather than before: a preflight
+            // CORS response short-circuited by the `CorsLayer` itself
+            // should still be counted, and being outermost guarantees
+            // that regardless of which inner layer produced the response
+            // (same "last .layer() = outermost" rule this function
+            // documents throughout).
+            .layer(axum::middleware::from_fn(request_metrics_middleware))
     }
 
     /// Start serving (HTTP and optionally HTTPS)
@@ -972,6 +1012,61 @@ async fn metrics_endpoint(State(state): State<AppState>) -> impl IntoResponse {
     )
 }
 
+/// Times and counts every request through this server (Phase 4
+/// observability: latency histograms, throughput, error rates by
+/// endpoint). One histogram (`lightbulb_http_request_duration_seconds`)
+/// and one counter (`lightbulb_http_requests_total`), both labeled by
+/// `route`+`method`, the counter also by `status`. Throughput and error
+/// rate are deliberately NOT separate metrics: both are standard PromQL
+/// computations over that one counter (`rate(...)` for throughput,
+/// `rate(...{status=~"5.."}) / rate(...)` for error rate) -- recording
+/// them again here would just be the same data twice.
+///
+/// `route` comes from [`axum::extract::MatchedPath`] -- the registered
+/// route PATTERN (e.g. `/v1/lightbulb/admin/api-keys/{id}`), never the
+/// resolved URI. A resolved path would make `route` a high-cardinality
+/// label (a fresh series per distinct id/key ever requested, growing
+/// forever) AND leak which specific ids/keys were accessed to anyone who
+/// can read the unauthenticated `/metrics` output -- the same
+/// no-identity discipline `metrics_endpoint`'s own doc comment applies to
+/// its gauges. `MatchedPath` is `None` for a request that matched no
+/// route at all (a 404) -- recorded under the fixed label `"unmatched"`
+/// rather than dropped, so a flood of 404s is still visible as a
+/// throughput/error-rate signal, just not attributed to a specific route.
+async fn request_metrics_middleware(
+    method: axum::http::Method,
+    matched_path: Option<axum::extract::MatchedPath>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let route = matched_path
+        .map(|p| p.as_str().to_string())
+        .unwrap_or_else(|| "unmatched".to_string());
+    let method = method.to_string();
+
+    let start = std::time::Instant::now();
+    let response = next.run(request).await;
+    let elapsed = start.elapsed().as_secs_f64();
+    let status = response.status().as_u16().to_string();
+
+    metrics::histogram!(
+        "lightbulb_http_request_duration_seconds",
+        "route" => route.clone(),
+        "method" => method.clone(),
+    )
+    .record(elapsed);
+
+    metrics::counter!(
+        "lightbulb_http_requests_total",
+        "route" => route,
+        "method" => method,
+        "status" => status,
+    )
+    .increment(1);
+
+    response
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1275,6 +1370,87 @@ mod tests {
         assert!(
             body.contains("lightbulb_queue_depth 7"),
             "expected the updated queue-depth gauge, got: {body}"
+        );
+    }
+
+    /// Drives a real request through `request_metrics_middleware`
+    /// (self-contained router, not the full `ApiServer`, same pattern as
+    /// `layer_ordering` below) and asserts on the rendered Prometheus
+    /// output. The load-bearing assertion is the ROUTE label:
+    /// `/test/{id}` (the registered pattern `MatchedPath` reports), never
+    /// `/test/42` (the resolved URI this request actually sent) -- a
+    /// resolved-path label would make `route` unbounded cardinality and
+    /// leak which specific ids were requested to an unauthenticated
+    /// `/metrics` caller.
+    #[tokio::test]
+    async fn request_metrics_middleware_labels_by_route_pattern_not_resolved_path() {
+        use axum::body::Body;
+        use axum::http::Request;
+        use axum::routing::get;
+        use tower::ServiceExt;
+
+        let _guard = METRICS_TEST_LOCK.lock().await;
+        let handle = prometheus_handle();
+
+        let app = axum::Router::new()
+            .route("/test/{id}", get(|| async { "ok" }))
+            .layer(axum::middleware::from_fn(request_metrics_middleware));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/test/42")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = handle.render();
+        assert!(
+            body.contains(r#"route="/test/{id}""#),
+            "expected the route-PATTERN label, got: {body}"
+        );
+        assert!(
+            !body.contains(r#"route="/test/42""#),
+            "the resolved path must never appear as a label (unbounded cardinality, \
+             leaks the requested id): {body}"
+        );
+    }
+
+    /// Positive control for the test above, and its own assertion: a
+    /// request that matches no route at all must still be counted (under
+    /// the fixed `"unmatched"` label), not silently dropped -- a flood of
+    /// 404s is exactly the kind of signal this metric exists to surface.
+    #[tokio::test]
+    async fn request_metrics_middleware_counts_unmatched_routes() {
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt;
+
+        let _guard = METRICS_TEST_LOCK.lock().await;
+        let handle = prometheus_handle();
+
+        let app =
+            axum::Router::<()>::new().layer(axum::middleware::from_fn(request_metrics_middleware));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/nothing-registered")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+        let body = handle.render();
+        assert!(
+            body.contains(r#"route="unmatched""#),
+            "a 404 with no matched route must still be counted, under the fixed \
+             \"unmatched\" label: {body}"
         );
     }
 

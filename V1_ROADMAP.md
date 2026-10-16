@@ -527,13 +527,22 @@ loop {
     `model_max_batch_size` existing as a config field) -- reporting a number here would always
     read 0 or 1, not a usable utilization metric. Revisit once real concurrent-slot batching
     exists.
-  - [ ] Request latency histograms — NOT DONE (`grep -rn "histogram\|Histogram" src/` finds only
-    an unrelated GGUF dtype-count comment). Separate PR: needs request-path instrumentation
-    (middleware timing each request), not just reading existing state.
-  - [ ] Throughput (requests/sec) — NOT DONE. Same separate PR as latency histograms.
-  - [ ] Error rates by endpoint — NOT DONE. Same separate PR; needs per-route/per-status-code
-    labels, which must stay low-cardinality and carry no per-key/per-user identity (same
-    discipline as this PR's gauges, see `metrics_endpoint`'s own doc comment).
+  - [x] Request latency histograms — DONE. `request_metrics_middleware` (`src/api/mod.rs`),
+    the outermost router layer (times EVERY request, `/health`/`/metrics` included), records
+    `lightbulb_http_request_duration_seconds` via the exporter's default quantile summary
+    (p50/p90/p95/p99/p99.9) -- no hand-picked histogram buckets needed for v1. A periodic
+    `run_upkeep()` background task was added (`ApiServer::new`, same pattern as the
+    `auth_attempt_counts` cleanup task) since this is the first metric needing it; v1's plain
+    gauges didn't.
+  - [x] Throughput (requests/sec) — DONE, but not as its own metric: derived from
+    `lightbulb_http_requests_total`'s `rate()` in PromQL, same counter error rate uses below.
+    Recording a second, separate throughput metric would just be the same data twice.
+  - [x] Error rates by endpoint — DONE, same counter: `lightbulb_http_requests_total`, labeled
+    `route`+`method`+`status`. `route` comes from `axum::extract::MatchedPath` (the registered
+    PATTERN, e.g. `/v1/lightbulb/admin/api-keys/{id}`), never the resolved URI -- a resolved
+    path would be unbounded cardinality AND leak which specific ids/keys were requested to an
+    unauthenticated `/metrics` caller (same discipline as the v1 gauges). An unmatched route
+    (404) is still counted, under the fixed label `"unmatched"`, rather than silently dropped.
   - [ ] Queue depth by priority — NOT DONE. The scheduler's `priority_queue`/`slot_pool`
     (`src/engine/memory_aware_scheduler.rs`) exist but nothing in the real request path calls
     `submit_priority_request`/`allocate_pending_requests` -- only `check_admission` (a pure
