@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.9.2
+
+### Added
+- Phase 4 hardening (audit item): `GET /health/ready` for deep readiness, next to the existing
+  bare-liveness `/health` (unchanged). Checks the database (a real `SELECT 1`, when one is
+  configured) and the model runner (`inference_tx` vs. `config.models_dir`, so "never asked
+  for a model" reads `not_configured` -- ready -- and "asked for one and it failed to start"
+  reads `not_loaded` -- not ready) fresh on every call. `200` + JSON detail when ready, `503`
+  + the same shape otherwise. Both routes stay outside the auth stack, same as before, so a
+  load balancer with no bearer token can read either.
+
 ## 0.9.1
 
 ### Fixed
