@@ -575,16 +575,23 @@ loop {
   `Cargo.toml`/`rust-toolchain.toml`); `rate_limit_per_minute`, `model_max_batch_size`,
   `model_context_length`, `model_max_queue_depth`, and all of `MemoryAwareConfig`
   (`main.rs:72-107`) are hardcoded constants with no file or env override.
-- [x] Support environment variable overrides — PARTIAL, credited as done for what it covers:
-  `main.rs:24-69` reads 8 real env vars (`DATABASE_URL`, `LIGHTBULB_BIND_ADDRESS`,
-  `LIGHTBULB_MODELS_DIR`, `LIGHTBULB_DEFAULT_MODEL`, `LIGHTBULB_JWT_SECRET`,
-  `LIGHTBULB_TRUSTED_PROXIES`, `LIGHTBULB_MAX_AUTH_ATTEMPTS_PER_MINUTE_PER_IP`,
-  `SECURITY_ALERT_EMAIL`) — but the hardcoded values above have no env equivalent at all, so
-  coverage is partial, not systemic.
-- [x] Validate configuration on startup — PARTIAL, real and wired:
-  `validate_auth_policy()` (`src/api/mod.rs:216-245`) is actually called from `ApiServer::new`
-  (`mod.rs:318`) and refuses to start on an unsafe no-DB/no-auth combination — but it validates
-  only the auth policy, nothing else (no checks on batch sizes, context length, port conflicts).
+- [x] Support environment variable overrides — DONE. The 8 existing env vars (`DATABASE_URL`,
+  `LIGHTBULB_BIND_ADDRESS`, `LIGHTBULB_MODELS_DIR`, `LIGHTBULB_DEFAULT_MODEL`,
+  `LIGHTBULB_JWT_SECRET`, `LIGHTBULB_TRUSTED_PROXIES`,
+  `LIGHTBULB_MAX_AUTH_ATTEMPTS_PER_MINUTE_PER_IP`, `SECURITY_ALERT_EMAIL`) plus 9 new ones
+  closing the gap this item found: `LIGHTBULB_RATE_LIMIT_PER_MINUTE`,
+  `LIGHTBULB_MODEL_MAX_BATCH_SIZE`, `LIGHTBULB_MODEL_CONTEXT_LENGTH`,
+  `LIGHTBULB_MODEL_MAX_QUEUE_DEPTH`, `LIGHTBULB_MAX_MEMORY_BYTES`,
+  `LIGHTBULB_MEMORY_PER_SLOT_BASE`, `LIGHTBULB_MEMORY_PER_TOKEN`,
+  `LIGHTBULB_EVICTION_PRESSURE_THRESHOLD`, `LIGHTBULB_MEMORY_SAFETY_MARGIN` (`main.rs`). No
+  config-FILE format added -- that's its own, larger item below, not folded into this one.
+- [x] Validate configuration on startup — DONE. `validate_auth_policy()` and
+  `validate_request_timeout()` were already wired; added `validate_server_config()`
+  (`src/api/mod.rs`, refuses a `0` batch size/context length/queue depth/rate limit) and
+  `MemoryAwareConfig::validate()` (`src/engine/memory_aware_scheduler.rs`, refuses a `0`
+  memory value or an eviction-pressure/safety-margin fraction outside its valid range), both
+  called at startup (`ApiServer::new` and `main.rs` respectively). Still not checked: port
+  conflicts (no clean way to probe this before actually binding).
 - [ ] Document all configuration options — NOT DONE. All 8 env vars above are documented only as
   inline Rust comments; `grep -rln "LIGHTBULB_BIND_ADDRESS\|LIGHTBULB_JWT_SECRET" docs/ *.md` →
   0 hits.

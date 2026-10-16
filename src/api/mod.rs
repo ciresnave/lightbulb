@@ -288,6 +288,43 @@ pub(crate) fn validate_request_timeout(config: &ApiConfig) -> Result<()> {
     Ok(())
 }
 
+/// Phase 4 config-management item: the roadmap's "Validate configuration
+/// on startup" covered only `validate_auth_policy` -- nothing checked the
+/// model/batching sizes at all, so a `0` (from a typo'd env var, say) for
+/// any of these would surface later as a confusing runtime failure (a
+/// batch of size 0, a context length of 0) rather than a clear refusal to
+/// start.
+pub(crate) fn validate_server_config(config: &ApiConfig) -> Result<()> {
+    if config.model_max_batch_size == 0 {
+        anyhow::bail!(
+            "refusing to start: model_max_batch_size is 0. Set \
+             LIGHTBULB_MODEL_MAX_BATCH_SIZE to a positive value, or omit it for the default."
+        );
+    }
+    if config.model_context_length == 0 {
+        anyhow::bail!(
+            "refusing to start: model_context_length is 0. Set \
+             LIGHTBULB_MODEL_CONTEXT_LENGTH to a positive value, or omit it for the default."
+        );
+    }
+    if config.model_max_queue_depth == 0 {
+        anyhow::bail!(
+            "refusing to start: model_max_queue_depth is 0, which would make every inference \
+             request report the queue full immediately (a 0-capacity channel admits nothing). \
+             Set LIGHTBULB_MODEL_MAX_QUEUE_DEPTH to a positive value, or omit it for the \
+             default."
+        );
+    }
+    if config.rate_limit_per_minute == 0 {
+        anyhow::bail!(
+            "refusing to start: rate_limit_per_minute is 0, which would refuse every \
+             authenticated request. Set LIGHTBULB_RATE_LIMIT_PER_MINUTE to a positive value, \
+             or omit it for the default."
+        );
+    }
+    Ok(())
+}
+
 /// Shared application state
 #[derive(Clone)]
 pub struct AppState {
@@ -382,6 +419,7 @@ impl ApiServer {
     pub async fn new(config: ApiConfig, scheduler: Arc<MemoryAwareScheduler>) -> Result<Self> {
         validate_auth_policy(&config)?;
         validate_request_timeout(&config)?;
+        validate_server_config(&config)?;
 
         // Set up database connection pool if DATABASE_URL is configured
         let db_pool = if let Some(ref database_url) = config.database_url {
@@ -1202,6 +1240,47 @@ mod tests {
             ..ApiConfig::default()
         };
         assert!(validate_request_timeout(&config).is_ok());
+    }
+
+    #[test]
+    fn validate_server_config_allows_the_default() {
+        assert!(validate_server_config(&ApiConfig::default()).is_ok());
+    }
+
+    #[test]
+    fn validate_server_config_refuses_zero_batch_size() {
+        let config = ApiConfig {
+            model_max_batch_size: 0,
+            ..ApiConfig::default()
+        };
+        assert!(validate_server_config(&config).is_err());
+    }
+
+    #[test]
+    fn validate_server_config_refuses_zero_context_length() {
+        let config = ApiConfig {
+            model_context_length: 0,
+            ..ApiConfig::default()
+        };
+        assert!(validate_server_config(&config).is_err());
+    }
+
+    #[test]
+    fn validate_server_config_refuses_zero_queue_depth() {
+        let config = ApiConfig {
+            model_max_queue_depth: 0,
+            ..ApiConfig::default()
+        };
+        assert!(validate_server_config(&config).is_err());
+    }
+
+    #[test]
+    fn validate_server_config_refuses_zero_rate_limit() {
+        let config = ApiConfig {
+            rate_limit_per_minute: 0,
+            ..ApiConfig::default()
+        };
+        assert!(validate_server_config(&config).is_err());
     }
 
     /// Builds a bare `AppState` directly rather than through `ApiServer::new`

@@ -84,6 +84,54 @@ impl Default for MemoryAwareConfig {
     }
 }
 
+impl MemoryAwareConfig {
+    /// Phase 4 config-management item: these five values had no startup
+    /// check at all (and, until this PR, no env override either) --
+    /// a `0` or an out-of-`[0.0, 1.0]` fraction from a typo'd env var
+    /// would surface later as a confusing scheduling failure (a slot
+    /// budget of zero, a threshold that never triggers or always does)
+    /// rather than a clear refusal to start.
+    pub fn validate(&self) -> anyhow::Result<()> {
+        if self.max_memory_bytes == 0 {
+            anyhow::bail!(
+                "refusing to start: max_memory_bytes is 0. Set LIGHTBULB_MAX_MEMORY_BYTES to \
+                 a positive value, or omit it for the default (8 GiB)."
+            );
+        }
+        if self.memory_per_slot_base == 0 {
+            anyhow::bail!(
+                "refusing to start: memory_per_slot_base is 0. Set \
+                 LIGHTBULB_MEMORY_PER_SLOT_BASE to a positive value, or omit it for the \
+                 default."
+            );
+        }
+        if self.memory_per_token == 0 {
+            anyhow::bail!(
+                "refusing to start: memory_per_token is 0. Set LIGHTBULB_MEMORY_PER_TOKEN to \
+                 a positive value, or omit it for the default."
+            );
+        }
+        if !(0.0..=1.0).contains(&self.eviction_pressure_threshold) {
+            anyhow::bail!(
+                "refusing to start: eviction_pressure_threshold is {}, outside [0.0, 1.0]. \
+                 Set LIGHTBULB_EVICTION_PRESSURE_THRESHOLD to a fraction in that range, or \
+                 omit it for the default (0.85).",
+                self.eviction_pressure_threshold
+            );
+        }
+        if !(0.0..1.0).contains(&self.memory_safety_margin) {
+            anyhow::bail!(
+                "refusing to start: memory_safety_margin is {}, outside [0.0, 1.0). A margin \
+                 of 1.0 or more would reserve the entire memory budget (or more) as headroom, \
+                 leaving nothing to actually allocate. Set LIGHTBULB_MEMORY_SAFETY_MARGIN to a \
+                 fraction in that range, or omit it for the default (0.1).",
+                self.memory_safety_margin
+            );
+        }
+        Ok(())
+    }
+}
+
 /// Priority request wrapper
 #[derive(Debug, Clone)]
 struct PriorityRequest {
@@ -376,6 +424,77 @@ impl MemoryAwareScheduler {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn validate_allows_the_default() {
+        assert!(MemoryAwareConfig::default().validate().is_ok());
+    }
+
+    #[test]
+    fn validate_refuses_zero_max_memory_bytes() {
+        let config = MemoryAwareConfig {
+            max_memory_bytes: 0,
+            ..MemoryAwareConfig::default()
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn validate_refuses_zero_memory_per_slot_base() {
+        let config = MemoryAwareConfig {
+            memory_per_slot_base: 0,
+            ..MemoryAwareConfig::default()
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn validate_refuses_zero_memory_per_token() {
+        let config = MemoryAwareConfig {
+            memory_per_token: 0,
+            ..MemoryAwareConfig::default()
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn validate_refuses_an_eviction_pressure_threshold_above_one() {
+        let config = MemoryAwareConfig {
+            eviction_pressure_threshold: 1.1,
+            ..MemoryAwareConfig::default()
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn validate_refuses_a_negative_eviction_pressure_threshold() {
+        let config = MemoryAwareConfig {
+            eviction_pressure_threshold: -0.1,
+            ..MemoryAwareConfig::default()
+        };
+        assert!(config.validate().is_err());
+    }
+
+    /// `1.0` itself, not just values above it: a margin of exactly 1.0
+    /// reserves the ENTIRE memory budget as headroom, leaving nothing to
+    /// allocate -- the boundary matters, not just "too high."
+    #[test]
+    fn validate_refuses_a_memory_safety_margin_of_exactly_one() {
+        let config = MemoryAwareConfig {
+            memory_safety_margin: 1.0,
+            ..MemoryAwareConfig::default()
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn validate_allows_a_memory_safety_margin_of_zero() {
+        let config = MemoryAwareConfig {
+            memory_safety_margin: 0.0,
+            ..MemoryAwareConfig::default()
+        };
+        assert!(config.validate().is_ok());
+    }
 
     fn create_test_request(id: &str, prompt_len: usize, max_tokens: usize) -> Request {
         Request {

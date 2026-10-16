@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.10.1
+
+### Added
+- Phase 4 config-management: 9 new environment variable overrides for values that were
+  previously hardcoded with no override at all --
+  `LIGHTBULB_RATE_LIMIT_PER_MINUTE`/`_MODEL_MAX_BATCH_SIZE`/`_MODEL_CONTEXT_LENGTH`/
+  `_MODEL_MAX_QUEUE_DEPTH`/`_MAX_MEMORY_BYTES`/`_MEMORY_PER_SLOT_BASE`/`_MEMORY_PER_TOKEN`/
+  `_EVICTION_PRESSURE_THRESHOLD`/`_MEMORY_SAFETY_MARGIN` (`main.rs`). Every one keeps the
+  previous hardcoded value as its default, so an existing deployment that sets none of them
+  is unaffected.
+- Two new startup validations, closing the rest of this item: `validate_server_config`
+  (`src/api/mod.rs`) refuses a `0` batch size/context length/queue depth/rate limit;
+  `MemoryAwareConfig::validate` (`src/engine/memory_aware_scheduler.rs`) refuses a `0` memory
+  value or an eviction-pressure/safety-margin fraction outside its valid range. Both run at
+  startup, before the server (or scheduler) does anything with the value.
+
 ## 0.10.0
 
 ### Changed
