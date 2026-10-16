@@ -144,6 +144,7 @@ async fn post_raw(path: &str, body: serde_json::Value) -> (StatusCode, Vec<u8>) 
             lightbulb::cache::PrefixCacheStats::default(),
         )),
         live_system: lightbulb::api::new_shared_system_metrics(),
+        queue_depth: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
     };
     let app = lightbulb::api::openai::routes().with_state(state);
     let resp = app

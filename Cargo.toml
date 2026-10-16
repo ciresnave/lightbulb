@@ -4,7 +4,7 @@
     license     = "MIT OR Apache-2.0"
     name        = "lightbulb"
     repository  = "https://github.com/ciresnave/lightbulb"
-    version     = "0.9.3"
+    version     = "0.9.4"
 
 [features]
     # CUDA support with flash attention and fused kernels.
@@ -336,6 +336,17 @@
     # keeps default builds free of it entirely.
     fuel-cuda-backend = { git = "https://github.com/ciresnave/fuel", rev = "d90b481fde7d84cb25284375274677a37a946703", optional = true }
 sysinfo = { version = "0.39.6", default-features = false, features = ["system"] }
+    # `metrics` is a pure facade (the `gauge!`/`counter!` macros record
+    # against a global recorder, with no dependencies of their own beyond
+    # that). `metrics-exporter-prometheus` default-features pulls in its
+    # own `http-listener` (a second hyper server) and `push-gateway`
+    # (reqwest+rustls+aws-lc-rs) -- neither applies here: `/metrics` is
+    # served through the existing axum router (`PrometheusHandle::render`),
+    # not a second listener, and nothing pushes to a gateway. Disabling
+    # defaults keeps aws-lc-rs out of the tree, which this project removed
+    # once already (see the "Replace aws-lc-rs with ring" commit).
+    metrics = "0.24"
+    metrics-exporter-prometheus = { version = "0.18", default-features = false }
 
 [[bin]]
 name = "lightbulb-cli"

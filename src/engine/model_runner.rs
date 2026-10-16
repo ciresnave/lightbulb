@@ -140,6 +140,33 @@ pub type InferenceRequestSender = SyncSender<InferenceJob>;
 /// each job and read by the HTTP layer without going through it.
 pub type SharedCacheStats = std::sync::Arc<std::sync::Mutex<crate::cache::PrefixCacheStats>>;
 
+/// Live count of inference jobs currently enqueued or in flight — the
+/// `/metrics` endpoint's queue-depth gauge (Phase 4 observability). Plain
+/// `Arc<AtomicUsize>` rather than threading a counter through the channel
+/// itself: `std::sync::mpsc::sync_channel`'s `SyncSender`/`Receiver` expose
+/// no `len()` at all, so there is nothing to read off the channel directly.
+pub type SharedQueueDepth = std::sync::Arc<std::sync::atomic::AtomicUsize>;
+
+/// RAII handle on one job's lifetime in `SharedQueueDepth`: increments on
+/// construction, decrements on drop, covering every exit path (a completed
+/// job, a job whose client disconnected, a job that errored, a job whose
+/// `try_send` never actually reached the channel) without each call site
+/// having to remember to decrement on its own way out.
+pub struct QueueDepthGuard(SharedQueueDepth);
+
+impl QueueDepthGuard {
+    pub fn new(counter: SharedQueueDepth) -> Self {
+        counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Self(counter)
+    }
+}
+
+impl Drop for QueueDepthGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 /// Returned by an enqueue attempt that found the inference queue at capacity.
 ///
 /// A distinct type, rather than a bare `anyhow!(...)`, so a handler can tell
@@ -612,6 +639,38 @@ pub(crate) fn run_jobs<M: EngineModel>(
 mod tests {
     use super::*;
     use crate::engine::{Request, RequestContext};
+
+    #[test]
+    fn queue_depth_guard_increments_on_construction_and_decrements_on_drop() {
+        let counter: SharedQueueDepth = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+        let guard = QueueDepthGuard::new(counter.clone());
+        assert_eq!(counter.load(std::sync::atomic::Ordering::Relaxed), 1);
+
+        drop(guard);
+        assert_eq!(counter.load(std::sync::atomic::Ordering::Relaxed), 0);
+    }
+
+    /// Two overlapping jobs must both be counted -- not just that a single
+    /// guard's own increment/decrement is paired correctly.
+    #[test]
+    fn queue_depth_guard_counts_multiple_overlapping_jobs() {
+        let counter: SharedQueueDepth = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+        let first = QueueDepthGuard::new(counter.clone());
+        let second = QueueDepthGuard::new(counter.clone());
+        assert_eq!(counter.load(std::sync::atomic::Ordering::Relaxed), 2);
+
+        drop(first);
+        assert_eq!(
+            counter.load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "dropping one of two overlapping jobs must leave the other counted"
+        );
+
+        drop(second);
+        assert_eq!(counter.load(std::sync::atomic::Ordering::Relaxed), 0);
+    }
 
     /// Builds a context that has already been marked `Completed` — every
     /// real backend does that unconditionally on `is_eos ||

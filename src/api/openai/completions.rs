@@ -222,6 +222,7 @@ async fn create_completion(
     // `chat::build_prompt`'s docs.
     let result = crate::api::openai::chat::run_inference_once(
         tx,
+        &state.queue_depth,
         crate::api::openai::chat::BuiltPrompt::raw(prompt_text.clone()),
         max_new_tokens,
         temperature,
@@ -320,6 +321,7 @@ mod tests {
                 crate::cache::PrefixCacheStats::default(),
             )),
             live_system: crate::api::new_shared_system_metrics(),
+            queue_depth: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         }
     }
 

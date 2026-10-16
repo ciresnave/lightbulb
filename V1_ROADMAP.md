@@ -505,15 +505,45 @@ loop {
   ID; `grep -rn "x-request-id\|SetRequestIdLayer\|MakeRequestUuid" src/` → 0 hits. The
   `RequestId` types that do exist (`slot_pool.rs:60`, `batched_llama.rs:36`,
   `batch_metadata.rs:13`) are internal scheduler bookkeeping, never propagated to HTTP.
-- [ ] Metrics endpoint (`/metrics` with Prometheus format) — NOT DONE, worse than missing (see
-  note above: hardcoded-zero stub, wrong route, wrong format, no dependency).
+- [x] Metrics endpoint (`/metrics` with Prometheus format) — v1 slice DONE. `GET /metrics`
+  (`metrics_endpoint`, `src/api/mod.rs`), unauthenticated same as `/health`/`/health/ready`,
+  gated by the new `ApiConfig.enable_metrics_endpoint` (default `true`). Uses the `metrics`
+  facade + `metrics-exporter-prometheus` (both latest crates.io versions;
+  `default-features = false` on the exporter -- its defaults pull in a second HTTP listener and
+  push-gateway support via `reqwest`+`rustls`+`aws-lc-rs`, none of which apply since this is
+  served through the existing axum router, and the last of which this project already removed
+  once). No per-user/per-key labels on anything exposed here -- an unauthenticated route leaking
+  which keys exist or how active each is would be a real disclosure.
+  - [x] Memory usage — DONE (`lightbulb_memory_total_bytes`/`_used_bytes`, same `live_system`
+    sampler the admin `metrics` endpoint already reads).
+  - [x] Queue depth — DONE (`lightbulb_queue_depth`), but NOT the raw channel buffer: 
+    `std::sync::mpsc::sync_channel`'s `SyncSender`/`Receiver` expose no `len()` at all. Tracked
+    instead via `engine::model_runner::QueueDepthGuard`, an RAII counter spanning
+    enqueue-to-response-delivered at the API layer (`run_inference_once`'s local guard, and one
+    held by streaming's `StreamState` until the SSE stream itself ends) -- arguably a more
+    useful "requests in flight" number than a bare channel length would have been anyway.
+  - [ ] Slot utilization — NOT DONE, dropped from v1 on a corrected premise: there is no real
+    multi-slot batching in `run_jobs` today (`batch` is always `vec![ctx]`, length 1, despite
+    `model_max_batch_size` existing as a config field) -- reporting a number here would always
+    read 0 or 1, not a usable utilization metric. Revisit once real concurrent-slot batching
+    exists.
   - [ ] Request latency histograms — NOT DONE (`grep -rn "histogram\|Histogram" src/` finds only
-    an unrelated GGUF dtype-count comment)
-  - [ ] Throughput (requests/sec) — NOT DONE
-  - [ ] Error rates by endpoint — NOT DONE
-  - [ ] Queue depth by priority — NOT DONE
-  - [ ] Memory usage over time — NOT DONE
-  - [ ] Slot utilization — NOT DONE
+    an unrelated GGUF dtype-count comment). Separate PR: needs request-path instrumentation
+    (middleware timing each request), not just reading existing state.
+  - [ ] Throughput (requests/sec) — NOT DONE. Same separate PR as latency histograms.
+  - [ ] Error rates by endpoint — NOT DONE. Same separate PR; needs per-route/per-status-code
+    labels, which must stay low-cardinality and carry no per-key/per-user identity (same
+    discipline as this PR's gauges, see `metrics_endpoint`'s own doc comment).
+  - [ ] Queue depth by priority — NOT DONE. The scheduler's `priority_queue`/`slot_pool`
+    (`src/engine/memory_aware_scheduler.rs`) exist but nothing in the real request path calls
+    `submit_priority_request`/`allocate_pending_requests` -- only `check_admission` (a pure
+    memory-budget check) is used. There is no live priority-queued request flow to report a
+    depth for today.
+  - [ ] **New finding, not part of this item**: `GET /v1/lightbulb/admin/scheduler/queue` and
+    `/admin/scheduler/stats` (`src/api/admin.rs`) both still return hardcoded zeros under a
+    `// TODO: Get actual ... from scheduler` comment -- unlike `/admin/metrics` (fixed in #150),
+    these look real (200, a real-looking JSON shape) and are not. Own PR: either wire them to
+    real data or have them say "unavailable" explicitly rather than a plausible-looking zero.
 - [x] Health check improvements — DONE. `GET /health` stays the bare liveness check
   (`health_check()`, `src/api/mod.rs`); added `GET /health/ready` (`readiness_check`) for
   deep health, both outside the auth stack so a load balancer with no bearer token can read
