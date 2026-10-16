@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.9.1
+
+### Fixed
+- `postgres_integration` CI job widened to run all 12 Postgres-gated tests in
+  `tests/api_integration_tests.rs` (was 4, by name filter) -- CireSnave's "#[ignore] should be
+  a last resort." Running the other 8 for the first time surfaced a real cross-test
+  contamination risk: every test shared one hardcoded fake peer IP, and the pre-auth attempt
+  limiter's attempt counter (`auth_attempt_counts`) persists in Postgres across a whole CI run,
+  keyed by IP alone -- a test that deliberately saturates its bucket could leak into an
+  unrelated test's result depending on run order, which `cargo test` does not guarantee.
+  Fixed by giving each test its own fake IP and truncating that table at the top of
+  `create_test_server`.
+- `test_pre_auth_attempt_limiter_is_keyed_per_ip`'s "different peer" varied only the port, not
+  the IP (127.0.0.1:9999 vs the shared 127.0.0.1:54321) -- since the limiter keys by IP alone,
+  this never actually exercised per-IP keying. Mutation-checked against a live Postgres in CI:
+  reverting to that shape makes the test fail (429 instead of 401), confirming the fixed
+  version (a genuinely different IP) is what the test needs to mean what it claims.
+
 ## 0.9.0
 
 ### Changed
