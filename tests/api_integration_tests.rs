@@ -27,10 +27,24 @@ mod api_tests {
     /// `auth_middleware`, let alone the handler these tests mean to pin.
     /// This fakes a peer address the same way a real connection would carry
     /// one.
-    fn with_fake_peer(mut request: Request<Body>) -> Request<Body> {
+    ///
+    /// Takes the peer IP explicitly rather than hardcoding one: the
+    /// pre-auth limiter keys its attempt counter by IP alone
+    /// (`auth_middleware::pre_auth_attempt_limiter_middleware` binds
+    /// `peer.ip()`, dropping the port), and that counter lives in
+    /// `auth_attempt_counts`, a table every test in this file shares across
+    /// one CI run. Every call site below passes its own distinct IP so
+    /// that one test deliberately saturating its bucket (the two
+    /// `pre_auth_attempt_limiter_*` tests below) cannot leak into another
+    /// test's expectations, regardless of what order the test binary picks
+    /// -- found when extending `postgres_integration` to run this whole
+    /// file: with a single shared fake IP, a saturating test running before
+    /// an ordinary one would make the ordinary one observe 429 instead of
+    /// its expected 401/200, non-deterministically.
+    fn with_fake_peer_at(mut request: Request<Body>, peer_ip: [u8; 4]) -> Request<Body> {
         request
             .extensions_mut()
-            .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 54321))));
+            .insert(ConnectInfo(SocketAddr::from((peer_ip, 54321))));
         request
     }
 
@@ -179,6 +193,25 @@ mod api_tests {
         // the opposite of what should be pinned.
         provision_test_api_key(&db_url, "test-token", "admin").await;
 
+        // Belt-and-suspenders alongside per-test fake IPs (`with_fake_peer_at`):
+        // CI's `postgres_integration` job starts a brand-new `initdb`-created
+        // cluster every run, so this table is empty there regardless. Locally,
+        // against the persistent container `test_db_url`'s own doc comment
+        // describes, repeated runs within the same per-minute window would
+        // otherwise accumulate stale counts under reused IPs. Every test calls
+        // `create_test_server` first, so clearing here gives each one a clean
+        // slate no matter what ran before it, in either environment.
+        let (client, connection) = tokio_postgres::connect(&db_url, tokio_postgres::NoTls)
+            .await
+            .expect("connect to the test database — is the container up on this URL?");
+        tokio::spawn(async move {
+            let _ = connection.await;
+        });
+        client
+            .execute("TRUNCATE TABLE auth_attempt_counts", &[])
+            .await
+            .expect("clear auth_attempt_counts before the test");
+
         server
     }
 
@@ -189,11 +222,12 @@ mod api_tests {
         let app = server.build_router().with_state(server.state().clone());
 
         let response = app
-            .oneshot(with_fake_peer(
+            .oneshot(with_fake_peer_at(
                 Request::builder()
                     .uri("/health")
                     .body(Body::empty())
                     .unwrap(),
+                [10, 0, 0, 1],
             ))
             .await
             .unwrap();
@@ -217,13 +251,14 @@ mod api_tests {
         });
 
         let response = app
-            .oneshot(with_fake_peer(
+            .oneshot(with_fake_peer_at(
                 Request::builder()
                     .method("POST")
                     .uri("/v1/chat/completions")
                     .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_string(&request_body).unwrap()))
                     .unwrap(),
+                [10, 0, 0, 2],
             ))
             .await
             .unwrap();
@@ -248,7 +283,7 @@ mod api_tests {
         });
 
         let response = app
-            .oneshot(with_fake_peer(
+            .oneshot(with_fake_peer_at(
                 Request::builder()
                     .method("POST")
                     .uri("/v1/chat/completions")
@@ -256,6 +291,7 @@ mod api_tests {
                     .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_string(&request_body).unwrap()))
                     .unwrap(),
+                [10, 0, 0, 3],
             ))
             .await
             .unwrap();
@@ -271,12 +307,13 @@ mod api_tests {
         let app = server.build_router().with_state(server.state().clone());
 
         let response = app
-            .oneshot(with_fake_peer(
+            .oneshot(with_fake_peer_at(
                 Request::builder()
                     .uri("/v1/lightbulb/admin/cache/stats")
                     .header("authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
+                [10, 0, 0, 4],
             ))
             .await
             .unwrap();
@@ -296,7 +333,7 @@ mod api_tests {
         });
 
         let response = app
-            .oneshot(with_fake_peer(
+            .oneshot(with_fake_peer_at(
                 Request::builder()
                     .method("POST")
                     .uri("/v1/lightbulb/knowledge/query")
@@ -304,6 +341,7 @@ mod api_tests {
                     .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_string(&request_body).unwrap()))
                     .unwrap(),
+                [10, 0, 0, 5],
             ))
             .await
             .unwrap();
@@ -336,7 +374,7 @@ mod api_tests {
         });
 
         let response = app
-            .oneshot(with_fake_peer(
+            .oneshot(with_fake_peer_at(
                 Request::builder()
                     .method("POST")
                     .uri("/v1/chat/completions")
@@ -344,6 +382,7 @@ mod api_tests {
                     .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_string(&request_body).unwrap()))
                     .unwrap(),
+                [10, 0, 0, 6],
             ))
             .await
             .unwrap();
@@ -356,13 +395,12 @@ mod api_tests {
     /// is exceeded for a given `ConnectInfo` peer — independent of whether
     /// any of those attempts carried a valid key.
     ///
-    /// NOT RUN in this sandbox: no usable test Postgres is reachable here
-    /// (confirmed by running the pre-existing ignored tests above, which
-    /// fail identically with a password-auth error against the only
-    /// Postgres instance on this machine's default port). Written and
-    /// compiled against the real `ApiServer`/`build_router` the same way
-    /// the tests above are, so it is exercised the moment a real test
-    /// database is available — not asserted as passing today.
+    /// Now run by `postgres_integration`'s full-file pass — this is the
+    /// positive control for the `_is_keyed_per_ip` test below: it proves the
+    /// limiter actually engages and refuses at `limit + 1` for the IP that
+    /// hits it this many times, so that test's "a different IP is let
+    /// through" result means something rather than the limiter being a
+    /// no-op.
     #[tokio::test]
     #[ignore] // Requires PostgreSQL
     async fn test_pre_auth_attempt_limiter_refuses_after_threshold() {
@@ -378,7 +416,7 @@ mod api_tests {
         // limiter must refuse with 429 before auth is ever reached.
         let mut last_status = StatusCode::OK;
         for _ in 0..=limit {
-            let request = with_fake_peer(unauthenticated_chat_request());
+            let request = with_fake_peer_at(unauthenticated_chat_request(), [10, 0, 0, 7]);
             last_status = app.clone().oneshot(request).await.unwrap().status();
         }
 
@@ -392,7 +430,18 @@ mod api_tests {
 
     /// Security audit item 3: a DIFFERENT peer IP must not be affected by
     /// another IP's attempt count — the limiter is keyed per-IP, not
-    /// global. Same sandbox caveat as the test above.
+    /// global.
+    ///
+    /// The "other peer" below must differ in IP, not just port: the
+    /// limiter binds `peer.ip()` only (`auth_middleware.rs`), discarding
+    /// the port, so two requests that share an IP share a bucket
+    /// regardless of port. A prior version of this test varied only the
+    /// port (127.0.0.1:54321 vs 127.0.0.1:9999) and so never actually
+    /// exercised per-IP keying — found when extending `postgres_integration`
+    /// to run this file for real. Mutation-checked: temporarily keying the
+    /// limiter by `SocketAddr` (ip+port) instead of `IpAddr` made this
+    /// version of the test fail as expected; the saturating test above is
+    /// the positive control proving the limiter engages at all.
     #[tokio::test]
     #[ignore] // Requires PostgreSQL
     async fn test_pre_auth_attempt_limiter_is_keyed_per_ip() {
@@ -401,14 +450,11 @@ mod api_tests {
         let app = server.build_router().with_state(server.state().clone());
 
         for _ in 0..=limit {
-            let request = with_fake_peer(unauthenticated_chat_request());
+            let request = with_fake_peer_at(unauthenticated_chat_request(), [10, 0, 0, 8]);
             let _ = app.clone().oneshot(request).await.unwrap();
         }
 
-        let mut other_peer_request = unauthenticated_chat_request();
-        other_peer_request
-            .extensions_mut()
-            .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 9999))));
+        let other_peer_request = with_fake_peer_at(unauthenticated_chat_request(), [10, 0, 0, 9]);
 
         let response = app.oneshot(other_peer_request).await.unwrap();
 
@@ -439,7 +485,10 @@ mod api_tests {
         let app = server.build_router().with_state(server.state().clone());
 
         let response = app
-            .oneshot(with_fake_peer(unauthenticated_chat_request()))
+            .oneshot(with_fake_peer_at(
+                unauthenticated_chat_request(),
+                [10, 0, 0, 10],
+            ))
             .await
             .unwrap();
 
@@ -474,12 +523,13 @@ mod api_tests {
         // The target key authenticates before revocation.
         let before = app
             .clone()
-            .oneshot(with_fake_peer(
+            .oneshot(with_fake_peer_at(
                 Request::builder()
                     .uri("/v1/lightbulb/admin/cache/stats")
                     .header("authorization", "Bearer revoke-target-token")
                     .body(Body::empty())
                     .unwrap(),
+                [10, 0, 0, 11],
             ))
             .await
             .unwrap();
@@ -496,25 +546,27 @@ mod api_tests {
 
         let revoke_response = app
             .clone()
-            .oneshot(with_fake_peer(
+            .oneshot(with_fake_peer_at(
                 Request::builder()
                     .method("DELETE")
                     .uri(format!("/v1/lightbulb/admin/api-keys/{target_id}"))
                     .header("authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
+                [10, 0, 0, 11],
             ))
             .await
             .unwrap();
         assert_eq!(revoke_response.status(), StatusCode::OK);
 
         let after = app
-            .oneshot(with_fake_peer(
+            .oneshot(with_fake_peer_at(
                 Request::builder()
                     .uri("/v1/lightbulb/admin/cache/stats")
                     .header("authorization", "Bearer revoke-target-token")
                     .body(Body::empty())
                     .unwrap(),
+                [10, 0, 0, 11],
             ))
             .await
             .unwrap();
@@ -581,13 +633,14 @@ mod api_tests {
         let app = server.build_router().with_state(server.state().clone());
 
         let response = app
-            .oneshot(with_fake_peer(
+            .oneshot(with_fake_peer_at(
                 Request::builder()
                     .method("DELETE")
                     .uri(format!("/v1/lightbulb/admin/api-keys/{only_admin_id}"))
                     .header("authorization", "Bearer lockout-test-admin-token")
                     .body(Body::empty())
                     .unwrap(),
+                [10, 0, 0, 12],
             ))
             .await
             .unwrap();
@@ -623,13 +676,14 @@ mod api_tests {
 
         let rotate_response = app
             .clone()
-            .oneshot(with_fake_peer(
+            .oneshot(with_fake_peer_at(
                 Request::builder()
                     .method("POST")
                     .uri(format!("/v1/lightbulb/admin/api-keys/{old_id}/rotate"))
                     .header("authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
+                [10, 0, 0, 13],
             ))
             .await
             .unwrap();
@@ -650,12 +704,13 @@ mod api_tests {
 
         let old_token_response = app
             .clone()
-            .oneshot(with_fake_peer(
+            .oneshot(with_fake_peer_at(
                 Request::builder()
                     .uri("/v1/lightbulb/admin/cache/stats")
                     .header("authorization", "Bearer rotate-target-token")
                     .body(Body::empty())
                     .unwrap(),
+                [10, 0, 0, 13],
             ))
             .await
             .unwrap();
@@ -666,12 +721,13 @@ mod api_tests {
         );
 
         let new_token_response = app
-            .oneshot(with_fake_peer(
+            .oneshot(with_fake_peer_at(
                 Request::builder()
                     .uri("/v1/lightbulb/admin/cache/stats")
                     .header("authorization", format!("Bearer {new_api_key}"))
                     .body(Body::empty())
                     .unwrap(),
+                [10, 0, 0, 13],
             ))
             .await
             .unwrap();
