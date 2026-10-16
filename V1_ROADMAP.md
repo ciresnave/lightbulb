@@ -548,11 +548,17 @@ loop {
     `submit_priority_request`/`allocate_pending_requests` -- only `check_admission` (a pure
     memory-budget check) is used. There is no live priority-queued request flow to report a
     depth for today.
-  - [ ] **New finding, not part of this item**: `GET /v1/lightbulb/admin/scheduler/queue` and
-    `/admin/scheduler/stats` (`src/api/admin.rs`) both still return hardcoded zeros under a
-    `// TODO: Get actual ... from scheduler` comment -- unlike `/admin/metrics` (fixed in #150),
-    these look real (200, a real-looking JSON shape) and are not. Own PR: either wire them to
-    real data or have them say "unavailable" explicitly rather than a plausible-looking zero.
+  - [x] **Finding from the metrics work, DONE**: `GET /v1/lightbulb/admin/scheduler/queue` and
+    `/admin/scheduler/stats` used to return hardcoded `0`/`0.0`/`[]` under a
+    `// TODO: Get actual ... from scheduler` comment -- unlike `/admin/metrics` (fixed in
+    #150), these looked real and were not. Breaking change (PM, 2026-10-16): every field with
+    no real backing is now `null`, not a plausible-looking zero, with a new
+    `unavailable_reason` string explaining why and pointing to `GET /metrics` for
+    request-count/latency/throughput. `memory_usage_bytes` on `scheduler/stats` is the one
+    field that stayed real (same `live_system` source `/admin/metrics` already reads).
+    `scheduler/queue`'s `pending_requests`/`running_requests`/`queue` have no real backing at
+    all and are not expected to gain one: the scheduler's `priority_queue`/`slot_pool` exist
+    but nothing in the live request path populates them.
 - [x] Health check improvements — DONE. `GET /health` stays the bare liveness check
   (`health_check()`, `src/api/mod.rs`); added `GET /health/ready` (`readiness_check`) for
   deep health, both outside the auth stack so a load balancer with no bearer token can read
