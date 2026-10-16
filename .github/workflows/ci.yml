@@ -68,11 +68,18 @@ jobs:
   # key revoke/rotate), PM condition 3: the revoked-key-is-rejected
   # behaviour needs a test that RUNS, not an `#[ignore]`-only assertion.
   #
-  # SCOPE: only these four tests run here, by name filter. The remaining
-  # pre-existing `#[ignore]`d integration tests (health check, chat
-  # completions, the rest of the pre-auth limiter's own tests) stay
-  # ignored and unexecuted in CI -- that gap is the Phase 2 audit's, not
-  # either of these items' to close.
+  # SCOPE: every `#[ignore]`d test in this one file now runs here -- no
+  # name filter. Widened from the original four (CireSnave, 2026-10-16:
+  # "#[ignore] should be a last resort"): the other eight were already
+  # written and compiled against the real server, just never run against a
+  # real database. Doing so surfaced a real cross-test hazard, fixed in the
+  # same change: every test in this file shares the `auth_attempt_counts`
+  # table across one job run, and the pre-auth limiter keys attempts by
+  # peer IP alone -- so a test that deliberately saturates its bucket could
+  # leak into another test's expectations depending on run order. Fixed by
+  # giving each test its own fake peer IP (`with_fake_peer_at`) and
+  # truncating that table at the top of `create_test_server`, not by
+  # ordering or serializing around it.
   postgres_integration:
     runs-on: windows-latest
     steps:
@@ -90,14 +97,10 @@ jobs:
           & "$env:PGBIN\createdb.exe" -h localhost -p 55432 -U lightbulb lightbulb
           "LIGHTBULB_TEST_DATABASE_URL=postgresql://lightbulb@localhost:55432/lightbulb" >> $env:GITHUB_ENV
 
-      - name: cargo test -- just the pre-auth-limiter regression + revoke/rotate tests
+      - name: cargo test -- every Postgres-gated test in this file
         shell: bash
         run: |
-          cargo test --test api_integration_tests -- --ignored --test-threads=1 \
-            pre_auth_attempt_limiter_does_not_503_an_ordinary_request \
-            revoking_an_api_key_rejects_it_on_the_next_request \
-            revoke_refuses_to_lock_out_the_last_admin_key \
-            rotating_an_api_key_revokes_the_old_and_issues_a_live_new_one
+          cargo test --test api_integration_tests -- --ignored --test-threads=1
 
       # tracing::error! calls in the request path (e.g. the pre-auth
       # attempt limiter failing its own DB query) go nowhere in a test
