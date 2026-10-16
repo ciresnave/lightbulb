@@ -816,22 +816,30 @@ struct ReadinessResponse {
     model: CheckStatus,
 }
 
+/// `None` means no database is configured at all (`not_configured`, an
+/// operator choice). `Some` is checked live with a real `SELECT 1` rather
+/// than just `pool.get()` succeeding: a pool can hand out a connection to a
+/// server that is up but not actually answering queries.
+async fn check_database(pool: Option<&deadpool_postgres::Pool>) -> CheckStatus {
+    let Some(pool) = pool else {
+        return CheckStatus::NotConfigured;
+    };
+    let Ok(client) = pool.get().await else {
+        return CheckStatus::Unreachable;
+    };
+    match client.query_one("SELECT 1", &[]).await {
+        Ok(_) => CheckStatus::Ok,
+        Err(_) => CheckStatus::Unreachable,
+    }
+}
+
 /// Readiness check: can this instance actually serve a request right now,
 /// as opposed to `/health`'s "is the process up at all." Checked fresh on
 /// every call rather than cached — the whole point is reporting the
 /// CURRENT state of dependencies that can change after startup (a database
 /// that was reachable five minutes ago and is down now).
 async fn readiness_check(State(state): State<AppState>) -> impl IntoResponse {
-    let database = match &state.db_pool {
-        None => CheckStatus::NotConfigured,
-        Some(pool) => match pool.get().await {
-            Ok(client) => match client.query_one("SELECT 1", &[]).await {
-                Ok(_) => CheckStatus::Ok,
-                Err(_) => CheckStatus::Unreachable,
-            },
-            Err(_) => CheckStatus::Unreachable,
-        },
-    };
+    let database = check_database(state.db_pool.as_ref()).await;
 
     // `inference_tx` is `None` both when no model was ever requested and
     // when one was requested but failed to start (`ApiServer::new` logs
