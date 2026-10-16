@@ -1210,10 +1210,15 @@ mod tests {
     /// recorder (`prometheus_handle`'s `OnceLock`) -- cargo runs tests in
     /// parallel by default, so two tests calling it concurrently would
     /// race on the same global gauge, each able to observe the other's
-    /// value. Both tests below take this lock for their full body to
-    /// serialize against each other; nothing else in this file touches
-    /// the Prometheus recorder, so no other test needs it.
-    static METRICS_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    /// value. Both tests below take this lock for their full body (held
+    /// across their `.await` on `metrics_endpoint`) to serialize against
+    /// each other; nothing else in this file touches the Prometheus
+    /// recorder, so no other test needs it. `tokio::sync::Mutex`, not
+    /// `std`'s: clippy's `await_holding_lock` (a real gate finding, not a
+    /// style nit -- a `std::sync::MutexGuard` held across an `.await` can
+    /// block a worker thread other tasks need) requires an async-aware
+    /// lock for exactly this held-across-await shape.
+    static METRICS_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     /// Pins the one number this test can control without a real database
     /// or model: the queue-depth gauge reflects whatever `AppState::
@@ -1223,7 +1228,7 @@ mod tests {
     /// controls or should pin a number to.
     #[tokio::test]
     async fn metrics_endpoint_reports_the_current_queue_depth() {
-        let _guard = METRICS_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = METRICS_TEST_LOCK.lock().await;
         let state = bare_state(None, false);
         state
             .queue_depth
@@ -1250,7 +1255,7 @@ mod tests {
     /// since there's no CI round trip needed to check a pure function).
     #[tokio::test]
     async fn metrics_endpoint_queue_depth_changes_with_the_counter() {
-        let _guard = METRICS_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = METRICS_TEST_LOCK.lock().await;
         let state = bare_state(None, false);
         state
             .queue_depth
