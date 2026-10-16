@@ -454,13 +454,7 @@ mod api_tests {
             let _ = app.clone().oneshot(request).await.unwrap();
         }
 
-        // THROWAWAY MUTATION, NOT FOR MERGE: same IP as the saturating peer
-        // above, port only differs -- reproduces the original bug this test
-        // had, to prove the limiter really does key by IP alone. Must go RED.
-        let mut other_peer_request = unauthenticated_chat_request();
-        other_peer_request
-            .extensions_mut()
-            .insert(ConnectInfo(SocketAddr::from(([10, 0, 0, 8], 9999))));
+        let other_peer_request = with_fake_peer_at(unauthenticated_chat_request(), [10, 0, 0, 9]);
 
         let response = app.oneshot(other_peer_request).await.unwrap();
 
