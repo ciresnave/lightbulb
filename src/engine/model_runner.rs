@@ -733,10 +733,22 @@ mod tests {
 
     /// Counts `step_batch` calls and advances the request exactly like a real
     /// backend would (`start_decoding` on the first step, `record_token` on
-    /// every step) — so a job that is NOT cancelled would keep going for
-    /// `max_new_tokens` steps, and the test can tell "never started" apart
-    /// from "started and then got cut off early" rather than from a model
-    /// that completes on its own regardless of cancellation.
+    /// every step, a real token pushed onto `generated_tokens`) — so a job
+    /// that is NOT cancelled would keep going for `max_new_tokens` steps,
+    /// and the test can tell "never started" apart from "started and then
+    /// got cut off early" rather than from a model that completes on its
+    /// own regardless of cancellation.
+    ///
+    /// Pushing a token onto `generated_tokens` matters beyond realism: the
+    /// streaming arm's disconnect check (`stream_tx.send(...).is_err()`,
+    /// `model_runner.rs`) is reached only via `if let Some(&last_token) =
+    /// batch[0].generated_tokens.last()` -- a model that never pushes a
+    /// token leaves that branch permanently unreached, and the loop would
+    /// then exit only through `should_continue()`'s normal-completion path
+    /// after the full `max_new_tokens` budget, silently never exercising
+    /// the disconnect check at all. Caught exactly this way: the streaming
+    /// disconnect test below first failed with `calls == 5` (the full
+    /// budget) instead of `1`, before this method pushed a token.
     struct CountingModel {
         calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     }
@@ -748,6 +760,7 @@ mod tests {
                 batch[0].start_decoding();
             }
             batch[0].record_token();
+            batch[0].generated_tokens.push(0);
             Ok(vec![None])
         }
 
@@ -796,6 +809,55 @@ mod tests {
             calls.load(std::sync::atomic::Ordering::SeqCst),
             0,
             "a job whose client already disconnected must not step the model at all"
+        );
+    }
+
+    /// The streaming counterpart of the test above — and the reason it's a
+    /// SEPARATE test rather than one more case of it: `ResponseMode::
+    /// Streaming`'s loop (unlike `Complete`'s) has no proactive
+    /// `is_closed()` check before stepping. It only learns the receiver is
+    /// gone from `stream_tx.send(...).is_err()`, which it cannot call
+    /// before producing a token to send — so a disconnected streaming
+    /// client costs exactly ONE wasted `step_batch` call, not zero, before
+    /// generation stops. Asserting `== 0` here would be the wrong
+    /// expectation for this mode; asserting `< max_new_tokens` is what the
+    /// roadmap's "Request cancellation support" item actually needed
+    /// proven for streaming (board audit, #148): that a dropped client
+    /// stops generation at all, not that it stops with zero overhead.
+    #[test]
+    fn a_dropped_streaming_receiver_stops_generation_after_one_wasted_step() {
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (stream_tx, stream_rx) =
+            tokio::sync::mpsc::unbounded_channel::<anyhow::Result<StreamItem>>();
+        drop(stream_rx); // the client is already gone by the time the job is picked up
+
+        tx.send(InferenceJob {
+            id: "cancelled".to_string(),
+            prompt: "p".to_string(),
+            max_new_tokens: 5,
+            temperature: 0.0,
+            add_special_tokens: true,
+            response_mode: ResponseMode::Streaming(stream_tx),
+        })
+        .unwrap();
+        drop(tx);
+
+        run_jobs(
+            CountingModel {
+                calls: calls.clone(),
+            },
+            rx,
+            std::sync::Arc::new(std::sync::Mutex::new(
+                crate::cache::PrefixCacheStats::default(),
+            )),
+        );
+
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "a dropped streaming receiver must stop generation after the first step's \
+             send fails, not run to the job's full max_new_tokens budget (5 here)"
         );
     }
 }
