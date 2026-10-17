@@ -4,7 +4,7 @@
     license     = "MIT OR Apache-2.0"
     name        = "lightbulb"
     repository  = "https://github.com/ciresnave/lightbulb"
-    version     = "0.10.3"
+    version     = "0.10.4"
 
 [features]
     # CUDA support with flash attention and fused kernels.
@@ -380,6 +380,11 @@ tower          = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
 base64         = "0.22"
 criterion      = { version = "0.8", features = ["html_reports"] }
+# Writes the tiny synthetic Llama checkpoints used by the checkpoint/GGUF
+# #[ignore] fixture plan (docs/CHECKPOINT_FIXTURE_FEASIBILITY.md) -- already
+# in the dependency graph transitively (fuel reads safetensors at runtime),
+# this just makes it a direct dep so test code can write one.
+safetensors    = "0.8"
 
 [[bench]]
 name = "batched_inference_benchmark"
