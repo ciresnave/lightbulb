@@ -180,9 +180,23 @@ bundled with 9 simpler call sites.
    errors with `RelError::Unsupported`. Both ported queries cast the column to
    `::text` in the SQL itself to work around it; see `auth_middleware.rs`'s
    `lookup_api_key_by_hash`.
-3. **Single-statement writes next**: `create_api_key`'s insert, `revoke_api_key`'s
-   update, the rate-limit counter's `ON CONFLICT ... DO UPDATE ... RETURNING` (certified
-   via PersistAnt's `UpsertWhere` leaf per docs/AUTH_PERSISTANT_ADOPTION_FIT.md §3).
+3. **Single-statement writes next**: exactly 5, not 3 as an earlier version of
+   this step claimed -- `create_api_key`'s insert (`admin.rs`), `revoke_api_key`'s
+   update (`admin.rs`), BOTH rate-limit-shaped upsert counters (the doc
+   originally named only one): `pre_auth_attempt_limiter_middleware`'s
+   `auth_attempt_counts` upsert and `rate_limit_middleware`'s `api_key_usage`
+   upsert (both `auth_middleware.rs`, both `ON CONFLICT ... DO UPDATE ...
+   RETURNING`, certified via PersistAnt's `UpsertWhere` leaf per
+   docs/AUTH_PERSISTANT_ADOPTION_FIT.md §3), and `audit_middleware`'s plain
+   `audit_logs` insert (`auth_middleware.rs`, no `RETURNING`, best-effort/
+   fire-and-forget via `tokio::spawn` -- omitted entirely from this step's
+   original list, not just miscounted). **Correction:** found by checking
+   every remaining `deadpool_postgres` call site's function and SQL verb
+   after step 2 landed, the same way step 2's own miscount was caught.
+   `Value` has no INET variant either (the same gap §2's table documents for
+   UUID) -- `client_ip`/`api_key_id` params bind through `Value::Text` with
+   an explicit `::inet`/`::uuid` cast on the bind PARAMETER (not a column,
+   since these are inserts, not lookups against a stored value).
 4. **`rotate_api_key`'s transaction last**: the one multi-statement, row-locked,
    atomic operation. By this point the `query`/`execute` pattern is proven on both
    reads and single writes; this step is purely about the `begin`/`commit` shape and

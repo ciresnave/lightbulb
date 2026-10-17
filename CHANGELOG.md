@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.10.10
+
+### Added
+- PersistAnt adoption Step 3 (docs/PERSISTANT_ADOPTION_DESIGN.md §5): the
+  5 single-statement writes -- `create_api_key`'s insert, `revoke_api_key`'s
+  update (both `admin.rs`), `pre_auth_attempt_limiter_middleware`'s
+  `auth_attempt_counts` upsert, `rate_limit_middleware`'s `api_key_usage`
+  upsert, and `audit_middleware`'s best-effort `audit_logs` insert (all
+  three `auth_middleware.rs`) -- now go through `AppState::pg_backend`.
+  `rotate_api_key`'s one transaction is untouched (step 4).
+
+### Fixed
+- `client_ip`/`api_key_id` insert parameters bind through `Value::Text`
+  with an explicit `::inet`/`::uuid` cast on the PARAMETER -- `Value` has
+  no INET variant either (the same gap step 2 found for UUID columns), and
+  these are inserts into typed columns, not lookups against a stored
+  value, so the cast belongs on the bind side here, not a column.
+
+### Corrected
+- `docs/PERSISTANT_ADOPTION_DESIGN.md`'s step 3 description (§5 item 3)
+  claimed this step was 3 call sites ("`create_api_key`'s insert,
+  `revoke_api_key`'s update, the rate-limit counter's `ON CONFLICT ... DO
+  UPDATE ... RETURNING`"). That undercounted: there are TWO
+  rate-limit-shaped upsert counters, not one (the pre-auth attempt limiter
+  and the per-key rate limiter are structurally identical and both single-
+  statement writes), and `audit_middleware`'s plain insert was omitted
+  entirely. The true scope is 5 call sites. Fixed directly in the doc, not
+  just noted here, per the portfolio's retraction rule -- the §1 Scope
+  section's own file-level totals (4 in `auth_middleware.rs`, 6 in
+  `admin.rs`) were already correct and needed no change.
+
 ## 0.10.9
 
 ### Added

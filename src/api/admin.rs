@@ -321,6 +321,46 @@ pub struct CreateApiKeyResponse {
     pub expires_at: Option<String>,
 }
 
+/// `create_api_key`'s two request-shape checks: the requested role is one of
+/// the three known values, and it is no higher than the caller's own role
+/// (`routes()`'s `admin_check_middleware` only enforces "caller is admin",
+/// never "requested role is no higher than caller's role" -- checked again
+/// here, independent of the router wiring, so a future looser role on this
+/// route, or a direct unit-test call bypassing the router, cannot reopen
+/// this escalation silently). `Some(response)` short-circuits the caller.
+fn validate_create_api_key_role(requested_role: &str, caller_role: &str) -> Option<Response> {
+    if !["user", "admin", "llm"].contains(&requested_role) {
+        return Some(
+            (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": {
+                        "message": "Invalid role. Must be one of: user, admin, llm",
+                        "type": "invalid_request_error",
+                    }
+                })),
+            )
+                .into_response(),
+        );
+    }
+    if role_rank(requested_role) > role_rank(caller_role) {
+        return Some(
+            (
+                StatusCode::FORBIDDEN,
+                Json(serde_json::json!({
+                    "error": {
+                        "message": "cannot create an API key with greater privilege than your own",
+                        "type": "permission_error",
+                        "code": "forbidden",
+                    }
+                })),
+            )
+                .into_response(),
+        );
+    }
+    None
+}
+
 /// Create a new API key
 #[axum_macros::debug_handler]
 async fn create_api_key(
@@ -328,39 +368,8 @@ async fn create_api_key(
     Extension(caller): Extension<ApiKeyInfo>,
     Json(request): Json<CreateApiKeyRequest>,
 ) -> impl IntoResponse {
-    // Validate role
-    if !["user", "admin", "llm"].contains(&request.role.as_str()) {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({
-                "error": {
-                    "message": "Invalid role. Must be one of: user, admin, llm",
-                    "type": "invalid_request_error",
-                }
-            })),
-        )
-            .into_response();
-    }
-
-    // Defense in depth: `routes()` already requires an admin caller to reach
-    // this handler at all (`admin_check_middleware`), but that only ever
-    // enforced "caller is admin", never "requested role is no higher than
-    // caller's role" — the actual escalation this blocks. Checked again
-    // here, independent of the router wiring, so a future looser role on
-    // this route (or a direct unit-test call bypassing the router) cannot
-    // reopen it silently.
-    if role_rank(&request.role) > role_rank(&caller.role) {
-        return (
-            StatusCode::FORBIDDEN,
-            Json(serde_json::json!({
-                "error": {
-                    "message": "cannot create an API key with greater privilege than your own",
-                    "type": "permission_error",
-                    "code": "forbidden",
-                }
-            })),
-        )
-            .into_response();
+    if let Some(response) = validate_create_api_key_role(&request.role, &caller.role) {
+        return response;
     }
 
     // Generate a random API key (32 bytes = 64 hex chars)
@@ -385,89 +394,149 @@ async fn create_api_key(
         now + seconds
     });
 
-    // Insert into database
-    let db_pool = match &state.db_pool {
-        Some(pool) => pool,
-        None => {
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(serde_json::json!({
-                    "error": {
-                        "message": "Database not configured",
-                        "type": "service_unavailable",
-                    }
-                })),
-            )
-                .into_response();
-        }
-    };
-    let client = match db_pool.get().await {
-        Ok(client) => client,
-        Err(e) => {
-            eprintln!("DB connection error: {}", e);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({
-                    "error": {
-                        "message": "Failed to connect to database",
-                        "type": "internal_error",
-                    }
-                })),
-            )
-                .into_response();
-        }
+    // Insert into database. PersistAnt adoption Step 3
+    // (docs/PERSISTANT_ADOPTION_DESIGN.md): this call site is one of the 5
+    // single-statement writes ported to `AppState::pg_backend` for this
+    // step (the design doc's own list named only 3; see its correction
+    // note). `insert_api_key_row` carries the `::text` casts and decoding
+    // this needs.
+    let (id, expires_at_value) = match insert_api_key_row(
+        &state,
+        &key_hash,
+        &request.role,
+        request.description.as_deref(),
+        expires_at,
+    )
+    .await
+    {
+        Ok(row) => row,
+        Err((status, msg, ty)) => return api_error(status, msg, ty, None),
     };
 
-    let result = client
-        .query_one(
+    let response = CreateApiKeyResponse {
+        api_key: api_key.clone(),
+        key_id: id.to_string(),
+        role: request.role.clone(),
+        expires_at: expires_at_value.map(|ts| ts.to_rfc3339()),
+    };
+
+    println!(
+        "✓ Created API key {} (role={}, expires={:?})",
+        id, request.role, expires_at_value
+    );
+
+    (StatusCode::CREATED, Json(response)).into_response()
+}
+
+/// Inserts the new key row via `AppState::pg_backend`, decoding the
+/// `RETURNING` row. `id` and `expires_at` are cast to `::text` in the SQL
+/// itself -- `persistant_relational::Value` has no `Uuid` or timestamp
+/// variant (docs/AUTH_PERSISTANT_ADOPTION_FIT.md §2) -- then parsed back:
+/// `id` via `persistant_migrate::value_to_uuid`, `expires_at` via
+/// `to_char(..., 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')` server-side so the text
+/// is RFC3339-parseable (Postgres's own default `::text` cast of a
+/// `timestamptz` is NOT RFC3339 -- e.g. a space instead of `T` -- and would
+/// fail `DateTime::parse_from_rfc3339`).
+async fn insert_api_key_row(
+    state: &AppState,
+    key_hash: &str,
+    role: &str,
+    description: Option<&str>,
+    expires_at: Option<i64>,
+) -> Result<(uuid::Uuid, Option<chrono::DateTime<chrono::Utc>>), ApiErrorParts> {
+    let backend = state.pg_backend.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Database not configured",
+        "service_unavailable",
+    ))?;
+
+    let description_value = description.map_or(persistant_relational::Value::Null, |d| {
+        persistant_relational::Value::Text(d.to_string())
+    });
+    let expires_at_value = expires_at.map_or(persistant_relational::Value::Null, |v| {
+        persistant_relational::Value::Int(v)
+    });
+
+    let rows = backend
+        .query(
             r#"
             INSERT INTO api_keys (key_hash, role, description, expires_at)
             VALUES ($1, $2, $3,
-                CASE 
-                    WHEN $4::bigint IS NOT NULL 
+                CASE
+                    WHEN $4::bigint IS NOT NULL
                     THEN to_timestamp($4::bigint)
                     ELSE NULL
                 END
             )
-            RETURNING id, expires_at AT TIME ZONE 'UTC' AS expires_at
+            RETURNING
+                id::text AS id,
+                to_char(
+                    expires_at AT TIME ZONE 'UTC',
+                    'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'
+                ) AS expires_at
             "#,
-            &[&key_hash, &request.role, &request.description, &expires_at],
+            &[
+                persistant_relational::Value::Text(key_hash.to_string()),
+                persistant_relational::Value::Text(role.to_string()),
+                description_value,
+                expires_at_value,
+            ],
         )
-        .await;
-
-    match result {
-        Ok(record) => {
-            let id: uuid::Uuid = record.get("id");
-            let expires_at_value: Option<chrono::DateTime<chrono::Utc>> = record.get("expires_at");
-
-            let response = CreateApiKeyResponse {
-                api_key: api_key.clone(),
-                key_id: id.to_string(),
-                role: request.role.clone(),
-                expires_at: expires_at_value.map(|ts| ts.to_rfc3339()),
-            };
-
-            println!(
-                "✓ Created API key {} (role={}, expires={:?})",
-                id, request.role, expires_at_value
-            );
-
-            (StatusCode::CREATED, Json(response)).into_response()
-        }
-        Err(e) => {
-            eprintln!("Failed to create API key: {}", e);
+        .await
+        .map_err(|e| {
+            eprintln!("Failed to create API key: {e}");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({
-                    "error": {
-                        "message": "Failed to create API key",
-                        "type": "internal_error",
-                    }
-                })),
+                "Failed to create API key",
+                "internal_error",
             )
-                .into_response()
+        })?;
+
+    decode_inserted_key_row(rows.first())
+}
+
+const INSERT_KEY_DECODE_ERROR: ApiErrorParts = (
+    StatusCode::INTERNAL_SERVER_ERROR,
+    "Failed to create API key",
+    "internal_error",
+);
+
+/// Decodes `insert_api_key_row`'s `RETURNING` row: `id` (always present) and
+/// `expires_at` (`Value::Null` when the key has no expiry).
+fn decode_inserted_key_row(
+    row: Option<&persistant_relational::Row>,
+) -> Result<(uuid::Uuid, Option<chrono::DateTime<chrono::Utc>>), ApiErrorParts> {
+    let row = row.ok_or_else(|| {
+        eprintln!("Failed to create API key: INSERT ... RETURNING produced no row");
+        INSERT_KEY_DECODE_ERROR
+    })?;
+
+    let id_value = row.values.first().ok_or_else(|| {
+        eprintln!("Failed to create API key: RETURNING row missing id column");
+        INSERT_KEY_DECODE_ERROR
+    })?;
+    let id = persistant_migrate::value_to_uuid(id_value).map_err(|e| {
+        eprintln!("Failed to create API key: {e}");
+        INSERT_KEY_DECODE_ERROR
+    })?;
+
+    let expires_at = match row.values.get(1) {
+        Some(persistant_relational::Value::Text(s)) => Some(
+            chrono::DateTime::parse_from_rfc3339(s)
+                .map_err(|e| {
+                    eprintln!("Failed to create API key: expires_at not RFC3339: {e}");
+                    INSERT_KEY_DECODE_ERROR
+                })?
+                .with_timezone(&chrono::Utc),
+        ),
+        Some(persistant_relational::Value::Null) | None => None,
+        Some(_) => {
+            eprintln!("Failed to create API key: expires_at column has an unexpected type");
+            return Err(INSERT_KEY_DECODE_ERROR);
         }
-    }
+    };
+
+    Ok((id, expires_at))
 }
 
 /// Revoke an API key response
@@ -641,10 +710,6 @@ async fn revoke_api_key(
         Ok(id) => id,
         Err((status, msg, ty)) => return api_error(status, msg, ty, None),
     };
-    let client = match get_db_client(&state).await {
-        Ok(client) => client,
-        Err((status, msg, ty)) => return api_error(status, msg, ty, None),
-    };
 
     if key_id == caller.api_key_id
         && let Some(response) = check_other_admin_key_exists(&state, key_id).await
@@ -652,10 +717,25 @@ async fn revoke_api_key(
         return response;
     }
 
-    let result = client
+    // PersistAnt adoption Step 3 (docs/PERSISTANT_ADOPTION_DESIGN.md): one
+    // of the 5 single-statement writes ported to `AppState::pg_backend` for
+    // this step.
+    let backend = match state.pg_backend.as_ref() {
+        Some(backend) => backend,
+        None => {
+            return api_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Database not configured",
+                "service_unavailable",
+                None,
+            );
+        }
+    };
+
+    let result = backend
         .execute(
-            "UPDATE api_keys SET revoked_at = NOW() WHERE id = $1 AND revoked_at IS NULL",
-            &[&key_id],
+            "UPDATE api_keys SET revoked_at = NOW() WHERE id::text = $1 AND revoked_at IS NULL",
+            &[persistant_migrate::uuid_to_value(key_id)],
         )
         .await;
 
@@ -675,7 +755,7 @@ async fn revoke_api_key(
         )
             .into_response(),
         Err(e) => {
-            eprintln!("Failed to revoke API key: {}", e);
+            eprintln!("Failed to revoke API key: {e}");
             api_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Failed to revoke API key",
