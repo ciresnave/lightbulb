@@ -148,6 +148,13 @@
     reqwest            = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls-manual-roots"] }
     persistant-sqlx       = "0.7.4"
     persistant-relational = "0.7.4"
+    # Only to build a Postgres pool with an explicit short acquire_timeout
+    # for ApiServer::new's bounded connect retry -- PgBackend::connect's own
+    # pool always uses sqlx's 30s default with no way to override it from
+    # outside persistant-sqlx. Not a return to deadpool_postgres/
+    # tokio_postgres: PersistAnt already depends on this exact sqlx, this
+    # just needs it in scope to call PgPoolOptions directly.
+    sqlx               = { version = "0.9", default-features = false, features = ["runtime-tokio", "postgres"] }
     tower-http         = { version = "0.6", features = ["cors", "trace"] }
 
     # TLS/Certificate dependencies

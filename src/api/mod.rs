@@ -414,11 +414,35 @@ pub fn new_shared_system_metrics() -> SharedSystemMetrics {
     std::sync::Arc::new(std::sync::Mutex::new(sysinfo::System::new_all()))
 }
 
-/// Connects to Postgres with a short, bounded retry (5 attempts, 200ms
-/// doubling to 3200ms between tries -- about 6 seconds of total patience).
-/// `PgBackend::connect` is eager, so this absorbs the "database and app
-/// started by the same orchestrator at the same time" case the old lazy
-/// `deadpool_postgres` pool never had to think about.
+/// One connection attempt, bounded to `timeout` regardless of
+/// `PgBackend::connect`'s own default. `PgBackend::connect` builds its pool
+/// with `sqlx`'s default `acquire_timeout` (30s) and no way to override it
+/// from outside the crate -- a retry loop built directly on `connect()`
+/// would take up to 5 x 30s = ~150s to give up, not the handful of seconds
+/// a "momentary blip" retry is supposed to cost. Building the `sqlx::PgPool`
+/// here with an explicit short `acquire_timeout`, then handing it to
+/// `PgBackend::from_pool` (the same public constructor `connect()` itself
+/// uses internally), keeps the retry loop's total bound small and real.
+async fn try_connect_once(
+    database_url: &str,
+    timeout: std::time::Duration,
+) -> Result<persistant_sqlx::PgBackend, persistant_relational::RelError> {
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(16)
+        .acquire_timeout(timeout)
+        .connect(database_url)
+        .await
+        .map_err(|e| persistant_relational::RelError::Unavailable(e.to_string()))?;
+    persistant_sqlx::PgBackend::from_pool(pool).await
+}
+
+/// Connects to Postgres with a short, bounded retry (5 attempts, each
+/// capped at 2s to connect, 200ms doubling to 3200ms between tries -- at
+/// most ~13 seconds of total patience, not the ~150s a naive retry on top
+/// of `PgBackend::connect`'s own 30s-per-attempt default would cost -- see
+/// `try_connect_once`). `PgBackend::connect` is eager, so this absorbs the
+/// "database and app started by the same orchestrator at the same time"
+/// case the old lazy `deadpool_postgres` pool never had to think about.
 ///
 /// If the database is still unreachable once the retries are exhausted,
 /// this returns `None` rather than propagating an error -- the server
@@ -429,12 +453,14 @@ pub fn new_shared_system_metrics() -> SharedSystemMetrics {
 /// server successfully and only surface as a readiness-check failure on
 /// first use). Step 5's eager `connect()` is not introducing a stricter
 /// failure mode than this repo had before it -- this helper restores the
-/// older, more forgiving one.
+/// older, more forgiving one, without inheriting `connect()`'s own
+/// unrelated 30s-per-attempt cost.
 async fn connect_with_retry(database_url: &str) -> Option<persistant_sqlx::PgBackend> {
+    const PER_ATTEMPT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
     const DELAYS_MS: [u64; 4] = [200, 400, 800, 1600];
     let mut last_err = None;
     for (attempt, delay_ms) in DELAYS_MS.iter().copied().enumerate() {
-        match persistant_sqlx::PgBackend::connect(database_url).await {
+        match try_connect_once(database_url, PER_ATTEMPT_TIMEOUT).await {
             Ok(backend) => return finish_connect(backend).await,
             Err(e) => {
                 tracing::warn!(
@@ -448,13 +474,13 @@ async fn connect_with_retry(database_url: &str) -> Option<persistant_sqlx::PgBac
         }
     }
     // Final attempt, no further sleep after it.
-    match persistant_sqlx::PgBackend::connect(database_url).await {
+    match try_connect_once(database_url, PER_ATTEMPT_TIMEOUT).await {
         Ok(backend) => finish_connect(backend).await,
         Err(e) => {
             tracing::error!(
                 error = %e,
                 prior_error = ?last_err,
-                "database unreachable after 5 attempts (~6s) — starting without a database \
+                "database unreachable after 5 attempts (~13s) — starting without a database \
                  (auth/audit/rate-limiting disabled)"
             );
             None
@@ -1710,6 +1736,28 @@ mod tests {
             "a 404 with no matched route must still be counted, under the fixed \
              \"unmatched\" label: {body}"
         );
+    }
+
+    /// End-to-end through the real entry point: `ApiServer::new` must
+    /// start successfully (not propagate an `Err`) against a genuinely
+    /// unreachable `DATABASE_URL`, with `pg_backend: None` -- the
+    /// degraded-start behavior `connect_with_retry` restores. Bounded by
+    /// `try_connect_once`'s explicit 2s-per-attempt timeout (not `sqlx`'s
+    /// 30s default), so this test costs ~13s, not ~150s.
+    #[tokio::test]
+    async fn api_server_new_starts_degraded_on_unreachable_database() {
+        use crate::engine::{MemoryAwareConfig, MemoryAwareScheduler};
+        let scheduler = Arc::new(MemoryAwareScheduler::new(MemoryAwareConfig::default()));
+        let config = ApiConfig {
+            database_url: Some("postgresql://nouser:nopass@127.0.0.1:1/nodb".to_string()),
+            jwt_secret: Some("test-secret".to_string()),
+            models_dir: None,
+            ..ApiConfig::default()
+        };
+        let server = ApiServer::new(config, scheduler)
+            .await
+            .expect("expected Ok (degraded start)");
+        assert!(server.state().pg_backend.is_none());
     }
 
     /// End-to-end through the real entry point, not just the pure function:

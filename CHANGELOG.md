@@ -5,21 +5,36 @@
 ### Fixed
 - **PM hold on PR#173, item 1 -- start-degraded behavior restored.**
   `ApiServer::new` now calls a new `connect_with_retry` helper instead of
-  `PgBackend::connect` directly: 5 attempts with exponential backoff
-  (200ms, 400ms, 800ms, 1600ms between tries, ~6s total patience) absorb a
-  momentary database blip at startup (e.g. container orchestration
-  starting the app and the database at the same time). If the database is
-  still unreachable once the retries are exhausted, the server now starts
-  in the SAME degraded state it always has when `DATABASE_URL` is merely
-  unset (`pg_backend: None`, auth/audit/rate-limiting disabled) instead of
-  `ApiServer::new` itself returning an error. This restores the pre-Step-5
-  `deadpool_postgres` behavior (always lazy, so a bad connection string
-  there also only ever surfaced as a readiness-check failure on first
-  use) rather than introducing a new, stricter failure mode. Tradeoff
-  stated explicitly: a genuinely misconfigured `DATABASE_URL` (a typo, not
-  a blip) now starts successfully with auth silently disabled rather than
-  failing fast at startup -- the same tradeoff this repo always had before
-  Step 5's eager `connect()` briefly removed it.
+  `PgBackend::connect` directly: 5 attempts, each capped at a 2s connect
+  timeout, with 200ms-doubling-to-1600ms delays between tries -- at most
+  ~13s of total patience. **Measured, not assumed:** a first version of
+  this fix called `PgBackend::connect` directly in the retry loop and
+  measured ~155s to exhaust 5 attempts (sqlx's own `acquire_timeout`
+  defaults to 30s per attempt, and `connect()` gives no way to override
+  it), nowhere near the "momentary blip" this retry is supposed to cost.
+  Fixed by building the `sqlx::PgPool` directly with an explicit 2s
+  `acquire_timeout`, then handing it to `PgBackend::from_pool` (the same
+  public constructor `connect()` uses internally) -- see
+  `try_connect_once`. `sqlx` is now a direct dependency for exactly this
+  (PersistAnt already pulls in the identical version transitively; this
+  does not reintroduce a separate Postgres driver).
+
+  If the database is still unreachable once the retries are exhausted,
+  the server now starts in the SAME degraded state it always has when
+  `DATABASE_URL` is merely unset (`pg_backend: None`, auth/audit/
+  rate-limiting disabled) instead of `ApiServer::new` itself returning an
+  error. This restores the pre-Step-5 `deadpool_postgres` behavior
+  (always lazy, so a bad connection string there also only ever surfaced
+  as a readiness-check failure on first use) rather than introducing a
+  new, stricter failure mode. Tradeoff stated explicitly: a genuinely
+  misconfigured `DATABASE_URL` (a typo, not a blip) now starts
+  successfully with auth silently disabled rather than failing fast at
+  startup -- the same tradeoff this repo always had before Step 5's
+  eager `connect()` briefly removed it. Proven end to end (not just by
+  reading the code) by a new test,
+  `api_server_new_starts_degraded_on_unreachable_database`: measured
+  ~15s against a genuinely unreachable address, down from the ~155s the
+  first version of this fix would have cost.
 - **PM hold item 2 -- red-first test for `CheckStatus::Unreachable`.**
   Added `check_database_reports_unreachable_when_a_live_backend_goes_away`
   (`src/api/mod.rs`): a real throwaway Postgres behind a small local TCP
