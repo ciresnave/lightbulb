@@ -993,24 +993,37 @@ once the PM confirms priority against the rest of the roadmap.
 
 ---
 
-## Pipeline execution driver — unbuilt (found 2026-10-14, Phase 4 audit follow-up)
+## Pipeline execution driver — module deleted, not built (resolved 2026-10-17)
 
-`src/engine/pipeline.rs`'s `Pipeline`/`PipelineBuilder`/`PipelineConfig` (multi-stage DAG
-orchestration with dependency tracking, parallel execution, KV cache sharing across stages — see
-the file's own module doc for the design) have **zero callers anywhere**, production or test
-(`grep -rn "engine::pipeline::Pipeline\b" src/ tests/` outside the file itself → 0 hits). `Pipeline`
-is a synchronous stage-state tracker only — `get_ready_stages`/`mark_running`/`mark_completed`/
-`mark_failed` — with no `async fn execute` anywhere, confirmed by its own test module being 100%
-`#[test]`, zero `#[tokio::test]`. Every `PipelineConfig` field (`max_concurrent_stages`,
-`enable_cache_sharing`, `timeout_ms`, `enable_parallel_execution`) is written and read back in a
-test asserting storage, never consulted by anything that runs stages — because nothing does.
+`src/engine/pipeline.rs` (`Pipeline`/`PipelineBuilder`/`PipelineConfig`, a synchronous DAG
+stage-state tracker with no execution driver — see the 2026-10-14 finding this replaces) was
+**deleted**, not wired up. PM-directed decision: "decide wire-or-delete with evidence, small PR."
+Evidence for delete, re-checked before removal:
+- **Zero callers anywhere** — `git grep -n "PipelineBuilder\|PipelineConfig\|PipelineStats\|
+  PipelineError\|StageType\|StageData\|StageResult\|StageState\b\|CacheRef\b" src/ tests/
+  examples/ benches/` outside the file itself and its own blanket re-export in
+  `engine/mod.rs` → 0 hits.
+- **Not referenced by any concrete plan.** CR.1-CR.4 (continuous reasoning, §II.5) name
+  `ModelRunner`'s inference loop as their integration point, never this DAG abstraction.
+  `docs/SCS_MODEL_SUPPORT.md`'s "pipeline" is a different, unrelated, separately-planned
+  `ScsInferencePipeline` (`src/model/scs_pipeline.rs`, not yet built either) — not this module.
+- **Sibling modules from the same origin commit got wired up; this one never did.** Added in one
+  bundled commit (`43c9bbd`, "Engine subsystems — scheduling, knowledge base, context
+  management"). Two siblings from that same commit, `KnowledgeBase` and `Decomposition`, do have
+  real callers today (`src/cache/tiered_storage.rs`, `src/engine/state_persistence.rs`) — so this
+  wasn't "the whole batch is unused scaffolding," specifically `pipeline.rs` never found a
+  consumer across the entire time since.
+- Building a real driver (async execution, dispatching ready stages to `ModelRunner`, honoring
+  `timeout_ms`/`max_concurrent_stages`) would be new feature work with no identified requester or
+  design spec beyond the inert config struct — not a small gap-fill.
 
-This is scaffolding for a feature (actual async multi-stage pipeline execution, dispatching each
-ready stage to the model runner and respecting `timeout_ms`/`max_concurrent_stages`) that was
-never built, not a live path missing one check. Building the driver — not pre-sliced here, size
-of effort unclear until someone reads the whole file and its intended caller surface (if the
-multi-stage-reasoning use case named in the module doc still applies) — is a real feature, PM's
-to prioritize against the rest of the roadmap.
+Breaking change (pre-1.0, so the 0.n segment bumps): `lightbulb::engine::{Pipeline, PipelineBuilder,
+PipelineConfig, PipelineError, PipelineId, PipelineStats, Stage, StageData, StageId, StageResult,
+StageState, StageType, CacheRef}` are no longer part of the public API. If multi-stage DAG
+orchestration is wanted later, design it against an actual caller (most likely CR.2's continuous
+reasoning engine, once that's built) rather than resurrecting this one unchanged — its
+`DeviceKvPool`-free `CacheRef` and stage model were never validated against any real execution
+path.
 
 ---
 
