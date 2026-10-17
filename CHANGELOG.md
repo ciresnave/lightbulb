@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.10.6
+
+### Added
+- `docs/AUTH_PERSISTANT_ADOPTION_FIT.md`: adoption-fit analysis for
+  auth-framework and PersistAnt against lightbulb's current API-key
+  auth and Postgres persistence (board 196, CIRESNAVE-EXPECTATIONS
+  §6.14). Docs only, no code or dependency change. Verdict: PersistAnt
+  is blocked (no Postgres/SQL backend exists yet in v0.6.2); a naive
+  auth-framework swap would regress three things lightbulb does better
+  today (plaintext API keys at rest, no per-key role, no atomic
+  rotation).
+
 ## 0.10.5
 
 ### Updated
