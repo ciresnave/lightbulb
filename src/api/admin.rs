@@ -550,42 +550,13 @@ fn rotate_internal_error(e: impl std::fmt::Display, context: &str) -> Response {
 /// locks every admin out of every admin route, including the one that could
 /// undo it. This does **not** generalize to "the last admin key anywhere":
 /// only self-revocation is guarded, per the PM's scoping of this item.
-/// `revoke_api_key`'s self-lockout check: is there another live, unexpired
-/// admin key besides the one being revoked? `Some(response)` short-circuits
-/// the caller with the 409 lockout refusal or a 500 on a DB error; `None`
-/// means it's safe to proceed with the revoke.
-///
-/// PersistAnt adoption Step 2 (docs/PERSISTANT_ADOPTION_DESIGN.md): this is
-/// one of the 2 read-only call sites ported to `AppState::pg_backend` for
-/// this step (the design doc's own line-number list for this step was
-/// wrong -- see the doc's correction note). Everything else in this module
-/// still goes through `state.db_pool` until a later step.
-async fn check_other_admin_key_exists(state: &AppState, key_id: uuid::Uuid) -> Option<Response> {
-    let backend = match state.pg_backend.as_ref() {
-        Some(backend) => backend,
-        None => {
-            return Some(api_error(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "Database not configured",
-                "service_unavailable",
-                None,
-            ));
-        }
-    };
-
-    let rows = backend
-        .query(
-            r#"SELECT EXISTS (
-                SELECT 1 FROM api_keys
-                WHERE role = 'admin'
-                  AND id != $1
-                  AND revoked_at IS NULL
-                  AND (expires_at IS NULL OR expires_at > NOW())
-            ) AS exists_flag"#,
-            &[persistant_migrate::uuid_to_value(key_id)],
-        )
-        .await;
-
+/// Interprets the `SELECT EXISTS (...)` result from
+/// `check_other_admin_key_exists`'s query: `Some(response)` is the response
+/// to short-circuit the caller with (the 409 lockout refusal or a 500 on a
+/// DB error), `None` means it's safe to proceed with the revoke.
+fn interpret_other_admin_key_result(
+    rows: Result<Vec<persistant_relational::Row>, persistant_relational::RelError>,
+) -> Option<Response> {
     match rows {
         Ok(rows) => {
             let exists = matches!(
@@ -614,6 +585,51 @@ async fn check_other_admin_key_exists(state: &AppState, key_id: uuid::Uuid) -> O
             ))
         }
     }
+}
+
+/// `revoke_api_key`'s self-lockout check: is there another live, unexpired
+/// admin key besides the one being revoked? `Some(response)` short-circuits
+/// the caller with the 409 lockout refusal or a 500 on a DB error; `None`
+/// means it's safe to proceed with the revoke.
+///
+/// PersistAnt adoption Step 2 (docs/PERSISTANT_ADOPTION_DESIGN.md): this is
+/// one of the 2 read-only call sites ported to `AppState::pg_backend` for
+/// this step (the design doc's own line-number list for this step was
+/// wrong -- see the doc's correction note). Everything else in this module
+/// still goes through `state.db_pool` until a later step.
+///
+/// `id != $1` doesn't type-check against a `Value::Text` parameter --
+/// Postgres has no `uuid <> text` operator (confirmed on a real run:
+/// "operator does not exist: uuid <> text"). Casting the COLUMN to `::text`
+/// (not the parameter) matches `auth_middleware.rs::lookup_api_key_by_hash`'s
+/// existing pattern for the same `Value`-has-no-Uuid-variant gap.
+async fn check_other_admin_key_exists(state: &AppState, key_id: uuid::Uuid) -> Option<Response> {
+    let backend = match state.pg_backend.as_ref() {
+        Some(backend) => backend,
+        None => {
+            return Some(api_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Database not configured",
+                "service_unavailable",
+                None,
+            ));
+        }
+    };
+
+    let rows = backend
+        .query(
+            r#"SELECT EXISTS (
+                SELECT 1 FROM api_keys
+                WHERE role = 'admin'
+                  AND id::text != $1
+                  AND revoked_at IS NULL
+                  AND (expires_at IS NULL OR expires_at > NOW())
+            ) AS exists_flag"#,
+            &[persistant_migrate::uuid_to_value(key_id)],
+        )
+        .await;
+
+    interpret_other_admin_key_result(rows)
 }
 
 async fn revoke_api_key(
