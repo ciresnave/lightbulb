@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.10.3
+
+### Added
+- Feasibility note for a synthetic checkpoint/GGUF test fixture (HANDOFF
+  item 2): classifies all 62 real checkpoint/GGUF-gated `#[ignore]` tests
+  as needing real trained weights (15) vs. architecture/shape/contract only
+  (43, synthetic-fixture candidates) vs. special-cased (4). Docs only, no
+  implementation (`docs/CHECKPOINT_FIXTURE_FEASIBILITY.md`).
+
+## 0.10.2
+
+### Changed
+- Takes `hardware-query` 0.2.2, which fixes a Linux compile bug in that
+  crate (missing `use std::fs`, 3 undefined driver-version functions under
+  `#[cfg(target_os = "linux")]`); `system-analysis` was already at its own
+  latest (0.2.1).
+- Adds an isolated `build-linux` CI job (`ubuntu-latest`, `cargo build
+  --workspace`) now that the blocker is gone, replacing the long-standing
+  `gates`-job comment explaining why Linux wasn't covered.
+
 ## 0.10.1
 
 ### Added
