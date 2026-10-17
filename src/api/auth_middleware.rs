@@ -15,6 +15,7 @@ use std::net::SocketAddr;
 use std::time::Instant;
 
 use crate::api::AppState;
+use crate::api::persistant_migrate;
 use persistant_relational::RelationalBackend;
 
 /// Error response
@@ -57,53 +58,22 @@ pub async fn pre_auth_attempt_limiter_middleware(
     request: Request,
     next: Next,
 ) -> Response {
-    let Some(pool) = state.db_pool.clone() else {
+    if state.pg_backend.is_none() {
         return next.run(request).await;
-    };
+    }
 
     let client_ip =
         effective_client_ip(peer.ip(), request.headers(), &state.config.trusted_proxies);
 
-    let client = match pool.get().await {
-        Ok(client) => client,
-        Err(e) => {
-            tracing::error!(
-                error = %e,
-                %client_ip,
-                "pre-auth attempt limiter: database connection failed; failing closed"
-            );
-            return service_unavailable();
-        }
-    };
-
     let limit = state.config.max_auth_attempts_per_minute_per_ip as i64;
 
-    // `client_ip` (a `std::net::IpAddr`) must be bound directly, not as its
-    // `.to_string()`. `$1::inet`'s cast resolves the bind parameter's wire
-    // type to INET, and `String`'s `ToSql` only covers TEXT-family OIDs --
-    // encoding a text value against an INET-typed parameter fails on every
-    // single call ("error serializing parameter 0"), unconditionally, not
-    // just past the rate limit. `IpAddr` has a native `ToSql` for INET.
-    let count: i64 = match client
-        .query_one(
-            r#"
-            INSERT INTO auth_attempt_counts (client_ip, window_start, request_count)
-            VALUES ($1, date_trunc('minute', now())::timestamp, 1)
-            ON CONFLICT (client_ip, window_start) DO UPDATE
-              SET request_count = auth_attempt_counts.request_count + 1
-            RETURNING request_count
-            "#,
-            &[&client_ip],
-        )
-        .await
-    {
-        Ok(row) => {
-            let count: i32 = row.get("request_count");
-            count as i64
-        }
-        Err(e) => {
+    // PersistAnt adoption Step 3 (docs/PERSISTANT_ADOPTION_DESIGN.md): one
+    // of the 5 single-statement writes ported to `AppState::pg_backend` for
+    // this step.
+    let count = match record_auth_attempt(&state, client_ip).await {
+        Ok(count) => count,
+        Err(()) => {
             tracing::error!(
-                error = %e,
                 %client_ip,
                 "pre-auth attempt limiter: database query failed; failing closed"
             );
@@ -139,6 +109,38 @@ pub async fn pre_auth_attempt_limiter_middleware(
     }
 
     next.run(request).await
+}
+
+/// Atomic upsert into `auth_attempt_counts`, returning the request count
+/// for the current minute window. `Err(())` means the query itself failed
+/// or no `AppState::pg_backend` is configured -- the caller fails closed
+/// either way, same as before this port.
+///
+/// `persistant_relational::Value` has no INET variant either (the same gap
+/// `persistant_migrate::uuid_to_value`'s doc comment describes for UUID),
+/// so `client_ip` binds through `Value::Text` with an explicit `::inet`
+/// cast on the PARAMETER (not a column, since this is an insert, not a
+/// lookup against a stored value) -- Postgres has no bare
+/// text-into-inet-column coercion.
+async fn record_auth_attempt(state: &AppState, client_ip: std::net::IpAddr) -> Result<i64, ()> {
+    let backend = state.pg_backend.as_ref().ok_or(())?;
+    let rows = backend
+        .query(
+            r#"
+            INSERT INTO auth_attempt_counts (client_ip, window_start, request_count)
+            VALUES ($1::inet, date_trunc('minute', now())::timestamp, 1)
+            ON CONFLICT (client_ip, window_start) DO UPDATE
+              SET request_count = auth_attempt_counts.request_count + 1
+            RETURNING request_count
+            "#,
+            &[persistant_relational::Value::Text(client_ip.to_string())],
+        )
+        .await
+        .map_err(|_| ())?;
+    match rows.first().and_then(|row| row.values.first()) {
+        Some(persistant_relational::Value::Int(n)) => Ok(*n),
+        _ => Err(()),
+    }
 }
 
 fn service_unavailable() -> Response {
@@ -306,7 +308,7 @@ pub async fn rate_limit_middleware(
     next: Next,
 ) -> Response {
     // Skip rate limiting when no database is configured
-    if state.db_pool.is_none() {
+    if state.pg_backend.is_none() {
         return next.run(request).await;
     }
 
@@ -315,35 +317,15 @@ pub async fn rate_limit_middleware(
 
     if let Some(key_info) = api_key_info {
         // Check and increment fixed-window (per-minute) counters in Postgres.
+        //
+        // PersistAnt adoption Step 3 (docs/PERSISTANT_ADOPTION_DESIGN.md):
+        // one of the 5 single-statement writes ported to
+        // `AppState::pg_backend` for this step.
         let limit = state.config.rate_limit_per_minute as i64;
         let api_key_id = key_info.api_key_id;
 
-        // Perform an atomic upsert and return the new request_count for the current minute window
-        let client = match state.db_pool.as_ref().unwrap().get().await {
-            Ok(client) => client,
-            Err(e) => {
-                eprintln!("DB connection error: {}", e);
-                // On DB error, be conservative and allow the request (don't block traffic for DB hiccups)
-                return next.run(request).await;
-            }
-        };
-
-        match client
-            .query_one(
-                r#"
-                INSERT INTO api_key_usage (api_key_id, window_start, request_count)
-                VALUES ($1, date_trunc('minute', now())::timestamp, 1)
-                ON CONFLICT (api_key_id, window_start) DO UPDATE
-                  SET request_count = api_key_usage.request_count + 1
-                RETURNING request_count
-                "#,
-                &[&api_key_id],
-            )
-            .await
-        {
-            Ok(row) => {
-                let count: i32 = row.get("request_count");
-                let count = count as i64;
+        match record_api_key_usage(&state, api_key_id).await {
+            Ok(count) => {
                 if count > limit {
                     let error = ErrorResponse {
                         error: ErrorDetail {
@@ -357,7 +339,7 @@ pub async fn rate_limit_middleware(
                 }
             }
             Err(e) => {
-                eprintln!("Rate limit DB error: {}", e);
+                eprintln!("Rate limit DB error: {e}");
                 // On DB error, be conservative and allow the request (don't block traffic for DB hiccups)
             }
         }
@@ -368,13 +350,42 @@ pub async fn rate_limit_middleware(
     }
 }
 
+/// Atomic upsert into `api_key_usage`, returning the request count for the
+/// current minute window. `api_key_id` binds through `Value::Text` with an
+/// explicit `::uuid` cast on the parameter -- same INET-on-insert pattern
+/// as `record_auth_attempt`, for the same reason (`Value` has no Uuid or
+/// Inet variant).
+async fn record_api_key_usage(state: &AppState, api_key_id: uuid::Uuid) -> Result<i64, String> {
+    let backend = state
+        .pg_backend
+        .as_ref()
+        .ok_or_else(|| "pg_backend not configured".to_string())?;
+    let rows = backend
+        .query(
+            r#"
+            INSERT INTO api_key_usage (api_key_id, window_start, request_count)
+            VALUES ($1::uuid, date_trunc('minute', now())::timestamp, 1)
+            ON CONFLICT (api_key_id, window_start) DO UPDATE
+              SET request_count = api_key_usage.request_count + 1
+            RETURNING request_count
+            "#,
+            &[persistant_migrate::uuid_to_value(api_key_id)],
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+    match rows.first().and_then(|row| row.values.first()) {
+        Some(persistant_relational::Value::Int(n)) => Ok(*n),
+        other => Err(format!("unexpected request_count row shape: {other:?}")),
+    }
+}
+
 /// Audit logging middleware
 pub async fn audit_middleware(
     State(state): State<AppState>,
     request: Request,
     next: Next,
 ) -> Response {
-    if !state.config.enable_audit_log || state.db_pool.is_none() {
+    if !state.config.enable_audit_log || state.pg_backend.is_none() {
         return next.run(request).await;
     }
 
@@ -391,23 +402,33 @@ pub async fn audit_middleware(
     let latency_ms = start.elapsed().as_millis() as i32;
     let status_code = response.status().as_u16() as i32;
 
-    // Log to database asynchronously
+    // Log to database asynchronously. PersistAnt adoption Step 3
+    // (docs/PERSISTANT_ADOPTION_DESIGN.md): one of the 5 single-statement
+    // writes ported to `AppState::pg_backend` for this step -- best-effort,
+    // same as before this port (the spawned task's result is dropped).
     if state.config.enable_audit_log {
-        let db_pool = state.db_pool.clone().unwrap();
+        let backend = state.pg_backend.clone().unwrap();
         let api_key_id = api_key_info.map(|info| info.api_key_id);
 
         tokio::spawn(async move {
-            if let Ok(client) = db_pool.get().await {
-                let _ = client
+            let api_key_id_value = api_key_id.map_or(persistant_relational::Value::Null, |id| {
+                persistant_migrate::uuid_to_value(id)
+            });
+            let _ = backend
                     .execute(
                         r#"
                         INSERT INTO audit_logs (api_key_id, endpoint, method, status_code, latency_ms)
-                        VALUES ($1, $2, $3, $4, $5)
+                        VALUES ($1::uuid, $2, $3, $4, $5)
                         "#,
-                        &[&api_key_id, &uri, &method, &status_code, &latency_ms],
+                        &[
+                            api_key_id_value,
+                            persistant_relational::Value::Text(uri),
+                            persistant_relational::Value::Text(method),
+                            persistant_relational::Value::Int(status_code as i64),
+                            persistant_relational::Value::Int(latency_ms as i64),
+                        ],
                     )
                     .await;
-            }
         });
     }
 
