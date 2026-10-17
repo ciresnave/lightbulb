@@ -1,11 +1,13 @@
-//! PersistAnt adoption, Step 1 (docs/PERSISTANT_ADOPTION_DESIGN.md): the 6
-//! `migrations/V{n}__*.sql` files ported to `persistant_relational::Migration`,
-//! run via `persistant_sqlx::PgBackend` ALONGSIDE (not instead of) the
-//! existing `refinery` runner in `src/api/mod.rs`. Nothing here is wired into
-//! the startup path yet -- that is step 5 of the adoption plan. This module
-//! exists so the port can be proven first, independent of any call site.
+//! PersistAnt adoption: the 6 `migrations/V{n}__*.sql` files ported to
+//! `persistant_relational::Migration`, run via `persistant_sqlx::PgBackend`.
+//! Step 1 proved this path non-destructive alongside the (then still
+//! present) `refinery` runner; Step 5 made it the sole migration path in
+//! `src/api/mod.rs::ApiServer::new` -- `refinery`/`deadpool_postgres`/
+//! `tokio_postgres` are gone from this repo's dependency tree.
 //!
-//! `migrations/*.sql` themselves are untouched: this is a parallel path.
+//! `migrations/*.sql` themselves are untouched and still exist in the repo
+//! (refinery just no longer runs them) -- kept for provenance/history, not
+//! because anything reads them anymore.
 //!
 //! ## Why the SQL text below is not byte-identical to the `.sql` files
 //!

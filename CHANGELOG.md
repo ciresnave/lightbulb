@@ -1,5 +1,110 @@
 # Changelog
 
+## 0.10.13
+
+### Fixed
+- **PM hold on PR#173, item 1 -- start-degraded behavior restored.**
+  `ApiServer::new` now calls a new `connect_with_retry` helper instead of
+  `PgBackend::connect` directly: 5 attempts, each capped at a 2s connect
+  timeout, with 200ms-doubling-to-1600ms delays between tries -- at most
+  ~13s of total patience. **Measured, not assumed:** a first version of
+  this fix called `PgBackend::connect` directly in the retry loop and
+  measured ~155s to exhaust 5 attempts (sqlx's own `acquire_timeout`
+  defaults to 30s per attempt, and `connect()` gives no way to override
+  it), nowhere near the "momentary blip" this retry is supposed to cost.
+  Fixed by building the `sqlx::PgPool` directly with an explicit 2s
+  `acquire_timeout`, then handing it to `PgBackend::from_pool` (the same
+  public constructor `connect()` uses internally) -- see
+  `try_connect_once`. `sqlx` is now a direct dependency for exactly this
+  (PersistAnt already pulls in the identical version transitively; this
+  does not reintroduce a separate Postgres driver).
+
+  If the database is still unreachable once the retries are exhausted,
+  the server now starts in the SAME degraded state it always has when
+  `DATABASE_URL` is merely unset (`pg_backend: None`, auth/audit/
+  rate-limiting disabled) instead of `ApiServer::new` itself returning an
+  error. This restores the pre-Step-5 `deadpool_postgres` behavior
+  (always lazy, so a bad connection string there also only ever surfaced
+  as a readiness-check failure on first use) rather than introducing a
+  new, stricter failure mode. Tradeoff stated explicitly: a genuinely
+  misconfigured `DATABASE_URL` (a typo, not a blip) now starts
+  successfully with auth silently disabled rather than failing fast at
+  startup -- the same tradeoff this repo always had before Step 5's
+  eager `connect()` briefly removed it. Proven end to end (not just by
+  reading the code) by a new test,
+  `api_server_new_starts_degraded_on_unreachable_database`: measured
+  ~15s against a genuinely unreachable address, down from the ~155s the
+  first version of this fix would have cost.
+- **PM hold item 2 -- red-first test for `CheckStatus::Unreachable`.**
+  Added `check_database_reports_unreachable_when_a_live_backend_goes_away`
+  (`src/api/mod.rs`): a real throwaway Postgres behind a small local TCP
+  proxy this test runs itself, so the initial connect and one `Ok` check
+  succeed through it, then the proxy is severed (stops accepting AND
+  drops every connection already open) and a second check must report
+  `Unreachable`. Two simpler approaches were tried and measured NOT to
+  work (both still in the test's own doc comment): `pg_terminate_backend`
+  alone (sqlx's pool silently opens a fresh connection on the next query),
+  and additionally revoking the role's `CONNECT` privilege (the test role
+  is a superuser in both this repo's own Docker verification and CI's
+  native `initdb`-created cluster -- confirmed directly against both --
+  and superusers bypass `CONNECT` privilege checks entirely).
+- **Found while verifying, not part of the PM's hold but blocking
+  `postgres_integration` CI on the already-pushed commit:**
+  `tests/persistant_migrate_tests.rs`'s `migrate_with_refinery` helper now
+  resets the schema (`DROP SCHEMA public CASCADE; CREATE SCHEMA public;`)
+  before running refinery. The CI job runs `api_integration_tests` and
+  this file back to back against the SAME shared Postgres cluster within
+  one job; once Step 5 made `api_integration_tests` (via `ApiServer::new`)
+  migrate through `PgBackend::migrate()` instead of refinery, that run
+  left behind the same tables/indexes this file's raw refinery run also
+  tries to create -- none of the original `.sql` files' `CREATE INDEX`
+  statements have `IF NOT EXISTS` (only `persistant_migrate`'s ported
+  copies do), so refinery failed with "relation ... already exists".
+  Confirmed in the real CI log for run 39058146345. Verified fixed by
+  reproducing CI's exact sequence (`api_integration_tests` then
+  `persistant_migrate_tests`, same cluster, same container) twice.
+
+## 0.10.12
+
+### Added
+- **PersistAnt adoption complete.** Step 5 (docs/PERSISTANT_ADOPTION_DESIGN.md
+  §5 item 5), the last step: `persistant_sqlx::PgBackend` is now the sole
+  database path for the admin/auth Postgres surface. `ApiServer::new` builds
+  only a `PgBackend` and runs `backend.migrate(...)` as the sole migration
+  path; `deadpool_postgres`, `tokio_postgres` and `refinery` are gone from
+  this repo's `[dependencies]` (kept as dev-dependencies only, scoped to
+  `tests/persistant_migrate_tests.rs`'s own simulation of a pre-Step-5
+  deployment -- see that file's `migrate_with_refinery` helper).
+- Ported the `auth_attempt_counts` cleanup background task and
+  `check_database` (the readiness-check helper) to `pg_backend`. Deleted
+  `get_db_client` (admin.rs) -- dead code, zero callers after Steps 1-4.
+
+### Fixed (finding)
+- **`PgBackend::connect` is EAGER**, unlike the prior
+  `deadpool_postgres::Pool::builder(...).build()`, which never touched the
+  network until the first `.get()`. `connect()` opens a real connection and
+  runs `SHOW server_version` before returning. This is a genuine behavior
+  change: a momentarily-unreachable database now fails `ApiServer::new`
+  itself (the server refuses to start) rather than starting and reporting
+  `not_configured`/`unreachable` via `/health/ready` until the database
+  comes up. Flagged for the PM's attention, not silently absorbed.
+  `readiness_check_is_not_ready_when_database_is_unreachable` (a red test
+  that injected a lazily-built pool pointed at an unreachable address) had
+  no direct equivalent for the same reason -- replaced with
+  `connecting_to_an_unreachable_database_fails`, which proves the same
+  claim one layer lower (at `connect()` itself); `check_database`'s
+  `CheckStatus::Unreachable` arm (connects fine, a later query fails) has
+  no red test post-Step-5, a real coverage gap, noted rather than hidden.
+
+### Corrected
+- `docs/PERSISTANT_ADOPTION_DESIGN.md`'s §5 item 6 ("drop `user_sessions`
+  as part of this work") and §7 Open Question 2 are corrected in place:
+  the PM's actual answer -- *"carry user_sessions forward unchanged;
+  dropping the dead table is its own later PR (irreversible = own
+  decision)"* -- overrides the doc's original text, which was written
+  before that answer. `user_sessions` (`V3`, dead schema) is unchanged by
+  this PR; dropping it is deferred to its own future PR.
+
 ## 0.10.11
 
 ### Added

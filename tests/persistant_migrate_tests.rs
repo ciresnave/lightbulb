@@ -7,11 +7,8 @@
 #[cfg(test)]
 mod persistant_migrate_tests {
     use lightbulb::api::persistant_migrate::migrations;
-    use lightbulb::api::{ApiConfig, ApiServer};
-    use lightbulb::engine::{MemoryAwareConfig, MemoryAwareScheduler};
     use persistant_relational::Migrates;
     use persistant_sqlx::PgBackend;
-    use std::sync::Arc;
 
     // Same override pattern as tests/api_integration_tests.rs's `test_db_url` --
     // these tests write to whatever database they are handed, so pointing
@@ -23,22 +20,46 @@ mod persistant_migrate_tests {
         })
     }
 
-    /// `ApiServer::new` runs refinery's `embed_migrations!` against
-    /// `database_url` as a side effect of construction -- the same path
-    /// every other integration test in this repo uses to get a migrated
-    /// database, reused here rather than re-implemented.
+    /// Simulates a PRE-Step-5 deployment: `ApiServer::new` ran refinery's
+    /// `embed_migrations!` as its own migration path before Step 5 made
+    /// `PgBackend::migrate` the sole one. That code is gone from the app
+    /// now, so this helper runs refinery directly against a raw
+    /// `tokio_postgres::Client` (a dev-dependency, see Cargo.toml) -- the
+    /// real-world scenario this simulates (an existing refinery-migrated
+    /// database, now pointed at the PersistAnt-only binary) is still worth
+    /// testing even though the binary itself no longer has this code path.
+    ///
+    /// Resets the schema to empty FIRST. Found by CI (`postgres_integration`
+    /// runs `api_integration_tests` and this file back to back against the
+    /// SAME shared cluster, port 55432, within one job): once Step 5 made
+    /// `ApiServer::new` (used by `api_integration_tests`) migrate through
+    /// `PgBackend::migrate()` instead of refinery, that run leaves the same
+    /// tables/indexes behind that this file's raw refinery run also tries to
+    /// create -- `CREATE TABLE IF NOT EXISTS` tolerates that, but none of
+    /// the original `.sql` files' `CREATE INDEX` statements have
+    /// `IF NOT EXISTS` (only `persistant_migrate`'s ported, idempotency-fixed
+    /// copies do), so refinery's run failed with "relation ... already
+    /// exists" -- a real, permanent collision now that both test files'
+    /// migration paths create the identical schema, not the one-off
+    /// container-reuse mistake this looked like at first. Each test in this
+    /// file needs its own empty schema regardless of what ran before it in
+    /// the same CI job.
     async fn migrate_with_refinery(db_url: &str) {
-        let config = ApiConfig {
-            database_url: Some(db_url.to_string()),
-            bind_address: "127.0.0.1:0".to_string(),
-            models_dir: None,
-            default_model: "test-model".to_string(),
-            ..Default::default()
-        };
-        let scheduler = Arc::new(MemoryAwareScheduler::new(MemoryAwareConfig::default()));
-        ApiServer::new(config, scheduler)
+        let (mut client, connection) = tokio_postgres::connect(db_url, tokio_postgres::NoTls)
             .await
-            .expect("refinery migration via ApiServer::new should succeed");
+            .expect("connect to the test database for the refinery baseline");
+        tokio::spawn(async move {
+            let _ = connection.await;
+        });
+        client
+            .batch_execute("DROP SCHEMA public CASCADE; CREATE SCHEMA public;")
+            .await
+            .expect("reset the schema to empty before the refinery baseline");
+        refinery::embed_migrations!("./migrations");
+        migrations::runner()
+            .run_async(&mut client)
+            .await
+            .expect("refinery migration (simulating a pre-Step-5 deployment) should succeed");
     }
 
     /// The core proof: PersistAnt's `_sqlx_migrations` ledger starts empty on

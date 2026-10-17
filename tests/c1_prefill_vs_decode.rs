@@ -99,7 +99,6 @@ async fn complete_raw(path: &Path, prompt: &str, max_tokens: usize) -> serde_jso
     let state = AppState {
         scheduler: Arc::new(MemoryAwareScheduler::new(MemoryAwareConfig::default())),
         config: ApiConfig::default(),
-        db_pool: None,
         pg_backend: None,
         inference_tx: Some(tx),
         chat_template: None,

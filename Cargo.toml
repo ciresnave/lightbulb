@@ -4,7 +4,7 @@
     license     = "MIT OR Apache-2.0"
     name        = "lightbulb"
     repository  = "https://github.com/ciresnave/lightbulb"
-    version     = "0.10.11"
+    version     = "0.10.13"
 
 [features]
     # CUDA support with flash attention and fused kernels.
@@ -146,12 +146,15 @@
     futures-util       = "0.3"
     hex                = "0.4"
     reqwest            = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls-manual-roots"] }
-    tokio-postgres     = "0.7"
-    deadpool-postgres  = "0.14"
-    refinery           = { version = "0.9", features = ["tokio-postgres"] }
-    postgres-types     = { version = "0.2", features = ["derive", "with-chrono-0_4", "with-uuid-1"] }
     persistant-sqlx       = "0.7.4"
     persistant-relational = "0.7.4"
+    # Only to build a Postgres pool with an explicit short acquire_timeout
+    # for ApiServer::new's bounded connect retry -- PgBackend::connect's own
+    # pool always uses sqlx's 30s default with no way to override it from
+    # outside persistant-sqlx. Not a return to deadpool_postgres/
+    # tokio_postgres: PersistAnt already depends on this exact sqlx, this
+    # just needs it in scope to call PgPoolOptions directly.
+    sqlx               = { version = "0.9", default-features = false, features = ["runtime-tokio", "postgres"] }
     tower-http         = { version = "0.6", features = ["cors", "trace"] }
 
     # TLS/Certificate dependencies
@@ -364,6 +367,21 @@ name = "lightbulb-probe"
 path = "src/bin/lightbulb-probe.rs"
 
 [dev-dependencies]
+# Dev-only as of PersistAnt adoption Step 5: the app itself no longer uses
+# these (deadpool-postgres/tokio-postgres/refinery are gone from
+# [dependencies]), but tests/persistant_migrate_tests.rs still needs a raw
+# driver to (a) simulate a pre-Step-5 deployment's refinery-migrated
+# database -- a real upgrade scenario worth testing even though the
+# shipped binary no longer runs refinery itself -- and (b) inspect the
+# resulting schema directly (information_schema/pg_indexes), independent
+# of persistant_sqlx's own Value-typed query path.
+tokio-postgres = "0.7"
+refinery       = { version = "0.9", features = ["tokio-postgres"] }
+# tests/api_integration_tests.rs's own test setup/verification helpers also
+# use tokio_postgres directly (provisioning keys, checking revoked-key
+# state) and bind/read `uuid::Uuid` params -- tokio_postgres has no
+# built-in Uuid support, hence this.
+postgres-types = { version = "0.2", features = ["with-uuid-1"] }
 # kiss-ref: spec-exact reference implementation of the KISS base-op vocabulary,
 # used as the port's INDEPENDENT differential target (tiers 1 and 2 of the
 # oracle). Differential target, never a verdict source — a disagreement means

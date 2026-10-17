@@ -582,24 +582,6 @@ fn parse_key_id(id: &str) -> Result<uuid::Uuid, ApiErrorParts> {
     })
 }
 
-/// Get a pooled DB connection, or the 503/500 `revoke_api_key`/`rotate_api_key` share when no
-/// database is configured or the pool can't hand one out.
-async fn get_db_client(state: &AppState) -> Result<deadpool_postgres::Client, ApiErrorParts> {
-    let db_pool = state.db_pool.as_ref().ok_or((
-        StatusCode::SERVICE_UNAVAILABLE,
-        "Database not configured",
-        "service_unavailable",
-    ))?;
-    db_pool.get().await.map_err(|e| {
-        eprintln!("DB connection error: {}", e);
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Failed to connect to database",
-            "internal_error",
-        )
-    })
-}
-
 /// The 500 every internal step of `rotate_api_key`'s transaction shares,
 /// logging `context` (which step failed) alongside the real error.
 fn rotate_internal_error(e: impl std::fmt::Display, context: &str) -> Response {
@@ -663,11 +645,11 @@ fn interpret_other_admin_key_result(
 /// the caller with the 409 lockout refusal or a 500 on a DB error; `None`
 /// means it's safe to proceed with the revoke.
 ///
-/// PersistAnt adoption Step 2 (docs/PERSISTANT_ADOPTION_DESIGN.md): this is
-/// one of the 2 read-only call sites ported to `AppState::pg_backend` for
-/// this step (the design doc's own line-number list for this step was
-/// wrong -- see the doc's correction note). Everything else in this module
-/// still goes through `state.db_pool` until a later step.
+/// PersistAnt adoption Step 2 (docs/PERSISTANT_ADOPTION_DESIGN.md): one of
+/// the 2 read-only call sites first ported to `AppState::pg_backend` (the
+/// design doc's own line-number list for this step was wrong -- see the
+/// doc's correction note). As of Step 5, `pg_backend` is this module's only
+/// database path.
 ///
 /// `id != $1` doesn't type-check against a `Value::Text` parameter --
 /// Postgres has no `uuid <> text` operator (confirmed on a real run:
@@ -939,7 +921,6 @@ mod tests {
         AppState {
             scheduler: std::sync::Arc::new(MemoryAwareScheduler::new(MemoryAwareConfig::default())),
             config: crate::api::ApiConfig::default(),
-            db_pool: None,
             pg_backend: None,
             inference_tx: None,
             chat_template: None,

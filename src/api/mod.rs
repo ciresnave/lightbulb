@@ -52,6 +52,7 @@ use tower_http::trace::TraceLayer;
 
 use crate::engine::MemoryAwareScheduler;
 use crate::engine::model_runner::ModelRunner;
+use persistant_relational::RelationalBackend;
 use std::path::Path;
 
 /// API server configuration
@@ -335,17 +336,11 @@ pub struct AppState {
     /// API configuration
     pub config: ApiConfig,
 
-    /// Database connection pool (None when running without PostgreSQL)
-    pub db_pool: Option<deadpool_postgres::Pool>,
-
-    /// PersistAnt adoption (docs/PERSISTANT_ADOPTION_DESIGN.md), Step 2: a
-    /// `persistant_sqlx::PgBackend` against the same database, built
-    /// alongside `db_pool` rather than replacing it. Per the design doc's
-    /// Option B staging rule, only the specific call sites ported so far
-    /// (the `revoke_api_key` admin-lockout check and `auth_middleware`'s
-    /// hash lookup) read from this; every other query still goes through
-    /// `db_pool` until a later step swaps the pool itself. `None` under the
-    /// same condition as `db_pool` (no `DATABASE_URL` configured).
+    /// Database handle (`None` when running without PostgreSQL). PersistAnt
+    /// adoption Step 5 (docs/PERSISTANT_ADOPTION_DESIGN.md) made this the
+    /// sole database path for the admin/auth Postgres surface --
+    /// `deadpool_postgres`/`tokio_postgres`/`refinery` are gone from this
+    /// repo's dependency tree.
     pub pg_backend: Option<persistant_sqlx::PgBackend>,
 
     /// Sender to enqueue inference jobs to the model runner thread (if started)
@@ -419,6 +414,97 @@ pub fn new_shared_system_metrics() -> SharedSystemMetrics {
     std::sync::Arc::new(std::sync::Mutex::new(sysinfo::System::new_all()))
 }
 
+/// One connection attempt, bounded to `timeout` regardless of
+/// `PgBackend::connect`'s own default. `PgBackend::connect` builds its pool
+/// with `sqlx`'s default `acquire_timeout` (30s) and no way to override it
+/// from outside the crate -- a retry loop built directly on `connect()`
+/// would take up to 5 x 30s = ~150s to give up, not the handful of seconds
+/// a "momentary blip" retry is supposed to cost. Building the `sqlx::PgPool`
+/// here with an explicit short `acquire_timeout`, then handing it to
+/// `PgBackend::from_pool` (the same public constructor `connect()` itself
+/// uses internally), keeps the retry loop's total bound small and real.
+async fn try_connect_once(
+    database_url: &str,
+    timeout: std::time::Duration,
+) -> Result<persistant_sqlx::PgBackend, persistant_relational::RelError> {
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(16)
+        .acquire_timeout(timeout)
+        .connect(database_url)
+        .await
+        .map_err(|e| persistant_relational::RelError::Unavailable(e.to_string()))?;
+    persistant_sqlx::PgBackend::from_pool(pool).await
+}
+
+/// Connects to Postgres with a short, bounded retry (5 attempts, each
+/// capped at 2s to connect, 200ms doubling to 3200ms between tries -- at
+/// most ~13 seconds of total patience, not the ~150s a naive retry on top
+/// of `PgBackend::connect`'s own 30s-per-attempt default would cost -- see
+/// `try_connect_once`). `PgBackend::connect` is eager, so this absorbs the
+/// "database and app started by the same orchestrator at the same time"
+/// case the old lazy `deadpool_postgres` pool never had to think about.
+///
+/// If the database is still unreachable once the retries are exhausted,
+/// this returns `None` rather than propagating an error -- the server
+/// starts in the same degraded state it always has when `DATABASE_URL`
+/// is merely unset (auth/audit/rate-limiting disabled). That is the same
+/// tradeoff the pre-Step-5 `deadpool_postgres` code always had (it was
+/// ALWAYS lazy: a typo'd connection string there would also start the
+/// server successfully and only surface as a readiness-check failure on
+/// first use). Step 5's eager `connect()` is not introducing a stricter
+/// failure mode than this repo had before it -- this helper restores the
+/// older, more forgiving one, without inheriting `connect()`'s own
+/// unrelated 30s-per-attempt cost.
+async fn connect_with_retry(database_url: &str) -> Option<persistant_sqlx::PgBackend> {
+    const PER_ATTEMPT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+    const DELAYS_MS: [u64; 4] = [200, 400, 800, 1600];
+    let mut last_err = None;
+    for (attempt, delay_ms) in DELAYS_MS.iter().copied().enumerate() {
+        match try_connect_once(database_url, PER_ATTEMPT_TIMEOUT).await {
+            Ok(backend) => return finish_connect(backend).await,
+            Err(e) => {
+                tracing::warn!(
+                    attempt = attempt + 1,
+                    error = %e,
+                    "database connect attempt failed, retrying"
+                );
+                last_err = Some(e);
+                tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+            }
+        }
+    }
+    // Final attempt, no further sleep after it.
+    match try_connect_once(database_url, PER_ATTEMPT_TIMEOUT).await {
+        Ok(backend) => finish_connect(backend).await,
+        Err(e) => {
+            tracing::error!(
+                error = %e,
+                prior_error = ?last_err,
+                "database unreachable after 5 attempts (~13s) — starting without a database \
+                 (auth/audit/rate-limiting disabled)"
+            );
+            None
+        }
+    }
+}
+
+/// Runs migrations on a freshly connected backend and logs success.
+/// Separated from `connect_with_retry` so a migration failure (distinct
+/// from a connection failure) is not retried -- a schema problem will not
+/// fix itself on the next attempt.
+async fn finish_connect(backend: persistant_sqlx::PgBackend) -> Option<persistant_sqlx::PgBackend> {
+    match backend.migrate(&persistant_migrate::migrations()).await {
+        Ok(_) => {
+            tracing::info!("Database connected and migrations applied");
+            Some(backend)
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "PersistAnt migration failed — starting without a database");
+            None
+        }
+    }
+}
+
 /// API server
 pub struct ApiServer {
     /// Application state
@@ -432,44 +518,22 @@ impl ApiServer {
         validate_request_timeout(&config)?;
         validate_server_config(&config)?;
 
-        // Set up database connection pool if DATABASE_URL is configured
-        let db_pool = if let Some(ref database_url) = config.database_url {
-            let mut pg_config: tokio_postgres::Config = database_url.parse()?;
-
-            // For trust auth, tokio-postgres still needs a password value (can be anything)
-            if pg_config.get_password().is_none() {
-                pg_config.password("trust");
-            }
-
-            let manager = deadpool_postgres::Manager::new(pg_config, tokio_postgres::NoTls);
-            let pool = deadpool_postgres::Pool::builder(manager)
-                .max_size(10)
-                .build()?;
-
-            // Run migrations
-            let mut client = pool.get().await?;
-            refinery::embed_migrations!("./migrations");
-            migrations::runner().run_async(&mut **client).await?;
-
-            tracing::info!("Database connected and migrations applied");
-            Some(pool)
-        } else {
-            tracing::info!(
-                "No DATABASE_URL set — running without database (auth/audit/rate-limiting disabled)"
-            );
-            None
-        };
-
-        // PersistAnt adoption Step 2 (docs/PERSISTANT_ADOPTION_DESIGN.md): a
-        // second handle on the same database, alongside `db_pool` rather
-        // than replacing it. See `AppState::pg_backend`'s own doc comment.
+        // PersistAnt adoption Step 5 (docs/PERSISTANT_ADOPTION_DESIGN.md): the
+        // sole database path. `PgBackend::connect` is EAGER (opens a real
+        // connection and runs `SHOW server_version` before returning), so a
+        // momentary DB blip at startup (e.g. container orchestration
+        // starting the app and the database at the same time) would
+        // otherwise fail `ApiServer::new` itself. `connect_with_retry`
+        // absorbs that with a short bounded retry; see its own doc comment
+        // for what happens if the database is genuinely unreachable.
         let pg_backend = match &config.database_url {
-            Some(database_url) => Some(
-                persistant_sqlx::PgBackend::connect(database_url)
-                    .await
-                    .map_err(|e| anyhow::anyhow!("PgBackend connect failed: {e}"))?,
-            ),
-            None => None,
+            Some(database_url) => connect_with_retry(database_url).await,
+            None => {
+                tracing::info!(
+                    "No DATABASE_URL set — running without database (auth/audit/rate-limiting disabled)"
+                );
+                None
+            }
         };
 
         // `auth_attempt_counts` (security audit item 3) is written on every
@@ -480,33 +544,20 @@ impl ApiServer {
         // own expiry rather than growing forever. A background task, not a
         // per-request delete, so the request path pays no extra latency for
         // it.
-        if let Some(pool) = db_pool.clone() {
+        if let Some(backend) = pg_backend.clone() {
             tokio::spawn(async move {
                 let mut interval = tokio::time::interval(std::time::Duration::from_secs(300));
                 loop {
                     interval.tick().await;
-                    match pool.get().await {
-                        Ok(client) => {
-                            if let Err(e) = client
-                                .execute(
-                                    "DELETE FROM auth_attempt_counts \
-                                     WHERE window_start < NOW() - INTERVAL '1 hour'",
-                                    &[],
-                                )
-                                .await
-                            {
-                                tracing::warn!(
-                                    error = %e,
-                                    "auth_attempt_counts cleanup query failed"
-                                );
-                            }
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                error = %e,
-                                "auth_attempt_counts cleanup: could not get a database connection"
-                            );
-                        }
+                    if let Err(e) = backend
+                        .execute(
+                            "DELETE FROM auth_attempt_counts \
+                             WHERE window_start < NOW() - INTERVAL '1 hour'",
+                            &[],
+                        )
+                        .await
+                    {
+                        tracing::warn!(error = %e, "auth_attempt_counts cleanup query failed");
                     }
                 }
             });
@@ -546,7 +597,6 @@ impl ApiServer {
         let mut state = AppState {
             scheduler,
             config: config.clone(),
-            db_pool,
             pg_backend,
             inference_tx: None,
             chat_template: None,
@@ -949,16 +999,14 @@ struct ReadinessResponse {
 
 /// `None` means no database is configured at all (`not_configured`, an
 /// operator choice). `Some` is checked live with a real `SELECT 1` rather
-/// than just `pool.get()` succeeding: a pool can hand out a connection to a
-/// server that is up but not actually answering queries.
-async fn check_database(pool: Option<&deadpool_postgres::Pool>) -> CheckStatus {
-    let Some(pool) = pool else {
+/// than trusting the handle alone: `PgBackend::connect` already proved
+/// reachability at startup (it's eager, see `ApiServer::new`), but a
+/// server that was reachable then can still have gone away since.
+async fn check_database(backend: Option<&persistant_sqlx::PgBackend>) -> CheckStatus {
+    let Some(backend) = backend else {
         return CheckStatus::NotConfigured;
     };
-    let Ok(client) = pool.get().await else {
-        return CheckStatus::Unreachable;
-    };
-    match client.query_one("SELECT 1", &[]).await {
+    match backend.query("SELECT 1", &[]).await {
         Ok(_) => CheckStatus::Ok,
         Err(_) => CheckStatus::Unreachable,
     }
@@ -970,7 +1018,7 @@ async fn check_database(pool: Option<&deadpool_postgres::Pool>) -> CheckStatus {
 /// CURRENT state of dependencies that can change after startup (a database
 /// that was reachable five minutes ago and is down now).
 async fn readiness_check(State(state): State<AppState>) -> impl IntoResponse {
-    let database = check_database(state.db_pool.as_ref()).await;
+    let database = check_database(state.pg_backend.as_ref()).await;
 
     // `inference_tx` is `None` both when no model was ever requested and
     // when one was requested but failed to start (`ApiServer::new` logs
@@ -1309,7 +1357,7 @@ mod tests {
 
     /// Builds a bare `AppState` directly rather than through `ApiServer::new`
     /// — these tests exercise `readiness_check`'s own branching on
-    /// `db_pool`/`inference_tx`/`config.models_dir`, not startup. Every
+    /// `pg_backend`/`inference_tx`/`config.models_dir`, not startup. Every
     /// field is `pub` for exactly this (see the field's own doc comment).
     fn bare_state(models_dir: Option<&str>, inference_tx_present: bool) -> AppState {
         use crate::engine::{MemoryAwareConfig, MemoryAwareScheduler};
@@ -1327,7 +1375,6 @@ mod tests {
                 models_dir: models_dir.map(str::to_string),
                 ..ApiConfig::default()
             },
-            db_pool: None,
             pg_backend: None,
             inference_tx,
             chat_template: None,
@@ -1380,29 +1427,188 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
     }
 
-    /// Red test for the database branch, independent of a real Postgres:
-    /// a pool pointed at a port nothing listens on. `Pool::builder(...).
-    /// build()` is lazy (no connection attempt), so this needs no network
-    /// access to construct — only `pool.get().await` in `check_database`
-    /// actually tries to connect, and that's what must fail fast here.
+    /// PersistAnt adoption Step 5 changed this test's shape, not just its
+    /// types. The prior `deadpool_postgres::Pool::builder(...).build()` was
+    /// LAZY -- no connection attempt -- so the old version of this test
+    /// could construct a pool pointed at an unreachable address, inject it
+    /// into `AppState`, and exercise `readiness_check`'s own branching
+    /// end to end. `persistant_sqlx::PgBackend::connect` is EAGER (it opens
+    /// a real connection and runs `SHOW server_version` before returning),
+    /// so there is no backend to inject in the unreachable case -- the
+    /// failure happens at `connect()` itself, before any `AppState` could
+    /// exist. This test now proves the same user-visible claim ("an
+    /// unreachable database is detected as not ready") one layer lower,
+    /// at `connect()` rather than inside `readiness_check`; it no longer
+    /// exercises `readiness_check`'s own code at all. `check_database`'s
+    /// `CheckStatus::Unreachable` arm (a backend that connected fine but a
+    /// later query fails) has no equivalent red test post-Step-5 for the
+    /// same reason -- noted as a real coverage gap, not silently dropped.
     #[tokio::test]
-    async fn readiness_check_is_not_ready_when_database_is_unreachable() {
-        let pg_config: tokio_postgres::Config = "postgresql://nouser:nopass@127.0.0.1:1/nodb"
-            .parse()
-            .expect("valid connection string syntax");
-        let manager = deadpool_postgres::Manager::new(pg_config, tokio_postgres::NoTls);
-        let pool = deadpool_postgres::Pool::builder(manager)
-            .max_size(1)
-            .build()
-            .expect("lazy pool construction never touches the network");
+    async fn connecting_to_an_unreachable_database_fails() {
+        let result =
+            persistant_sqlx::PgBackend::connect("postgresql://nouser:nopass@127.0.0.1:1/nodb")
+                .await;
+        assert!(result.is_err());
+    }
 
-        let mut state = bare_state(None, false);
-        state.db_pool = Some(pool);
+    /// The red test `connecting_to_an_unreachable_database_fails` (above)
+    /// doesn't cover -- a `PgBackend` that connected successfully, then a
+    /// LATER query against it fails. `check_database`'s `CheckStatus::
+    /// Unreachable` arm is specifically that case.
+    ///
+    /// Two approaches were tried and measured NOT to work, kept here as the
+    /// reasoning for why this one is shaped the way it is:
+    /// - `pg_terminate_backend` alone: sqlx's pool silently opens a brand
+    ///   new connection on the very next `.query()` and the call succeeds
+    ///   anyway.
+    /// - `REVOKE CONNECT ON DATABASE ... FROM <role>` to also block the
+    ///   reconnect: has NO EFFECT, because the test role is a superuser in
+    ///   both this repo's Docker verification setup and CI's native
+    ///   `initdb`-created cluster (confirmed directly: `SELECT rolsuper
+    ///   FROM pg_roles WHERE rolname = current_user` returns `t`) --
+    ///   superusers bypass the `CONNECT` privilege check entirely.
+    ///
+    /// What actually works, privilege-agnostic: a local TCP proxy sits
+    /// between `PgBackend` and the real Postgres. The initial `connect()`
+    /// and one `check_database` call succeed through it (proving the
+    /// `Ok` path); the proxy's listener is then dropped so no further
+    /// connection to it is even possible, and its single open connection
+    /// is aborted -- severing the backend from Postgres the same way a
+    /// server crash or network partition would, regardless of role
+    /// privileges.
+    /// Splices a proxy's `host:port` into a Postgres connection string in
+    /// place of the real one. No `url` crate dependency in this repo; the
+    /// connection string's shape is simple enough
+    /// (`scheme://user:pass@host:port/db...`) to splice directly.
+    fn proxied_db_url(db_url: &str, proxy_addr: std::net::SocketAddr) -> String {
+        let after_at = db_url.rsplit_once('@').map_or(db_url, |(_, rest)| rest);
+        let path_start = after_at.find('/').unwrap_or(after_at.len());
+        let prefix_end = db_url.len() - after_at.len();
+        format!(
+            "{}{}:{}{}",
+            &db_url[..prefix_end],
+            proxy_addr.ip(),
+            proxy_addr.port(),
+            &after_at[path_start..]
+        )
+    }
 
-        let response = readiness_check(axum::extract::State(state))
+    /// Starts a local TCP proxy forwarding to `db_url`'s real host:port,
+    /// returning the proxy's own bound address, an abort sender that severs
+    /// every connection the proxy has ever opened (stops `accept()`ing AND
+    /// cuts every already-open connection), and the proxy task's handle.
+    ///
+    /// A connection pool (sqlx's, underneath `PgBackend`) may open more than
+    /// one TCP connection even for a single logical caller -- measured
+    /// directly: a proxy that only ever called `accept()` once left
+    /// `check_database`'s own query hanging on a second connection attempt
+    /// nobody was accepting. One `abort` broadcast covers every connection
+    /// the pool opens through this proxy, however many there turn out to be.
+    /// The real Postgres's `host:port`, parsed out of a connection string.
+    fn real_host_port(db_url: &str) -> String {
+        let real_config: tokio_postgres::Config = db_url.parse().expect("valid test database URL");
+        format!(
+            "{}:{}",
+            real_config.get_hosts().first().map_or_else(
+                || "127.0.0.1".to_string(),
+                |h| {
+                    let tokio_postgres::config::Host::Tcp(s) = h;
+                    s.clone()
+                }
+            ),
+            real_config.get_ports().first().copied().unwrap_or(5432)
+        )
+    }
+
+    /// Forwards one accepted client connection to `real_addr` until either
+    /// side closes or `abort_rx` fires -- one task per proxied connection.
+    async fn forward_one_connection(
+        client: tokio::net::TcpStream,
+        real_addr: String,
+        mut abort_rx: tokio::sync::broadcast::Receiver<()>,
+    ) {
+        let Ok(mut upstream) = tokio::net::TcpStream::connect(&real_addr).await else {
+            return;
+        };
+        let (mut client_r, mut client_w) = client.into_split();
+        let (mut up_r, mut up_w) = upstream.split();
+        tokio::select! {
+            _ = tokio::io::copy(&mut client_r, &mut up_w) => {}
+            _ = tokio::io::copy(&mut up_r, &mut client_w) => {}
+            _ = abort_rx.recv() => {}
+        }
+    }
+
+    async fn start_severable_proxy(
+        db_url: &str,
+    ) -> (
+        std::net::SocketAddr,
+        tokio::sync::broadcast::Sender<()>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let real_addr = real_host_port(db_url);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
-            .into_response();
-        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+            .expect("bind an ephemeral local port for the proxy");
+        let proxy_addr = listener
+            .local_addr()
+            .expect("the proxy's own bound address");
+
+        let (abort_tx, _) = tokio::sync::broadcast::channel::<()>(1);
+        let proxy_task = tokio::spawn({
+            let abort_tx = abort_tx.clone();
+            async move {
+                loop {
+                    let mut abort_rx = abort_tx.subscribe();
+                    tokio::select! {
+                        accepted = listener.accept() => {
+                            let Ok((client, _)) = accepted else { break };
+                            tokio::spawn(forward_one_connection(
+                                client,
+                                real_addr.clone(),
+                                abort_tx.subscribe(),
+                            ));
+                        }
+                        _ = abort_rx.recv() => break,
+                    }
+                }
+            }
+        });
+
+        (proxy_addr, abort_tx, proxy_task)
+    }
+
+    #[tokio::test]
+    #[ignore] // Requires PostgreSQL
+    async fn check_database_reports_unreachable_when_a_live_backend_goes_away() {
+        let db_url = std::env::var("LIGHTBULB_TEST_DATABASE_URL").unwrap_or_else(|_| {
+            "postgresql://lightbulb:vKTbmBA5RXIauMrNHxzs@localhost:5432/lightbulb".to_string()
+        });
+        let (proxy_addr, abort_tx, proxy_task) = start_severable_proxy(&db_url).await;
+        let proxied_url = proxied_db_url(&db_url, proxy_addr);
+
+        let backend = persistant_sqlx::PgBackend::connect(&proxied_url)
+            .await
+            .expect("should connect to the real test database through the proxy");
+        assert!(
+            matches!(check_database(Some(&backend)).await, CheckStatus::Ok),
+            "sanity check: must be reachable (through the proxy) before we sever it"
+        );
+
+        // Sever the proxy: no more bytes flow, and the task exits (the
+        // listener was consumed into it, so it cannot accept a replacement
+        // connection either).
+        let _ = abort_tx.send(());
+        proxy_task
+            .await
+            .expect("the proxy task should exit cleanly");
+
+        let result = check_database(Some(&backend)).await;
+        assert!(
+            matches!(result, CheckStatus::Unreachable),
+            "a backend whose only path to Postgres was just severed must report \
+             Unreachable, not silently reconnect and report Ok: got {result:?}"
+        );
     }
 
     /// `metrics_endpoint` installs and reads ONE process-wide Prometheus
@@ -1556,6 +1762,28 @@ mod tests {
             "a 404 with no matched route must still be counted, under the fixed \
              \"unmatched\" label: {body}"
         );
+    }
+
+    /// End-to-end through the real entry point: `ApiServer::new` must
+    /// start successfully (not propagate an `Err`) against a genuinely
+    /// unreachable `DATABASE_URL`, with `pg_backend: None` -- the
+    /// degraded-start behavior `connect_with_retry` restores. Bounded by
+    /// `try_connect_once`'s explicit 2s-per-attempt timeout (not `sqlx`'s
+    /// 30s default), so this test costs ~13s, not ~150s.
+    #[tokio::test]
+    async fn api_server_new_starts_degraded_on_unreachable_database() {
+        use crate::engine::{MemoryAwareConfig, MemoryAwareScheduler};
+        let scheduler = Arc::new(MemoryAwareScheduler::new(MemoryAwareConfig::default()));
+        let config = ApiConfig {
+            database_url: Some("postgresql://nouser:nopass@127.0.0.1:1/nodb".to_string()),
+            jwt_secret: Some("test-secret".to_string()),
+            models_dir: None,
+            ..ApiConfig::default()
+        };
+        let server = ApiServer::new(config, scheduler)
+            .await
+            .expect("expected Ok (degraded start)");
+        assert!(server.state().pg_backend.is_none());
     }
 
     /// End-to-end through the real entry point, not just the pure function:
