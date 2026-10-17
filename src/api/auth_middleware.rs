@@ -217,7 +217,7 @@ pub async fn auth_middleware(
     next: Next,
 ) -> Response {
     // Skip authentication when no database is configured
-    if state.db_pool.is_none() {
+    if state.pg_backend.is_none() {
         return next.run(request).await;
     }
 

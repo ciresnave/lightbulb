@@ -97,7 +97,6 @@ async fn post_raw(path: &str, body: serde_json::Value) -> (StatusCode, Vec<u8>) 
     let state = AppState {
         scheduler: Arc::new(MemoryAwareScheduler::new(MemoryAwareConfig::default())),
         config: ApiConfig::default(),
-        db_pool: None,
         pg_backend: None,
         inference_tx: Some(tx),
         chat_template: chat_template_for(&dir),

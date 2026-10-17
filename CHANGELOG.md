@@ -1,5 +1,46 @@
 # Changelog
 
+## 0.10.12
+
+### Added
+- **PersistAnt adoption complete.** Step 5 (docs/PERSISTANT_ADOPTION_DESIGN.md
+  §5 item 5), the last step: `persistant_sqlx::PgBackend` is now the sole
+  database path for the admin/auth Postgres surface. `ApiServer::new` builds
+  only a `PgBackend` and runs `backend.migrate(...)` as the sole migration
+  path; `deadpool_postgres`, `tokio_postgres` and `refinery` are gone from
+  this repo's `[dependencies]` (kept as dev-dependencies only, scoped to
+  `tests/persistant_migrate_tests.rs`'s own simulation of a pre-Step-5
+  deployment -- see that file's `migrate_with_refinery` helper).
+- Ported the `auth_attempt_counts` cleanup background task and
+  `check_database` (the readiness-check helper) to `pg_backend`. Deleted
+  `get_db_client` (admin.rs) -- dead code, zero callers after Steps 1-4.
+
+### Fixed (finding)
+- **`PgBackend::connect` is EAGER**, unlike the prior
+  `deadpool_postgres::Pool::builder(...).build()`, which never touched the
+  network until the first `.get()`. `connect()` opens a real connection and
+  runs `SHOW server_version` before returning. This is a genuine behavior
+  change: a momentarily-unreachable database now fails `ApiServer::new`
+  itself (the server refuses to start) rather than starting and reporting
+  `not_configured`/`unreachable` via `/health/ready` until the database
+  comes up. Flagged for the PM's attention, not silently absorbed.
+  `readiness_check_is_not_ready_when_database_is_unreachable` (a red test
+  that injected a lazily-built pool pointed at an unreachable address) had
+  no direct equivalent for the same reason -- replaced with
+  `connecting_to_an_unreachable_database_fails`, which proves the same
+  claim one layer lower (at `connect()` itself); `check_database`'s
+  `CheckStatus::Unreachable` arm (connects fine, a later query fails) has
+  no red test post-Step-5, a real coverage gap, noted rather than hidden.
+
+### Corrected
+- `docs/PERSISTANT_ADOPTION_DESIGN.md`'s §5 item 6 ("drop `user_sessions`
+  as part of this work") and §7 Open Question 2 are corrected in place:
+  the PM's actual answer -- *"carry user_sessions forward unchanged;
+  dropping the dead table is its own later PR (irreversible = own
+  decision)"* -- overrides the doc's original text, which was written
+  before that answer. `user_sessions` (`V3`, dead schema) is unchanged by
+  this PR; dropping it is deferred to its own future PR.
+
 ## 0.10.11
 
 ### Added

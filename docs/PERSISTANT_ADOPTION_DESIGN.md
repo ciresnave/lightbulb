@@ -206,8 +206,11 @@ bundled with 9 simpler call sites.
    `deadpool_postgres`/`tokio_postgres`/`refinery`, make `PgBackend` the only pool,
    switch the startup migration call to `backend.migrate(...)` as the sole path (no
    longer "in addition to," now instead of).
-6. **Drop `user_sessions`** (dead schema, `V3`) as part of this work rather than
-   carrying it forward -- see Open Question 2.
+6. ~~Drop `user_sessions` (dead schema, `V3`) as part of this work~~ -- **Corrected
+   (Step 5 PR):** the PM's answer to Open Question 2 (below) overrides this item as
+   originally written. `user_sessions` carries forward unchanged in this step; dropping
+   the dead table is deferred to its own future PR, since it's an irreversible schema
+   change that deserves its own decision rather than riding along with the pool swap.
 
 ## 6. Rollback plan
 
@@ -243,9 +246,10 @@ bundled with 9 simpler call sites.
    actual running instance with live state today. This changes how cautious step 5
    needs to be -- a disposable dev database makes the big-bang Option A viable too,
    since "worst case, recreate it" is a real fallback there and isn't here.
-2. Confirmed in §1: `user_sessions` (`V3`) is dead schema with zero code references.
-   Drop it as part of this work (per §5 step 6), or carry it forward unchanged into the
-   new migration set for a separate decision later?
+2. **Answered (PM):** "carry user_sessions forward unchanged; dropping the dead table is
+   its own later PR (irreversible = own decision)." `user_sessions` (`V3`, dead schema,
+   zero code references, confirmed in §1) is carried forward unchanged by Step 5; its
+   removal is its own future PR, not bundled with the pool swap.
 3. **`Uuid` has no direct `Value` variant** (§2's table). Two ways to handle it:
    (a) stringify every `Uuid` through `Value::Text` at each of lightbulb's call sites
    (~6 of the 10 touch an `id` column), or (b) switch `api_keys.id` and its foreign
