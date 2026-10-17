@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.10.11
+
+### Added
+- PersistAnt adoption Step 4 (docs/PERSISTANT_ADOPTION_DESIGN.md §5): the
+  last call-site step. `rotate_api_key`'s one transaction -- the row-locked
+  `SELECT ... FOR UPDATE`, the replacement key's `INSERT ... RETURNING`,
+  and the old key's `UPDATE ... SET revoked_at`, all inside one
+  `backend.begin(Isolation::ReadCommitted)` / `PgTx` transaction -- ported
+  to `AppState::pg_backend`. Only `src/api/mod.rs`'s pool construction
+  itself (step 5) still uses `deadpool_postgres`.
+- Two helpers, `lock_api_key_for_rotation` and `insert_rotated_key`,
+  extracted from `rotate_api_key` proactively (every prior step needed a
+  Codacy method-length fix; this one didn't).
+
+### Verified
+- A real throwaway Postgres (Docker): all 13 `tests/api_integration_tests.rs`
+  tests pass, including `test_rotating_an_api_key_revokes_the_old_and_issues_a_live_new_one`
+  -- a genuine behavioral check (the rotated-out token is confirmed
+  `401`, the new one confirmed live), not just a status-code check, so
+  the transaction's atomicity is directly exercised. All 3
+  `tests/persistant_migrate_tests.rs` tests pass. fmt clean; clippy
+  baseline unchanged (594 diagnostics, 50 lints, none new or increased).
+- The design doc's own step 4 description was already accurate (one
+  function, the transaction) -- no correction needed this time, unlike
+  steps 2 and 3.
+
 ## 0.10.10
 
 ### Added

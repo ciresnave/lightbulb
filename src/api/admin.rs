@@ -19,7 +19,7 @@ use sha2::{Digest, Sha256};
 use crate::api::AppState;
 use crate::api::auth_middleware::{ApiKeyInfo, admin_check_middleware};
 use crate::api::persistant_migrate;
-use persistant_relational::RelationalBackend;
+use persistant_relational::{Isolation, RelationalBackend, RelationalTx};
 
 /// Create admin API routes.
 ///
@@ -786,6 +786,63 @@ pub struct RotateApiKeyResponse {
 /// `revoke_api_key` needs one: the replacement key exists, committed
 /// atomically with the old one's revocation, before any caller could
 /// observe the old key as gone.
+/// `rotate_api_key`'s row-locked read: the role/description of the key
+/// being rotated, or `Ok(None)` if it's already gone/revoked (not an error
+/// -- the caller turns that into a 404). `id::text = $1` is the same
+/// column-cast pattern `check_other_admin_key_exists` uses for the same
+/// `Value`-has-no-Uuid-variant gap.
+async fn lock_api_key_for_rotation(
+    tx: &mut persistant_sqlx::PgTx<'_>,
+    old_id: uuid::Uuid,
+) -> Result<Option<(String, Option<String>)>, persistant_relational::RelError> {
+    let rows = tx
+        .query(
+            "SELECT role, description FROM api_keys \
+             WHERE id::text = $1 AND revoked_at IS NULL FOR UPDATE",
+            &[persistant_migrate::uuid_to_value(old_id)],
+        )
+        .await?;
+    let Some(row) = rows.first() else {
+        return Ok(None);
+    };
+    let role = row
+        .text(0)
+        .ok_or_else(|| persistant_relational::RelError::Unsupported("role column not text".into()))?
+        .to_string();
+    let description = row.text(1).map(str::to_string);
+    Ok(Some((role, description)))
+}
+
+/// `rotate_api_key`'s replacement-key insert, inside the same transaction
+/// as the lock above. `RETURNING id::text` / `value_to_uuid` is the same
+/// cast pattern Step 3's `create_api_key` uses.
+async fn insert_rotated_key(
+    tx: &mut persistant_sqlx::PgTx<'_>,
+    key_hash: &str,
+    role: &str,
+    description: Option<&str>,
+) -> Result<uuid::Uuid, persistant_relational::RelError> {
+    let description_value = description.map_or(persistant_relational::Value::Null, |d| {
+        persistant_relational::Value::Text(d.to_string())
+    });
+    let rows = tx
+        .query(
+            "INSERT INTO api_keys (key_hash, role, description) VALUES ($1, $2, $3) \
+             RETURNING id::text AS id",
+            &[
+                persistant_relational::Value::Text(key_hash.to_string()),
+                persistant_relational::Value::Text(role.to_string()),
+                description_value,
+            ],
+        )
+        .await?;
+    let id_value = rows.first().and_then(|row| row.values.first()).ok_or(
+        persistant_relational::RelError::Unsupported("INSERT ... RETURNING produced no id".into()),
+    )?;
+    persistant_migrate::value_to_uuid(id_value)
+        .map_err(persistant_relational::RelError::Unsupported)
+}
+
 async fn rotate_api_key(
     State(state): State<AppState>,
     Extension(_caller): Extension<ApiKeyInfo>,
@@ -795,28 +852,27 @@ async fn rotate_api_key(
         Ok(id) => id,
         Err((status, msg, ty)) => return api_error(status, msg, ty, None),
     };
-    let mut client = match get_db_client(&state).await {
-        Ok(client) => client,
-        Err((status, msg, ty)) => return api_error(status, msg, ty, None),
+    let backend = match state.pg_backend.as_ref() {
+        Some(backend) => backend,
+        None => {
+            return api_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Database not configured",
+                "service_unavailable",
+                None,
+            );
+        }
     };
 
-    let txn = match client.transaction().await {
+    let mut txn = match backend.begin(Isolation::ReadCommitted).await {
         Ok(txn) => txn,
         Err(e) => return rotate_internal_error(e, "Failed to start transaction"),
     };
 
     // Lock the row for the duration of the transaction: a concurrent rotate
     // or revoke on the same id waits rather than racing.
-    let old_row = txn
-        .query_opt(
-            "SELECT role, description FROM api_keys \
-             WHERE id = $1 AND revoked_at IS NULL FOR UPDATE",
-            &[&old_id],
-        )
-        .await;
-
-    let (role, description): (String, Option<String>) = match old_row {
-        Ok(Some(row)) => (row.get("role"), row.get("description")),
+    let (role, description) = match lock_api_key_for_rotation(&mut txn, old_id).await {
+        Ok(Some(row)) => row,
         Ok(None) => {
             return api_error(
                 StatusCode::NOT_FOUND,
@@ -838,22 +894,16 @@ async fn rotate_api_key(
     hasher.update(api_key.as_bytes());
     let key_hash = format!("{:x}", hasher.finalize());
 
-    let new_id: uuid::Uuid = match txn
-        .query_one(
-            "INSERT INTO api_keys (key_hash, role, description) VALUES ($1, $2, $3) \
-             RETURNING id",
-            &[&key_hash, &role, &description],
-        )
-        .await
+    let new_id = match insert_rotated_key(&mut txn, &key_hash, &role, description.as_deref()).await
     {
-        Ok(row) => row.get("id"),
+        Ok(id) => id,
         Err(e) => return rotate_internal_error(e, "Failed to insert rotated API key"),
     };
 
     if let Err(e) = txn
         .execute(
-            "UPDATE api_keys SET revoked_at = NOW() WHERE id = $1",
-            &[&old_id],
+            "UPDATE api_keys SET revoked_at = NOW() WHERE id::text = $1",
+            &[persistant_migrate::uuid_to_value(old_id)],
         )
         .await
     {
