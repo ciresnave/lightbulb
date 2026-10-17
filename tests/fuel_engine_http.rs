@@ -155,6 +155,7 @@ async fn fuel_runner_serves_a_coherent_completion_over_http() {
         scheduler: Arc::new(MemoryAwareScheduler::new(MemoryAwareConfig::default())),
         config: ApiConfig::default(),
         db_pool: None,
+        pg_backend: None,
         inference_tx: Some(tx),
         chat_template: chat_template_for(&dir),
         // Default window (20): these harnesses make a handful of requests, so
@@ -309,6 +310,7 @@ async fn fuel_runner_serves_a_default_temperature_completion() {
         scheduler: Arc::new(MemoryAwareScheduler::new(MemoryAwareConfig::default())),
         config: ApiConfig::default(),
         db_pool: None,
+        pg_backend: None,
         inference_tx: Some(tx),
         chat_template: chat_template_for(&dir),
         // Default window (20): these harnesses make a handful of requests, so

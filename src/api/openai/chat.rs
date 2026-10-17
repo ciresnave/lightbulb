@@ -1977,6 +1977,7 @@ mod tests {
             scheduler: std::sync::Arc::new(MemoryAwareScheduler::new(MemoryAwareConfig::default())),
             config: crate::api::ApiConfig::default(),
             db_pool: None,
+            pg_backend: None,
             inference_tx,
             chat_template,
             eos_monitor,

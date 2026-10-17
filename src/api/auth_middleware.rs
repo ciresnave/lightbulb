@@ -15,6 +15,7 @@ use std::net::SocketAddr;
 use std::time::Instant;
 
 use crate::api::AppState;
+use persistant_relational::RelationalBackend;
 
 /// Error response
 #[derive(Debug, Clone, Serialize)]
@@ -151,6 +152,62 @@ fn service_unavailable() -> Response {
     (StatusCode::SERVICE_UNAVAILABLE, Json(error)).into_response()
 }
 
+/// Look up an API key by its hash, via `AppState::pg_backend`.
+///
+/// `Ok(None)` means not found/expired/revoked (a normal outcome, not an
+/// error); `Err(())` means the lookup itself failed (DB unreachable or
+/// unconfigured) -- the caller logs and turns that into a 500, matching the
+/// previous `deadpool_postgres` path's behavior exactly.
+///
+/// The `id` column is cast to `::text` in the query itself:
+/// `persistant_relational`'s row decoder (`persistant-sqlx`'s `decode()`)
+/// has no case for Postgres's `UUID` type at all -- only
+/// `BOOL`/`INT2`/`INT4`/`INT8`/`FLOAT4`/`FLOAT8`/`TEXT`/`VARCHAR`/`NAME`/
+/// `BPCHAR`/`BYTEA` -- so selecting a raw `uuid` column errors with
+/// `RelError::Unsupported`. Casting server-side sidesteps that; the column
+/// arrives as `Value::Text`, decoded the same way `uuid_to_value`/
+/// `value_to_uuid` already handle UUIDs everywhere else in this adoption.
+async fn lookup_api_key_by_hash(
+    state: &AppState,
+    key_hash: &str,
+) -> Result<Option<ApiKeyInfo>, ()> {
+    let backend = match state.pg_backend.as_ref() {
+        Some(backend) => backend,
+        None => {
+            eprintln!("PgBackend not configured");
+            return Err(());
+        }
+    };
+
+    let rows = backend
+        .query(
+            r#"SELECT id::text AS id, role
+               FROM api_keys
+               WHERE key_hash = $1
+                 AND (expires_at IS NULL OR expires_at > NOW())
+                 AND revoked_at IS NULL
+               LIMIT 1"#,
+            &[persistant_relational::Value::Text(key_hash.to_string())],
+        )
+        .await
+        .map_err(|e| eprintln!("DB error checking API key: {e}"))?;
+
+    let Some(row) = rows.first() else {
+        return Ok(None);
+    };
+    let id_text = row.text(0).ok_or_else(|| {
+        eprintln!("DB error checking API key: id column was not text after ::text cast");
+    })?;
+    let api_key_id = uuid::Uuid::parse_str(id_text)
+        .map_err(|e| eprintln!("DB error checking API key: id column is not a valid UUID: {e}"))?;
+    let role = row
+        .text(1)
+        .ok_or_else(|| eprintln!("DB error checking API key: role column was not text"))?
+        .to_string();
+
+    Ok(Some(ApiKeyInfo { api_key_id, role }))
+}
+
 /// Authentication middleware
 pub async fn auth_middleware(
     State(state): State<AppState>,
@@ -189,44 +246,12 @@ pub async fn auth_middleware(
             .map(|b| format!("{:02x}", b))
             .collect::<String>();
 
-        // Query the database for a matching, non-expired key
-        let client = match state.db_pool.as_ref().unwrap().get().await {
-            Ok(client) => client,
-            Err(e) => {
-                eprintln!("DB connection error: {}", e);
-                let error = ErrorResponse {
-                    error: ErrorDetail {
-                        message: "Internal server error".to_string(),
-                        r#type: "server_error".to_string(),
-                        code: Some("internal_error".to_string()),
-                    },
-                };
-                return (StatusCode::INTERNAL_SERVER_ERROR, Json(error)).into_response();
-            }
-        };
-
-        match client
-            .query_opt(
-                r#"SELECT id, role
-                   FROM api_keys
-                   WHERE key_hash = $1
-                     AND (expires_at IS NULL OR expires_at > NOW())
-                     AND revoked_at IS NULL
-                   LIMIT 1"#,
-                &[&key_hash],
-            )
-            .await
-        {
-            Ok(Some(row)) => {
-                let id: uuid::Uuid = row.get("id");
-                let role: String = row.get("role");
-
-                // Insert API key info for handlers and audit
-                request.extensions_mut().insert(ApiKeyInfo {
-                    api_key_id: id,
-                    role: role,
-                });
-
+        // PersistAnt adoption Step 2 (docs/PERSISTANT_ADOPTION_DESIGN.md):
+        // this hash lookup is one of the 2 read-only call sites ported to
+        // `AppState::pg_backend` for this step.
+        match lookup_api_key_by_hash(&state, &key_hash).await {
+            Ok(Some(info)) => {
+                request.extensions_mut().insert(info);
                 return next.run(request).await;
             }
             Ok(None) => {
@@ -241,9 +266,7 @@ pub async fn auth_middleware(
 
                 return (StatusCode::UNAUTHORIZED, Json(error)).into_response();
             }
-            Err(e) => {
-                // Database error
-                eprintln!("DB error checking API key: {}", e);
+            Err(()) => {
                 let error = ErrorResponse {
                     error: ErrorDetail {
                         message: "Internal server error".to_string(),

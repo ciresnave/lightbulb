@@ -313,6 +313,7 @@ mod tests {
             scheduler: std::sync::Arc::new(MemoryAwareScheduler::new(MemoryAwareConfig::default())),
             config: crate::api::ApiConfig::default(),
             db_pool: None,
+            pg_backend: None,
             inference_tx,
             chat_template: None,
             eos_monitor: std::sync::Arc::new(crate::engine::eos_monitor::EosMonitor::default()),

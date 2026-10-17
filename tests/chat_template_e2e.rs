@@ -98,6 +98,7 @@ async fn post_raw(path: &str, body: serde_json::Value) -> (StatusCode, Vec<u8>) 
         scheduler: Arc::new(MemoryAwareScheduler::new(MemoryAwareConfig::default())),
         config: ApiConfig::default(),
         db_pool: None,
+        pg_backend: None,
         inference_tx: Some(tx),
         chat_template: chat_template_for(&dir),
         // Default window (20): these harnesses make a handful of requests, so

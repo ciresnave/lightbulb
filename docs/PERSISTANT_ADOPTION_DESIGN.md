@@ -61,7 +61,7 @@ Lightbulb's current shape, read from this repo (`src/api/admin.rs:664-735`,
 | lightbulb today | PersistAnt equivalent | Mapping note |
 |---|---|---|
 | `pool.get().await?` (`deadpool_postgres::Client`) | `PgBackend::from_pool(pool)` once at startup, then `&PgBackend` passed around | One-time construction change, not per-call |
-| `client.query_opt(sql, &[&id])` | `backend.query(sql, &[Value::from(id)])` then take `.first()` | **No `query_opt`/`query_one` convenience exists.** Every single-row lookup (3 of the 10 call sites: `admin.rs:420,567,709` plus the `FOR UPDATE` lookup at `:678`) becomes `query(...)` returning `Vec<Row>`, with the "0 or 1 row" check moved into lightbulb's own code instead of being enforced by the driver. This is the single biggest per-call-site shape change, not a 1:1 swap. |
+| `client.query_opt(sql, &[&id])` | `backend.query(sql, &[Value::from(id)])` then take `.first()` | **No `query_opt`/`query_one` convenience exists.** Every single-row lookup (`admin.rs:567`'s lockout check, `auth_middleware.rs:209`'s hash lookup, and the `FOR UPDATE` lookup inside `rotate_api_key` at `:678`) becomes `query(...)` returning `Vec<Row>`, with the "0 or 1 row" check moved into lightbulb's own code instead of being enforced by the driver. This is the single biggest per-call-site shape change, not a 1:1 swap. **Correction (Step 2 PR):** this row originally also named `admin.rs:420` and `:709` as single-row lookups. Both are `INSERT ... RETURNING` (writes, not reads) -- `:420` is `create_api_key`'s insert (Step 3), `:709` is `rotate_api_key`'s replacement-key insert, inside the one transaction (Step 4). Verified by function boundary, not just SQL verb. |
 | `client.execute(sql, &[&a, &b])` | `backend.execute(sql, &[Value::from(a), Value::from(b)])` | `Value` (`crates/persistant-relational/src/value.rs:36-45`) is `Null/Bool/Int(i64)/Float(f64)/Text(String)/Bytes(Vec<u8>)` -- deliberately narrow, no `Uuid` or timestamp variant. Every `uuid::Uuid` param lightbulb currently binds directly (`old_id` in `admin.rs:678`, `:709`'s `RETURNING id` read-back) needs to go through `Value::Text(id.to_string())` and be parsed back out; this is a real conversion lightbulb's code has to write, not a gap in PersistAnt (the doc comment says so explicitly: "a program with richer types uses the driver's own handle" -- i.e. `PgBackend::pool()`'s raw `sqlx::PgPool` is the escape hatch if this conversion is unwanted everywhere) |
 | `client.transaction().await?` → `txn.query_opt/execute(...)` → `txn.commit().await?` | `backend.begin(Isolation::ReadCommitted).await?` → `tx.query/execute(...)` → `tx.commit().await?` | Same shape (begin/use/commit), and PersistAnt's `Isolation` enum lets `rotate_api_key`'s `FOR UPDATE` row-lock transaction request `Isolation::ReadCommitted` explicitly (lightbulb's current code gets Postgres's default isolation implicitly) -- a documented choice, not a behavior change, if `ReadCommitted` is picked to match current behavior exactly |
 | `SELECT ... FOR UPDATE` as literal SQL text | Same literal SQL text, inside `tx.query(...)` | PersistAnt's `RowLock` conformance leaf (certified `enabled=yes`, `matrix/sqlx-postgres.tsv`) means this exact clause is expected to keep working, not translated |
@@ -163,10 +163,23 @@ bundled with 9 simpler call sites.
    what refinery produces. This step touches zero query call sites and is fully
    reversible by deleting the added code -- no production migration ledger is touched
    yet.
-2. **Read-only call sites first**: the 3 single-row lookups (`admin.rs:420,567,709`)
-   plus `auth_middleware.rs`'s hash lookup -- lowest risk, no transaction, no write.
-   Confirms the `Value`-conversion and `Vec<Row>`→typed-field decoding pattern once,
-   before repeating it on writes.
+2. **Read-only call sites first**: exactly 2, not 4 as an earlier version of this
+   step claimed -- `admin.rs:567`'s `revoke_api_key` self-lockout check (`SELECT
+   EXISTS (...)`) and `auth_middleware.rs:209`'s bearer-hash lookup (`SELECT id,
+   role FROM api_keys WHERE key_hash = $1 ...`). **Correction:** `admin.rs:420` is
+   `create_api_key`'s `INSERT ... RETURNING` (a write, Step 3); `admin.rs:678` and
+   `:709` are both inside `rotate_api_key`'s one transaction (`SELECT ... FOR
+   UPDATE` and the replacement key's `INSERT ... RETURNING`, both Step 4) -- found
+   by checking each call site's actual SQL verb and enclosing function, not just
+   trusting the line numbers this doc originally gave. Lowest risk of the true
+   read sites: no transaction, no write. Confirms the `Value`-conversion and
+   `Vec<Row>`→typed-field decoding pattern once, before repeating it on writes.
+   Also surfaced a gap not in §2's table: `persistant-sqlx`'s row decoder has no
+   case for Postgres's `UUID` column type at all (only `BOOL`/`INT*`/`FLOAT*`/
+   `TEXT`/`VARCHAR`/`NAME`/`BPCHAR`/`BYTEA`) -- selecting a raw `uuid` column
+   errors with `RelError::Unsupported`. Both ported queries cast the column to
+   `::text` in the SQL itself to work around it; see `auth_middleware.rs`'s
+   `lookup_api_key_by_hash`.
 3. **Single-statement writes next**: `create_api_key`'s insert, `revoke_api_key`'s
    update, the rate-limit counter's `ON CONFLICT ... DO UPDATE ... RETURNING` (certified
    via PersistAnt's `UpsertWhere` leaf per docs/AUTH_PERSISTANT_ADOPTION_FIT.md §3).

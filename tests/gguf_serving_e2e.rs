@@ -142,6 +142,7 @@ async fn serve_the_fixed_prompt(path: &Path) -> (StatusCode, serde_json::Value) 
         scheduler: Arc::new(MemoryAwareScheduler::new(MemoryAwareConfig::default())),
         config: ApiConfig::default(),
         db_pool: None,
+        pg_backend: None,
         inference_tx: Some(tx),
         chat_template: chat_template::resolve_for_serving(path),
         eos_monitor: Default::default(),
