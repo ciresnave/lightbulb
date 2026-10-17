@@ -18,6 +18,8 @@ use sha2::{Digest, Sha256};
 
 use crate::api::AppState;
 use crate::api::auth_middleware::{ApiKeyInfo, admin_check_middleware};
+use crate::api::persistant_migrate;
+use persistant_relational::RelationalBackend;
 
 /// Create admin API routes.
 ///
@@ -548,6 +550,72 @@ fn rotate_internal_error(e: impl std::fmt::Display, context: &str) -> Response {
 /// locks every admin out of every admin route, including the one that could
 /// undo it. This does **not** generalize to "the last admin key anywhere":
 /// only self-revocation is guarded, per the PM's scoping of this item.
+/// `revoke_api_key`'s self-lockout check: is there another live, unexpired
+/// admin key besides the one being revoked? `Some(response)` short-circuits
+/// the caller with the 409 lockout refusal or a 500 on a DB error; `None`
+/// means it's safe to proceed with the revoke.
+///
+/// PersistAnt adoption Step 2 (docs/PERSISTANT_ADOPTION_DESIGN.md): this is
+/// one of the 2 read-only call sites ported to `AppState::pg_backend` for
+/// this step (the design doc's own line-number list for this step was
+/// wrong -- see the doc's correction note). Everything else in this module
+/// still goes through `state.db_pool` until a later step.
+async fn check_other_admin_key_exists(state: &AppState, key_id: uuid::Uuid) -> Option<Response> {
+    let backend = match state.pg_backend.as_ref() {
+        Some(backend) => backend,
+        None => {
+            return Some(api_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Database not configured",
+                "service_unavailable",
+                None,
+            ));
+        }
+    };
+
+    let rows = backend
+        .query(
+            r#"SELECT EXISTS (
+                SELECT 1 FROM api_keys
+                WHERE role = 'admin'
+                  AND id != $1
+                  AND revoked_at IS NULL
+                  AND (expires_at IS NULL OR expires_at > NOW())
+            ) AS exists_flag"#,
+            &[persistant_migrate::uuid_to_value(key_id)],
+        )
+        .await;
+
+    match rows {
+        Ok(rows) => {
+            let exists = matches!(
+                rows.first().and_then(|row| row.values.first()),
+                Some(persistant_relational::Value::Bool(true))
+            );
+            if exists {
+                None
+            } else {
+                Some(api_error(
+                    StatusCode::CONFLICT,
+                    "refusing to revoke your own key: it is the only unexpired admin key, \
+                     and revoking it would lock out all admin access",
+                    "conflict_error",
+                    Some("would_lock_out_admin_access"),
+                ))
+            }
+        }
+        Err(e) => {
+            eprintln!("Failed to check for another admin key: {e}");
+            Some(api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to revoke API key",
+                "internal_error",
+                None,
+            ))
+        }
+    }
+}
+
 async fn revoke_api_key(
     State(state): State<AppState>,
     Extension(caller): Extension<ApiKeyInfo>,
@@ -562,43 +630,10 @@ async fn revoke_api_key(
         Err((status, msg, ty)) => return api_error(status, msg, ty, None),
     };
 
-    if key_id == caller.api_key_id {
-        let other_admin_key_exists = client
-            .query_one(
-                r#"SELECT EXISTS (
-                    SELECT 1 FROM api_keys
-                    WHERE role = 'admin'
-                      AND id != $1
-                      AND revoked_at IS NULL
-                      AND (expires_at IS NULL OR expires_at > NOW())
-                ) AS exists_flag"#,
-                &[&key_id],
-            )
-            .await;
-
-        match other_admin_key_exists {
-            Ok(row) => {
-                let exists: bool = row.get("exists_flag");
-                if !exists {
-                    return api_error(
-                        StatusCode::CONFLICT,
-                        "refusing to revoke your own key: it is the only unexpired admin key, \
-                         and revoking it would lock out all admin access",
-                        "conflict_error",
-                        Some("would_lock_out_admin_access"),
-                    );
-                }
-            }
-            Err(e) => {
-                eprintln!("Failed to check for another admin key: {}", e);
-                return api_error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "Failed to revoke API key",
-                    "internal_error",
-                    None,
-                );
-            }
-        }
+    if key_id == caller.api_key_id
+        && let Some(response) = check_other_admin_key_exists(&state, key_id).await
+    {
+        return response;
     }
 
     let result = client
@@ -757,6 +792,7 @@ mod tests {
             scheduler: std::sync::Arc::new(MemoryAwareScheduler::new(MemoryAwareConfig::default())),
             config: crate::api::ApiConfig::default(),
             db_pool: None,
+            pg_backend: None,
             inference_tx: None,
             chat_template: None,
             eos_monitor: std::sync::Arc::new(crate::engine::eos_monitor::EosMonitor::default()),

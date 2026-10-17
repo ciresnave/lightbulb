@@ -338,6 +338,16 @@ pub struct AppState {
     /// Database connection pool (None when running without PostgreSQL)
     pub db_pool: Option<deadpool_postgres::Pool>,
 
+    /// PersistAnt adoption (docs/PERSISTANT_ADOPTION_DESIGN.md), Step 2: a
+    /// `persistant_sqlx::PgBackend` against the same database, built
+    /// alongside `db_pool` rather than replacing it. Per the design doc's
+    /// Option B staging rule, only the specific call sites ported so far
+    /// (the `revoke_api_key` admin-lockout check and `auth_middleware`'s
+    /// hash lookup) read from this; every other query still goes through
+    /// `db_pool` until a later step swaps the pool itself. `None` under the
+    /// same condition as `db_pool` (no `DATABASE_URL` configured).
+    pub pg_backend: Option<persistant_sqlx::PgBackend>,
+
     /// Sender to enqueue inference jobs to the model runner thread (if started)
     pub inference_tx:
         Option<std::sync::mpsc::SyncSender<crate::engine::model_runner::InferenceJob>>,
@@ -450,6 +460,18 @@ impl ApiServer {
             None
         };
 
+        // PersistAnt adoption Step 2 (docs/PERSISTANT_ADOPTION_DESIGN.md): a
+        // second handle on the same database, alongside `db_pool` rather
+        // than replacing it. See `AppState::pg_backend`'s own doc comment.
+        let pg_backend = match &config.database_url {
+            Some(database_url) => Some(
+                persistant_sqlx::PgBackend::connect(database_url)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("PgBackend connect failed: {e}"))?,
+            ),
+            None => None,
+        };
+
         // `auth_attempt_counts` (security audit item 3) is written on every
         // request that reaches `pre_auth_attempt_limiter_middleware`,
         // including every brute-force guess — unlike `api_key_usage`, whose
@@ -525,6 +547,7 @@ impl ApiServer {
             scheduler,
             config: config.clone(),
             db_pool,
+            pg_backend,
             inference_tx: None,
             chat_template: None,
             eos_monitor: Arc::new(crate::engine::eos_monitor::EosMonitor::default()),
@@ -1305,6 +1328,7 @@ mod tests {
                 ..ApiConfig::default()
             },
             db_pool: None,
+            pg_backend: None,
             inference_tx,
             chat_template: None,
             eos_monitor: Arc::new(crate::engine::eos_monitor::EosMonitor::default()),

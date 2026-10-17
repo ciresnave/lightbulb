@@ -1,5 +1,38 @@
 # Changelog
 
+## 0.10.9
+
+### Added
+- PersistAnt adoption Step 2 (docs/PERSISTANT_ADOPTION_DESIGN.md §5): the
+  2 genuinely read-only call sites -- `admin.rs`'s `revoke_api_key`
+  self-lockout check and `auth_middleware.rs`'s bearer-hash lookup -- now
+  read through `AppState::pg_backend` (`persistant_sqlx::PgBackend`,
+  built alongside the existing `db_pool` rather than replacing it). Every
+  other call site is unchanged.
+- `AppState::pg_backend: Option<persistant_sqlx::PgBackend>`, constructed
+  in `ApiServer::new` from the same `database_url` as `db_pool`, `None`
+  under the same condition.
+
+### Fixed
+- **Found while porting**: `persistant-sqlx`'s row decoder has no case for
+  Postgres's `UUID` column type at all (only
+  `BOOL`/`INT2`/`INT4`/`INT8`/`FLOAT4`/`FLOAT8`/`TEXT`/`VARCHAR`/`NAME`/
+  `BPCHAR`/`BYTEA`) -- selecting a raw `uuid` column through `PgBackend::
+  query` errors with `RelError::Unsupported`. Both ported queries now
+  cast the `id` column to `::text` in the SQL itself; it decodes as
+  `Value::Text` and is parsed back to a `Uuid` in Rust.
+
+### Corrected
+- `docs/PERSISTANT_ADOPTION_DESIGN.md`'s step 2 description (§5 item 2,
+  and the related row in §2's table) claimed "the 3 single-row lookups
+  (`admin.rs:420,567,709`) plus `auth_middleware.rs`'s hash lookup" were
+  this step's scope. That was wrong: `admin.rs:420` is `create_api_key`'s
+  `INSERT ... RETURNING` (a write, Step 3), and `admin.rs:678`/`:709` are
+  both inside `rotate_api_key`'s one transaction (Step 4), not read-only
+  call sites at all. The true Step 2 scope is exactly 2 call sites:
+  `admin.rs:567` and `auth_middleware.rs:209`. Fixed directly in the doc
+  (not just noted here), per the portfolio's retraction rule.
+
 ## 0.10.8
 
 ### Added
