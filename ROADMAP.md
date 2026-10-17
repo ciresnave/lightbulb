@@ -826,18 +826,14 @@ an `mpsc` channel) has no cross-thread readable state at all today, and `AppStat
 disconnected instance nothing ever submits a request to. Sliced so each lands as its own PR with
 its own test, in this order:
 
-1. **Wire real prefix-cache stats into the `cache_stats` admin endpoint**, replacing the
-   hardcoded-zero mock. Smallest real win: `ParallelModelManager`'s `PrefixKvCache` is already
-   live in the serving path (`parallel_model_manager.rs:1138,1427,1431`) and already exposes
-   `prefix_cache_stats()`/`entry_count()`/`current_size_bytes()` — the gap is purely that nothing
-   threads a readable handle from the model-runner thread out to the HTTP layer. Needs a new
-   `Arc<Mutex<_>>` snapshot handle threaded through `ModelRunner::start`'s signature (breaking,
-   same shape as #134's `max_queue_depth` addition) and a new `EngineModel::prefix_cache_stats()`
-   trait method (default-provided, so the two test stub impls in `model_runner.rs` need no
-   change). Does **not** touch `scheduler_stats`/`scheduler_queue`/`cache_clear` — those three
-   stay mocked because their backing data (the scheduler actually seeing requests) doesn't exist.
-   **Updated 2026-10-14**: this was originally written assuming slice 2 would close that gap; it
-   does not (see slice 2's own note below) — these three stay mocked until slice 5.
+1. **DONE, lightbulb#139.** `cache_stats` reports the real, shared `AppState.cache_stats` handle
+   (`src/api/admin.rs::cache_stats`, test `cache_stats_reports_the_shared_handles_real_values_not_a_mock`),
+   confirmed present and passing at `origin/main` 2026-10-17 — not a stale claim. `layers` stays
+   empty (honest absence: no per-layer breakdown exists in the prefix cache). Does **not** touch
+   `scheduler_stats`/`scheduler_queue`/`cache_clear` — those three stay mocked/unavailable because
+   their backing data (the scheduler actually seeing requests) doesn't exist; `scheduler_stats`/
+   `scheduler_queue` were separately fixed (#161) to report `unavailable_reason` instead of a
+   plausible zero, still deferred for real data until slice 5.
 2. **Request admission — DONE, lightbulb#142, differently than planned here.** This entry
    originally said "route jobs through `MemoryAwareScheduler::submit_request` /
    `allocate_pending_requests`" — what actually landed is `MemoryAwareScheduler::check_admission`,
