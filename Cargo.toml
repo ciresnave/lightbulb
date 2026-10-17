@@ -4,7 +4,7 @@
     license     = "MIT OR Apache-2.0"
     name        = "lightbulb"
     repository  = "https://github.com/ciresnave/lightbulb"
-    version     = "0.10.4"
+    version     = "0.10.5"
 
 [features]
     # CUDA support with flash attention and fused kernels.
@@ -176,7 +176,7 @@
     mocopr = "0.1"
 
     # Hardware detection and system analysis
-    system-analysis = "0.2"
+    system-analysis = "0.3"
 
     # Candlelight - Unified Candle ML framework wrapper
     # Candlelight defaults enable flash-attn/cudnn/cuda; Lightbulb gates those

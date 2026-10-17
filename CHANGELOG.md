@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.10.5
+
+### Updated
+- system-analysis 0.2 -> 0.3.0 (pulls hardware-query 0.3.0 transitively,
+  closing the gap where lightbulb could not take hardware-query 0.3.0
+  directly: system-analysis 0.2.1's published `hardware-query = "^0.2.0"`
+  did not admit it). build-linux (Docker) and gates (native Windows, all
+  6 steps: fmt, lockfile, doc, test, featgate, clippy) both green; clippy
+  baseline unchanged (593 diagnostics, 51 lints, none new or increased).
+
 ## 0.10.4
 
 ### Added
