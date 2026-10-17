@@ -17,7 +17,6 @@ pub mod mixed_precision;
 pub mod model_runner;
 pub mod moe_router;
 pub mod performance_optimization;
-pub mod pipeline;
 pub mod production_providers;
 pub mod query_analysis;
 pub mod reasoning_controls;
@@ -67,10 +66,6 @@ pub use moe_router::{
 pub use performance_optimization::{
     AsyncContextManager, CacheConfig, CacheStats, ConnectionPool, EmbeddingModel,
     EmbeddingModelConfig, LazyEmbeddingModel, PoolStats,
-};
-pub use pipeline::{
-    CacheRef, Pipeline, PipelineBuilder, PipelineConfig, PipelineError, PipelineId, PipelineStats,
-    Stage, StageData, StageId, StageResult, StageState, StageType,
 };
 pub use production_providers::{
     EmbeddingConfig, EmbeddingProvider, FileChange, FileChangeType, FileWatcherConfig,

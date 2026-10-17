@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.11.0
+
+### Removed (breaking)
+- **Deleted `src/engine/pipeline.rs` (`Pipeline`/`PipelineBuilder`/`PipelineConfig`/`Stage`/etc.),
+  dead since it was added.** PM-directed decision (board follow-up on the 2026-10-14 Phase 4
+  audit's "Pipeline execution driver" finding): decide wire-or-delete with evidence. Evidence for
+  delete: zero callers anywhere outside the file and its own blanket re-export (`git grep` across
+  `src/ tests/ examples/ benches/`); no concrete roadmap plan names it as an integration point
+  (CR.1-CR.4 target `ModelRunner`'s inference loop directly; `docs/SCS_MODEL_SUPPORT.md`'s
+  "pipeline" is an unrelated, separately-planned `ScsInferencePipeline`); and unlike its two
+  siblings from the same origin commit (`KnowledgeBase`, `Decomposition`, both of which did get
+  real callers), this module never found one across the project's whole history. Building a real
+  async execution driver for it would be new feature work with no identified requester, not a
+  gap-fill. `lightbulb::engine::{Pipeline, PipelineBuilder, PipelineConfig, PipelineError,
+  PipelineId, PipelineStats, Stage, StageData, StageId, StageResult, StageState, StageType,
+  CacheRef}` are no longer part of the public API -- hence the 0.n major bump, pre-1.0. See
+  ROADMAP.md's "Pipeline execution driver" entry for the full evidence trail.
+
 ## 0.10.14
 
 ### Corrected
