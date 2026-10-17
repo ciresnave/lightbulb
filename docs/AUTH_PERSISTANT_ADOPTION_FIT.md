@@ -6,6 +6,16 @@ should adopt PersistAnt for persistence." Docs only -- no dependency added, no
 code changed. Answers: what in lightbulb's current auth/persistence maps onto
 each shared crate today, what's a real gap, and in what order to move.
 
+**Correction (same day):** the first version of this doc read both shared
+crates from their local working-tree checkouts under `C:\Projects`, which this
+portfolio's own `CLAUDE.md` §2 forbids ("Read `git show origin/main:<path>`,
+never a working tree -- checkouts are shared between lanes") precisely because
+those checkouts were stale. At `origin/main` today, PersistAnt is **0.7.4**
+(not 0.6.2) and auth-framework is **0.6.0-rc71** (not 0.5.0-rc24). Both
+sections below are rewritten from `git show origin/main:<path>` reads at those
+versions; the verdict changes for PersistAnt and partially for auth-framework.
+Section 1 (lightbulb's own code) was already correct and is unchanged.
+
 ## 1. What lightbulb has today
 
 ### 1a. Auth
@@ -69,180 +79,227 @@ test-fixture `None` defaults). Features used: `FOR UPDATE` row locks,
 `ON CONFLICT ... DO UPDATE ... RETURNING`, `EXISTS` subqueries, foreign keys
 with `ON DELETE {SET NULL,CASCADE}`, explicit transactions.
 
-## 2. auth-framework (v0.5.0-rc24, read at `C:\Projects\auth-framework`)
+## 2. auth-framework (v0.6.0-rc71, read via `git show origin/main:<path>`)
 
-Release candidate, pre-1.0, `rust-version = "1.88"`. README's own framing:
-"should still be validated against your environment, storage, TLS... before
-rollout."
-
-The `AuthMethodEnum`/`ApiKeyMethod` registry path (`src/methods/mod.rs:315`)
-is a **stub** -- its `authenticate()` arm for `Credential::ApiKey` always
-returns a fixed failure string telling the caller to go through
-`AuthFramework` directly instead. The real entry point is
+Release candidate, pre-1.0. The real entry points are
 `AuthFramework::{create_api_key, validate_api_key, revoke_api_key}`
-(`src/auth.rs:1272-1290`), which delegate to `UserManager` (`src/auth_modular
-/user_manager.rs:56-140`):
+(`src/auth.rs:1523-1541`), thin pass-throughs with no added logic, which
+delegate to `UserManager` (`src/auth_modular/user_manager.rs`):
 
-- `create_api_key(user_id, expires_in) -> String`: generates `ak_<32-byte
-  token>`, stores a JSON blob (`user_id`, `created_at`, `expires_at`) in the
-  storage backend keyed by **the literal plaintext key itself**
-  (`format!("api_key:{}", api_key)`, `:73`) -- no hashing anywhere on this
-  path (contrast `password_hash` via bcrypt elsewhere in the same file,
-  `:391`). A storage-backend leak hands out live, usable keys directly. This
-  is a real regression versus lightbulb's current hash-at-rest design, not
-  a lateral move.
-- `validate_api_key(key) -> UserInfo`: looks the plaintext up, checks
-  `expires_at`, and returns a `UserInfo` whose `roles` is **hardcoded to
-  `vec!["api_user"]`** (`:114`) -- the role lightbulb assigns at creation
-  time (user/admin/llm, enforced by `role_rank`) has no equivalent slot here.
-- **No `rotate_api_key` exists anywhere in `user_manager.rs`** (confirmed by
-  grep over the file) -- only create+revoke. lightbulb's one-transaction
-  atomic rotation has no direct replacement; it would have to be
-  hand-built as create-then-revoke (losing the atomicity guarantee) or kept
-  as lightbulb's own code calling auth-framework's primitives underneath.
-- Postgres storage backend (`src/storage/postgres.rs`) exists
-  (`postgres-storage` feature, default-on) and uses `sqlx`, not
-  `deadpool_postgres`/`tokio_postgres` -- a different pooling/driver stack
-  than lightbulb's current one, so this is a driver swap, not just an
-  auth-logic swap.
-- Rate limiting: `utils::rate_limit::RateLimiter` (`src/utils/rate_limit.rs`)
-  is in-process/synchronous (DashMap-shaped, not DB-backed) -- correct for a
-  single instance, loses lightbulb's current property of surviving a
-  restart and being consistent across multiple server instances.
-  `distributed::rate_limiting::DistributedRateLimiter`
-  (`src/distributed/rate_limiting.rs:116`) exists for that case but needs
-  **Redis** (`redis-storage` feature, `redis_url` config, `:29`) -- a new
-  infra dependency lightbulb does not have today, not a Postgres path.
-- RBAC exists (`enhanced-rbac` feature, `role_system` crate,
-  `src/authorization_enhanced/`) and is far richer than lightbulb's flat
-  three-role `role_rank` check, but it attaches to `UserInfo`/sessions, not
-  to the bare bearer-key-to-role mapping lightbulb's admin gate uses today
-  -- wiring it in is a design decision, not a drop-in.
+- **`create_api_key`** (`user_manager.rs:291-312`): generates `ak_<32-byte
+  token>`, stores a JSON blob (`user_id`, `created_at`, `expires_at`) under
+  `Self::api_key_storage_key(&api_key)`.
+- **Hash-at-rest is now implemented** (`user_manager.rs:203-208`):
+  `api_key_storage_key` names the row `"api_key_h:{digest}"` where `digest =
+  crate::storage::key_names::digest("api_key", api_key)` -- "a
+  domain-separated one-way digest, never the raw key" (the function's own
+  doc comment). This closes the gap the stale (rc24) read of this doc
+  reported. A paired `legacy_api_key_storage_key` (`:212`) and
+  `get_api_key_row` (`:227-265`) migrate any key still stored under the old
+  plaintext-named row on first read, with a documented concurrency argument
+  against a revoke racing the migration. **Gap 1 (plaintext keys at rest):
+  CLOSED.**
+- **`validate_api_key`** (`:326-356`) still returns a `UserInfo` whose
+  `roles` is **hardcoded to `vec!["api_user".to_string()]`**
+  (`user_manager.rs:351`), regardless of what role, if any, the key's owner
+  actually has. lightbulb's admin-gating and self-escalation check
+  (`role_rank`) have nothing to attach to without building a parallel role
+  store. **Gap 2 (no per-key role): still OPEN**, same line number
+  (`:351`) as before -- unchanged between rc24 and rc71.
+- **No `rotate_api_key` exists anywhere in the repository**
+  (`git grep -n 'rotate_api_key\|fn rotate' origin/main -- '*.rs'` returns
+  only unrelated hits: `authentication/advanced_auth.rs`'s
+  `rotate_codes`, `protocols/gnap.rs`'s OAuth `rotate_token`,
+  `security/secure_session.rs`'s `rotate_session`, and HMAC/RSA signing-key
+  rotation in `tokens/mod.rs` -- none of these touch API keys).
+  lightbulb's one-transaction atomic rotation (revoke old + insert new,
+  commit or neither) has no equivalent. **Gap 3 (no atomic key rotation):
+  still OPEN.**
+- A Postgres storage backend exists (`storage-postgres` feature family) and
+  uses `sqlx`, not `deadpool_postgres`/`tokio_postgres` -- a different
+  pooling/driver stack than lightbulb's current one, so adopting it is a
+  driver swap on top of the auth-logic swap, not just the latter.
 
 ### What maps close to 1:1
 - Bearer-token-to-identity lookup (`validate_api_key` ↔ `auth_middleware`'s
-  hash lookup) -- same shape, modulo the hashing gap above.
+  hash lookup) -- same shape, and now the storage side matches too
+  (both hash before persisting).
 - Create/revoke primitives exist on both sides with compatible semantics
   (expiry, one-shot revoke).
-- Both can sit behind axum middleware (`api-server`/`axum-integration`
-  features exist specifically for this).
+- Both can sit behind axum middleware (auth-framework ships
+  `api-server`/`axum-integration` features for this).
 
-### Gaps (concrete, not hypothetical)
-1. **No hash-at-rest for API keys** -- `create_api_key` stores the plaintext
-   as the lookup key. Adopting as-is is a security *regression* from
-   lightbulb's current SHA-256-hash design. Would need a wrapper that hashes
-   before calling in, or an upstream fix.
-2. **No role assigned at key-creation time** -- `validate_api_key` always
-   returns `api_user`; lightbulb's admin-gating and self-escalation check
-   (`role_rank`) have nothing to attach to without building a parallel
-   role store.
-3. **No atomic key rotation** -- `rotate_api_key` does not exist; lightbulb's
-   one-transaction old-key-revoke+new-key-issue has no equivalent.
-4. **Distributed rate limiting needs Redis**, a dependency lightbulb does
-   not currently have; the in-process alternative drops cross-restart and
-   cross-instance correctness lightbulb's current DB-backed limiter has.
-5. **Different Postgres driver** (`sqlx` vs `deadpool_postgres`/
-   `tokio_postgres`) -- adopting the Postgres storage backend means running
-   two Postgres client stacks side by side during migration, or porting
-   lightbulb's non-auth DB usage too (there is none today, so this is
-   contained, but worth naming).
-6. Pre-1.0 release-candidate maturity (rc24) -- CireSnave's "all deps at
+### Gaps (concrete, not hypothetical; re-verified against origin/main rc71)
+1. ~~No hash-at-rest for API keys~~ -- **CLOSED**, see above
+   (`user_manager.rs:203-208`).
+2. **No role assigned at key-creation time** -- `validate_api_key` still
+   always returns `api_user` (`user_manager.rs:351`); `create_api_key`
+   (`:291-312`) takes no role parameter either, so there is nowhere to put
+   one even on the write side.
+3. **No atomic key rotation** -- confirmed absent repo-wide, not just in
+   `user_manager.rs`.
+4. **Different Postgres driver** (`sqlx` vs `deadpool_postgres`/
+   `tokio_postgres`) if the Postgres storage backend is adopted alongside
+   the auth-logic swap.
+5. Pre-1.0 release-candidate maturity (rc71) -- CireSnave's "all deps at
    latest" standing rule applies, but an RC's API can still move under a
    minor bump in ways a stable 1.x would not.
 
-## 3. PersistAnt (v0.6.2, read at `C:\Projects\PersistAnt`)
+**Net change from the stale read:** one of three original regressions is
+fixed upstream already (hashing); two remain (role, rotation). The adoption
+blocker is now narrower than first reported, not gone.
 
-Pre-1.0. Its own README states the scope plainly: "a **thin** persistence
-layer over Apache OpenDAL, for **blobs and records stored by key**... *
-Migrations, locks and expiry are still to come.*"
+## 3. PersistAnt (v0.7.4, read via `git show origin/main:<path>`)
 
-`Config` (`src/store.rs:68-96`), the only way to open a `Store`, has exactly
-four variants: `Memory`, `Fs { root, atomic_write_dir }`, and two test fakes
-(`Faulty`, `Masked`) that wrap one of the other two. **There is no Postgres
-variant, no networked backend of any kind.** The API is get/put/delete by
-key plus typed records with a schema-version field (`Record::SCHEMA`) -- a
-key-value/blob store, not a relational one. It has no SQL, no joins, no
-transactions spanning multiple keys, no row locking, no foreign keys.
+Pre-1.0, but materially different from the v0.6.2 state the first version of
+this doc described: PersistAnt is now a **workspace** with a separate
+relational driver crate, `persistant-sqlx`
+(`crates/persistant-sqlx/Cargo.toml`), implementing
+`persistant_relational::RelationalBackend` for PostgreSQL (plus optional
+MySQL/SQLite). **The original "no Postgres backend, key-value only" verdict
+no longer holds.**
 
-### What maps 1:1
-Nothing. lightbulb's persistence needs are relational by construction: four
-tables joined by foreign key (`api_keys` ← `audit_logs`, `api_key_usage`,
-`auth_attempt_counts` is the exception, keyed by IP not by key), one
-multi-statement transaction with a row lock (`rotate_api_key`'s `FOR UPDATE`),
-atomic upsert-and-read-back counters (`ON CONFLICT ... RETURNING`), and an
-`EXISTS` subquery (the last-admin-key lockout check). None of these are
-expressible against a key-by-key blob store without rebuilding a relational
-layer on top of it from scratch -- which is exactly the layer PersistAnt's
-own README says isn't built yet ("migrations... still to come", and no
-transaction primitive is mentioned at all).
+`PgBackend` (`crates/persistant-sqlx/src/lib.rs:140-227`) wraps a real
+`sqlx::PgPool` and exposes `execute`/`query`/`begin(isolation)`; `begin`
+returns a `PgTx` implementing `RelationalTx` with `execute`/`query`/
+`commit`/`rollback` (`:210-250`). The trait doc is explicit that this is a
+raw-SQL passthrough, not a query-builder DSL: "Statements are written in the
+backend's own Dialect... Nothing here translates SQL."
+(`crates/persistant-relational/src/backend.rs:21-22`). That means `SELECT ...
+FOR UPDATE` and `INSERT ... ON CONFLICT ... RETURNING` -- the exact two
+constructs lightbulb's `rotate_api_key` and rate-limit counter depend on --
+are plain strings passed straight to `execute`/`query`, no translation layer
+to fight.
 
-### Gaps
-1. **No Postgres backend exists.** This is not a missing feature to work
-   around; it is the entire premise of lightbulb's persistence (foreign
-   keys, transactions, aggregate queries) having no home in PersistAnt's
-   current `Config` surface at all.
-2. **No transactions.** `rotate_api_key`'s atomicity guarantee (old key
-   revoked and new key live, or neither, never both) has no primitive to
-   build on.
-3. **No migrations.** Lightbulb's six-file, monotonically-numbered schema
-   evolution (`refinery`) has no PersistAnt-side equivalent; the README
-   lists this as future work, not a gap to engineer around today.
+The relational contract (`crates/persistant-relational/src/conformance.rs`)
+defines 11 leaves (`Leaf` enum, `:48-86`): `Values`, `Transaction`,
+`UniqueClassified`, `ForeignKey`, `CheckConstraint`,
+`IsolationNoDirtyRead`, `IsolationRepeatableRead`, `IsolationSerializable`,
+`Savepoint`, `RowLock` (doc comment: "a row locked `FOR UPDATE` by an open
+transaction cannot be locked by another connection"), `UpsertWhere` (`INSERT
+.. ON CONFLICT (..) DO UPDATE .. WHERE ..`). The checked-in conformance
+matrix for this backend, `matrix/sqlx-postgres.tsv` (against a real
+PostgreSQL 16.15), shows **every one of these `enabled=yes`**, plus a
+separate `rel.migrate.*` family (`apply`, `checksum`, `newer`, `atomic`,
+`ddl_atomic`, `concurrent`) also all `enabled=yes` -- checksummed, ordered,
+resumable migrations with corruption/staleness detection
+(`crates/persistant-relational/src/migrate.rs:1-60`: `ChecksumMismatch`,
+`NewerThanProgram`, `Dirty`, `Failed` error variants), comparable in rigor to
+lightbulb's current `refinery`-based six-file migration set.
+
+Error classification (`persistant-sqlx/src/lib.rs:29-50`) maps Postgres
+SQLSTATEs to typed `RelError` variants lightbulb's queries already produce
+conditions for: `23505`→`UniqueViolation`, `23503`→`ForeignKeyViolation`,
+`23514`/`23502`→`CheckViolation`, `40001`→`Serialization`,
+`40P01`→`Deadlock`.
+
+### What maps close to 1:1
+- `begin(Isolation::Serializable) -> PgTx { execute, query, commit }` ↔
+  lightbulb's `rotate_api_key` transaction (`SELECT ... FOR UPDATE`, insert
+  replacement, revoke old, commit) -- same shape, raw SQL both sides.
+- `RowLock` leaf, certified `enabled=yes` against Postgres 16.15 ↔
+  lightbulb's `FOR UPDATE` usage in the same function.
+- `UpsertWhere` leaf (`ON CONFLICT ... DO UPDATE ... WHERE`), certified
+  `enabled=yes` ↔ lightbulb's rate-limit counter's `ON CONFLICT DO UPDATE
+  ... RETURNING` (the `RETURNING` clause is a plain query result row via
+  `query()`, not a separate primitive).
+- `ForeignKey`/`CheckConstraint` leaves, certified `enabled=yes` ↔
+  lightbulb's `api_keys`-referencing foreign keys and column constraints.
+- Checksummed migrations with a dirty-state guard ↔ `refinery`'s embedded
+  migration set, comparable semantics (lightbulb would need to port six SQL
+  files' worth of DDL into `Migration::new(version, description, sql)`
+  calls, not redesign the schema).
+
+### Gaps (re-verified against origin/main 0.7.4; the v0.6.2 gap list no
+longer applies)
+1. **Separate crate, separate pool/driver.** `persistant-sqlx` wraps
+   `sqlx::PgPool`, not `deadpool_postgres`/`tokio_postgres` -- adopting it
+   means running two Postgres client stacks during migration, same shape as
+   the auth-framework driver-swap gap above (and the same non-issue today,
+   since lightbulb's only Postgres usage is already the auth/admin path
+   this would replace).
+2. **No evidence (in the files read) of a connection-pool-level feature
+   lightbulb currently relies on beyond pooling itself** -- not confirmed
+   either way for this doc; worth a short spike (`PgBackend::connect`/
+   `from_pool`, `lib.rs:146-165`) before committing to a full swap, but not
+   a blocker found so far.
+3. Pre-1.0 maturity -- same "all deps at latest, RC API can move" caveat as
+   auth-framework.
+
+**Net change from the stale read:** the "blocked, not sized" verdict is
+**wrong at current versions**. PersistAnt 0.7.4's relational driver covers
+every primitive lightbulb's persistence layer uses (transactions,
+serializable isolation, row locks, FK/check constraints, upsert-where,
+checksummed migrations), certified against a real PostgreSQL 16.15. This is
+now a **sized adoption**, not a blocked one.
 
 ## 4. Adoption order and recommendation
 
-**Do not adopt PersistAnt for lightbulb's current persistence now.** There
-is no backend to adopt *into* -- Postgres is not one of PersistAnt's four
-`Config` variants, and the relational operations lightbulb's auth/rate-limit
-path depends on (transactions, row locks, joins, aggregate queries) are
-outside what a key-value/blob store expresses at all, let alone what
-PersistAnt has built so far. Revisit if/when PersistAnt grows a Postgres
-(or any SQL) backend; until then this is a **blocked**, not a **sized**,
-item.
+**Adopt PersistAnt first.** At 0.7.4 it has no remaining functional gap
+against lightbulb's persistence needs: every relational primitive lightbulb
+uses (transactions, serializable isolation, row locks, FK/check constraints,
+upsert-where, checksummed migrations) is certified `enabled=yes` against a
+real PostgreSQL 16.15. The only real cost is the mechanical one of running a
+second Postgres driver stack (`sqlx` via `persistant-sqlx`) during the
+migration off `deadpool_postgres`/`tokio_postgres` -- contained, since
+lightbulb's only Postgres usage today is the auth/admin path this would
+replace, not spread across the codebase.
 
-**auth-framework is adoptable, but not as a like-for-like swap** -- three of
-its gaps (plaintext-key storage, no per-key role, no atomic rotation) are
-things lightbulb's current code does *better* today, so a naive swap is a
-regression on all three. The lower-risk path is: keep lightbulb's own
-hash-at-rest Postgres schema and role/rotation logic, and adopt
-auth-framework only for the pieces it clearly does *more* of than lightbulb
-needs to build itself (OAuth2/OIDC/SAML/WebAuthn, if those ever become
-in-scope for lightbulb; its RBAC, if lightbulb's three flat roles ever need
-to become real policies) -- i.e., treat it as additive capability, not a
-rip-and-replace of the bearer-key path. A rip-and-replace right now would
-have to reintroduce hashing, per-key roles, and atomic rotation inside
-auth-framework first, which is new work in a dependency, not adoption.
+**auth-framework is adoptable for the identity-lookup shape, but not yet a
+like-for-like swap for the role/rotation pieces.** One of the three original
+regressions is already fixed upstream (hash-at-rest). The other two
+(hardcoded `api_user` role, no atomic rotation) are things lightbulb's
+current code still does better. The lower-risk path: adopt
+auth-framework's `create_api_key`/`validate_api_key`/`revoke_api_key` for
+the bearer-token-to-identity lookup itself, but keep lightbulb's own
+role/rotation logic layered on top (role stored and checked in lightbulb's
+own schema, rotation still lightbulb's one-transaction revoke+issue) until
+auth-framework grows a per-key role and a rotation primitive upstream.
 
-**Risk framing, since the PM asked for it explicitly:** a broken persistence
-swap tends to fail *loudly* here (a missing table, a failed migration, a
-connection error) because every current query already has explicit error
-handling (fail-closed on the attempt limiter, fail-open with a logged error
-on the rate limiter) -- but PersistAnt isn't in a state to attempt this at
-all, so the risk question is moot for now. A broken auth swap is the more
-dangerous direction to rush: the two regressions that matter most (plaintext
-keys at rest, no per-key role) are both *silent* -- nothing crashes, nothing
-logs an error, the system simply becomes less secure in a way that only
-shows up in an audit or a breach. That argues for not touching auth either,
-until upstream closes those two gaps.
+**Why PersistAnt before auth-framework, not the other way round:** adopting
+PersistAnt touches *only* the storage layer underneath logic that doesn't
+change (the SQL lightbulb already runs, largely unchanged, now issued
+through `PgBackend` instead of `deadpool_postgres`) -- a contained,
+mechanical swap with a certified contract to verify against before and
+after. Adopting auth-framework's identity logic changes *behavior*
+(what's hashed, what's returned, what's enforced), which is riskier to
+land correctly and depends on the still-open role/rotation gaps either
+way. Do the lower-risk, higher-certainty swap first.
 
-**Effort/risk if the PM wants a sized plan despite the above:**
+**Risk framing, since the PM asked for it explicitly:** a broken PersistAnt
+swap tends to fail *loudly* -- a missing migration, a failed transaction, a
+connection error, all of which lightbulb's existing error handling already
+expects in some form (fail-closed on the attempt limiter, fail-open with a
+logged error on the rate limiter) and the conformance matrix gives a concrete
+thing to re-verify against (run lightbulb's own queries against `PgBackend`
+and confirm the same `RelError` classification lands for the same failure
+modes). A broken auth-framework identity swap is more dangerous to rush
+precisely because the two gaps that still exist (no per-key role, no
+rotation) are *silent* if routed around carelessly -- nothing crashes,
+nothing logs an error, a key that should have been scoped to `user` behaves
+as whatever role lightbulb's wrapper code assumes. Keeping role/rotation
+logic on lightbulb's own side (not inside auth-framework) is what keeps that
+risk from landing in the first place.
+
+**Effort/risk:**
 
 | Step | Effort | Risk | Why |
 |---|---|---|---|
-| Wrap auth-framework's `create_api_key` with a hashing layer | Small | Low | One function, mirrors lightbulb's existing `Sha256::new()...finalize()` pattern (already used 3x in `admin.rs`/`auth_middleware.rs`) |
-| Add a per-key role field to auth-framework (upstream PR) | Medium | Medium | Touches `UserManager::create_api_key`'s stored JSON shape and `validate_api_key`'s `UserInfo` construction; affects every auth-framework consumer, not just lightbulb |
-| Add atomic key rotation to auth-framework (upstream PR) | Medium | Medium | Needs a transaction primitive in whichever storage backend is active; `sqlx`'s Postgres backend has one, the in-memory/other backends may not |
-| Swap lightbulb's 48 call sites onto auth-framework's API once the above land | Large | High | Two Postgres driver stacks running at once during transition (`deadpool_postgres` + `sqlx`), 16 raw-SQL sites to retire, and the admin self-lockout/escalation tests (`admin.rs` `#[cfg(test)]`, ~9 tests) all need re-proving against the new path |
-| Adopt PersistAnt for lightbulb's persistence | **Blocked** | N/A | No Postgres backend exists in PersistAnt v0.6.2 |
+| Port lightbulb's 6 migration files to `persistant-relational::Migration` calls | Medium | Low | Mechanical translation of existing, working DDL; `rel.migrate.checksum`/`.atomic` are certified, so a ported migration either applies cleanly once or fails loudly before any app code runs |
+| Swap `deadpool_postgres`/`tokio_postgres` call sites onto `PgBackend`/`PgTx` | Large | Medium | ~16 raw-SQL sites across `auth_middleware.rs`/`admin.rs`; mechanical per-site (same SQL text, different `execute`/`query` call shape) but all must move together since only one pool can be live against the schema at a time |
+| Re-prove the admin self-lockout/escalation tests against `PgBackend` | Medium | Low | ~9 `#[cfg(test)]` tests in `admin.rs`; the conformance matrix already certifies the primitives they exercise (`RowLock`, `Transaction`), so this is re-running known-good tests on a new driver, not new test design |
+| Wrap auth-framework's `create_api_key`/`validate_api_key`/`revoke_api_key` for the lookup path, keeping lightbulb's role/rotation logic on top | Small | Low | Hashing gap is closed upstream; the wrapper only needs to carry lightbulb's existing role/rotation code, not invent new logic |
+| Add a per-key role field to auth-framework (upstream PR, benefits every project adopting it) | Medium | Medium | Touches `UserManager::create_api_key`'s stored JSON shape and `validate_api_key`'s `UserInfo` construction; affects every auth-framework consumer, not just lightbulb |
+| Add atomic key rotation to auth-framework (upstream PR, benefits every project adopting it) | Medium | Medium | Needs a transaction primitive in whichever storage backend is active; the Postgres backend has one via `persistant-sqlx`/`sqlx` if auth-framework adopts PersistAnt too, other backends may not |
 
 ## Open questions for the PM / CireSnave
 
-1. Is auth-framework's plaintext-key-at-rest and no-per-key-role gap
-   something to fix upstream (in auth-framework, benefiting every project)
-   before any lightbulb adoption, or is lightbulb expected to route around
-   it locally?
-2. Does `user_sessions` (dead schema, V3) get dropped as part of any future
-   persistence work regardless of PersistAnt's trajectory, since it's
-   unused today either way?
-3. Should lightbulb file the "needs a Postgres/SQL backend" gap against
-   PersistAnt now, so that work is visible on its own roadmap rather than
-   discovered again the next time this ruling is revisited?
+1. Should the PersistAnt migration-file port and the Postgres-driver swap
+   land as one PR or be staged (migrations ported and dual-run first,
+   driver swap second)?
+2. Does `user_sessions` (dead schema, V3) get dropped as part of the
+   PersistAnt migration port, since it's unused today regardless?
+3. Is auth-framework's no-per-key-role and no-rotation gap something to fix
+   upstream (benefiting every project) before lightbulb wraps around it, or
+   is a lightbulb-side wrapper (keeping role/rotation logic local)
+   acceptable as a permanent shape rather than a stopgap?
