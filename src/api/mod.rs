@@ -414,6 +414,71 @@ pub fn new_shared_system_metrics() -> SharedSystemMetrics {
     std::sync::Arc::new(std::sync::Mutex::new(sysinfo::System::new_all()))
 }
 
+/// Connects to Postgres with a short, bounded retry (5 attempts, 200ms
+/// doubling to 3200ms between tries -- about 6 seconds of total patience).
+/// `PgBackend::connect` is eager, so this absorbs the "database and app
+/// started by the same orchestrator at the same time" case the old lazy
+/// `deadpool_postgres` pool never had to think about.
+///
+/// If the database is still unreachable once the retries are exhausted,
+/// this returns `None` rather than propagating an error -- the server
+/// starts in the same degraded state it always has when `DATABASE_URL`
+/// is merely unset (auth/audit/rate-limiting disabled). That is the same
+/// tradeoff the pre-Step-5 `deadpool_postgres` code always had (it was
+/// ALWAYS lazy: a typo'd connection string there would also start the
+/// server successfully and only surface as a readiness-check failure on
+/// first use). Step 5's eager `connect()` is not introducing a stricter
+/// failure mode than this repo had before it -- this helper restores the
+/// older, more forgiving one.
+async fn connect_with_retry(database_url: &str) -> Option<persistant_sqlx::PgBackend> {
+    const DELAYS_MS: [u64; 4] = [200, 400, 800, 1600];
+    let mut last_err = None;
+    for (attempt, delay_ms) in DELAYS_MS.iter().copied().enumerate() {
+        match persistant_sqlx::PgBackend::connect(database_url).await {
+            Ok(backend) => return finish_connect(backend).await,
+            Err(e) => {
+                tracing::warn!(
+                    attempt = attempt + 1,
+                    error = %e,
+                    "database connect attempt failed, retrying"
+                );
+                last_err = Some(e);
+                tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+            }
+        }
+    }
+    // Final attempt, no further sleep after it.
+    match persistant_sqlx::PgBackend::connect(database_url).await {
+        Ok(backend) => finish_connect(backend).await,
+        Err(e) => {
+            tracing::error!(
+                error = %e,
+                prior_error = ?last_err,
+                "database unreachable after 5 attempts (~6s) — starting without a database \
+                 (auth/audit/rate-limiting disabled)"
+            );
+            None
+        }
+    }
+}
+
+/// Runs migrations on a freshly connected backend and logs success.
+/// Separated from `connect_with_retry` so a migration failure (distinct
+/// from a connection failure) is not retried -- a schema problem will not
+/// fix itself on the next attempt.
+async fn finish_connect(backend: persistant_sqlx::PgBackend) -> Option<persistant_sqlx::PgBackend> {
+    match backend.migrate(&persistant_migrate::migrations()).await {
+        Ok(_) => {
+            tracing::info!("Database connected and migrations applied");
+            Some(backend)
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "PersistAnt migration failed — starting without a database");
+            None
+        }
+    }
+}
+
 /// API server
 pub struct ApiServer {
     /// Application state
@@ -428,28 +493,15 @@ impl ApiServer {
         validate_server_config(&config)?;
 
         // PersistAnt adoption Step 5 (docs/PERSISTANT_ADOPTION_DESIGN.md): the
-        // sole database path. `PgBackend::connect` is EAGER -- unlike
-        // `deadpool_postgres::Pool::builder(...).build()`, which never
-        // touches the network until the first `.get()`, `connect()` opens a
-        // real connection and runs `SHOW server_version` before returning.
-        // This is a genuine behavior change from the prior lazy pool: a
-        // momentarily-unreachable database now fails `ApiServer::new`
-        // itself (the server refuses to start) rather than starting and
-        // reporting `not_configured`/`unreachable` via `/health/ready`
-        // until the database comes up. Flagged for the PM, not silently
-        // absorbed -- see this commit's message.
+        // sole database path. `PgBackend::connect` is EAGER (opens a real
+        // connection and runs `SHOW server_version` before returning), so a
+        // momentary DB blip at startup (e.g. container orchestration
+        // starting the app and the database at the same time) would
+        // otherwise fail `ApiServer::new` itself. `connect_with_retry`
+        // absorbs that with a short bounded retry; see its own doc comment
+        // for what happens if the database is genuinely unreachable.
         let pg_backend = match &config.database_url {
-            Some(database_url) => {
-                let backend = persistant_sqlx::PgBackend::connect(database_url)
-                    .await
-                    .map_err(|e| anyhow::anyhow!("PgBackend connect failed: {e}"))?;
-                backend
-                    .migrate(&persistant_migrate::migrations())
-                    .await
-                    .map_err(|e| anyhow::anyhow!("PersistAnt migration failed: {e}"))?;
-                tracing::info!("Database connected and migrations applied");
-                Some(backend)
-            }
+            Some(database_url) => connect_with_retry(database_url).await,
             None => {
                 tracing::info!(
                     "No DATABASE_URL set — running without database (auth/audit/rate-limiting disabled)"
@@ -1371,6 +1423,140 @@ mod tests {
             persistant_sqlx::PgBackend::connect("postgresql://nouser:nopass@127.0.0.1:1/nodb")
                 .await;
         assert!(result.is_err());
+    }
+
+    /// The red test `connecting_to_an_unreachable_database_fails` (above)
+    /// doesn't cover -- a `PgBackend` that connected successfully, then a
+    /// LATER query against it fails. `check_database`'s `CheckStatus::
+    /// Unreachable` arm is specifically that case.
+    ///
+    /// Two approaches were tried and measured NOT to work, kept here as the
+    /// reasoning for why this one is shaped the way it is:
+    /// - `pg_terminate_backend` alone: sqlx's pool silently opens a brand
+    ///   new connection on the very next `.query()` and the call succeeds
+    ///   anyway.
+    /// - `REVOKE CONNECT ON DATABASE ... FROM <role>` to also block the
+    ///   reconnect: has NO EFFECT, because the test role is a superuser in
+    ///   both this repo's Docker verification setup and CI's native
+    ///   `initdb`-created cluster (confirmed directly: `SELECT rolsuper
+    ///   FROM pg_roles WHERE rolname = current_user` returns `t`) --
+    ///   superusers bypass the `CONNECT` privilege check entirely.
+    ///
+    /// What actually works, privilege-agnostic: a local TCP proxy sits
+    /// between `PgBackend` and the real Postgres. The initial `connect()`
+    /// and one `check_database` call succeed through it (proving the
+    /// `Ok` path); the proxy's listener is then dropped so no further
+    /// connection to it is even possible, and its single open connection
+    /// is aborted -- severing the backend from Postgres the same way a
+    /// server crash or network partition would, regardless of role
+    /// privileges.
+    #[tokio::test]
+    #[ignore] // Requires PostgreSQL
+    async fn check_database_reports_unreachable_when_a_live_backend_goes_away() {
+        let db_url = std::env::var("LIGHTBULB_TEST_DATABASE_URL").unwrap_or_else(|_| {
+            "postgresql://lightbulb:vKTbmBA5RXIauMrNHxzs@localhost:5432/lightbulb".to_string()
+        });
+        let real_config: tokio_postgres::Config = db_url.parse().expect("valid test database URL");
+        let real_addr = format!(
+            "{}:{}",
+            real_config.get_hosts().first().map_or_else(
+                || "127.0.0.1".to_string(),
+                |h| {
+                    let tokio_postgres::config::Host::Tcp(s) = h;
+                    s.clone()
+                }
+            ),
+            real_config.get_ports().first().copied().unwrap_or(5432)
+        );
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind an ephemeral local port for the proxy");
+        let proxy_addr = listener
+            .local_addr()
+            .expect("the proxy's own bound address");
+
+        // A connection pool (sqlx's, underneath `PgBackend`) may open more
+        // than one TCP connection even for a single logical caller --
+        // measured directly: a proxy that only ever called `accept()` once
+        // left `check_database`'s own query hanging on a second connection
+        // attempt nobody was accepting. One `abort` broadcast covers every
+        // connection the pool opens through this proxy, however many there
+        // turn out to be; severing means: stop accepting new ones (`listen`
+        // task exits) AND cut every one already open (every per-connection
+        // task sees the broadcast and exits too).
+        let (abort_tx, _) = tokio::sync::broadcast::channel::<()>(1);
+        let proxy_task = tokio::spawn({
+            let abort_tx = abort_tx.clone();
+            async move {
+                loop {
+                    let mut abort_rx = abort_tx.subscribe();
+                    tokio::select! {
+                        accepted = listener.accept() => {
+                            let Ok((client, _)) = accepted else { break };
+                            let real_addr = real_addr.clone();
+                            let mut abort_rx2 = abort_tx.subscribe();
+                            tokio::spawn(async move {
+                                let Ok(mut upstream) =
+                                    tokio::net::TcpStream::connect(&real_addr).await
+                                else {
+                                    return;
+                                };
+                                let (mut client_r, mut client_w) = client.into_split();
+                                let (mut up_r, mut up_w) = upstream.split();
+                                tokio::select! {
+                                    _ = tokio::io::copy(&mut client_r, &mut up_w) => {}
+                                    _ = tokio::io::copy(&mut up_r, &mut client_w) => {}
+                                    _ = abort_rx2.recv() => {}
+                                }
+                            });
+                        }
+                        _ = abort_rx.recv() => break,
+                    }
+                }
+            }
+        });
+
+        // No `url` crate dependency in this repo; the connection string's
+        // shape is simple enough (`scheme://user:pass@host:port/db...`) to
+        // splice the host:port segment directly rather than add one.
+        let proxied_url = {
+            let after_at = db_url
+                .rsplit_once('@')
+                .map_or(db_url.as_str(), |(_, rest)| rest);
+            let path_start = after_at.find('/').unwrap_or(after_at.len());
+            let prefix_end = db_url.len() - after_at.len();
+            format!(
+                "{}{}:{}{}",
+                &db_url[..prefix_end],
+                proxy_addr.ip(),
+                proxy_addr.port(),
+                &after_at[path_start..]
+            )
+        };
+
+        let backend = persistant_sqlx::PgBackend::connect(&proxied_url)
+            .await
+            .expect("should connect to the real test database through the proxy");
+        assert!(
+            matches!(check_database(Some(&backend)).await, CheckStatus::Ok),
+            "sanity check: must be reachable (through the proxy) before we sever it"
+        );
+
+        // Sever the proxy: no more bytes flow, and the task exits (the
+        // listener was consumed into it, so it cannot accept a replacement
+        // connection either).
+        let _ = abort_tx.send(());
+        proxy_task
+            .await
+            .expect("the proxy task should exit cleanly");
+
+        let result = check_database(Some(&backend)).await;
+        assert!(
+            matches!(result, CheckStatus::Unreachable),
+            "a backend whose only path to Postgres was just severed must report \
+             Unreachable, not silently reconnect and report Ok: got {result:?}"
+        );
     }
 
     /// `metrics_endpoint` installs and reads ONE process-wide Prometheus

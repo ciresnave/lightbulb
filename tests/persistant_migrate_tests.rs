@@ -28,6 +28,22 @@ mod persistant_migrate_tests {
     /// real-world scenario this simulates (an existing refinery-migrated
     /// database, now pointed at the PersistAnt-only binary) is still worth
     /// testing even though the binary itself no longer has this code path.
+    ///
+    /// Resets the schema to empty FIRST. Found by CI (`postgres_integration`
+    /// runs `api_integration_tests` and this file back to back against the
+    /// SAME shared cluster, port 55432, within one job): once Step 5 made
+    /// `ApiServer::new` (used by `api_integration_tests`) migrate through
+    /// `PgBackend::migrate()` instead of refinery, that run leaves the same
+    /// tables/indexes behind that this file's raw refinery run also tries to
+    /// create -- `CREATE TABLE IF NOT EXISTS` tolerates that, but none of
+    /// the original `.sql` files' `CREATE INDEX` statements have
+    /// `IF NOT EXISTS` (only `persistant_migrate`'s ported, idempotency-fixed
+    /// copies do), so refinery's run failed with "relation ... already
+    /// exists" -- a real, permanent collision now that both test files'
+    /// migration paths create the identical schema, not the one-off
+    /// container-reuse mistake this looked like at first. Each test in this
+    /// file needs its own empty schema regardless of what ran before it in
+    /// the same CI job.
     async fn migrate_with_refinery(db_url: &str) {
         let (mut client, connection) = tokio_postgres::connect(db_url, tokio_postgres::NoTls)
             .await
@@ -35,6 +51,10 @@ mod persistant_migrate_tests {
         tokio::spawn(async move {
             let _ = connection.await;
         });
+        client
+            .batch_execute("DROP SCHEMA public CASCADE; CREATE SCHEMA public;")
+            .await
+            .expect("reset the schema to empty before the refinery baseline");
         refinery::embed_migrations!("./migrations");
         migrations::runner()
             .run_async(&mut client)

@@ -1,5 +1,54 @@
 # Changelog
 
+## 0.10.13
+
+### Fixed
+- **PM hold on PR#173, item 1 -- start-degraded behavior restored.**
+  `ApiServer::new` now calls a new `connect_with_retry` helper instead of
+  `PgBackend::connect` directly: 5 attempts with exponential backoff
+  (200ms, 400ms, 800ms, 1600ms between tries, ~6s total patience) absorb a
+  momentary database blip at startup (e.g. container orchestration
+  starting the app and the database at the same time). If the database is
+  still unreachable once the retries are exhausted, the server now starts
+  in the SAME degraded state it always has when `DATABASE_URL` is merely
+  unset (`pg_backend: None`, auth/audit/rate-limiting disabled) instead of
+  `ApiServer::new` itself returning an error. This restores the pre-Step-5
+  `deadpool_postgres` behavior (always lazy, so a bad connection string
+  there also only ever surfaced as a readiness-check failure on first
+  use) rather than introducing a new, stricter failure mode. Tradeoff
+  stated explicitly: a genuinely misconfigured `DATABASE_URL` (a typo, not
+  a blip) now starts successfully with auth silently disabled rather than
+  failing fast at startup -- the same tradeoff this repo always had before
+  Step 5's eager `connect()` briefly removed it.
+- **PM hold item 2 -- red-first test for `CheckStatus::Unreachable`.**
+  Added `check_database_reports_unreachable_when_a_live_backend_goes_away`
+  (`src/api/mod.rs`): a real throwaway Postgres behind a small local TCP
+  proxy this test runs itself, so the initial connect and one `Ok` check
+  succeed through it, then the proxy is severed (stops accepting AND
+  drops every connection already open) and a second check must report
+  `Unreachable`. Two simpler approaches were tried and measured NOT to
+  work (both still in the test's own doc comment): `pg_terminate_backend`
+  alone (sqlx's pool silently opens a fresh connection on the next query),
+  and additionally revoking the role's `CONNECT` privilege (the test role
+  is a superuser in both this repo's own Docker verification and CI's
+  native `initdb`-created cluster -- confirmed directly against both --
+  and superusers bypass `CONNECT` privilege checks entirely).
+- **Found while verifying, not part of the PM's hold but blocking
+  `postgres_integration` CI on the already-pushed commit:**
+  `tests/persistant_migrate_tests.rs`'s `migrate_with_refinery` helper now
+  resets the schema (`DROP SCHEMA public CASCADE; CREATE SCHEMA public;`)
+  before running refinery. The CI job runs `api_integration_tests` and
+  this file back to back against the SAME shared Postgres cluster within
+  one job; once Step 5 made `api_integration_tests` (via `ApiServer::new`)
+  migrate through `PgBackend::migrate()` instead of refinery, that run
+  left behind the same tables/indexes this file's raw refinery run also
+  tries to create -- none of the original `.sql` files' `CREATE INDEX`
+  statements have `IF NOT EXISTS` (only `persistant_migrate`'s ported
+  copies do), so refinery failed with "relation ... already exists".
+  Confirmed in the real CI log for run 39058146345. Verified fixed by
+  reproducing CI's exact sequence (`api_integration_tests` then
+  `persistant_migrate_tests`, same cluster, same container) twice.
+
 ## 0.10.12
 
 ### Added
