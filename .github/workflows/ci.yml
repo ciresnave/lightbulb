@@ -119,40 +119,32 @@ jobs:
           & "$env:PGBIN\pg_ctl.exe" -D "$env:RUNNER_TEMP\lightbulb-pgdata" stop -m fast
         continue-on-error: true
 
+  build-linux:
+    # Isolated from `gates` on purpose, same reasoning as hardware-query's own
+    # isolated build-linux job: this job's only question is whether the
+    # workspace compiles on Linux, which the Windows-only `gates` job below
+    # can't answer at all (it has never run on this OS).
+    #
+    # Previously red: `system-analysis 0.2.1 -> hardware-query 0.2.1` had 16
+    # compile errors under #[cfg(target_os = "linux")] (missing `use std::fs`
+    # in cpu.rs, 3 undefined driver-version functions in tpu.rs) -- a bug in
+    # hardware-query itself, fixed and republished as hardware-query 0.2.2.
+    # This crate now takes that version.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build (default features)
+        run: cargo build --workspace --verbose
+
   gates:
-    # WINDOWS, NOT LINUX, AND THIS IS A MEASURED CONSTRAINT RATHER THAN A
-    # PREFERENCE. Lightbulb does not currently build on Linux at all:
-    #
-    #   system-analysis 0.2.1  ->  hardware-query 0.2.1
-    #
-    # 16 compile errors, and they are TWO UNRELATED DEFECTS, not one:
-    #
-    #   13x error[E0433]  cpu.rs  -- bare `fs::read_to_string(...)` with no
-    #                                `use std::fs;` anywhere in the file
-    #    3x error[E0599]  tpu.rs  -- Self::get_edge_tpu_driver_version() (x2,
-    #                                :207 :245) and Self::get_habana_driver_
-    #                                version() (:306) HAVE ZERO DEFINITIONS in
-    #                                the crate. Not a missing import: missing
-    #                                functions. (Sibling get_tpu_driver_version
-    #                                at :355 does exist -- that is the control.)
-    #
-    # All 16 sit under `#[cfg(target_os = "linux")]`, which is why every build
-    # this project has ever run -- all on Windows -- compiled clean.
-    #
-    # SO THE FIX IS NOT ONE LINE. One line closes the E0433s; the E0599s need
-    # two functions written or three call sites removed, and what an Edge-TPU
-    # or Habana driver version should report is a judgement call, not a typo.
-    #
-    # 0.2.1 is the newest published version, so there is nothing to bump to.
-    # `system-analysis` is ours: `use system_analysis::SystemAnalyzer` inside
-    # `HardwareProfile::detect()` in src/hardware/mod.rs. So it is not trivially
-    # removable either. (Named by SYMBOL, not by line -- a line number in a
-    # comment moves silently on any insertion above it, and this comment is
-    # meant to be read long after it was written.)
-    #
-    # Windows is the platform this project is developed on, targets CUDA on,
-    # and is known to build on. A green gate on the platform that exists beats
-    # a red gate on the one we would like to.
+    # WINDOWS, NOT LINUX. Windows is the platform this project is developed
+    # on, targets CUDA on, and is known to build on -- the Linux question is
+    # answered separately by build-linux above, which only checks that the
+    # workspace compiles (not fmt/clippy/test, which stay Windows-scoped).
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
