@@ -222,69 +222,24 @@ fn push_layer_tensors(
     ffn_dim: usize,
     kv_dim: usize,
 ) {
-    push_tensor(
-        data,
-        rng,
-        format!("model.layers.{i}.self_attn.q_proj.weight"),
-        vec![dim, dim],
-        dim * dim,
-    );
-    push_tensor(
-        data,
-        rng,
-        format!("model.layers.{i}.self_attn.k_proj.weight"),
-        vec![kv_dim, dim],
-        kv_dim * dim,
-    );
-    push_tensor(
-        data,
-        rng,
-        format!("model.layers.{i}.self_attn.v_proj.weight"),
-        vec![kv_dim, dim],
-        kv_dim * dim,
-    );
-    push_tensor(
-        data,
-        rng,
-        format!("model.layers.{i}.self_attn.o_proj.weight"),
-        vec![dim, dim],
-        dim * dim,
-    );
-    push_tensor(
-        data,
-        rng,
-        format!("model.layers.{i}.mlp.gate_proj.weight"),
-        vec![ffn_dim, dim],
-        ffn_dim * dim,
-    );
-    push_tensor(
-        data,
-        rng,
-        format!("model.layers.{i}.mlp.up_proj.weight"),
-        vec![ffn_dim, dim],
-        ffn_dim * dim,
-    );
-    push_tensor(
-        data,
-        rng,
-        format!("model.layers.{i}.mlp.down_proj.weight"),
-        vec![dim, ffn_dim],
-        dim * ffn_dim,
-    );
-    push_tensor(
-        data,
-        rng,
-        format!("model.layers.{i}.input_layernorm.weight"),
-        vec![dim],
-        dim,
-    );
-    push_tensor(
-        data,
-        rng,
-        format!("model.layers.{i}.post_attention_layernorm.weight"),
-        vec![dim],
-        dim,
-    );
+    // (name suffix, shape) for all 9 per-layer tensors -- data-driven so this
+    // function stays short; the names/shapes still read directly against the
+    // HF tensor names `write_synthetic_checkpoint`'s doc comment lists.
+    let specs: [(&str, Vec<usize>); 9] = [
+        ("self_attn.q_proj.weight", vec![dim, dim]),
+        ("self_attn.k_proj.weight", vec![kv_dim, dim]),
+        ("self_attn.v_proj.weight", vec![kv_dim, dim]),
+        ("self_attn.o_proj.weight", vec![dim, dim]),
+        ("mlp.gate_proj.weight", vec![ffn_dim, dim]),
+        ("mlp.up_proj.weight", vec![ffn_dim, dim]),
+        ("mlp.down_proj.weight", vec![dim, ffn_dim]),
+        ("input_layernorm.weight", vec![dim]),
+        ("post_attention_layernorm.weight", vec![dim]),
+    ];
+    for (suffix, shape) in specs {
+        let len = shape.iter().product();
+        push_tensor(data, rng, format!("model.layers.{i}.{suffix}"), shape, len);
+    }
 }
 
 /// Writes a synthetic Llama-shaped checkpoint (`config.json` +
