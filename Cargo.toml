@@ -4,7 +4,7 @@
     license     = "MIT OR Apache-2.0"
     name        = "lightbulb"
     repository  = "https://github.com/ciresnave/lightbulb"
-    version     = "0.10.7"
+    version     = "0.10.8"
 
 [features]
     # CUDA support with flash attention and fused kernels.
@@ -150,6 +150,8 @@
     deadpool-postgres  = "0.14"
     refinery           = { version = "0.9", features = ["tokio-postgres"] }
     postgres-types     = { version = "0.2", features = ["derive", "with-chrono-0_4", "with-uuid-1"] }
+    persistant-sqlx       = "0.7.4"
+    persistant-relational = "0.7.4"
     tower-http         = { version = "0.6", features = ["cors", "trace"] }
 
     # TLS/Certificate dependencies

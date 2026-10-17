@@ -31,6 +31,7 @@ pub mod auth_middleware;
 pub mod chat_template;
 pub mod lightbulb;
 pub mod openai;
+pub mod persistant_migrate;
 pub mod security_event;
 pub mod types;
 
