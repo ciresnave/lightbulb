@@ -1,16 +1,40 @@
 # Changelog
 
+## 0.10.7
+
+### Added
+- `docs/PERSISTANT_ADOPTION_DESIGN.md`: design-first plan for swapping
+  lightbulb's admin/auth Postgres path (src/api/auth_middleware.rs,
+  src/api/admin.rs, 6 migration files) onto PersistAnt 0.7.4's
+  persistant-sqlx::PgBackend, per the PM's instruction following the
+  auth-framework/PersistAnt adoption-fit analysis. Covers the target
+  API shape, the migration path, two staging options (recommends
+  incremental-by-call-site over big-bang), a step order, and an
+  explicit rollback plan including the one stage (the pool/ledger
+  swap itself) a plain PR revert does not cover. Docs only -- no
+  dependency added, no source code or migration touched.
+
+### Corrected
+- The 0.10.6 entry below stated the auth-framework/PersistAnt
+  adoption-fit verdict as first written, which read both crates from
+  stale local working-tree checkouts. `docs/AUTH_PERSISTANT_ADOPTION_FIT.md`
+  itself was corrected in #167 (commit 6a55165) against current
+  `origin/main` for both repos, but this CHANGELOG entry was not
+  updated at the time -- a retraction that didn't reach as far as the
+  original claim. Corrected verdict, current as of PersistAnt 0.7.4 /
+  auth-framework 0.6.0-rc71: PersistAnt is **adoptable** (not blocked --
+  its `persistant-sqlx::PgBackend` now has a certified relational
+  contract covering every primitive lightbulb's persistence uses).
+  auth-framework's hash-at-rest gap is **closed**; its no-per-key-role
+  and no-atomic-rotation gaps are **still open**.
+
 ## 0.10.6
 
 ### Added
 - `docs/AUTH_PERSISTANT_ADOPTION_FIT.md`: adoption-fit analysis for
   auth-framework and PersistAnt against lightbulb's current API-key
   auth and Postgres persistence (board 196, CIRESNAVE-EXPECTATIONS
-  §6.14). Docs only, no code or dependency change. Verdict: PersistAnt
-  is blocked (no Postgres/SQL backend exists yet in v0.6.2); a naive
-  auth-framework swap would regress three things lightbulb does better
-  today (plaintext API keys at rest, no per-key role, no atomic
-  rotation).
+  §6.14). Docs only, no code or dependency change.
 
 ## 0.10.5
 
