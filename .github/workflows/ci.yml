@@ -113,6 +113,17 @@ jobs:
         run: |
           cargo test --test persistant_migrate_tests -- --ignored --test-threads=1
 
+      # PersistAnt adoption Step 5 (PM's hold item 2): the one red-first
+      # test proving check_database's CheckStatus::Unreachable arm. It
+      # lives in src/api/mod.rs's own #[cfg(test)] module (a lib test, not
+      # a tests/*.rs file), so neither step above ever invoked it --
+      # confirmed missing from this job's own log before this step existed.
+      - name: cargo test -- PersistAnt CheckStatus::Unreachable proof (Step 5)
+        shell: bash
+        run: |
+          cargo test --lib check_database_reports_unreachable_when_a_live_backend_goes_away \
+            -- --ignored --test-threads=1
+
       # tracing::error! calls in the request path (e.g. the pre-auth
       # attempt limiter failing its own DB query) go nowhere in a test
       # binary with no subscriber installed -- a 503 in the test output is
