@@ -1476,12 +1476,41 @@ mod tests {
     /// is aborted -- severing the backend from Postgres the same way a
     /// server crash or network partition would, regardless of role
     /// privileges.
-    #[tokio::test]
-    #[ignore] // Requires PostgreSQL
-    async fn check_database_reports_unreachable_when_a_live_backend_goes_away() {
-        let db_url = std::env::var("LIGHTBULB_TEST_DATABASE_URL").unwrap_or_else(|_| {
-            "postgresql://lightbulb:vKTbmBA5RXIauMrNHxzs@localhost:5432/lightbulb".to_string()
-        });
+    /// Splices a proxy's `host:port` into a Postgres connection string in
+    /// place of the real one. No `url` crate dependency in this repo; the
+    /// connection string's shape is simple enough
+    /// (`scheme://user:pass@host:port/db...`) to splice directly.
+    fn proxied_db_url(db_url: &str, proxy_addr: std::net::SocketAddr) -> String {
+        let after_at = db_url.rsplit_once('@').map_or(db_url, |(_, rest)| rest);
+        let path_start = after_at.find('/').unwrap_or(after_at.len());
+        let prefix_end = db_url.len() - after_at.len();
+        format!(
+            "{}{}:{}{}",
+            &db_url[..prefix_end],
+            proxy_addr.ip(),
+            proxy_addr.port(),
+            &after_at[path_start..]
+        )
+    }
+
+    /// Starts a local TCP proxy forwarding to `db_url`'s real host:port,
+    /// returning the proxy's own bound address, an abort sender that severs
+    /// every connection the proxy has ever opened (stops `accept()`ing AND
+    /// cuts every already-open connection), and the proxy task's handle.
+    ///
+    /// A connection pool (sqlx's, underneath `PgBackend`) may open more than
+    /// one TCP connection even for a single logical caller -- measured
+    /// directly: a proxy that only ever called `accept()` once left
+    /// `check_database`'s own query hanging on a second connection attempt
+    /// nobody was accepting. One `abort` broadcast covers every connection
+    /// the pool opens through this proxy, however many there turn out to be.
+    async fn start_severable_proxy(
+        db_url: &str,
+    ) -> (
+        std::net::SocketAddr,
+        tokio::sync::broadcast::Sender<()>,
+        tokio::task::JoinHandle<()>,
+    ) {
         let real_config: tokio_postgres::Config = db_url.parse().expect("valid test database URL");
         let real_addr = format!(
             "{}:{}",
@@ -1502,15 +1531,6 @@ mod tests {
             .local_addr()
             .expect("the proxy's own bound address");
 
-        // A connection pool (sqlx's, underneath `PgBackend`) may open more
-        // than one TCP connection even for a single logical caller --
-        // measured directly: a proxy that only ever called `accept()` once
-        // left `check_database`'s own query hanging on a second connection
-        // attempt nobody was accepting. One `abort` broadcast covers every
-        // connection the pool opens through this proxy, however many there
-        // turn out to be; severing means: stop accepting new ones (`listen`
-        // task exits) AND cut every one already open (every per-connection
-        // task sees the broadcast and exits too).
         let (abort_tx, _) = tokio::sync::broadcast::channel::<()>(1);
         let proxy_task = tokio::spawn({
             let abort_tx = abort_tx.clone();
@@ -1543,23 +1563,17 @@ mod tests {
             }
         });
 
-        // No `url` crate dependency in this repo; the connection string's
-        // shape is simple enough (`scheme://user:pass@host:port/db...`) to
-        // splice the host:port segment directly rather than add one.
-        let proxied_url = {
-            let after_at = db_url
-                .rsplit_once('@')
-                .map_or(db_url.as_str(), |(_, rest)| rest);
-            let path_start = after_at.find('/').unwrap_or(after_at.len());
-            let prefix_end = db_url.len() - after_at.len();
-            format!(
-                "{}{}:{}{}",
-                &db_url[..prefix_end],
-                proxy_addr.ip(),
-                proxy_addr.port(),
-                &after_at[path_start..]
-            )
-        };
+        (proxy_addr, abort_tx, proxy_task)
+    }
+
+    #[tokio::test]
+    #[ignore] // Requires PostgreSQL
+    async fn check_database_reports_unreachable_when_a_live_backend_goes_away() {
+        let db_url = std::env::var("LIGHTBULB_TEST_DATABASE_URL").unwrap_or_else(|_| {
+            "postgresql://lightbulb:vKTbmBA5RXIauMrNHxzs@localhost:5432/lightbulb".to_string()
+        });
+        let (proxy_addr, abort_tx, proxy_task) = start_severable_proxy(&db_url).await;
+        let proxied_url = proxied_db_url(&db_url, proxy_addr);
 
         let backend = persistant_sqlx::PgBackend::connect(&proxied_url)
             .await
