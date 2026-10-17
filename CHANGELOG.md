@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.11.1
+
+### Added
+- **M4 slice 5 (continuous batching) sub-slice plan**, per the PM's "sub-sliced, each slice
+  red-first" direction. ROADMAP.md now sizes it into 5.1-5.5: 5.1 verifies (doesn't assume) that
+  `ParallelModelManager::forward_batch` already tolerates the variable-live-request-set call
+  pattern continuous batching needs, before anything in `run_jobs` depends on it; 5.2 restructures
+  `run_jobs`'s admission loop with no behavior change; 5.3 is the real concurrent-stepping change;
+  5.4 wires `MemoryAwareScheduler`'s `SlotPool` in for real `scheduler_stats`/`scheduler_queue`/
+  priority data (closing what slices 3/4 deferred here); 5.5 is the already-known `run_jobs`
+  complexity refactor, sequenced last. Docs only, no code changed.
+
 ## 0.11.0
 
 ### Removed (breaking)

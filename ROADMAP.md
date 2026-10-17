@@ -854,9 +854,64 @@ its own test, in this order:
    chat/completions requests, mapped to `Priority` on submission into slice 2's admission path —
    **also blocked on the same gap**: there is no `submit_request` call for a priority to attach
    to yet. Revisit together with slice 5.
-5. **Continuous batching**: replace `run_jobs`'s one-job-at-a-time loop with real multi-request
-   batching via `SlotPool`. The big one — expect this to need further sub-slicing once reached;
-   do not pre-slice it now, the shape of slices 1-4 may change what's left.
+5. **Continuous batching — sub-sliced (2026-10-17, PM-tasked: "sub-sliced, each slice
+   red-first").** Scope is `run_jobs`'s orchestration loop (`src/engine/model_runner.rs`) on the
+   default (`candlelight`) path only — `fuel-engine` dispatches to `run_fuel_engine` instead
+   (`ModelRunner::start`'s `#[cfg(feature = "fuel-engine")]` arm, confirmed via
+   `grep -n "fuel-engine" src/engine/model_runner.rs`) and never calls `run_jobs`/`EngineModel` at
+   all, so it is untouched by any sub-slice here (that path is research track item 1's territory).
+
+   **Finding that changes the risk picture (2026-10-17):** the `EngineModel::step_batch` trait doc
+   warns that "a future scheduler that steps a SUBSET of live requests per call" would silently
+   corrupt cache state across requests, citing "the now-deleted `FuelEngineModel::step_batch`" as
+   the implementation that would have broken this way. **The one implementor that actually matters
+   for this slice, `ParallelModelManager::forward_batch` (`src/model/parallel_model_manager.rs:1095`),
+   is not that implementor** — it already separates `batch` by `RequestState` per call
+   (`Pending`/`Decoding`/`Completed` handled per-index, `:1118-1199`) and explicitly keeps
+   `Completed` slots in the batch on purpose ("In continuous batching, we need to include Completed
+   slots too... masked out, but we need the full batch size", `:1193-1197`) — i.e. it already looks
+   built for exactly the call pattern this slice needs (every live request present every call,
+   grown/shrunk between calls as requests arrive/finish). **This is a reading of the code, not a
+   measurement** — sub-slice 5.1 exists to turn it into one before anything in `run_jobs` depends
+   on it.
+
+   1. **5.1 — Verify the invariant holds, before relying on it.** New test driving
+      `ParallelModelManager::forward_batch` directly (no `run_jobs` involvement) through a sequence
+      that exercises the thing the trait doc warns about: request A admitted, steps a few tokens;
+      request B admitted into the same batch while A is still decoding; A completes and is dropped
+      from the batch on a later call while B continues; a fresh request C is admitted into the slot
+      A's cache index should now have freed. Assert C's generated tokens are correct (not corrupted
+      by A's leftover KV state) and that `cache_index_pool` accounting matches (no double-allocation,
+      no leak). Red first: written and run against current `main` before any `run_jobs` change, so
+      a failure here is caught as a pre-existing model-layer gap, not attributed to this slice's own
+      orchestration change.
+   2. **5.2 — Non-blocking admission, no behavior change yet.** Restructure `run_jobs`'s loop from
+      blocking `while let Ok(job) = rx.recv()` (one job, full lifetime, before the next is even read)
+      to maintaining a `Vec` of in-flight jobs fed by blocking-recv-when-empty /
+      try_recv-when-not-empty — but still step each job to completion alone, serially, matching
+      today's observable behavior exactly. Pure plumbing. Red-first acceptance test: capture
+      current output for a fixed sequence of jobs against a stub `EngineModel` (already used in
+      this file's test module), confirm it's green pre-refactor, then confirm it stays byte-identical
+      post-refactor — proves the new shape didn't change anything yet.
+   3. **5.3 — Real concurrent stepping.** Once 5.2's shape exists, call `step_batch` with every
+      live job's context together per iteration (not one), demux each returned token to its own
+      request's channel (stream) or accumulator (complete), and drop a job from the active `Vec`
+      only after a call reports it `Completed` (satisfying 5.1's invariant: a request stays in every
+      `batch` for every call it's live, never removed early). Red-first test: submit two jobs close
+      enough together that both must be mid-decode simultaneously; assert (a) `step_batch` is
+      observed receiving a batch of len ≥ 2 while both are in flight (a stub model records the
+      batch lengths it's called with — impossible under today's code, where it's always 1), and
+      (b) each request's own output is correct and uncontaminated by the other's tokens.
+   4. **5.4 — Wire `MemoryAwareScheduler`'s `SlotPool` in for real admission/limits**, closing what
+      slice plan items 3 and 4 above deferred here: `scheduler_stats`/`scheduler_queue` get real
+      data (slot occupancy, queue depth) once 5.3's concurrent set is the thing `SlotPool` is
+      actually tracking, and `Priority` (item 4) has a real multi-slot admission path to attach to
+      instead of `check_admission`'s dry-run estimate.
+   5. **5.5 — `run_jobs` complexity refactor (slice plan item 6, below)**, sequenced last as that
+      item already said, now that 5.1-5.4 have settled what the function actually looks like.
+
+   Each of 5.1-5.4 lands as its own PR, red-first, with cargo test --lib green before AND the new
+   test failing-then-passing demonstrated in the PR description — not just "compiles" at the end.
 
 Each slice must land green on `cargo test --lib` plus its own new test proving the specific claim
 (a mock replaced with live data, a real rejection, etc.) — not just "compiles."
