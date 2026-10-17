@@ -1,5 +1,42 @@
 # Changelog
 
+## 0.10.4
+
+### Added
+- A synthetic Llama-shaped checkpoint generator for the checkpoint/GGUF
+  `#[ignore]` fixture plan (`docs/CHECKPOINT_FIXTURE_FEASIBILITY.md`):
+  `tests/support/mod.rs` (reached from integration tests via
+  `#[path = "support/mod.rs"] mod support;`, and from `#[cfg(test)]` unit
+  tests under `src/` via `include!` from the new
+  `src::test_models::synthetic_checkpoint` module -- one file, two reach
+  paths, so there is exactly one copy to keep correct). Writes a tiny
+  (few-KB) `config.json` + `tokenizer.json` + `model.safetensors` with
+  random f32 weights, in the same HuggingFace directory layout the real
+  loaders already read. Verified end to end by a new unconditional (no
+  `#[ignore]`, no env var, no real checkpoint) unit test,
+  `test_models::tests::synthetic_checkpoint_loads`, which writes the
+  fixture and loads it through the real `load_llama_f32_from_dir`.
+- Adds `safetensors` as a dev-dependency (already present transitively;
+  this makes it a direct one for the generator to use).
+
+### Known gap, corrected from the feasibility note
+- The feasibility note characterized `model_fuel_golden.rs`'s 7 tests as
+  "zero additional design work beyond having a fixture at all" -- true for
+  loading a checkpoint, not true for this file's specific harness. Its
+  golden fixture lives at one hardcoded path
+  (`tests/fixtures/model_fuel_golden/v1/tinyllama_f32_greedy.json`);
+  pointing `TINYLLAMA_DIR` at the synthetic checkpoint and running
+  `capture_golden_fixture` would overwrite that real, human-reviewed
+  artifact rather than create a separate one. Un-ignoring those 7 needs a
+  parallel fixture path (and capture/compare functions) for the synthetic
+  checkpoint, not a one-line env-var swap -- a real, if modest, follow-up,
+  not a zero-effort one. Likewise `decoder.rs`'s
+  `stepwise_logits_match_the_reference_loop_exactly` hardcodes TinyLlama
+  token ids (e.g. `7483`) that exceed the synthetic checkpoint's smaller
+  vocabulary -- each test needs its own check against the fixture's actual
+  dimensions, not a blanket "any valid checkpoint works" assumption.
+  Correcting this now, before it's acted on as if it were true.
+
 ## 0.10.3
 
 ### Added

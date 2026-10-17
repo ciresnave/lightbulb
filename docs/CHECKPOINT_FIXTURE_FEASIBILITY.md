@@ -16,11 +16,17 @@ values (generated text, pinned vocab hashes, measured token counts) that a
 random-weight model will never reproduce, and 4 are special-cased (see
 below) -- building a synthetic fixture does not help those at all.
 
-**Recommendation: build the fixture, start with the 7 `model_fuel_golden.rs`
-tests (zero additional design work beyond having a fixture at all), then the
-metadata-only GGUF tests.** Treat the EOS-timing-dependent API tests and the
-multi-file corpus sweeps as a second phase -- they need a fixture engineered
-for specific behavior, not just a valid file.
+**Recommendation: build the fixture (done, PR #165), then wire up tests one
+at a time, smallest first.** `model_fuel_golden.rs`'s 7 tests are NOT the
+zero-engineering starting point this note originally claimed -- see the
+correction in "Tier 1" below, written after actually attempting the wiring.
+The genuinely cheapest conversions, needing only the generator itself with
+no further per-test adaptation, are the metadata-only GGUF tests (Tier 2)
+and the differential tests that don't hardcode checkpoint-specific values
+(most of Tier 1, excluding `model_fuel_golden.rs` and `decoder.rs`). Treat
+the EOS-timing-dependent API tests and the multi-file corpus sweeps as a
+later phase -- they need a fixture engineered for specific behavior, not
+just a valid file.
 
 ## Methodology
 
@@ -71,12 +77,14 @@ known hash/value from the real model, or assert the literal generated text
 
 No dependency on trained values. Ranked within each tier by estimated fixture effort.
 
-**Tier 1 -- works with any valid tiny synthetic checkpoint, no special engineering (13):**
+**Tier 1 -- no dependency on trained values, but NOT all "no special
+engineering" as first written (corrected after actually attempting the
+wiring in PR #165) (13):**
 
 | File:line | Test | Note |
 |---|---|---|
-| `tests/model_fuel_golden.rs:2615,2724,2828,2922,2988,3088,3145` (7) | determinism / cache-capacity invariance / position correctness / tie-break agreement | **All self-referential** -- each compares the fixture against a captured snapshot of *itself*, or two code paths on the *same* weights. None needs an externally-correct value. Despite the file's name, this is the single best conversion: have `capture_golden_fixture` point at the synthetic checkpoint and all 7 run as-is. |
-| `src/model_fuel/decoder.rs:142` | `stepwise_logits_match_the_reference_loop_exactly` | Differential: two code paths, same weights, `maxdiff == 0` |
+| `tests/model_fuel_golden.rs:2615,2724,2828,2922,2988,3088,3145` (7) | determinism / cache-capacity invariance / position correctness / tie-break agreement | **All self-referential** -- each compares the fixture against a captured snapshot of *itself*, or two code paths on the *same* weights, so none needs an externally-correct value. BUT the fixture this file reads/writes lives at one hardcoded path (`tests/fixtures/model_fuel_golden/v1/tinyllama_f32_greedy.json`); pointing `TINYLLAMA_DIR` at the synthetic checkpoint and running `capture_golden_fixture` would OVERWRITE that real, human-reviewed artifact rather than create a separate one. This is NOT a zero-effort conversion -- it needs a parallel fixture path and parallel capture/compare functions for the synthetic checkpoint, a real (if modest) follow-up PR of its own. |
+| `src/model_fuel/decoder.rs:142` | `stepwise_logits_match_the_reference_loop_exactly` | Differential: two code paths, same weights, `maxdiff == 0`. ALSO not zero-effort: the test hardcodes a TinyLlama-specific prompt (e.g. token id `7483`) that exceeds the synthetic checkpoint's smaller vocabulary -- needs its own small adaptation (safe placeholder tokens), not a blanket "any checkpoint works" swap. |
 | `src/model_fuel/loader_f32.rs:252` | `f32_and_stock_loaders_agree` | Differential: two loaders, same weights |
 | `tests/enhanced_correctness_tests.rs:88` | `test_batch_vs_sequential_single_token` | Differential: batch vs sequential, same weights. (This file has 7 more `#[ignore]`d siblings at lines 148/219/254/302/327/385/439 that weren't caught by the checkpoint/GGUF keyword filter and so aren't in this note's 62-test count, but are identically-shaped differential tests -- same conversion applies, free bonus beyond the scope counted here.) |
 | `tests/fuel_engine_http.rs:290` | `fuel_runner_serves_a_default_temperature_completion` | Explicitly documented in the test as shape/provenance-only, not content |
@@ -167,10 +175,13 @@ small hidden size, small vocab) covers every Tier 1-3 test. Concretely:
 4. **Tokenizer**: a tiny matching vocab/merges for the Tier 3 tests that need
    a (GGUF, tokenizer.json) pair.
 
-This single fixture (plus, later, the Tier 4/5 variants) unlocks all of Tier
-1-3 (26 tests) with no further design work; Tier 4 (8 tests) needs the same
-fixture but tuned so EOS fires at specific, deliberate token counts; Tier 5
-(2 tests) needs 2-3 more such files with varied metadata.
+This single fixture unlocks most of Tier 1-3 (26 tests) with no further
+design work -- except `model_fuel_golden.rs`'s 7 tests (need a parallel
+fixture path, not just the generator) and `decoder.rs`'s 1 (needs its
+hardcoded prompt adapted to the smaller vocabulary); see the corrections in
+Tier 1 above. Tier 4 (8 tests) needs the same fixture but tuned so EOS
+fires at specific, deliberate token counts; Tier 5 (2 tests) needs 2-3 more
+such files with varied metadata.
 
 ## What this note does not decide
 

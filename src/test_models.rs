@@ -155,6 +155,23 @@ pub fn describe() -> String {
     }
 }
 
+/// A tiny synthetic Llama-shaped checkpoint generator -- for `#[cfg(test)]`
+/// unit tests under `src/` that need a loadable checkpoint but not correct
+/// trained values. See `docs/CHECKPOINT_FIXTURE_FEASIBILITY.md`.
+///
+/// `#[cfg(test)]`-gated rather than a plain `pub mod`, because it depends on
+/// `safetensors`, a dev-dependency -- unavailable to the crate's normal
+/// (non-test) build. `tests/*.rs` integration tests can't see this module at
+/// all (they link against the lib built *without* `--cfg test`); they
+/// instead declare `#[path = "support/mod.rs"] mod support;` to reach the
+/// very same file this `include!`s. One physical file, reached two
+/// different ways, so there is exactly one copy of this logic to keep
+/// correct.
+#[cfg(test)]
+pub mod synthetic_checkpoint {
+    include!("../tests/support/mod.rs");
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -220,5 +237,27 @@ mod tests {
             dir.display()
         );
         println!("{}", describe());
+    }
+
+    /// Smoke test for the synthetic-checkpoint generator itself
+    /// (`docs/CHECKPOINT_FIXTURE_FEASIBILITY.md`): the written directory must
+    /// actually load through the same loader the real checkpoint uses, not
+    /// merely contain well-formed JSON. Runs unconditionally -- no
+    /// environment variable, no real checkpoint, no `#[ignore]` -- because
+    /// its whole point is that it needs none of those.
+    #[test]
+    fn synthetic_checkpoint_loads() {
+        use crate::model_fuel::loader_f32::load_llama_f32_from_dir;
+        use synthetic_checkpoint::{SyntheticArchitecture, write_synthetic_checkpoint};
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let arch = SyntheticArchitecture::default();
+        write_synthetic_checkpoint(tmp.path(), &arch).expect("writing synthetic checkpoint");
+
+        let loaded = load_llama_f32_from_dir(tmp.path()).expect("loading synthetic checkpoint");
+        assert_eq!(loaded.config.dim, arch.hidden_size);
+        assert_eq!(loaded.config.n_layers, arch.num_hidden_layers);
+        assert_eq!(loaded.config.vocab_size, arch.vocab_size);
+        assert_eq!(loaded.model.weights.layers.len(), arch.num_hidden_layers);
     }
 }
