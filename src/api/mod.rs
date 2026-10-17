@@ -1504,15 +1504,10 @@ mod tests {
     /// `check_database`'s own query hanging on a second connection attempt
     /// nobody was accepting. One `abort` broadcast covers every connection
     /// the pool opens through this proxy, however many there turn out to be.
-    async fn start_severable_proxy(
-        db_url: &str,
-    ) -> (
-        std::net::SocketAddr,
-        tokio::sync::broadcast::Sender<()>,
-        tokio::task::JoinHandle<()>,
-    ) {
+    /// The real Postgres's `host:port`, parsed out of a connection string.
+    fn real_host_port(db_url: &str) -> String {
         let real_config: tokio_postgres::Config = db_url.parse().expect("valid test database URL");
-        let real_addr = format!(
+        format!(
             "{}:{}",
             real_config.get_hosts().first().map_or_else(
                 || "127.0.0.1".to_string(),
@@ -1522,8 +1517,36 @@ mod tests {
                 }
             ),
             real_config.get_ports().first().copied().unwrap_or(5432)
-        );
+        )
+    }
 
+    /// Forwards one accepted client connection to `real_addr` until either
+    /// side closes or `abort_rx` fires -- one task per proxied connection.
+    async fn forward_one_connection(
+        client: tokio::net::TcpStream,
+        real_addr: String,
+        mut abort_rx: tokio::sync::broadcast::Receiver<()>,
+    ) {
+        let Ok(mut upstream) = tokio::net::TcpStream::connect(&real_addr).await else {
+            return;
+        };
+        let (mut client_r, mut client_w) = client.into_split();
+        let (mut up_r, mut up_w) = upstream.split();
+        tokio::select! {
+            _ = tokio::io::copy(&mut client_r, &mut up_w) => {}
+            _ = tokio::io::copy(&mut up_r, &mut client_w) => {}
+            _ = abort_rx.recv() => {}
+        }
+    }
+
+    async fn start_severable_proxy(
+        db_url: &str,
+    ) -> (
+        std::net::SocketAddr,
+        tokio::sync::broadcast::Sender<()>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let real_addr = real_host_port(db_url);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind an ephemeral local port for the proxy");
@@ -1540,22 +1563,11 @@ mod tests {
                     tokio::select! {
                         accepted = listener.accept() => {
                             let Ok((client, _)) = accepted else { break };
-                            let real_addr = real_addr.clone();
-                            let mut abort_rx2 = abort_tx.subscribe();
-                            tokio::spawn(async move {
-                                let Ok(mut upstream) =
-                                    tokio::net::TcpStream::connect(&real_addr).await
-                                else {
-                                    return;
-                                };
-                                let (mut client_r, mut client_w) = client.into_split();
-                                let (mut up_r, mut up_w) = upstream.split();
-                                tokio::select! {
-                                    _ = tokio::io::copy(&mut client_r, &mut up_w) => {}
-                                    _ = tokio::io::copy(&mut up_r, &mut client_w) => {}
-                                    _ = abort_rx2.recv() => {}
-                                }
-                            });
+                            tokio::spawn(forward_one_connection(
+                                client,
+                                real_addr.clone(),
+                                abort_tx.subscribe(),
+                            ));
                         }
                         _ = abort_rx.recv() => break,
                     }
