@@ -437,6 +437,23 @@ async fn create_api_key(
 /// is RFC3339-parseable (Postgres's own default `::text` cast of a
 /// `timestamptz` is NOT RFC3339 -- e.g. a space instead of `T` -- and would
 /// fail `DateTime::parse_from_rfc3339`).
+const INSERT_API_KEY_SQL: &str = r#"
+    INSERT INTO api_keys (key_hash, role, description, expires_at)
+    VALUES ($1, $2, $3,
+        CASE
+            WHEN $4::bigint IS NOT NULL
+            THEN to_timestamp($4::bigint)
+            ELSE NULL
+        END
+    )
+    RETURNING
+        id::text AS id,
+        to_char(
+            expires_at AT TIME ZONE 'UTC',
+            'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'
+        ) AS expires_at
+"#;
+
 async fn insert_api_key_row(
     state: &AppState,
     key_hash: &str,
@@ -459,22 +476,7 @@ async fn insert_api_key_row(
 
     let rows = backend
         .query(
-            r#"
-            INSERT INTO api_keys (key_hash, role, description, expires_at)
-            VALUES ($1, $2, $3,
-                CASE
-                    WHEN $4::bigint IS NOT NULL
-                    THEN to_timestamp($4::bigint)
-                    ELSE NULL
-                END
-            )
-            RETURNING
-                id::text AS id,
-                to_char(
-                    expires_at AT TIME ZONE 'UTC',
-                    'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'
-                ) AS expires_at
-            "#,
+            INSERT_API_KEY_SQL,
             &[
                 persistant_relational::Value::Text(key_hash.to_string()),
                 persistant_relational::Value::Text(role.to_string()),
