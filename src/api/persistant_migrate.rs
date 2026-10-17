@@ -31,99 +31,93 @@
 use persistant_relational::{Migration, Value};
 use uuid::Uuid;
 
+const V1_CREATE_API_KEYS: &str = "CREATE TABLE IF NOT EXISTS api_keys (\
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),\
+    key_hash VARCHAR(64) NOT NULL UNIQUE,\
+    role VARCHAR(20) NOT NULL CHECK (role IN ('user', 'admin', 'llm')),\
+    description TEXT,\
+    created_at TIMESTAMP NOT NULL DEFAULT NOW(),\
+    expires_at TIMESTAMP,\
+    last_used_at TIMESTAMP\
+ );\
+ CREATE INDEX IF NOT EXISTS idx_api_keys_key_hash ON api_keys(key_hash);\
+ CREATE INDEX IF NOT EXISTS idx_api_keys_created_at ON api_keys(created_at);\
+ CREATE INDEX IF NOT EXISTS idx_api_keys_expires_at ON api_keys(expires_at);";
+
+const V2_CREATE_AUDIT_LOGS: &str = "CREATE TABLE IF NOT EXISTS audit_logs (\
+    id BIGSERIAL PRIMARY KEY,\
+    api_key_id UUID REFERENCES api_keys(id) ON DELETE SET NULL,\
+    endpoint VARCHAR(255) NOT NULL,\
+    method VARCHAR(10) NOT NULL,\
+    status_code INTEGER NOT NULL,\
+    latency_ms INTEGER NOT NULL,\
+    request_size_bytes BIGINT,\
+    response_size_bytes BIGINT,\
+    error_message TEXT,\
+    created_at TIMESTAMP NOT NULL DEFAULT NOW()\
+ );\
+ CREATE INDEX IF NOT EXISTS idx_audit_logs_api_key_id ON audit_logs(api_key_id);\
+ CREATE INDEX IF NOT EXISTS idx_audit_logs_created_at ON audit_logs(created_at);\
+ CREATE INDEX IF NOT EXISTS idx_audit_logs_endpoint ON audit_logs(endpoint);\
+ CREATE INDEX IF NOT EXISTS idx_audit_logs_status_code ON audit_logs(status_code);";
+
+const V3_CREATE_SESSIONS: &str = "CREATE TABLE IF NOT EXISTS user_sessions (\
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),\
+    api_key_id UUID NOT NULL REFERENCES api_keys(id) ON DELETE CASCADE,\
+    session_token VARCHAR(128) NOT NULL UNIQUE,\
+    ip_address INET,\
+    user_agent TEXT,\
+    created_at TIMESTAMP NOT NULL DEFAULT NOW(),\
+    last_accessed_at TIMESTAMP NOT NULL DEFAULT NOW(),\
+    expires_at TIMESTAMP NOT NULL\
+ );\
+ CREATE INDEX IF NOT EXISTS idx_user_sessions_session_token ON user_sessions(session_token);\
+ CREATE INDEX IF NOT EXISTS idx_user_sessions_api_key_id ON user_sessions(api_key_id);\
+ CREATE INDEX IF NOT EXISTS idx_user_sessions_expires_at ON user_sessions(expires_at);\
+ CREATE INDEX IF NOT EXISTS idx_user_sessions_last_accessed_at ON user_sessions(last_accessed_at);";
+
+const V4_CREATE_RATE_LIMITS: &str = "CREATE TABLE IF NOT EXISTS api_key_usage (\
+    api_key_id UUID NOT NULL REFERENCES api_keys(id) ON DELETE CASCADE,\
+    window_start TIMESTAMP NOT NULL,\
+    request_count INTEGER NOT NULL DEFAULT 0,\
+    PRIMARY KEY (api_key_id, window_start)\
+ );\
+ CREATE INDEX IF NOT EXISTS idx_api_key_usage_window_start ON api_key_usage(window_start);";
+
+const V5_CREATE_AUTH_ATTEMPT_COUNTS: &str = "CREATE TABLE IF NOT EXISTS auth_attempt_counts (\
+    client_ip INET NOT NULL,\
+    window_start TIMESTAMP NOT NULL,\
+    request_count INTEGER NOT NULL DEFAULT 0,\
+    PRIMARY KEY (client_ip, window_start)\
+ );\
+ CREATE INDEX IF NOT EXISTS idx_auth_attempt_counts_window_start ON auth_attempt_counts(window_start);";
+
+const V6_ADD_API_KEY_REVOCATION: &str = "DO $$ BEGIN \
+    IF NOT EXISTS ( \
+        SELECT 1 FROM information_schema.columns \
+        WHERE table_name = 'api_keys' AND column_name = 'revoked_at' \
+    ) THEN \
+        ALTER TABLE api_keys ADD COLUMN revoked_at TIMESTAMP; \
+    END IF; \
+ END $$;\
+ CREATE INDEX IF NOT EXISTS idx_api_keys_revoked_at ON api_keys(revoked_at);";
+
 /// The 6 migrations, ported. Versions and descriptions match the original
-/// `V{n}__{description}.sql` filenames.
+/// `V{n}__{description}.sql` filenames; each migration's SQL text lives in
+/// its own module-level const above (kept out of this function so its own
+/// line count stays short -- the SQL itself, not the wiring, is what's long).
 pub fn migrations() -> Vec<Migration> {
     vec![
-        Migration::new(
-            1,
-            "create_api_keys",
-            "CREATE TABLE IF NOT EXISTS api_keys (\
-                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),\
-                key_hash VARCHAR(64) NOT NULL UNIQUE,\
-                role VARCHAR(20) NOT NULL CHECK (role IN ('user', 'admin', 'llm')),\
-                description TEXT,\
-                created_at TIMESTAMP NOT NULL DEFAULT NOW(),\
-                expires_at TIMESTAMP,\
-                last_used_at TIMESTAMP\
-             );\
-             CREATE INDEX IF NOT EXISTS idx_api_keys_key_hash ON api_keys(key_hash);\
-             CREATE INDEX IF NOT EXISTS idx_api_keys_created_at ON api_keys(created_at);\
-             CREATE INDEX IF NOT EXISTS idx_api_keys_expires_at ON api_keys(expires_at);",
-        ),
-        Migration::new(
-            2,
-            "create_audit_logs",
-            "CREATE TABLE IF NOT EXISTS audit_logs (\
-                id BIGSERIAL PRIMARY KEY,\
-                api_key_id UUID REFERENCES api_keys(id) ON DELETE SET NULL,\
-                endpoint VARCHAR(255) NOT NULL,\
-                method VARCHAR(10) NOT NULL,\
-                status_code INTEGER NOT NULL,\
-                latency_ms INTEGER NOT NULL,\
-                request_size_bytes BIGINT,\
-                response_size_bytes BIGINT,\
-                error_message TEXT,\
-                created_at TIMESTAMP NOT NULL DEFAULT NOW()\
-             );\
-             CREATE INDEX IF NOT EXISTS idx_audit_logs_api_key_id ON audit_logs(api_key_id);\
-             CREATE INDEX IF NOT EXISTS idx_audit_logs_created_at ON audit_logs(created_at);\
-             CREATE INDEX IF NOT EXISTS idx_audit_logs_endpoint ON audit_logs(endpoint);\
-             CREATE INDEX IF NOT EXISTS idx_audit_logs_status_code ON audit_logs(status_code);",
-        ),
-        Migration::new(
-            3,
-            "create_sessions",
-            "CREATE TABLE IF NOT EXISTS user_sessions (\
-                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),\
-                api_key_id UUID NOT NULL REFERENCES api_keys(id) ON DELETE CASCADE,\
-                session_token VARCHAR(128) NOT NULL UNIQUE,\
-                ip_address INET,\
-                user_agent TEXT,\
-                created_at TIMESTAMP NOT NULL DEFAULT NOW(),\
-                last_accessed_at TIMESTAMP NOT NULL DEFAULT NOW(),\
-                expires_at TIMESTAMP NOT NULL\
-             );\
-             CREATE INDEX IF NOT EXISTS idx_user_sessions_session_token ON user_sessions(session_token);\
-             CREATE INDEX IF NOT EXISTS idx_user_sessions_api_key_id ON user_sessions(api_key_id);\
-             CREATE INDEX IF NOT EXISTS idx_user_sessions_expires_at ON user_sessions(expires_at);\
-             CREATE INDEX IF NOT EXISTS idx_user_sessions_last_accessed_at ON user_sessions(last_accessed_at);",
-        ),
-        Migration::new(
-            4,
-            "create_rate_limits",
-            "CREATE TABLE IF NOT EXISTS api_key_usage (\
-                api_key_id UUID NOT NULL REFERENCES api_keys(id) ON DELETE CASCADE,\
-                window_start TIMESTAMP NOT NULL,\
-                request_count INTEGER NOT NULL DEFAULT 0,\
-                PRIMARY KEY (api_key_id, window_start)\
-             );\
-             CREATE INDEX IF NOT EXISTS idx_api_key_usage_window_start ON api_key_usage(window_start);",
-        ),
+        Migration::new(1, "create_api_keys", V1_CREATE_API_KEYS),
+        Migration::new(2, "create_audit_logs", V2_CREATE_AUDIT_LOGS),
+        Migration::new(3, "create_sessions", V3_CREATE_SESSIONS),
+        Migration::new(4, "create_rate_limits", V4_CREATE_RATE_LIMITS),
         Migration::new(
             5,
             "create_auth_attempt_counts",
-            "CREATE TABLE IF NOT EXISTS auth_attempt_counts (\
-                client_ip INET NOT NULL,\
-                window_start TIMESTAMP NOT NULL,\
-                request_count INTEGER NOT NULL DEFAULT 0,\
-                PRIMARY KEY (client_ip, window_start)\
-             );\
-             CREATE INDEX IF NOT EXISTS idx_auth_attempt_counts_window_start ON auth_attempt_counts(window_start);",
+            V5_CREATE_AUTH_ATTEMPT_COUNTS,
         ),
-        Migration::new(
-            6,
-            "add_api_key_revocation",
-            "DO $$ BEGIN \
-                IF NOT EXISTS ( \
-                    SELECT 1 FROM information_schema.columns \
-                    WHERE table_name = 'api_keys' AND column_name = 'revoked_at' \
-                ) THEN \
-                    ALTER TABLE api_keys ADD COLUMN revoked_at TIMESTAMP; \
-                END IF; \
-             END $$;\
-             CREATE INDEX IF NOT EXISTS idx_api_keys_revoked_at ON api_keys(revoked_at);",
-        ),
+        Migration::new(6, "add_api_key_revocation", V6_ADD_API_KEY_REVOCATION),
     ]
 }
 

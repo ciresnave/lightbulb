@@ -102,6 +102,17 @@ jobs:
         run: |
           cargo test --test api_integration_tests -- --ignored --test-threads=1
 
+      # PersistAnt adoption Step 1 (docs/PERSISTANT_ADOPTION_DESIGN.md): these
+      # 3 tests are the proof that the ported migrations apply cleanly on top
+      # of a database refinery already migrated. `#[ignore]` stays on them,
+      # same convention as the suite above (this job forces them with
+      # `--ignored`) -- the gap was this job never invoking this test binary
+      # at all, not the attribute itself.
+      - name: cargo test -- PersistAnt migration-port proof (Step 1)
+        shell: bash
+        run: |
+          cargo test --test persistant_migrate_tests -- --ignored --test-threads=1
+
       # tracing::error! calls in the request path (e.g. the pre-auth
       # attempt limiter failing its own DB query) go nowhere in a test
       # binary with no subscriber installed -- a 503 in the test output is

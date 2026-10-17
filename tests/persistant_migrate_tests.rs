@@ -70,10 +70,42 @@ mod persistant_migrate_tests {
         assert!(report.already_applied.is_empty());
     }
 
+    async fn assert_tables_exist(client: &tokio_postgres::Client, tables: &[&str]) {
+        for table in tables {
+            let exists: bool = client
+                .query_one(
+                    "SELECT EXISTS (SELECT 1 FROM information_schema.tables \
+                     WHERE table_name = $1)",
+                    &[table],
+                )
+                .await
+                .unwrap_or_else(|e| panic!("checking table {table}: {e}"))
+                .get(0);
+            assert!(exists, "table {table} should exist after the port");
+        }
+    }
+
+    async fn assert_indexes_exist(client: &tokio_postgres::Client, indexes: &[&str]) {
+        for index in indexes {
+            let exists: bool = client
+                .query_one(
+                    "SELECT EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = $1)",
+                    &[index],
+                )
+                .await
+                .unwrap_or_else(|e| panic!("checking index {index}: {e}"))
+                .get(0);
+            assert!(exists, "index {index} should exist after the port");
+        }
+    }
+
     /// The "diff the resulting schema" half of the proof: every table,
     /// column and index the original `.sql` files create is present and
     /// correctly shaped after PersistAnt's run, queried directly rather than
-    /// assumed from the migration text succeeding.
+    /// assumed from the migration text succeeding. Split into the two
+    /// `assert_*_exist` helpers above to keep this function itself short --
+    /// the number of things checked, not the function's own logic, is what's
+    /// large here.
     #[tokio::test]
     #[ignore] // Requires PostgreSQL
     async fn schema_after_persistant_migrate_matches_the_original_migrations() {
@@ -94,24 +126,17 @@ mod persistant_migrate_tests {
             let _ = connection.await;
         });
 
-        for table in [
-            "api_keys",
-            "audit_logs",
-            "user_sessions",
-            "api_key_usage",
-            "auth_attempt_counts",
-        ] {
-            let exists: bool = client
-                .query_one(
-                    "SELECT EXISTS (SELECT 1 FROM information_schema.tables \
-                     WHERE table_name = $1)",
-                    &[&table],
-                )
-                .await
-                .unwrap_or_else(|e| panic!("checking table {table}: {e}"))
-                .get(0);
-            assert!(exists, "table {table} should exist after the port");
-        }
+        assert_tables_exist(
+            &client,
+            &[
+                "api_keys",
+                "audit_logs",
+                "user_sessions",
+                "api_key_usage",
+                "auth_attempt_counts",
+            ],
+        )
+        .await;
 
         let revoked_at_exists: bool = client
             .query_one(
@@ -127,24 +152,18 @@ mod persistant_migrate_tests {
             "api_keys.revoked_at (added by V6) should exist after the port"
         );
 
-        for index in [
-            "idx_api_keys_key_hash",
-            "idx_audit_logs_endpoint",
-            "idx_user_sessions_session_token",
-            "idx_api_key_usage_window_start",
-            "idx_auth_attempt_counts_window_start",
-            "idx_api_keys_revoked_at",
-        ] {
-            let exists: bool = client
-                .query_one(
-                    "SELECT EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = $1)",
-                    &[&index],
-                )
-                .await
-                .unwrap_or_else(|e| panic!("checking index {index}: {e}"))
-                .get(0);
-            assert!(exists, "index {index} should exist after the port");
-        }
+        assert_indexes_exist(
+            &client,
+            &[
+                "idx_api_keys_key_hash",
+                "idx_audit_logs_endpoint",
+                "idx_user_sessions_session_token",
+                "idx_api_key_usage_window_start",
+                "idx_auth_attempt_counts_window_start",
+                "idx_api_keys_revoked_at",
+            ],
+        )
+        .await;
     }
 
     /// Running `migrate()` a SECOND time, now that PersistAnt's own ledger

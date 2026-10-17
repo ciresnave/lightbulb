@@ -735,6 +735,18 @@ comment referencing one of them).
   a ~2.2 GB checkpoint; there is no GPU runner **by decision (2026-08-27, cost)**.
   CI *compiles* them so they cannot rot, and `scripts/check.sh` prints them in a
   NOT RUN block on every run including successful ones.
+- **The Postgres-gated `#[ignore]` group (2026-10-17) is not a hardware case and
+  should be un-ignored.** `#[ignore] // Requires PostgreSQL` across
+  `tests/api_integration_tests.rs` and `tests/persistant_migrate_tests.rs` is
+  currently forced to run via `cargo test -- --ignored` in the
+  `postgres_integration` CI job, which already stands up a real Postgres
+  service (`initdb`-created, port 55432) for exactly this purpose — unlike the
+  GPU/checkpoint tests above, there is no environment this group genuinely
+  can't run in. Per the portfolio's "`#[ignore]` is a last resort" rule, drop
+  the attribute and gate on `LIGHTBULB_TEST_DATABASE_URL` being set instead (red
+  when a database is expected but absent, never a silent skip) so a run outside
+  `postgres_integration` without a configured database still fails loudly
+  rather than looking identical to a pass.
 - **⚠️ NO DOCUMENTATION EXAMPLE IN THIS REPO IS EXECUTED.** Measured 2026-09-05:
 
   ```text
