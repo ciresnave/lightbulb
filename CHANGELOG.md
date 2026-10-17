@@ -1,5 +1,38 @@
 # Changelog
 
+## 0.10.8
+
+### Added
+- PersistAnt adoption Step 1 (docs/PERSISTANT_ADOPTION_DESIGN.md §5):
+  `src/api/persistant_migrate.rs` ports the 6 `migrations/V{n}__*.sql`
+  files to `persistant_relational::Migration`, run via
+  `persistant_sqlx::PgBackend` ALONGSIDE (not instead of) the existing
+  `refinery` runner -- nothing is wired into the startup path yet, that
+  is step 5. Not committed to `[dependencies]` until now:
+  `persistant-sqlx = "0.7.4"`, `persistant-relational = "0.7.4"`.
+- A Uuid<->`Value` helper (`uuid_to_value`/`value_to_uuid`), per the
+  design doc §7 Q3's answer: stringify through `Value::Text` rather
+  than change the schema, keeping `UUID` columns identical to today.
+- `tests/persistant_migrate_tests.rs` (3 new `#[ignore] // Requires
+  PostgreSQL` tests): proves `PgBackend::migrate` applies cleanly on
+  top of a database `refinery` already migrated (the design doc §7
+  Q1's non-destructiveness requirement), that the resulting schema
+  matches the original migrations table-by-table and index-by-index,
+  and that a second `migrate()` run is a pure no-op via PersistAnt's
+  own ledger.
+
+### Fixed
+- **A literal, byte-identical port of the 6 `.sql` files is NOT
+  non-destructive against a database refinery already migrated.**
+  None of their `CREATE INDEX` statements have `IF NOT EXISTS`, and
+  V6's `ALTER TABLE ... ADD COLUMN` has no existence guard; PersistAnt's
+  own migration ledger (`_sqlx_migrations`) is a different table from
+  refinery's, so it starts empty on such a database and genuinely tries
+  to run every statement fresh on first contact. Every `CREATE INDEX`
+  in the ported migrations now has `IF NOT EXISTS`; V6's `ADD COLUMN`
+  is wrapped in a guarded `DO` block. The migration SQL's literal text
+  changed for idempotency; the resulting schema did not.
+
 ## 0.10.7
 
 ### Added
