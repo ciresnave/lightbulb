@@ -200,6 +200,93 @@ fn f32_bytes(v: &[f32]) -> Vec<u8> {
     out
 }
 
+fn push_tensor(
+    data: &mut Vec<(String, Vec<usize>, Vec<u8>)>,
+    rng: &mut Xorshift64,
+    name: String,
+    shape: Vec<usize>,
+    len: usize,
+) {
+    data.push((name, shape, f32_bytes(&random_vec(rng, len))));
+}
+
+// One transformer layer's worth of tensors -- factored out of
+// `write_synthetic_checkpoint` purely to keep that function under Codacy's
+// line-count limit; no behavior of its own beyond the 9 `push` calls one
+// layer needs.
+fn push_layer_tensors(
+    data: &mut Vec<(String, Vec<usize>, Vec<u8>)>,
+    rng: &mut Xorshift64,
+    i: usize,
+    dim: usize,
+    ffn_dim: usize,
+    kv_dim: usize,
+) {
+    push_tensor(
+        data,
+        rng,
+        format!("model.layers.{i}.self_attn.q_proj.weight"),
+        vec![dim, dim],
+        dim * dim,
+    );
+    push_tensor(
+        data,
+        rng,
+        format!("model.layers.{i}.self_attn.k_proj.weight"),
+        vec![kv_dim, dim],
+        kv_dim * dim,
+    );
+    push_tensor(
+        data,
+        rng,
+        format!("model.layers.{i}.self_attn.v_proj.weight"),
+        vec![kv_dim, dim],
+        kv_dim * dim,
+    );
+    push_tensor(
+        data,
+        rng,
+        format!("model.layers.{i}.self_attn.o_proj.weight"),
+        vec![dim, dim],
+        dim * dim,
+    );
+    push_tensor(
+        data,
+        rng,
+        format!("model.layers.{i}.mlp.gate_proj.weight"),
+        vec![ffn_dim, dim],
+        ffn_dim * dim,
+    );
+    push_tensor(
+        data,
+        rng,
+        format!("model.layers.{i}.mlp.up_proj.weight"),
+        vec![ffn_dim, dim],
+        ffn_dim * dim,
+    );
+    push_tensor(
+        data,
+        rng,
+        format!("model.layers.{i}.mlp.down_proj.weight"),
+        vec![dim, ffn_dim],
+        dim * ffn_dim,
+    );
+    push_tensor(
+        data,
+        rng,
+        format!("model.layers.{i}.input_layernorm.weight"),
+        vec![dim],
+        dim,
+    );
+    push_tensor(
+        data,
+        rng,
+        format!("model.layers.{i}.post_attention_layernorm.weight"),
+        vec![dim],
+        dim,
+    );
+}
+
 /// Writes a synthetic Llama-shaped checkpoint (`config.json` +
 /// `model.safetensors`) into `dir`, which must already exist.
 ///
@@ -225,80 +312,26 @@ pub fn write_synthetic_checkpoint(
     // Buffers must outlive the TensorViews borrowing from them, so collect
     // everything first, then build views over the finished Vec<Vec<u8>>.
     let mut data: Vec<(String, Vec<usize>, Vec<u8>)> = Vec::new();
-    let mut push = |name: String, shape: Vec<usize>, len: usize, rng: &mut Xorshift64| {
-        data.push((name, shape, f32_bytes(&random_vec(rng, len))));
-    };
 
-    push(
+    push_tensor(
+        &mut data,
+        &mut rng,
         "model.embed_tokens.weight".into(),
         vec![vocab, dim],
         vocab * dim,
-        &mut rng,
     );
 
     for i in 0..arch.num_hidden_layers {
-        push(
-            format!("model.layers.{i}.self_attn.q_proj.weight"),
-            vec![dim, dim],
-            dim * dim,
-            &mut rng,
-        );
-        push(
-            format!("model.layers.{i}.self_attn.k_proj.weight"),
-            vec![kv_dim, dim],
-            kv_dim * dim,
-            &mut rng,
-        );
-        push(
-            format!("model.layers.{i}.self_attn.v_proj.weight"),
-            vec![kv_dim, dim],
-            kv_dim * dim,
-            &mut rng,
-        );
-        push(
-            format!("model.layers.{i}.self_attn.o_proj.weight"),
-            vec![dim, dim],
-            dim * dim,
-            &mut rng,
-        );
-        push(
-            format!("model.layers.{i}.mlp.gate_proj.weight"),
-            vec![ffn_dim, dim],
-            ffn_dim * dim,
-            &mut rng,
-        );
-        push(
-            format!("model.layers.{i}.mlp.up_proj.weight"),
-            vec![ffn_dim, dim],
-            ffn_dim * dim,
-            &mut rng,
-        );
-        push(
-            format!("model.layers.{i}.mlp.down_proj.weight"),
-            vec![dim, ffn_dim],
-            dim * ffn_dim,
-            &mut rng,
-        );
-        push(
-            format!("model.layers.{i}.input_layernorm.weight"),
-            vec![dim],
-            dim,
-            &mut rng,
-        );
-        push(
-            format!("model.layers.{i}.post_attention_layernorm.weight"),
-            vec![dim],
-            dim,
-            &mut rng,
-        );
+        push_layer_tensors(&mut data, &mut rng, i, dim, ffn_dim, kv_dim);
     }
 
-    push("model.norm.weight".into(), vec![dim], dim, &mut rng);
-    push(
+    push_tensor(&mut data, &mut rng, "model.norm.weight".into(), vec![dim], dim);
+    push_tensor(
+        &mut data,
+        &mut rng,
         "lm_head.weight".into(),
         vec![vocab, dim],
         vocab * dim,
-        &mut rng,
     );
 
     let views: Vec<(String, TensorView)> = data
