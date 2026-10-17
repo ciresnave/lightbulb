@@ -85,6 +85,19 @@ mod persistant_migrate_tests {
         }
     }
 
+    async fn assert_column_exists(client: &tokio_postgres::Client, table: &str, column: &str) {
+        let exists: bool = client
+            .query_one(
+                "SELECT EXISTS (SELECT 1 FROM information_schema.columns \
+                 WHERE table_name = $1 AND column_name = $2)",
+                &[&table, &column],
+            )
+            .await
+            .unwrap_or_else(|e| panic!("checking {table}.{column}: {e}"))
+            .get(0);
+        assert!(exists, "{table}.{column} should exist after the port");
+    }
+
     async fn assert_indexes_exist(client: &tokio_postgres::Client, indexes: &[&str]) {
         for index in indexes {
             let exists: bool = client
@@ -138,19 +151,7 @@ mod persistant_migrate_tests {
         )
         .await;
 
-        let revoked_at_exists: bool = client
-            .query_one(
-                "SELECT EXISTS (SELECT 1 FROM information_schema.columns \
-                 WHERE table_name = 'api_keys' AND column_name = 'revoked_at')",
-                &[],
-            )
-            .await
-            .expect("checking api_keys.revoked_at")
-            .get(0);
-        assert!(
-            revoked_at_exists,
-            "api_keys.revoked_at (added by V6) should exist after the port"
-        );
+        assert_column_exists(&client, "api_keys", "revoked_at").await;
 
         assert_indexes_exist(
             &client,
