@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.10.14
+
+### Corrected
+- **ROADMAP.md's M4 slice 1 was stale-marked open.** It shipped in #139:
+  `src/api/admin.rs::cache_stats` reports the real, shared
+  `AppState.cache_stats` handle (not the hardcoded-zero mock), proven by
+  `cache_stats_reports_the_shared_handles_real_values_not_a_mock` -- both
+  confirmed present and real at `origin/main` before writing this fix, not
+  just the merged PR's title. Corrected the entry in place to match slice
+  2's existing "DONE, lightbulb#NNN" format. Docs only, no code changed.
+
 ## 0.10.13
 
 ### Fixed
