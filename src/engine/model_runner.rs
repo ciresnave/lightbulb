@@ -624,6 +624,62 @@ fn fail_whole_batch<M: EngineModel>(
     batch.clear();
 }
 
+/// One `Streaming` job's share of a round: send its new token (if this
+/// round produced one) and, if it just finished, the `Done` marker.
+/// Returns whether the job should be removed from the active set --
+/// finished normally, or the client is gone (a failed send either way).
+fn stream_job_step<M: EngineModel>(
+    model: &mut M,
+    ctx: &RequestContext,
+    stream_tx: &async_mpsc::UnboundedSender<Result<StreamItem>>,
+    got_new_token: bool,
+) -> bool {
+    if got_new_token {
+        let last_token = *ctx.generated_tokens.last().unwrap();
+        match model.decode_text(&[last_token], false) {
+            Ok(token_text) => {
+                if stream_tx.send(Ok(StreamItem::Token(token_text))).is_err() {
+                    return true; // receiver dropped
+                }
+            }
+            Err(e) => {
+                let _ = stream_tx.send(Err(e));
+                return true;
+            }
+        }
+    }
+    if !ctx.should_continue() {
+        let _ = stream_tx.send(Ok(StreamItem::Done {
+            finish_reason: finish_reason_for(ctx),
+        }));
+        return true;
+    }
+    false
+}
+
+/// A `Complete` job's one send, made once it's leaving the active set
+/// (finished, cancelled, or errored) -- decode everything generated so far
+/// and report it.
+fn finish_complete_job<M: EngineModel>(
+    model: &mut M,
+    ctx: RequestContext,
+    resp_tx: oneshot::Sender<anyhow::Result<CompletionResult>>,
+) {
+    match model.decode_text(&ctx.generated_tokens, false) {
+        Ok(text) => {
+            let _ = resp_tx.send(Ok(CompletionResult {
+                text,
+                prompt_tokens: ctx.prompt_tokens,
+                completion_tokens: ctx.tokens_generated,
+                finish_reason: finish_reason_for(&ctx),
+            }));
+        }
+        Err(e) => {
+            let _ = resp_tx.send(Err(e));
+        }
+    }
+}
+
 /// Demultiplex one successful `step_batch` call across every active job.
 ///
 /// `prev_lens[idx]` is `batch[idx].generated_tokens.len()` from just BEFORE
@@ -641,63 +697,27 @@ fn demux_step_results<M: EngineModel>(
     let mut idx = 0;
     while idx < batch.len() {
         let got_new_token = batch[idx].generated_tokens.len() > prev_lens[idx];
-        let mut remove = false;
-
-        match &modes[idx] {
+        let remove = match &modes[idx] {
             ActiveMode::Streaming(stream_tx) => {
-                if got_new_token {
-                    let last_token = *batch[idx].generated_tokens.last().unwrap();
-                    match model.decode_text(&[last_token], false) {
-                        Ok(token_text) => {
-                            if stream_tx.send(Ok(StreamItem::Token(token_text))).is_err() {
-                                remove = true; // receiver dropped
-                            }
-                        }
-                        Err(e) => {
-                            let _ = stream_tx.send(Err(e));
-                            remove = true;
-                        }
-                    }
-                }
-                if !remove && !batch[idx].should_continue() {
-                    let _ = stream_tx.send(Ok(StreamItem::Done {
-                        finish_reason: finish_reason_for(&batch[idx]),
-                    }));
-                    remove = true;
-                }
+                stream_job_step(model, &batch[idx], stream_tx, got_new_token)
             }
-            ActiveMode::Complete(_) => {
-                // Nothing to send until done -- same reasoning as before
-                // 5.3: a dropped client would otherwise run to completion
-                // unnoticed, so cancellation is checked pre-step instead
-                // (`remove_cancelled_before_step`), not here.
-                if !batch[idx].should_continue() {
-                    remove = true;
-                }
-            }
-        }
+            // Nothing to send until done -- same reasoning as before 5.3: a
+            // dropped client would otherwise run to completion unnoticed,
+            // so cancellation is checked pre-step instead
+            // (`remove_cancelled_before_step`), not here.
+            ActiveMode::Complete(_) => !batch[idx].should_continue(),
+        };
 
         if remove {
             abandon_if_not_completed(model, &batch[idx]);
             let ctx = batch.remove(idx);
             let mode = modes.remove(idx);
+            // `Streaming`'s sender already got its Done/Err inside
+            // `stream_job_step`; the owned sender is simply dropped along
+            // with `mode` here. Only `Complete` has a final send left to do.
             if let ActiveMode::Complete(resp_tx) = mode {
-                match model.decode_text(&ctx.generated_tokens, false) {
-                    Ok(text) => {
-                        let _ = resp_tx.send(Ok(CompletionResult {
-                            text,
-                            prompt_tokens: ctx.prompt_tokens,
-                            completion_tokens: ctx.tokens_generated,
-                            finish_reason: finish_reason_for(&ctx),
-                        }));
-                    }
-                    Err(e) => {
-                        let _ = resp_tx.send(Err(e));
-                    }
-                }
+                finish_complete_job(model, ctx, resp_tx);
             }
-            // `Streaming`'s sender already got its Done/Err above; the
-            // owned sender in `mode` is simply dropped along with it here.
         } else {
             idx += 1;
         }
@@ -1078,6 +1098,25 @@ mod tests {
         }
     }
 
+    fn send_complete_job(
+        tx: &std::sync::mpsc::Sender<InferenceJob>,
+        id: &str,
+        prompt: &str,
+        max_new_tokens: usize,
+    ) -> oneshot::Receiver<anyhow::Result<CompletionResult>> {
+        let (resp_tx, resp_rx) = oneshot::channel();
+        tx.send(InferenceJob {
+            id: id.to_string(),
+            prompt: prompt.to_string(),
+            max_new_tokens,
+            temperature: 0.0,
+            add_special_tokens: true,
+            response_mode: ResponseMode::Complete(resp_tx),
+        })
+        .unwrap();
+        resp_rx
+    }
+
     /// **Corrected 2026-10-18 (M4 slice 5.3 superseded this test's original
     /// claim).** The function this test originally pinned -- `run_jobs`
     /// processes already-queued jobs "one at a time... with no
@@ -1102,27 +1141,8 @@ mod tests {
         let batch_lens = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let (tx, rx) = std::sync::mpsc::channel();
 
-        let (resp_tx_a, mut resp_rx_a) = oneshot::channel();
-        tx.send(InferenceJob {
-            id: "a".to_string(),
-            prompt: "p".to_string(),
-            max_new_tokens: 5,
-            temperature: 0.0,
-            add_special_tokens: true,
-            response_mode: ResponseMode::Complete(resp_tx_a),
-        })
-        .unwrap();
-
-        let (resp_tx_b, mut resp_rx_b) = oneshot::channel();
-        tx.send(InferenceJob {
-            id: "b".to_string(),
-            prompt: "q".to_string(),
-            max_new_tokens: 3,
-            temperature: 0.0,
-            add_special_tokens: true,
-            response_mode: ResponseMode::Complete(resp_tx_b),
-        })
-        .unwrap();
+        let mut resp_rx_a = send_complete_job(&tx, "a", "p", 5);
+        let mut resp_rx_b = send_complete_job(&tx, "b", "q", 3);
         drop(tx); // so run_jobs returns once both are drained
 
         run_jobs(
