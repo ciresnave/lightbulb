@@ -1129,7 +1129,7 @@ mod tests {
             "TinyLlama checkpoint not found -- set TINYLLAMA_DIR, or see \
              test_models::describe() for the other resolution paths this test tries",
         );
-        let model = ParallelModelManager::load(&model_dir, 1, 256, Some("f32"), None)
+        let model = crate::model::ParallelModelManager::load(&model_dir, 1, 256, Some("f32"), None)
             .expect("failed to load TinyLlama");
 
         let (tx, rx) = std::sync::mpsc::channel();
