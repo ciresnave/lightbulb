@@ -922,15 +922,28 @@ its own test, in this order:
       current output for a fixed sequence of jobs against a stub `EngineModel` (already used in
       this file's test module), confirm it's green pre-refactor, then confirm it stays byte-identical
       post-refactor — proves the new shape didn't change anything yet.
-   3. **5.3 — Real concurrent stepping.** Once 5.2's shape exists, call `step_batch` with every
-      live job's context together per iteration (not one), demux each returned token to its own
-      request's channel (stream) or accumulator (complete), and drop a job from the active `Vec`
-      only after a call reports it `Completed` (satisfying 5.1's invariant: a request stays in every
-      `batch` for every call it's live, never removed early). Red-first test: submit two jobs close
-      enough together that both must be mid-decode simultaneously; assert (a) `step_batch` is
-      observed receiving a batch of len ≥ 2 while both are in flight (a stub model records the
-      batch lengths it's called with — impossible under today's code, where it's always 1), and
-      (b) each request's own output is correct and uncontaminated by the other's tokens.
+   3. **5.3 — DONE, real concurrent stepping landed.** `run_jobs` now steps every live job
+      together in one `step_batch` call per round (`admit_pending`/`remove_cancelled_before_step`/
+      `demux_step_results`/`fail_whole_batch` in `src/engine/model_runner.rs`), demuxing each
+      round's result to its own request's channel and dropping a job only once a round reports it
+      `Completed`, cancelled (pre-step, `Complete` mode only, matching the pre-5.3 precheck), or
+      the whole round errors (`step_batch`'s `Err` aborts the batch with no per-request
+      granularity, per the trait's own doc — every active job in that round fails together).
+      Red-first test `run_jobs_steps_concurrent_requests_together_without_cross_contamination`:
+      two jobs submitted together, `step_batch` observed with `batch.len() >= 2` while both are
+      in flight, each still produces its own correct, uncontaminated output. Fails (always
+      `batch.len() == 1`) against pre-5.3 code; passes against this.
+      **Superseded in place, not just annotated:** 5.2's own acceptance test asserted "no
+      interleaving between jobs" as ITS temporary scope, not a permanent guarantee -- that
+      assertion is now simply wrong, since interleaving is the whole point of 5.3, so the test
+      was corrected (not merely noted) to assert the real invariant instead (concurrent stepping
+      + correct per-job results), per the portfolio's retraction rule.
+      **Cache-slot-leak fix verified compatible**, not just assumed: the slice 5.1-adjacent fix
+      (board item, PR #179 -- a cancelled request's cache index must be released even when it
+      never reaches the backend's own completion branch) was re-run against 5.3's new concurrent
+      admission and still passes, for the right reason -- a cancelled job is removed in the SAME
+      round it's stepped, before any other job can join it in the active batch, so the two never
+      coexist in a way that would need the fix to behave differently.
    4. **5.4 — Wire `MemoryAwareScheduler`'s `SlotPool` in for real admission/limits**, closing what
       slice plan items 3 and 4 above deferred here: `scheduler_stats`/`scheduler_queue` get real
       data (slot occupancy, queue depth) once 5.3's concurrent set is the thing `SlotPool` is

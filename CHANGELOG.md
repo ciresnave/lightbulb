@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.11.5
+
+### Changed
+- **M4 slice 5.3: `run_jobs` now steps every live request together, in one `step_batch` call per
+  round** (`src/engine/model_runner.rs`), instead of one job running alone to completion before
+  the next is even admitted (5.2's shape). New helpers: `admit_pending` (grows the active set,
+  no cap yet -- that's slice 5.4's `SlotPool` job), `remove_cancelled_before_step` (the multi-job
+  counterpart of the old `resp_tx.is_closed()` precheck for `Complete` mode), `demux_step_results`
+  (routes each round's result to its own request's channel, using a per-job previous-token-count
+  snapshot to detect a new token without depending on `step_batch`'s own unread/unreconciled
+  return value), `fail_whole_batch` (a `step_batch` error aborts every active job together, per
+  the trait's own doc -- no per-request granularity exists to do otherwise).
+- Red-first test `run_jobs_steps_concurrent_requests_together_without_cross_contamination`: two
+  jobs submitted together, `step_batch` observed with `batch.len() >= 2` while both are in
+  flight, each still produces its own correct, uncontaminated output. Fails against pre-5.3 code
+  (`batch.len()` was always 1); passes against this.
+- **Corrected in place**, per the retraction rule: slice 5.2's acceptance test asserted "no
+  interleaving between jobs" as its own stated temporary scope, not a permanent guarantee --
+  interleaving is the entire point of 5.3, so that assertion is now simply wrong. Replaced with
+  the real invariant (above), not merely annotated.
+- Re-verified the slice-5.1-adjacent cache-leak fix (#179) against 5.3's new concurrent
+  admission: still passes, and for a sound reason -- a cancelled job is removed in the same round
+  it's stepped, before any other job can join it in the active batch.
+- `cargo test --lib`: 881 passed, 0 failed, 24 ignored (fast suite) + the checkpoint-needing
+  tests individually confirmed passing. `scripts/clippy_gate.py`: clean, no new or increased
+  lints (one genuinely new `clippy::while_let_loop` finding on the admission loop's own
+  `try_recv` drain, fixed by using `while let` directly, not suppressed).
+
 ## 0.11.4
 
 ### Fixed

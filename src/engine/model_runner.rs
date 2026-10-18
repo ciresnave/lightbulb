@@ -1,7 +1,7 @@
 use anyhow::Result;
 use std::collections::VecDeque;
 use std::path::PathBuf;
-use std::sync::mpsc::{Receiver, SyncSender, TryRecvError};
+use std::sync::mpsc::{Receiver, SyncSender};
 use tokio::sync::{mpsc as async_mpsc, oneshot};
 
 use crate::engine::{Request, RequestContext};
@@ -518,189 +518,245 @@ fn publish_cache_stats<M: EngineModel>(model: &M, cache_stats: &SharedCacheStats
     }
 }
 
-/// The job loop. Identical for every backend, which is why it is generic rather
-/// than duplicated per `cfg`.
-///
-/// M4 slice 5.2: admission is non-blocking once there is already a job in
-/// hand -- `pending` drains everything already sitting in the channel
-/// before processing, rather than this function going back to a single
-/// blocking `recv()` between every job. **No behavior change is intended by
-/// this shape alone**: jobs still process one at a time, in submission
-/// order, each to completion, exactly as before -- `pending` only moves
-/// already-queued jobs from the channel's own buffer into this function's,
-/// which is the admission shape slice 5.3's real concurrent stepping builds
-/// on. `run_jobs_processes_already_queued_jobs_one_at_a_time_in_submission_
-/// order` (this module's test) pins that claim.
-pub(crate) fn run_jobs<M: EngineModel>(
-    mut model: M,
-    rx: Receiver<InferenceJob>,
-    cache_stats: SharedCacheStats,
+/// One active job's response channel, held alongside its `RequestContext`
+/// in a SEPARATE `Vec` -- `step_batch` needs a contiguous `&mut
+/// [RequestContext]`, which a `Vec` of `(RequestContext, ActiveMode)` pairs
+/// can't yield a sub-slice of without unsafe. The two `Vec`s are kept the
+/// same length and index-aligned by every function below; nothing grows or
+/// shrinks one without the other in the same step.
+enum ActiveMode {
+    Streaming(async_mpsc::UnboundedSender<Result<StreamItem>>),
+    Complete(oneshot::Sender<anyhow::Result<CompletionResult>>),
+}
+
+/// Release `ctx`'s backend resource (a cache index, say) if its own
+/// completion path never got to. Every removal site below calls this
+/// first: a normally completed request has `state == Completed` precisely
+/// because the backend's own completion branch already released it there
+/// (see `EngineModel::abandon`'s doc), so this is a no-op for the common
+/// case and only fires on a cancelled, errored, or batch-aborted one.
+fn abandon_if_not_completed<M: EngineModel>(model: &mut M, ctx: &RequestContext) {
+    if ctx.cache_index.is_some() && !matches!(ctx.state, crate::engine::RequestState::Completed) {
+        model.abandon(ctx);
+    }
+}
+
+/// Move every job already queued (the channel's own buffer, drained by
+/// `run_jobs`'s non-blocking `try_recv` -- M4 slice 5.2) into the active
+/// batch. No admission limit yet -- that is slice 5.4's `SlotPool` job, not
+/// this one's. New requests start `Pending`; `step_batch` prefills them on
+/// the next call, same as always.
+fn admit_pending(
+    pending: &mut VecDeque<InferenceJob>,
+    batch: &mut Vec<RequestContext>,
+    modes: &mut Vec<ActiveMode>,
 ) {
-    let mut pending: VecDeque<InferenceJob> = VecDeque::new();
-
-    loop {
-        if pending.is_empty() {
-            match rx.recv() {
-                Ok(job) => pending.push_back(job),
-                Err(_) => break, // every sender dropped and nothing left queued
-            }
-        }
-        loop {
-            match rx.try_recv() {
-                Ok(job) => pending.push_back(job),
-                Err(TryRecvError::Empty) => break,
-                Err(TryRecvError::Disconnected) => break,
-            }
-        }
-
-        let job = pending
-            .pop_front()
-            .expect("pending was just confirmed non-empty above");
-
+    while let Some(job) = pending.pop_front() {
         let req = Request {
             id: job.id.clone(),
             prompt: job.prompt.clone(),
             max_new_tokens: job.max_new_tokens,
         };
-
         let mut ctx = RequestContext::new(req);
         ctx.temperature = job.temperature;
         // Carried, not re-derived. The runner cannot tell a templated prompt
         // from a raw one by looking at it — `<s>` is ordinary text — so the
         // handler that built the prompt is the only place the answer exists.
         ctx.add_special_tokens = job.add_special_tokens;
-        let mut batch = vec![ctx];
+        batch.push(ctx);
+        modes.push(match job.response_mode {
+            ResponseMode::Streaming(tx) => ActiveMode::Streaming(tx),
+            ResponseMode::Complete(tx) => ActiveMode::Complete(tx),
+        });
+    }
+}
 
-        // Process based on response mode (move out of job to avoid borrow issues)
-        match job.response_mode {
-            ResponseMode::Streaming(stream_tx) => {
-                // Streaming mode: decode and send tokens incrementally.
-                //
-                // `finished_normally` distinguishes the loop's four `break`
-                // paths: a dropped receiver, a `decode_text` failure, a
-                // `step_batch` failure, and `should_continue()` going false.
-                // Only the last is a normal completion — the other three have
-                // either already sent `Err` or can no longer be received by
-                // anyone — so it is the only path that sets the flag before
-                // breaking.
-                let mut finished_normally = false;
-                loop {
-                    match model.step_batch(&mut batch) {
-                        Ok(_) => {
-                            // Get the most recent token and decode it
-                            if let Some(&last_token) = batch[0].generated_tokens.last() {
-                                match model.decode_text(&[last_token], false) {
-                                    Ok(token_text) => {
-                                        if stream_tx
-                                            .send(Ok(StreamItem::Token(token_text)))
-                                            .is_err()
-                                        {
-                                            // Receiver dropped, stop generation
-                                            break;
-                                        }
-                                    }
-                                    Err(e) => {
-                                        let _ = stream_tx.send(Err(e));
-                                        break;
-                                    }
-                                }
-                            }
+/// Remove every `Complete`-mode job whose receiver is already closed,
+/// BEFORE this round's `step_batch` call -- the multi-job counterpart of
+/// the pre-5.3 single-job loop's `resp_tx.is_closed()` precheck (checked
+/// before every step, never after). `Streaming` mode has no precheck,
+/// unchanged from before: a dropped streaming client is only detected by a
+/// failed send, after the token that send would have carried is already
+/// generated (`a_dropped_streaming_receiver_stops_generation_after_one_
+/// wasted_step` pins exactly that one-step cost).
+fn remove_cancelled_before_step<M: EngineModel>(
+    model: &mut M,
+    batch: &mut Vec<RequestContext>,
+    modes: &mut Vec<ActiveMode>,
+) {
+    let mut idx = 0;
+    while idx < modes.len() {
+        let closed = matches!(&modes[idx], ActiveMode::Complete(tx) if tx.is_closed());
+        if closed {
+            abandon_if_not_completed(model, &batch[idx]);
+            batch.remove(idx);
+            modes.remove(idx);
+        } else {
+            idx += 1;
+        }
+    }
+}
 
-                            if !batch[0].should_continue() {
-                                finished_normally = true;
-                                break;
+/// Every active job fails together -- `step_batch`'s `Err` aborts the
+/// whole batch, with no per-request granularity (`EngineModel::
+/// step_batch`'s own doc: "Errors are the Err arm and abort the whole
+/// batch"). Tell every job's own channel, release what each held, and
+/// empty both `Vec`s -- every job in this round is being removed.
+fn fail_whole_batch<M: EngineModel>(
+    model: &mut M,
+    batch: &mut Vec<RequestContext>,
+    modes: &mut Vec<ActiveMode>,
+    err: anyhow::Error,
+) {
+    for ctx in batch.iter() {
+        abandon_if_not_completed(model, ctx);
+    }
+    for mode in modes.drain(..) {
+        match mode {
+            ActiveMode::Streaming(tx) => {
+                let _ = tx.send(Err(anyhow::anyhow!("{err}")));
+            }
+            ActiveMode::Complete(tx) => {
+                let _ = tx.send(Err(anyhow::anyhow!("{err}")));
+            }
+        }
+    }
+    batch.clear();
+}
+
+/// Demultiplex one successful `step_batch` call across every active job.
+///
+/// `prev_lens[idx]` is `batch[idx].generated_tokens.len()` from just BEFORE
+/// this call -- the trait's own doc says a request advances "by at most
+/// one token" per call and its `Vec<Option<u32>>` return value's per-entry
+/// meaning is unread/unreconciled between implementors, so this is the
+/// reliable way to tell "did idx get a new token this round" from "idx is
+/// still mid-chunked-prefill" without depending on either.
+fn demux_step_results<M: EngineModel>(
+    model: &mut M,
+    batch: &mut Vec<RequestContext>,
+    modes: &mut Vec<ActiveMode>,
+    prev_lens: &[usize],
+) {
+    let mut idx = 0;
+    while idx < batch.len() {
+        let got_new_token = batch[idx].generated_tokens.len() > prev_lens[idx];
+        let mut remove = false;
+
+        match &modes[idx] {
+            ActiveMode::Streaming(stream_tx) => {
+                if got_new_token {
+                    let last_token = *batch[idx].generated_tokens.last().unwrap();
+                    match model.decode_text(&[last_token], false) {
+                        Ok(token_text) => {
+                            if stream_tx.send(Ok(StreamItem::Token(token_text))).is_err() {
+                                remove = true; // receiver dropped
                             }
                         }
                         Err(e) => {
                             let _ = stream_tx.send(Err(e));
-                            break;
+                            remove = true;
                         }
                     }
                 }
-
-                // Exactly one Done, carrying what the runner observed rather
-                // than what the handler would otherwise assume. Sent on the
-                // normal exit only — an error path already sent Err, and a
-                // dropped receiver cannot receive this either.
-                if finished_normally {
+                if !remove && !batch[idx].should_continue() {
                     let _ = stream_tx.send(Ok(StreamItem::Done {
-                        finish_reason: finish_reason_for(&batch[0]),
+                        finish_reason: finish_reason_for(&batch[idx]),
                     }));
+                    remove = true;
                 }
             }
-            ResponseMode::Complete(resp_tx) => {
-                // Complete mode: generate all tokens then send final text.
-                //
-                // Unlike Streaming, nothing here sends anything until the job
-                // is done, so a dropped client would otherwise run to
-                // completion unnoticed — burning a generation's worth of
-                // compute for a `oneshot::Sender::send` whose `Err` nobody
-                // reads. `resp_tx.is_closed()` is checked before every step:
-                // it goes true the moment the handler's `resp_rx` is dropped,
-                // which happens when the client disconnects and the request
-                // future awaiting it is cancelled (see
-                // `chat::run_inference_once`).
-                let mut final_result: Option<anyhow::Result<CompletionResult>> = None;
-                let mut cancelled = false;
-
-                loop {
-                    if resp_tx.is_closed() {
-                        cancelled = true;
-                        break;
-                    }
-                    match model.step_batch(&mut batch) {
-                        Ok(_) => {
-                            if !batch[0].should_continue() {
-                                break;
-                            }
-                        }
-                        Err(e) => {
-                            final_result = Some(Err(e));
-                            break;
-                        }
-                    }
-                }
-
-                // Decode all generated tokens at once. Skipped on
-                // cancellation: there is no receiver left to decode for, and
-                // `decode_text` is not free.
-                if !cancelled && final_result.is_none() {
-                    let generated_tokens = batch[0].generated_tokens.clone();
-                    match model.decode_text(&generated_tokens, false) {
-                        Ok(text) => {
-                            final_result = Some(Ok(CompletionResult {
-                                text,
-                                prompt_tokens: batch[0].prompt_tokens,
-                                completion_tokens: batch[0].tokens_generated,
-                                finish_reason: finish_reason_for(&batch[0]),
-                            }))
-                        }
-                        Err(e) => final_result = Some(Err(e)),
-                    }
-                }
-
-                if !cancelled && let Some(res) = final_result {
-                    let _ = resp_tx.send(res);
+            ActiveMode::Complete(_) => {
+                // Nothing to send until done -- same reasoning as before
+                // 5.3: a dropped client would otherwise run to completion
+                // unnoticed, so cancellation is checked pre-step instead
+                // (`remove_cancelled_before_step`), not here.
+                if !batch[idx].should_continue() {
+                    remove = true;
                 }
             }
         }
 
-        // Once per job, regardless of mode or outcome: if the backend
-        // allocated a resource for this request (a cache index, say) and
-        // its own completion path never got to release it -- because this
-        // job was cancelled or errored rather than finishing normally --
-        // tell it to release what it holds. A normally completed request
-        // has `state == Completed` precisely because the backend's own
-        // completion branch ran (and already released there), so this is a
-        // no-op for the common case and only fires on an abandoned one.
-        if batch[0].cache_index.is_some()
-            && !matches!(batch[0].state, crate::engine::RequestState::Completed)
-        {
-            model.abandon(&batch[0]);
+        if remove {
+            abandon_if_not_completed(model, &batch[idx]);
+            let ctx = batch.remove(idx);
+            let mode = modes.remove(idx);
+            if let ActiveMode::Complete(resp_tx) = mode {
+                match model.decode_text(&ctx.generated_tokens, false) {
+                    Ok(text) => {
+                        let _ = resp_tx.send(Ok(CompletionResult {
+                            text,
+                            prompt_tokens: ctx.prompt_tokens,
+                            completion_tokens: ctx.tokens_generated,
+                            finish_reason: finish_reason_for(&ctx),
+                        }));
+                    }
+                    Err(e) => {
+                        let _ = resp_tx.send(Err(e));
+                    }
+                }
+            }
+            // `Streaming`'s sender already got its Done/Err above; the
+            // owned sender in `mode` is simply dropped along with it here.
+        } else {
+            idx += 1;
+        }
+    }
+}
+
+/// The job loop. Identical for every backend, which is why it is generic rather
+/// than duplicated per `cfg`.
+///
+/// M4 slice 5.3: every live request is stepped together, in one
+/// `step_batch` call per round, rather than one job running alone to
+/// completion before the next is even admitted (5.2's shape; unchanged
+/// behavior). A request joins the active batch the round after it's
+/// admitted and leaves only once a round reports it `Completed`, cancelled,
+/// or the whole round errors -- `ParallelModelManager::forward_batch`
+/// (M4 slice 5.1's finding) is built to tolerate exactly that: every live
+/// request present every call, grown/shrunk between calls as requests
+/// arrive/finish, never a call with a request silently missing while still
+/// live.
+pub(crate) fn run_jobs<M: EngineModel>(
+    mut model: M,
+    rx: Receiver<InferenceJob>,
+    cache_stats: SharedCacheStats,
+) {
+    let mut pending: VecDeque<InferenceJob> = VecDeque::new();
+    let mut batch: Vec<RequestContext> = Vec::new();
+    let mut modes: Vec<ActiveMode> = Vec::new();
+
+    loop {
+        admit_pending(&mut pending, &mut batch, &mut modes);
+
+        if batch.is_empty() {
+            match rx.recv() {
+                Ok(job) => {
+                    pending.push_back(job);
+                    continue;
+                }
+                Err(_) => break, // every sender dropped and nothing left queued or active
+            }
         }
 
-        // Once per job, regardless of mode -- the one piece of state this
-        // thread shares outside the per-job channel (board item M4 slice 1).
+        while let Ok(job) = rx.try_recv() {
+            pending.push_back(job);
+        }
+
+        remove_cancelled_before_step(&mut model, &mut batch, &mut modes);
+        if batch.is_empty() {
+            continue;
+        }
+
+        let prev_lens: Vec<usize> = batch.iter().map(|ctx| ctx.generated_tokens.len()).collect();
+
+        match model.step_batch(&mut batch) {
+            Ok(_) => demux_step_results(&mut model, &mut batch, &mut modes, &prev_lens),
+            Err(e) => fail_whole_batch(&mut model, &mut batch, &mut modes, e),
+        }
+
+        // Once per round -- the one piece of state this thread shares
+        // outside the per-job channel (board item M4 slice 1).
         publish_cache_stats(&model, &cache_stats);
     }
 
@@ -992,28 +1048,29 @@ mod tests {
         );
     }
 
-    /// Records which request each `step_batch` call advanced, and completes
-    /// a request after exactly its own `max_new_tokens` steps -- so the
-    /// recorded sequence is a complete trace of processing order, not just a
-    /// count.
-    struct OrderRecordingModel {
-        order: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    /// Records each call's batch length and, for every ENTRY in the batch
+    /// (not just index 0 -- a real multi-request batch needs every element
+    /// advanced, unlike the single-job-shaped `CountingModel`/`SpyModel`
+    /// above), advances it by one token and completes it after exactly its
+    /// own `max_new_tokens` steps.
+    struct ConcurrencyRecordingModel {
+        batch_lens: std::sync::Arc<std::sync::Mutex<Vec<usize>>>,
     }
 
-    impl EngineModel for OrderRecordingModel {
+    impl EngineModel for ConcurrencyRecordingModel {
         fn step_batch(&mut self, batch: &mut [RequestContext]) -> Result<Vec<Option<u32>>> {
-            self.order.lock().unwrap().push(batch[0].request.id.clone());
-            if batch[0].tokens_generated == 0 {
-                batch[0].start_decoding();
+            self.batch_lens.lock().unwrap().push(batch.len());
+            for ctx in batch.iter_mut() {
+                if ctx.tokens_generated == 0 {
+                    ctx.start_decoding();
+                }
+                ctx.record_token();
+                ctx.generated_tokens.push(ctx.tokens_generated as u32);
+                if ctx.tokens_generated >= ctx.request.max_new_tokens {
+                    ctx.complete();
+                }
             }
-            batch[0].record_token();
-            batch[0]
-                .generated_tokens
-                .push(batch[0].tokens_generated as u32);
-            if batch[0].tokens_generated >= batch[0].request.max_new_tokens {
-                batch[0].complete();
-            }
-            Ok(vec![None])
+            Ok(vec![None; batch.len()])
         }
 
         fn decode_text(&self, tokens: &[u32], _skip_special: bool) -> Result<String> {
@@ -1021,46 +1078,56 @@ mod tests {
         }
     }
 
-    /// M4 slice 5.2: `run_jobs`'s admission loop changes shape (non-blocking
-    /// drain into an active `Vec` instead of a single blocking `recv` per
-    /// job), with NO behavior change intended yet -- jobs still process one
-    /// at a time, in the order submitted, to completion each, exactly as
-    /// before. This test is the pre/post pin: run it against the admission
-    /// loop before touching it (baseline) and again after (must stay
-    /// identical). It does not, by itself, prove 5.2 landed correctly --
-    /// the two runs being equal is what proves that; a diff against this
-    /// file's git history at the commit that changed `run_jobs` is the real
-    /// check, not just "this test passes."
+    /// **Corrected 2026-10-18 (M4 slice 5.3 superseded this test's original
+    /// claim).** The function this test originally pinned -- `run_jobs`
+    /// processes already-queued jobs "one at a time... with no
+    /// interleaving" -- was 5.2's own explicit, temporary scope ("no
+    /// behavior change is intended by this shape alone"), not a permanent
+    /// guarantee. Slice 5.3 (real concurrent stepping, per the sub-plan)
+    /// intentionally replaces it: every live request is now stepped
+    /// together in one `step_batch` call per round. This test's assertion
+    /// is replaced in place, not merely annotated, per the portfolio's
+    /// retraction rule -- the old assertion would now simply be wrong, not
+    /// a style preference.
     ///
-    /// Three jobs, three different `max_new_tokens` (2, 3, 1), submitted
-    /// back-to-back before `run_jobs` is ever called (so the channel already
-    /// holds all three when the function starts) -- this is exactly the
-    /// "jobs already queued" case 5.2's non-blocking drain touches; a single
-    /// job in the channel would never exercise it, FIFO or not.
+    /// What still holds, and what this test now proves instead: two jobs
+    /// submitted together (so the channel already holds both when
+    /// `run_jobs` starts) must both be mid-decode SIMULTANEOUSLY at some
+    /// point -- `step_batch` observed with `batch.len() >= 2` -- and each
+    /// must still get exactly its own, uncontaminated result (right token
+    /// count, right decoded text) despite being interleaved with the
+    /// other's.
     #[test]
-    fn run_jobs_processes_already_queued_jobs_one_at_a_time_in_submission_order() {
-        let order = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    fn run_jobs_steps_concurrent_requests_together_without_cross_contamination() {
+        let batch_lens = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let (tx, rx) = std::sync::mpsc::channel();
 
-        let mut resp_rxs = Vec::new();
-        for (id, max_new_tokens) in [("j1", 2usize), ("j2", 3), ("j3", 1)] {
-            let (resp_tx, resp_rx) = oneshot::channel();
-            tx.send(InferenceJob {
-                id: id.to_string(),
-                prompt: "p".to_string(),
-                max_new_tokens,
-                temperature: 0.0,
-                add_special_tokens: true,
-                response_mode: ResponseMode::Complete(resp_tx),
-            })
-            .unwrap();
-            resp_rxs.push((id, max_new_tokens, resp_rx));
-        }
-        drop(tx); // so run_jobs returns once all three are drained
+        let (resp_tx_a, mut resp_rx_a) = oneshot::channel();
+        tx.send(InferenceJob {
+            id: "a".to_string(),
+            prompt: "p".to_string(),
+            max_new_tokens: 5,
+            temperature: 0.0,
+            add_special_tokens: true,
+            response_mode: ResponseMode::Complete(resp_tx_a),
+        })
+        .unwrap();
+
+        let (resp_tx_b, mut resp_rx_b) = oneshot::channel();
+        tx.send(InferenceJob {
+            id: "b".to_string(),
+            prompt: "q".to_string(),
+            max_new_tokens: 3,
+            temperature: 0.0,
+            add_special_tokens: true,
+            response_mode: ResponseMode::Complete(resp_tx_b),
+        })
+        .unwrap();
+        drop(tx); // so run_jobs returns once both are drained
 
         run_jobs(
-            OrderRecordingModel {
-                order: order.clone(),
+            ConcurrencyRecordingModel {
+                batch_lens: batch_lens.clone(),
             },
             rx,
             std::sync::Arc::new(std::sync::Mutex::new(
@@ -1068,24 +1135,38 @@ mod tests {
             )),
         );
 
-        assert_eq!(
-            order.lock().unwrap().as_slice(),
-            &["j1", "j1", "j2", "j2", "j2", "j3"],
-            "processing order/interleaving changed -- j1's 2 steps, then j2's 3, then j3's 1, \
-             with no interleaving between jobs, is today's behavior and 5.2 must not change it"
+        let lens = batch_lens.lock().unwrap().clone();
+        assert!(
+            lens.iter().any(|&l| l >= 2),
+            "step_batch was never called with both requests in flight together -- \
+             concurrent stepping did not happen; observed batch lengths: {lens:?}"
         );
 
-        for (id, max_new_tokens, mut resp_rx) in resp_rxs {
-            let result = resp_rx
-                .try_recv()
-                .unwrap_or_else(|_| panic!("job {id} never received a result"));
-            let completion = result.unwrap_or_else(|e| panic!("job {id} failed: {e}"));
-            assert_eq!(
-                completion.completion_tokens, max_new_tokens,
-                "job {id} should have generated exactly its own max_new_tokens"
-            );
-            assert_eq!(completion.finish_reason, FinishReason::Length);
-        }
+        let a = resp_rx_a
+            .try_recv()
+            .expect("job a never received a result")
+            .expect("job a failed");
+        let b = resp_rx_b
+            .try_recv()
+            .expect("job b never received a result")
+            .expect("job b failed");
+
+        assert_eq!(
+            a.completion_tokens, 5,
+            "job a should generate exactly its own budget"
+        );
+        assert_eq!(
+            b.completion_tokens, 3,
+            "job b should generate exactly its own budget"
+        );
+        assert_eq!(
+            a.text, "[1, 2, 3, 4, 5]",
+            "job a's decoded text must be its own sequence, not b's or a mix of both"
+        );
+        assert_eq!(
+            b.text, "[1, 2, 3]",
+            "job b's decoded text must be its own sequence, not a's or a mix of both"
+        );
     }
 
     /// **Pre-existing bug, not introduced by any M4 slice.** `run_jobs`'s two
