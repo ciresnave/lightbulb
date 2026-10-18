@@ -944,11 +944,35 @@ its own test, in this order:
       admission and still passes, for the right reason -- a cancelled job is removed in the SAME
       round it's stepped, before any other job can join it in the active batch, so the two never
       coexist in a way that would need the fix to behave differently.
-   4. **5.4 — Wire `MemoryAwareScheduler`'s `SlotPool` in for real admission/limits**, closing what
-      slice plan items 3 and 4 above deferred here: `scheduler_stats`/`scheduler_queue` get real
-      data (slot occupancy, queue depth) once 5.3's concurrent set is the thing `SlotPool` is
-      actually tracking, and `Priority` (item 4) has a real multi-slot admission path to attach to
-      instead of `check_admission`'s dry-run estimate.
+   4. **5.4 — sub-sliced (2026-10-18), same reasoning as slice 5 itself.** Reading
+      `MemoryAwareScheduler`/`SlotPool` before slicing found a real shape mismatch: `SlotPool` is
+      its own independent bookkeeping state machine (`update_slot(slot_id, token)` tracks
+      `tokens_generated`/`is_prefill`/completion ITSELF, from tokens the caller hands it) --
+      it does not read or drive `run_jobs`'s real `Vec<RequestContext>` stepping (5.2/5.3). Wiring
+      it in means keeping a SECOND, parallel bookkeeping structure in sync with the real one, for
+      observability and admission-limiting, not replacing `batch`/`modes` with it. Also:
+      `AppState.scheduler` is `Arc<MemoryAwareScheduler>` today (no interior mutability) --
+      `check_admission` is `&self`-only (slice 2's design), but `submit_request`/
+      `allocate_pending_requests`/`free_slot` all need `&mut self`, so the type itself has to
+      change before `run_jobs` (which has no handle to the scheduler at all today) can touch it.
+      1. **5.4a — Make the scheduler mutably shareable and sync real admission/departure into it,
+         no stats or Priority changes yet.** `AppState.scheduler` becomes `Arc<Mutex<
+         MemoryAwareScheduler>>`; a handle threads into `run_jobs` the same way `cache_stats`
+         already does. `admit_pending` calls `submit_request` when a job joins the active set;
+         every removal site (`demux_step_results`'s normal completion, `remove_cancelled_
+         before_step`, `fail_whole_batch`) calls `free_slot` for the same request. Red-first test:
+         after `run_jobs` processes N concurrent jobs, the shared scheduler's `slot_pool().
+         get_ready_batch().len()` reflects real occupancy at a captured mid-run point, not zero
+         (today) or a stale value.
+      2. **5.4b — Wire `scheduler_stats`/`scheduler_queue` to read the real shared scheduler**
+         instead of `unavailable_reason` (#161). `cache_clear`'s `_scheduler` binding gets a real
+         use too if there's a real clear operation to call (`free_slot` per active slot), or stays
+         `unavailable_reason`'d with a stated reason if not -- decide once 5.4a's shape is in.
+      3. **5.4c — Real `Priority`.** `InferenceJob` gains a `priority: Priority` field; the OpenAI
+         request body gets a priority extension (API shape TBD -- OpenAI has no such field, same
+         note as the original item 4); `admit_pending` submits via `submit_priority_request`
+         instead of `submit_request`. Only sized here, not designed -- the request-body shape is
+         a real decision, not mechanical, and belongs with whoever reviews the API surface change.
    5. **5.5 — `run_jobs` complexity refactor (slice plan item 6, below)**, sequenced last as that
       item already said, now that 5.1-5.4 have settled what the function actually looks like.
 
