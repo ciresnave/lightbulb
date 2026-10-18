@@ -364,6 +364,49 @@ fn test_chunked_prefill_with_variable_lengths() {
 /// 520.95s wall time for the one test (model load x2 + ~8 decode steps on
 /// CPU f32) -- slow, but this runs on its own self-hosted job, not inline
 /// with the rest of the suite.
+const SLOT_REUSE_TEST_MAX_BATCH_SIZE: usize = 1; // forces B onto the exact index A just freed
+const SLOT_REUSE_TEST_CONTEXT_LENGTH: usize = 256;
+const SLOT_REUSE_TEST_STEP_BUDGET: usize = 32;
+
+fn slot_reuse_test_model(model_dir: &std::path::Path) -> ParallelModelManager {
+    ParallelModelManager::load(
+        model_dir,
+        SLOT_REUSE_TEST_MAX_BATCH_SIZE,
+        SLOT_REUSE_TEST_CONTEXT_LENGTH,
+        Some("f32"),
+        None,
+    )
+    .expect("failed to load TinyLlama")
+}
+
+/// Steps `model` on the single request in `batch` until it stops continuing.
+/// A budget exhausted without completion is a test setup failure (loud), not
+/// a silent return -- every call site's assertions depend on actually
+/// reaching completion.
+fn step_single_request_to_completion(
+    model: &mut ParallelModelManager,
+    batch: &mut [RequestContext],
+) {
+    for _ in 0..SLOT_REUSE_TEST_STEP_BUDGET {
+        model.forward_batch(batch).expect("forward_batch failed");
+        if !batch[0].should_continue() {
+            return;
+        }
+    }
+    panic!(
+        "request {} did not reach completion within {SLOT_REUSE_TEST_STEP_BUDGET} steps",
+        batch[0].request.id
+    );
+}
+
+fn b_request() -> Request {
+    Request {
+        id: "req-b".to_string(),
+        prompt: "The largest planet in the solar system is".to_string(),
+        max_new_tokens: 4,
+    }
+}
+
 #[test]
 fn cache_index_reused_by_a_later_unrelated_request_is_not_corrupted() {
     let model_dir = lightbulb::test_models::tinyllama_dir().expect(
@@ -371,24 +414,8 @@ fn cache_index_reused_by_a_later_unrelated_request_is_not_corrupted() {
          for the other resolution paths this test tries",
     );
 
-    const MAX_BATCH_SIZE: usize = 1; // forces B onto the exact index A just freed
-    const CONTEXT_LENGTH: usize = 256;
-
-    let b_request = || Request {
-        id: "req-b".to_string(),
-        prompt: "The largest planet in the solar system is".to_string(),
-        max_new_tokens: 4,
-    };
-
     // --- Run A to completion, then B into a fresh Vec on the SAME model. ---
-    let mut model = ParallelModelManager::load(
-        &model_dir,
-        MAX_BATCH_SIZE,
-        CONTEXT_LENGTH,
-        Some("f32"),
-        None,
-    )
-    .expect("failed to load TinyLlama");
+    let mut model = slot_reuse_test_model(&model_dir);
 
     let a_request = Request {
         id: "req-a".to_string(),
@@ -396,19 +423,7 @@ fn cache_index_reused_by_a_later_unrelated_request_is_not_corrupted() {
         max_new_tokens: 4,
     };
     let mut a_batch = vec![RequestContext::new(a_request)];
-    for _ in 0..32 {
-        model
-            .forward_batch(&mut a_batch)
-            .expect("forward_batch failed for A");
-        if !a_batch[0].should_continue() {
-            break;
-        }
-    }
-    assert!(
-        !a_batch[0].generated_tokens.is_empty() && !a_batch[0].should_continue(),
-        "request A did not reach completion within the step budget -- cannot test slot reuse \
-         without a freed cache index"
-    );
+    step_single_request_to_completion(&mut model, &mut a_batch);
     // `a_batch[0].cache_index` itself is NOT cleared by `complete()` -- it only
     // flips `state` (`src/engine/mod.rs::RequestContext::complete`). The real
     // release is pool-internal (`self.cache_index_pool[cache_idx] = false`,
@@ -429,39 +444,16 @@ fn cache_index_reused_by_a_later_unrelated_request_is_not_corrupted() {
          index A just freed. If this is anything else, the scenario this test exists to check \
          (slot reuse) never actually happened"
     );
-    for _ in 0..31 {
-        if !b_batch[0].should_continue() {
-            break;
-        }
-        model
-            .forward_batch(&mut b_batch)
-            .expect("forward_batch failed for B (after A)");
+    if b_batch[0].should_continue() {
+        step_single_request_to_completion(&mut model, &mut b_batch);
     }
-    assert!(
-        !b_batch[0].generated_tokens.is_empty() && !b_batch[0].should_continue(),
-        "request B did not reach completion within the step budget"
-    );
     let b_after_a_tokens = b_batch[0].generated_tokens.clone();
     let b_after_a_text = model.decode(&b_after_a_tokens, false).unwrap();
 
     // --- Control: B alone, on a SEPARATE model instance A never touched. ---
-    let mut control_model = ParallelModelManager::load(
-        &model_dir,
-        MAX_BATCH_SIZE,
-        CONTEXT_LENGTH,
-        Some("f32"),
-        None,
-    )
-    .expect("failed to load TinyLlama for the control instance");
+    let mut control_model = slot_reuse_test_model(&model_dir);
     let mut control_batch = vec![RequestContext::new(b_request())];
-    for _ in 0..32 {
-        control_model
-            .forward_batch(&mut control_batch)
-            .expect("forward_batch failed for the control run of B");
-        if !control_batch[0].should_continue() {
-            break;
-        }
-    }
+    step_single_request_to_completion(&mut control_model, &mut control_batch);
     let b_control_tokens = control_batch[0].generated_tokens.clone();
     let b_control_text = control_model.decode(&b_control_tokens, false).unwrap();
 
