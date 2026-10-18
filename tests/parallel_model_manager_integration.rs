@@ -323,6 +323,159 @@ fn test_chunked_prefill_with_variable_lengths() {
     );
 }
 
+/// M4 slice 5.1: does a cache index freed by one completed request corrupt
+/// the NEXT, unrelated request that reuses it?
+///
+/// `EngineModel::step_batch`'s trait doc (`src/engine/model_runner.rs`) warns
+/// that a scheduler stepping a changing set of live requests per call can
+/// silently corrupt cache state across requests -- citing a *now-deleted*
+/// implementor as the one that broke this way. `ParallelModelManager::
+/// forward_batch` looks built to avoid it (`release_cache_index` runs the
+/// same call a request completes, `src/model/parallel_model_manager.rs:1395`
+/// and `:1736`) -- but that is a reading of the code, not a measurement. This
+/// test is the measurement, before any of slice 5.2+ depends on the answer.
+///
+/// Method: run request A alone to completion (freeing its cache index), then
+/// submit an unrelated request B into a FRESH `Vec` -- the same shape
+/// `run_jobs` will produce once 5.2+ lands (a job leaves the active set, a
+/// later one arrives, nothing carries the old `RequestContext` forward). B
+/// almost certainly reuses A's just-freed cache index (`max_batch_size: 1`
+/// forces it -- there is no other index to allocate). The control is a
+/// SEPARATE, freshly loaded model instance given a batch of ONLY B, so
+/// nothing about A ever touches it. At `temperature: 0.0` (greedy, the
+/// default), decoding is deterministic: if cache reuse leaked any of A's KV
+/// state into B's slot, B's tokens diverge from the control. If the
+/// bookkeeping is correct, they must match bit-for-bit.
+///
+/// Needs the TinyLlama checkpoint (see `test_models::tinyllama_dir`). **Not**
+/// `#[ignore]`d, per CireSnave's standing rule (2026-10-16, EXPECTATIONS
+/// §5.1g/5.1h): a test that can't run on a GitHub-hosted runner but can run
+/// on the self-hosted one runs there, under its own job, rather than being
+/// silently excluded from every run via `#[ignore]`. Hosted CI jobs that run
+/// this whole test file must `--skip` it by name until that job exists (the
+/// PM is routing the self-hosted job spec and the checkpoint's provenance;
+/// see the PR this landed in). Run by hand meanwhile:
+/// `cargo test --test parallel_model_manager_integration \
+///   cache_index_reused_by_a_later_unrelated_request_is_not_corrupted`
+///
+/// Measured (not merely written), 2026-10-17, CPU, `f32`: **passes.**
+/// `B after A (reused slot): [27441, 1524, 29889, 13] "Jupiter.\n"` ==
+/// `B alone (control): [27441, 1524, 29889, 13] "Jupiter.\n"`, bit-for-bit.
+/// 520.95s wall time for the one test (model load x2 + ~8 decode steps on
+/// CPU f32) -- slow, but this runs on its own self-hosted job, not inline
+/// with the rest of the suite.
+#[test]
+fn cache_index_reused_by_a_later_unrelated_request_is_not_corrupted() {
+    let model_dir = lightbulb::test_models::tinyllama_dir().expect(
+        "TinyLlama checkpoint not found -- set TINYLLAMA_DIR, or see test_models::describe() \
+         for the other resolution paths this test tries",
+    );
+
+    const MAX_BATCH_SIZE: usize = 1; // forces B onto the exact index A just freed
+    const CONTEXT_LENGTH: usize = 256;
+
+    let b_request = || Request {
+        id: "req-b".to_string(),
+        prompt: "The largest planet in the solar system is".to_string(),
+        max_new_tokens: 4,
+    };
+
+    // --- Run A to completion, then B into a fresh Vec on the SAME model. ---
+    let mut model = ParallelModelManager::load(
+        &model_dir,
+        MAX_BATCH_SIZE,
+        CONTEXT_LENGTH,
+        Some("f32"),
+        None,
+    )
+    .expect("failed to load TinyLlama");
+
+    let a_request = Request {
+        id: "req-a".to_string(),
+        prompt: "Rust is a systems programming language that".to_string(),
+        max_new_tokens: 4,
+    };
+    let mut a_batch = vec![RequestContext::new(a_request)];
+    for _ in 0..32 {
+        model
+            .forward_batch(&mut a_batch)
+            .expect("forward_batch failed for A");
+        if !a_batch[0].should_continue() {
+            break;
+        }
+    }
+    assert!(
+        !a_batch[0].generated_tokens.is_empty() && !a_batch[0].should_continue(),
+        "request A did not reach completion within the step budget -- cannot test slot reuse \
+         without a freed cache index"
+    );
+    // `a_batch[0].cache_index` itself is NOT cleared by `complete()` -- it only
+    // flips `state` (`src/engine/mod.rs::RequestContext::complete`). The real
+    // release is pool-internal (`self.cache_index_pool[cache_idx] = false`,
+    // `parallel_model_manager.rs:1396`), invisible from the caller's
+    // `RequestContext`. A completed context is discarded, never read again, so
+    // that stale field is harmless -- this test does not assert on it; it
+    // asserts on what the POOL does with the freed slot, below.
+    drop(a_batch); // nothing carries forward into B's batch, matching run_jobs's future shape
+
+    let mut b_batch = vec![RequestContext::new(b_request())];
+    model
+        .forward_batch(&mut b_batch)
+        .expect("forward_batch failed for B's first step (after A)");
+    assert_eq!(
+        b_batch[0].cache_index,
+        Some(0),
+        "with max_batch_size=1, B's prefill must reuse the only index the pool has -- the exact \
+         index A just freed. If this is anything else, the scenario this test exists to check \
+         (slot reuse) never actually happened"
+    );
+    for _ in 0..31 {
+        if !b_batch[0].should_continue() {
+            break;
+        }
+        model
+            .forward_batch(&mut b_batch)
+            .expect("forward_batch failed for B (after A)");
+    }
+    assert!(
+        !b_batch[0].generated_tokens.is_empty() && !b_batch[0].should_continue(),
+        "request B did not reach completion within the step budget"
+    );
+    let b_after_a_tokens = b_batch[0].generated_tokens.clone();
+    let b_after_a_text = model.decode(&b_after_a_tokens, false).unwrap();
+
+    // --- Control: B alone, on a SEPARATE model instance A never touched. ---
+    let mut control_model = ParallelModelManager::load(
+        &model_dir,
+        MAX_BATCH_SIZE,
+        CONTEXT_LENGTH,
+        Some("f32"),
+        None,
+    )
+    .expect("failed to load TinyLlama for the control instance");
+    let mut control_batch = vec![RequestContext::new(b_request())];
+    for _ in 0..32 {
+        control_model
+            .forward_batch(&mut control_batch)
+            .expect("forward_batch failed for the control run of B");
+        if !control_batch[0].should_continue() {
+            break;
+        }
+    }
+    let b_control_tokens = control_batch[0].generated_tokens.clone();
+    let b_control_text = control_model.decode(&b_control_tokens, false).unwrap();
+
+    println!("B after A (reused slot): {b_after_a_tokens:?} \"{b_after_a_text}\"");
+    println!("B alone   (control):     {b_control_tokens:?} \"{b_control_text}\"");
+
+    assert_eq!(
+        b_after_a_tokens, b_control_tokens,
+        "request B produced different tokens when it reused A's freed cache index than when it \
+         ran alone on a fresh model instance -- A's KV state leaked into B's slot. Both runs are \
+         greedy (temperature 0.0, the default), so this is not sampling noise."
+    );
+}
+
 #[test]
 #[ignore]
 fn test_parallel_deterministic_consistency() {

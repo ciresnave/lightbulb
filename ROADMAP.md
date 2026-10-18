@@ -747,6 +747,35 @@ comment referencing one of them).
   when a database is expected but absent, never a silent skip) so a run outside
   `postgres_integration` without a configured database still fails loudly
   rather than looking identical to a pass.
+- **Self-hosted-runner debt inventory (2026-10-17, per CIRESNAVE-EXPECTATIONS §5.1g/5.1h: "existing
+  `#[ignore]`s are debt; each lane lists its own and works them down").** PM is routing a self-hosted
+  CI job for `tests/parallel_model_manager_integration.rs`'s new, deliberately-not-`#[ignore]`d
+  `cache_index_reused_by_a_later_unrelated_request_is_not_corrupted` (board item M4 slice 5.1). The
+  rest of the tree's `#[ignore]`s, by file, evidenced via `grep -c "#\[ignore\]"` (2026-10-17):
+  - **Already legitimately covered, not debt** — Postgres-gated, not hardware: `tests/
+    api_integration_tests.rs` (14) and `tests/persistant_migrate_tests.rs` (3) run via the
+    `postgres_integration` CI job's `-- --ignored` against a real hosted-runner Postgres service.
+    A GitHub-hosted runner can do this; no self-hosted runner is needed for either file.
+  - **Checkpoint-needing (CPU-runnable if a model is present, same shape as slice 5.1's test) —
+    debt, not yet routed:** `tests/parallel_model_manager_integration.rs` (6, its own pre-existing
+    ones besides 5.1's new test), `tests/enhanced_correctness_tests.rs` (12), `tests/
+    contracts_live.rs` (6), `tests/integration_local_model.rs` (3), `tests/c1_prefill_vs_decode.rs`
+    (2), `tests/load_stress_tests.rs` (2, resource need not yet confirmed by reading the file).
+  - **GPU-needing (CUDA hardware, not just a checkpoint) — debt, not yet routed:** `tests/
+    multi_gpu_validation.rs` (17), `tests/fused_rmsnorm_parity.rs` (4), `tests/
+    fused_rmsnorm_perf.rs` (4), `tests/kv_append_perf_probe.rs` (1).
+  - **Mixed GPU-and-checkpoint signals in the same file (needs a closer read before routing):**
+    `tests/model_fuel_golden.rs` (9), `tests/gguf_serving_e2e.rs` (1, one of the "three behavioural
+    acceptance tests" above).
+  - **Not yet triaged at all** — `#[ignore]` also appears inside `src/` unit-test modules
+    (`api/mod.rs`, `backend/marlin.rs`, `backend/marlin_ffi.rs`, `engine/eos_monitor.rs`, `engine/
+    relevance_search.rs`, `gguf/mod.rs`, `lib.rs`, `model/batched_llama.rs`, `model/
+    fused_rmsnorm.rs`, `model_fuel/batched.rs`, `model_fuel/generate.rs`, `model_fuel/loader.rs`,
+    `model_fuel/loader_gguf.rs`, `multi_gpu/distributed_cache.rs`, `multi_gpu/pipeline_parallel.rs`,
+    `multi_gpu/tensor_parallel.rs`, `test_models.rs`) — count and resource need not established
+    here; a separate pass, not sized yet.
+  - This is an inventory, not a remediation plan: each row above still needs its own self-hosted
+    job (or, for the mixed/untriaged ones, a closer read first) before its `#[ignore]`s come off.
 - **⚠️ NO DOCUMENTATION EXAMPLE IN THIS REPO IS EXECUTED.** Measured 2026-09-05:
 
   ```text
