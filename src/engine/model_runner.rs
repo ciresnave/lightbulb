@@ -279,6 +279,27 @@ pub(crate) trait EngineModel {
     fn prefix_cache_stats(&self) -> crate::cache::PrefixCacheStats {
         crate::cache::PrefixCacheStats::default()
     }
+
+    /// Release any backend resource (e.g. a KV-cache slot) held by a
+    /// request that will never be stepped again.
+    ///
+    /// **Bug this exists to fix (found 2026-10-18, pre-existing, not
+    /// introduced by any M4 slice):** `run_jobs` cancels a request by
+    /// dropping its `RequestContext` on four exit paths (a closed
+    /// `Complete` receiver, a closed `Streaming` receiver, and a
+    /// `step_batch` error on either mode) — none of which is a normal
+    /// completion. `ParallelModelManager::forward_batch` only releases a
+    /// cache index from its OWN completion branch (`hit_eos ||
+    /// tokens_generated >= max_new_tokens`); a context dropped any other
+    /// way leaks its slot permanently. `run_jobs` calls this exactly once
+    /// per job, after whichever response-mode branch ran, whenever
+    /// `ctx.cache_index.is_some() && ctx.state != RequestState::Completed`
+    /// — i.e. a slot was allocated and the backend's own completion path
+    /// never got to release it.
+    ///
+    /// Default no-op: an implementor with nothing to release (the test
+    /// stubs in this module, anything stateless) needs no change.
+    fn abandon(&mut self, _ctx: &RequestContext) {}
 }
 
 impl EngineModel for crate::model::ParallelModelManager {
@@ -288,6 +309,12 @@ impl EngineModel for crate::model::ParallelModelManager {
 
     fn decode_text(&self, tokens: &[u32], skip_special: bool) -> Result<String> {
         self.decode(tokens, skip_special)
+    }
+
+    fn abandon(&mut self, ctx: &RequestContext) {
+        if let Some(cache_idx) = ctx.cache_index {
+            self.release_cache_index(cache_idx);
+        }
     }
 
     fn prefix_cache_stats(&self) -> crate::cache::PrefixCacheStats {
@@ -656,6 +683,20 @@ pub(crate) fn run_jobs<M: EngineModel>(
                     let _ = resp_tx.send(res);
                 }
             }
+        }
+
+        // Once per job, regardless of mode or outcome: if the backend
+        // allocated a resource for this request (a cache index, say) and
+        // its own completion path never got to release it -- because this
+        // job was cancelled or errored rather than finishing normally --
+        // tell it to release what it holds. A normally completed request
+        // has `state == Completed` precisely because the backend's own
+        // completion branch ran (and already released there), so this is a
+        // no-op for the common case and only fires on an abandoned one.
+        if batch[0].cache_index.is_some()
+            && !matches!(batch[0].state, crate::engine::RequestState::Completed)
+        {
+            model.abandon(&batch[0]);
         }
 
         // Once per job, regardless of mode -- the one piece of state this
@@ -1045,5 +1086,98 @@ mod tests {
             );
             assert_eq!(completion.finish_reason, FinishReason::Length);
         }
+    }
+
+    /// **Pre-existing bug, not introduced by any M4 slice.** `run_jobs`'s two
+    /// cancellation paths drop `batch` without a final `step_batch` call
+    /// that would hit `ParallelModelManager::forward_batch`'s own completion
+    /// branch -- the only place `release_cache_index` is ever called
+    /// (`parallel_model_manager.rs:1395`/`:1736`). A cancelled request whose
+    /// first step already allocated a cache index therefore leaks that slot
+    /// permanently. With `model_max_batch_size: 8` in production
+    /// (`api/mod.rs`), 8 such cancellations over the server's uptime
+    /// (cumulative, not concurrent -- `run_jobs` processes serially today)
+    /// exhausts the pool; the 9th request's prefill calls
+    /// `allocate_cache_index().expect("No available cache indices in pool")`
+    /// and panics the model-runner thread, permanently killing inference
+    /// with no clean recovery.
+    ///
+    /// Reproduced here with `max_batch_size: 1` (one cancellation is enough
+    /// to exhaust a one-slot pool -- the same mechanism, fewer repetitions)
+    /// and a REAL `ParallelModelManager` (TinyLlama), not a stub, because
+    /// the bug is in the pool bookkeeping a stub doesn't have. Job A streams
+    /// with its receiver already dropped before `run_jobs` is ever called --
+    /// the same deterministic technique as
+    /// `a_dropped_streaming_receiver_stops_generation_after_one_wasted_step`,
+    /// chosen because it needs no thread/timing race: `step_batch` runs
+    /// once (allocating the only cache index), the send attempt fails, and
+    /// the loop breaks with the index never released. Job B is an ordinary
+    /// request that should be served normally.
+    ///
+    /// Needs the TinyLlama checkpoint. Not `#[ignore]`d, same policy and
+    /// reasoning as `cache_index_reused_by_a_later_unrelated_request_is_
+    /// not_corrupted` (`tests/parallel_model_manager_integration.rs`) --
+    /// CireSnave's EXPECTATIONS §5.1g/5.1h. Hosted CI must `--skip` it by
+    /// name until the self-hosted job lands.
+    ///
+    /// **Measured 2026-10-18, before the fix: panics**, exactly as described
+    /// above -- `thread '...' panicked at .../parallel_model_manager.rs:...:
+    /// No available cache indices in pool`.
+    #[test]
+    fn a_cancelled_request_leaks_its_cache_slot_and_the_next_request_panics() {
+        let model_dir = crate::test_models::tinyllama_dir().expect(
+            "TinyLlama checkpoint not found -- set TINYLLAMA_DIR, or see \
+             test_models::describe() for the other resolution paths this test tries",
+        );
+        let model = crate::model::ParallelModelManager::load(&model_dir, 1, 256, Some("f32"), None)
+            .expect("failed to load TinyLlama");
+
+        let (tx, rx) = std::sync::mpsc::channel();
+
+        // Job A: streaming, receiver already gone -- deterministic
+        // cancel-after-exactly-one-step (allocates the pool's only index,
+        // then the send fails and the loop breaks without releasing it).
+        let (stream_tx, stream_rx) =
+            tokio::sync::mpsc::unbounded_channel::<anyhow::Result<StreamItem>>();
+        drop(stream_rx);
+        tx.send(InferenceJob {
+            id: "a-cancelled".to_string(),
+            prompt: "Rust is a systems programming language that".to_string(),
+            max_new_tokens: 20,
+            temperature: 0.0,
+            add_special_tokens: true,
+            response_mode: ResponseMode::Streaming(stream_tx),
+        })
+        .unwrap();
+
+        // Job B: an ordinary request that must still be served.
+        let (resp_tx, mut resp_rx) = oneshot::channel();
+        tx.send(InferenceJob {
+            id: "b-ordinary".to_string(),
+            prompt: "The largest planet in the solar system is".to_string(),
+            max_new_tokens: 2,
+            temperature: 0.0,
+            add_special_tokens: true,
+            response_mode: ResponseMode::Complete(resp_tx),
+        })
+        .unwrap();
+        drop(tx);
+
+        run_jobs(
+            model,
+            rx,
+            std::sync::Arc::new(std::sync::Mutex::new(
+                crate::cache::PrefixCacheStats::default(),
+            )),
+        );
+
+        let result = resp_rx.try_recv().expect(
+            "job B never received a result -- run_jobs must have returned without processing it",
+        );
+        assert!(
+            result.is_ok(),
+            "job B (an ordinary, uncancelled request) failed: {:?}",
+            result.err()
+        );
     }
 }

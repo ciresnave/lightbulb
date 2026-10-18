@@ -262,17 +262,20 @@ jobs:
       # path, chat-template rendering end to end, or GGUF serving were
       # exercised. Widening it needs a runner with the model and a GPU, which
       # is a separate change; stating the limit is not.
-      # `--skip cache_index_reused_...`: that test needs the TinyLlama
-      # checkpoint and is deliberately NOT `#[ignore]`d (CireSnave's standing
-      # rule, EXPECTATIONS §5.1g/5.1h -- a test that can run on a self-hosted
-      # runner must run there, not be silently excluded via #[ignore]). The
-      # self-hosted job that actually executes it is being routed separately;
-      # until it exists, this hosted job must skip it by NAME (visible and
-      # removable the moment that job lands), not fall back to #[ignore].
+      # `--skip cache_index_reused_...` / `--skip a_cancelled_request_...`:
+      # both need the TinyLlama checkpoint and are deliberately NOT
+      # `#[ignore]`d (CireSnave's standing rule, EXPECTATIONS §5.1g/5.1h --
+      # a test that can run on a self-hosted runner must run there, not be
+      # silently excluded via #[ignore]). The self-hosted job that actually
+      # executes them is being routed separately; until it exists, this
+      # hosted job must skip them by NAME (visible and removable the moment
+      # that job lands), not fall back to #[ignore].
       - name: test
         shell: bash
         run: |
-          cargo test --tests -- --skip cache_index_reused_by_a_later_unrelated_request_is_not_corrupted
+          cargo test --tests \
+            -- --skip cache_index_reused_by_a_later_unrelated_request_is_not_corrupted \
+               --skip a_cancelled_request_leaks_its_cache_slot_and_the_next_request_panics
           echo test >> .gates-ran
 
       # THE FOUR EMPTY BINARIES ABOVE ARE NOT MERELY UNRUN -- THEY ARE UNCOMPILED.

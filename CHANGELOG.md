@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.11.4
+
+### Fixed
+- **Cache-slot leak on request cancellation -- a real, pre-existing DoS, found while designing
+  M4 slice 5.3, not introduced by it.** `ParallelModelManager::release_cache_index` was only ever
+  called from `forward_batch`'s own completion branch. `run_jobs`'s four cancellation/error exit
+  paths (a closed `Complete` receiver, a closed `Streaming` receiver, and a `step_batch` error on
+  either mode) all dropped `RequestContext` without a final call that would reach that branch --
+  leaking the cache index permanently. With the production default `model_max_batch_size: 8`, 8
+  such cancellations over the server's uptime (cumulative, not concurrent) exhausted the pool;
+  the 9th request's prefill hit `allocate_cache_index().expect("No available cache indices in
+  pool")` and panicked the model-runner thread, permanently killing inference with no clean
+  recovery short of a process restart.
+- **Reproduced live before fixing**, not just read: new test
+  `a_cancelled_request_leaks_its_cache_slot_and_the_next_request_panics` (real TinyLlama,
+  `max_batch_size: 1` -- one cancellation is enough to exhaust a one-slot pool, same mechanism,
+  fewer repetitions) panicked against the pre-fix code exactly as described, then passed once
+  fixed.
+- **Fix:** new `EngineModel::abandon(&mut self, ctx: &RequestContext)` trait method (default
+  no-op), called once by `run_jobs` per job whenever `ctx.cache_index.is_some() && ctx.state !=
+  RequestState::Completed` -- i.e. a slot was allocated and the backend's own completion path
+  never got to release it. `ParallelModelManager`'s impl calls the now-`pub(crate)`
+  `release_cache_index`. Not published to crates.io (confirmed: crates.io returns 404 for
+  `lightbulb`), so no GHSA/RustSec advisory applies.
+- `cargo test --lib`: 881 passed, 0 failed, 24 ignored (the checkpoint-needing reproduction test
+  is skipped by this count, same policy as slice 5.1's). `scripts/clippy_gate.py`: clean, no new
+  or increased lints.
+
 ## 0.11.3
 
 ### Changed
