@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.12.0
+
+### Changed (breaking)
+- **M4 slice 5.4a: `AppState.scheduler` is now `SharedScheduler` (`Arc<Mutex<MemoryAwareScheduler>>`),
+  not `Arc<MemoryAwareScheduler>`** -- a public-field type change (pre-1.0, hence the 0.n bump).
+  `check_admission`'s own `&self`-only design (slice 2) can't support `submit_request`/
+  `allocate_pending_requests`/`free_slot`, which all need `&mut self`; interior mutability is what
+  lets both the HTTP layer (reading) and `run_jobs` (writing, on its own thread) hold the same
+  scheduler. `ApiServer::new`'s `scheduler` parameter and every `MemoryAwareScheduler` construction
+  site across the tree (production and test fixtures) updated to match.
+- `run_jobs` now mirrors real admission and departure into the shared scheduler's own `SlotPool`
+  bookkeeping, not just its own `batch`/`modes`: `admit_pending` calls `submit_request` +
+  `allocate_pending_requests` when a job joins (a chars/4 placeholder for `prompt_tokens`, the
+  same heuristic `check_admission` already uses -- real tokenization hasn't happened yet at
+  admission time); every removal site calls the new `release_scheduler_slot` helper,
+  unconditionally (the scheduler mirror has no "the backend already freed it" case to skip,
+  unlike `abandon_if_not_completed`). No real admission limit enforced yet -- still this sub-slice's
+  scope, not 5.4a's.
+- Red-first test `run_jobs_mirrors_real_admission_and_departure_into_the_shared_scheduler`: two
+  concurrent jobs, the scheduler's tracked occupancy reaches 2 while both are in flight (impossible
+  before -- nothing called `submit_request`/`free_slot` from `run_jobs` at all) and returns to 0
+  once both complete.
+- Re-verified both prior checkpoint tests (slice 5.1's cache-reuse-safety test, the cache-leak fix)
+  against the real TinyLlama checkpoint after this change: both still pass.
+- `cargo test --lib`: 882 passed, 0 failed, 24 ignored. `scripts/clippy_gate.py`: clean, no new or
+  increased lints.
+
 ## 0.11.6
 
 ### Added

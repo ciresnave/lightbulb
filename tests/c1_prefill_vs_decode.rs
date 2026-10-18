@@ -85,6 +85,9 @@ fn gguf_path() -> Option<PathBuf> {
 }
 
 async fn complete_raw(path: &Path, prompt: &str, max_tokens: usize) -> serde_json::Value {
+    let scheduler = Arc::new(std::sync::Mutex::new(MemoryAwareScheduler::new(
+        MemoryAwareConfig::default(),
+    )));
     let tx = ModelRunner::start(
         path,
         1,
@@ -94,10 +97,11 @@ async fn complete_raw(path: &Path, prompt: &str, max_tokens: usize) -> serde_jso
         std::sync::Arc::new(std::sync::Mutex::new(
             lightbulb::cache::PrefixCacheStats::default(),
         )),
+        scheduler.clone(),
     )
     .expect("starting the model runner");
     let state = AppState {
-        scheduler: Arc::new(MemoryAwareScheduler::new(MemoryAwareConfig::default())),
+        scheduler,
         config: ApiConfig::default(),
         pg_backend: None,
         inference_tx: Some(tx),

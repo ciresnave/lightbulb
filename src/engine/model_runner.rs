@@ -141,6 +141,14 @@ pub type InferenceRequestSender = SyncSender<InferenceJob>;
 /// each job and read by the HTTP layer without going through it.
 pub type SharedCacheStats = std::sync::Arc<std::sync::Mutex<crate::cache::PrefixCacheStats>>;
 
+/// Shared, lockable handle on the admission scheduler (M4 slice 5.4a).
+/// `MemoryAwareScheduler::check_admission` is `&self`-only (slice 2's dry-run
+/// estimate), but `submit_request`/`allocate_pending_requests`/`free_slot`
+/// all need `&mut self` -- interior mutability is what lets both the HTTP
+/// layer (reading) and `run_jobs` (writing, on its own thread) hold the same
+/// scheduler.
+pub type SharedScheduler = std::sync::Arc<std::sync::Mutex<crate::engine::MemoryAwareScheduler>>;
+
 /// Live count of inference jobs currently enqueued or in flight — the
 /// `/metrics` endpoint's queue-depth gauge (Phase 4 observability). Plain
 /// `Arc<AtomicUsize>` rather than threading a counter through the channel
@@ -352,6 +360,11 @@ impl ModelRunner {
     /// * `cache_stats` - Shared handle `run_jobs` writes the prefix cache's
     ///   stats into after every job, for the `cache_stats` admin endpoint to
     ///   read without going through the inference channel.
+    /// * `scheduler` - Shared admission scheduler (M4 slice 5.4a). `run_jobs`
+    ///   mirrors real admission/departure into it as jobs join and leave the
+    ///   active set, for the `scheduler_stats`/`scheduler_queue` admin
+    ///   endpoints to read (slice 5.4b) without going through the inference
+    ///   channel.
     #[cfg(not(feature = "fuel-engine"))]
     pub fn start(
         model_path: impl Into<PathBuf>,
@@ -360,6 +373,7 @@ impl ModelRunner {
         dtype: Option<String>,
         max_queue_depth: usize,
         cache_stats: SharedCacheStats,
+        scheduler: SharedScheduler,
     ) -> Result<InferenceRequestSender> {
         let model_path = model_path.into();
         let (tx, rx): (SyncSender<InferenceJob>, Receiver<InferenceJob>) =
@@ -404,7 +418,7 @@ impl ModelRunner {
                         if is_gguf { "GGUF" } else { "SafeTensors" }
                     );
 
-                    run_jobs(manager, rx, cache_stats);
+                    run_jobs(manager, rx, cache_stats, scheduler);
                 }
                 Err(e) => {
                     // Model failed to load; consume any pending jobs and return error message
@@ -426,10 +440,11 @@ impl ModelRunner {
     /// "bf16" request would change numerics against every golden captured on
     /// the f32 path. The parameter stays for signature compatibility.
     ///
-    /// `cache_stats` is accepted for signature compatibility with the
-    /// candlelight path and never written: this path's scheduling (board
-    /// item 97) doesn't go through `run_jobs`, which is the only writer,
-    /// and has no prefix-cache concept of its own today.
+    /// `cache_stats` and `scheduler` are accepted for signature compatibility
+    /// with the candlelight path and never written: this path's scheduling
+    /// (board item 97) doesn't go through `run_jobs`, which is the only
+    /// writer for either, and has no prefix-cache or admission-tracking
+    /// concept of its own today.
     #[cfg(feature = "fuel-engine")]
     pub fn start(
         model_path: impl Into<PathBuf>,
@@ -438,6 +453,7 @@ impl ModelRunner {
         dtype: Option<String>,
         max_queue_depth: usize,
         _cache_stats: SharedCacheStats,
+        _scheduler: SharedScheduler,
     ) -> Result<InferenceRequestSender> {
         let model_path = model_path.into();
         let (tx, rx): (SyncSender<InferenceJob>, Receiver<InferenceJob>) =
@@ -541,15 +557,43 @@ fn abandon_if_not_completed<M: EngineModel>(model: &mut M, ctx: &RequestContext)
     }
 }
 
+/// Mirror a departure into the shared scheduler's own bookkeeping (M4 slice
+/// 5.4a) -- unlike `abandon_if_not_completed`, this runs for EVERY removal,
+/// completed or not: the scheduler's `SlotPool` tracks occupancy for
+/// observability (slice 5.4b) and has no notion of "the backend already
+/// released its own resource" to skip on. A lock-poisoned or already-absent
+/// slot is not an error here -- the request is leaving either way.
+fn release_scheduler_slot(scheduler: &SharedScheduler, request_id: &str) {
+    if let Ok(mut sched) = scheduler.lock() {
+        let slot_id = sched
+            .slot_pool()
+            .get_request_slot(&request_id.to_string())
+            .copied();
+        if let Some(slot_id) = slot_id {
+            let _ = sched.free_slot(slot_id);
+        }
+    }
+}
+
 /// Move every job already queued (the channel's own buffer, drained by
 /// `run_jobs`'s non-blocking `try_recv` -- M4 slice 5.2) into the active
-/// batch. No admission limit yet -- that is slice 5.4's `SlotPool` job, not
-/// this one's. New requests start `Pending`; `step_batch` prefills them on
-/// the next call, same as always.
+/// batch. New requests start `Pending`; `step_batch` prefills them on the
+/// next call, same as always.
+///
+/// M4 slice 5.4a: also mirrors the admission into the shared scheduler's own
+/// bookkeeping (`SlotPool` via `MemoryAwareScheduler`) -- for observability
+/// (slice 5.4b) and future real admission limits, NOT a second source of
+/// truth for whether this job actually runs; `batch`/`modes` is. No real
+/// admission limit is enforced here yet (still this slice's scope, not
+/// 5.4a's): `submit_request` only queues if the scheduler has no free slot,
+/// it never rejects. `prompt_tokens` is a LENGTH placeholder (chars/4, the
+/// same heuristic `check_admission` already uses in the HTTP layer), not
+/// real tokenization -- the scheduler only ever reads its `.len()`.
 fn admit_pending(
     pending: &mut VecDeque<InferenceJob>,
     batch: &mut Vec<RequestContext>,
     modes: &mut Vec<ActiveMode>,
+    scheduler: &SharedScheduler,
 ) {
     while let Some(job) = pending.pop_front() {
         let req = Request {
@@ -563,6 +607,18 @@ fn admit_pending(
         // from a raw one by looking at it — `<s>` is ordinary text — so the
         // handler that built the prompt is the only place the answer exists.
         ctx.add_special_tokens = job.add_special_tokens;
+
+        if let Ok(mut sched) = scheduler.lock() {
+            sched.submit_request(crate::engine::SlotPoolRequest {
+                id: job.id.clone(),
+                prompt_tokens: vec![0u32; job.prompt.len() / 4],
+                max_new_tokens: job.max_new_tokens,
+                temperature: job.temperature,
+                top_p: 1.0,
+            });
+            sched.allocate_pending_requests();
+        }
+
         batch.push(ctx);
         modes.push(match job.response_mode {
             ResponseMode::Streaming(tx) => ActiveMode::Streaming(tx),
@@ -583,12 +639,14 @@ fn remove_cancelled_before_step<M: EngineModel>(
     model: &mut M,
     batch: &mut Vec<RequestContext>,
     modes: &mut Vec<ActiveMode>,
+    scheduler: &SharedScheduler,
 ) {
     let mut idx = 0;
     while idx < modes.len() {
         let closed = matches!(&modes[idx], ActiveMode::Complete(tx) if tx.is_closed());
         if closed {
             abandon_if_not_completed(model, &batch[idx]);
+            release_scheduler_slot(scheduler, &batch[idx].request.id);
             batch.remove(idx);
             modes.remove(idx);
         } else {
@@ -606,10 +664,12 @@ fn fail_whole_batch<M: EngineModel>(
     model: &mut M,
     batch: &mut Vec<RequestContext>,
     modes: &mut Vec<ActiveMode>,
+    scheduler: &SharedScheduler,
     err: anyhow::Error,
 ) {
     for ctx in batch.iter() {
         abandon_if_not_completed(model, ctx);
+        release_scheduler_slot(scheduler, &ctx.request.id);
     }
     for mode in modes.drain(..) {
         match mode {
@@ -693,6 +753,7 @@ fn demux_step_results<M: EngineModel>(
     batch: &mut Vec<RequestContext>,
     modes: &mut Vec<ActiveMode>,
     prev_lens: &[usize],
+    scheduler: &SharedScheduler,
 ) {
     let mut idx = 0;
     while idx < batch.len() {
@@ -710,6 +771,7 @@ fn demux_step_results<M: EngineModel>(
 
         if remove {
             abandon_if_not_completed(model, &batch[idx]);
+            release_scheduler_slot(scheduler, &batch[idx].request.id);
             let ctx = batch.remove(idx);
             let mode = modes.remove(idx);
             // `Streaming`'s sender already got its Done/Err inside
@@ -741,13 +803,14 @@ pub(crate) fn run_jobs<M: EngineModel>(
     mut model: M,
     rx: Receiver<InferenceJob>,
     cache_stats: SharedCacheStats,
+    scheduler: SharedScheduler,
 ) {
     let mut pending: VecDeque<InferenceJob> = VecDeque::new();
     let mut batch: Vec<RequestContext> = Vec::new();
     let mut modes: Vec<ActiveMode> = Vec::new();
 
     loop {
-        admit_pending(&mut pending, &mut batch, &mut modes);
+        admit_pending(&mut pending, &mut batch, &mut modes, &scheduler);
 
         if batch.is_empty() {
             match rx.recv() {
@@ -763,7 +826,7 @@ pub(crate) fn run_jobs<M: EngineModel>(
             pending.push_back(job);
         }
 
-        remove_cancelled_before_step(&mut model, &mut batch, &mut modes);
+        remove_cancelled_before_step(&mut model, &mut batch, &mut modes, &scheduler);
         if batch.is_empty() {
             continue;
         }
@@ -771,8 +834,8 @@ pub(crate) fn run_jobs<M: EngineModel>(
         let prev_lens: Vec<usize> = batch.iter().map(|ctx| ctx.generated_tokens.len()).collect();
 
         match model.step_batch(&mut batch) {
-            Ok(_) => demux_step_results(&mut model, &mut batch, &mut modes, &prev_lens),
-            Err(e) => fail_whole_batch(&mut model, &mut batch, &mut modes, e),
+            Ok(_) => demux_step_results(&mut model, &mut batch, &mut modes, &prev_lens, &scheduler),
+            Err(e) => fail_whole_batch(&mut model, &mut batch, &mut modes, &scheduler, e),
         }
 
         // Once per round -- the one piece of state this thread shares
@@ -787,6 +850,12 @@ pub(crate) fn run_jobs<M: EngineModel>(
 mod tests {
     use super::*;
     use crate::engine::{Request, RequestContext};
+
+    fn test_scheduler() -> SharedScheduler {
+        std::sync::Arc::new(std::sync::Mutex::new(
+            crate::engine::MemoryAwareScheduler::new(crate::engine::MemoryAwareConfig::default()),
+        ))
+    }
 
     #[test]
     fn queue_depth_guard_increments_on_construction_and_decrements_on_drop() {
@@ -926,6 +995,7 @@ mod tests {
                 std::sync::Arc::new(std::sync::Mutex::new(
                     crate::cache::PrefixCacheStats::default(),
                 )),
+                test_scheduler(),
             );
 
             let seen = seen.lock().unwrap();
@@ -1010,6 +1080,7 @@ mod tests {
             std::sync::Arc::new(std::sync::Mutex::new(
                 crate::cache::PrefixCacheStats::default(),
             )),
+            test_scheduler(),
         );
 
         assert_eq!(
@@ -1058,6 +1129,7 @@ mod tests {
             std::sync::Arc::new(std::sync::Mutex::new(
                 crate::cache::PrefixCacheStats::default(),
             )),
+            test_scheduler(),
         );
 
         assert_eq!(
@@ -1153,6 +1225,7 @@ mod tests {
             std::sync::Arc::new(std::sync::Mutex::new(
                 crate::cache::PrefixCacheStats::default(),
             )),
+            test_scheduler(),
         );
 
         let lens = batch_lens.lock().unwrap().clone();
@@ -1187,6 +1260,101 @@ mod tests {
             b.text, "[1, 2, 3]",
             "job b's decoded text must be its own sequence, not a's or a mix of both"
         );
+    }
+
+    /// Same per-ctx advancement as `ConcurrencyRecordingModel`, but records
+    /// the SHARED SCHEDULER's own live occupancy on every call instead of
+    /// the batch length -- M4 slice 5.4a's claim is specifically that the
+    /// scheduler's bookkeeping reflects real concurrent admission, not just
+    /// that `run_jobs`'s own `batch` does (5.3 already proved that).
+    struct SchedulerObservingModel {
+        scheduler: SharedScheduler,
+        occupancy: std::sync::Arc<std::sync::Mutex<Vec<usize>>>,
+    }
+
+    impl EngineModel for SchedulerObservingModel {
+        fn step_batch(&mut self, batch: &mut [RequestContext]) -> Result<Vec<Option<u32>>> {
+            if let Ok(sched) = self.scheduler.lock() {
+                self.occupancy
+                    .lock()
+                    .unwrap()
+                    .push(sched.slot_pool().get_ready_batch().len());
+            }
+            for ctx in batch.iter_mut() {
+                if ctx.tokens_generated == 0 {
+                    ctx.start_decoding();
+                }
+                ctx.record_token();
+                ctx.generated_tokens.push(ctx.tokens_generated as u32);
+                if ctx.tokens_generated >= ctx.request.max_new_tokens {
+                    ctx.complete();
+                }
+            }
+            Ok(vec![None; batch.len()])
+        }
+
+        fn decode_text(&self, tokens: &[u32], _skip_special: bool) -> Result<String> {
+            Ok(format!("{tokens:?}"))
+        }
+    }
+
+    /// M4 slice 5.4a: `run_jobs` mirrors real admission/departure into the
+    /// shared scheduler's own bookkeeping (`SlotPool` via
+    /// `MemoryAwareScheduler`), not just into its own `batch`/`modes`.
+    /// Two jobs submitted together (same shape as the 5.3 concurrency test)
+    /// -- the scheduler's `slot_pool().get_ready_batch().len()` must reach
+    /// 2 at some point (both admitted and tracked concurrently), then drop
+    /// back to 0 once both complete (both departures freed their slot).
+    /// Fails against pre-5.4a code (nothing calls `submit_request`/
+    /// `free_slot` from `run_jobs` at all, so occupancy never moves off 0).
+    #[test]
+    fn run_jobs_mirrors_real_admission_and_departure_into_the_shared_scheduler() {
+        let scheduler = test_scheduler();
+        let occupancy = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (tx, rx) = std::sync::mpsc::channel();
+
+        let mut resp_rx_a = send_complete_job(&tx, "a", "p", 5);
+        let mut resp_rx_b = send_complete_job(&tx, "b", "q", 3);
+        drop(tx);
+
+        run_jobs(
+            SchedulerObservingModel {
+                scheduler: scheduler.clone(),
+                occupancy: occupancy.clone(),
+            },
+            rx,
+            std::sync::Arc::new(std::sync::Mutex::new(
+                crate::cache::PrefixCacheStats::default(),
+            )),
+            scheduler.clone(),
+        );
+
+        let occ = occupancy.lock().unwrap().clone();
+        assert!(
+            occ.iter().any(|&n| n >= 2),
+            "the shared scheduler's tracked occupancy never reached 2 while both jobs were \
+             in flight -- admission was never mirrored into it; observed: {occ:?}"
+        );
+
+        // Read the scheduler's state directly, after run_jobs has returned
+        // (both jobs completed) -- NOT via the model's own recorded samples,
+        // which only observe the START of each step_batch call and so can
+        // never see the state after the LAST job's own departure (nothing
+        // calls step_batch again once the active set is empty).
+        let final_occupancy = scheduler
+            .lock()
+            .unwrap()
+            .slot_pool()
+            .get_ready_batch()
+            .len();
+        assert_eq!(
+            final_occupancy, 0,
+            "both jobs completed, so both departures must have freed their scheduler slot -- \
+             occupancy observed during the run: {occ:?}"
+        );
+
+        assert!(resp_rx_a.try_recv().unwrap().is_ok());
+        assert!(resp_rx_b.try_recv().unwrap().is_ok());
     }
 
     /// **Pre-existing bug, not introduced by any M4 slice.** `run_jobs`'s two
@@ -1270,6 +1438,7 @@ mod tests {
             std::sync::Arc::new(std::sync::Mutex::new(
                 crate::cache::PrefixCacheStats::default(),
             )),
+            test_scheduler(),
         );
 
         let result = resp_rx.try_recv().expect(

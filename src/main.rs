@@ -144,7 +144,9 @@ async fn main() -> Result<()> {
     };
     scheduler_config.validate()?;
 
-    let scheduler = Arc::new(MemoryAwareScheduler::new(scheduler_config));
+    let scheduler = Arc::new(std::sync::Mutex::new(MemoryAwareScheduler::new(
+        scheduler_config,
+    )));
 
     // Create and start server
     let server = ApiServer::new(config, scheduler).await?;
