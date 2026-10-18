@@ -504,6 +504,39 @@ async fn finish_connect(backend: persistant_sqlx::PgBackend) -> Option<persistan
     }
 }
 
+/// Spawn the `auth_attempt_counts` (security audit item 3) expiry task.
+/// Extracted out of `ApiServer::new` (Codacy: still 7 lines over limit
+/// after the first extraction) -- self-contained, reads nothing from
+/// `AppState`.
+///
+/// Written on every request that reaches `pre_auth_attempt_limiter_
+/// middleware`, including every brute-force guess — unlike `api_key_usage`,
+/// whose rows are bounded by the number of PROVISIONED keys, this table's
+/// key space is "every IP that ever made a request," so it needs its own
+/// expiry rather than growing forever. A background task, not a per-request
+/// delete, so the request path pays no extra latency for it.
+fn spawn_auth_attempt_counts_cleanup(pg_backend: Option<persistant_sqlx::PgBackend>) {
+    let Some(backend) = pg_backend else {
+        return;
+    };
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(300));
+        loop {
+            interval.tick().await;
+            if let Err(e) = backend
+                .execute(
+                    "DELETE FROM auth_attempt_counts \
+                     WHERE window_start < NOW() - INTERVAL '1 hour'",
+                    &[],
+                )
+                .await
+            {
+                tracing::warn!(error = %e, "auth_attempt_counts cleanup query failed");
+            }
+        }
+    });
+}
+
 /// Start a model runner thread if a model directory and default model exist,
 /// wiring `state.inference_tx`/`chat_template` on success. Extracted out of
 /// `ApiServer::new` (Codacy: that function was 97 lines / complexity 11,
@@ -598,32 +631,7 @@ impl ApiServer {
             }
         };
 
-        // `auth_attempt_counts` (security audit item 3) is written on every
-        // request that reaches `pre_auth_attempt_limiter_middleware`,
-        // including every brute-force guess — unlike `api_key_usage`, whose
-        // rows are bounded by the number of PROVISIONED keys, this table's
-        // key space is "every IP that ever made a request," so it needs its
-        // own expiry rather than growing forever. A background task, not a
-        // per-request delete, so the request path pays no extra latency for
-        // it.
-        if let Some(backend) = pg_backend.clone() {
-            tokio::spawn(async move {
-                let mut interval = tokio::time::interval(std::time::Duration::from_secs(300));
-                loop {
-                    interval.tick().await;
-                    if let Err(e) = backend
-                        .execute(
-                            "DELETE FROM auth_attempt_counts \
-                             WHERE window_start < NOW() - INTERVAL '1 hour'",
-                            &[],
-                        )
-                        .await
-                    {
-                        tracing::warn!(error = %e, "auth_attempt_counts cleanup query failed");
-                    }
-                }
-            });
-        }
+        spawn_auth_attempt_counts_cleanup(pg_backend.clone());
 
         // Install the Prometheus recorder NOW, not lazily on the first
         // `/metrics` request. `request_metrics_middleware` (Phase 4
