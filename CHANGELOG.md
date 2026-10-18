@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.11.6
+
+### Added
+- **M4 slice 5.4 sub-plan.** Reading `MemoryAwareScheduler`/`SlotPool` before slicing found a real
+  shape mismatch: `SlotPool` is its own independent bookkeeping state machine, not something that
+  reads or drives `run_jobs`'s real stepping -- wiring it in means keeping a second, parallel
+  bookkeeping structure in sync, not replacing the real one. Also: `AppState.scheduler` is
+  `Arc<MemoryAwareScheduler>` (no interior mutability) today, but `submit_request`/`free_slot`
+  need `&mut self`. ROADMAP.md now sizes 5.4 into 5.4a (make the scheduler mutably shareable, sync
+  real admission/departure, red-first), 5.4b (wire `scheduler_stats`/`scheduler_queue` to the real
+  shared scheduler), 5.4c (real `Priority`, sized but not designed -- the API-body shape is a real
+  decision for whoever reviews it). Docs only, no code changed.
+
 ## 0.11.5
 
 ### Changed
