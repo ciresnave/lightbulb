@@ -1,6 +1,7 @@
 use anyhow::Result;
+use std::collections::VecDeque;
 use std::path::PathBuf;
-use std::sync::mpsc::{Receiver, SyncSender};
+use std::sync::mpsc::{Receiver, SyncSender, TryRecvError};
 use tokio::sync::{mpsc as async_mpsc, oneshot};
 
 use crate::engine::{Request, RequestContext};
@@ -492,13 +493,43 @@ fn publish_cache_stats<M: EngineModel>(model: &M, cache_stats: &SharedCacheStats
 
 /// The job loop. Identical for every backend, which is why it is generic rather
 /// than duplicated per `cfg`.
+///
+/// M4 slice 5.2: admission is non-blocking once there is already a job in
+/// hand -- `pending` drains everything already sitting in the channel
+/// before processing, rather than this function going back to a single
+/// blocking `recv()` between every job. **No behavior change is intended by
+/// this shape alone**: jobs still process one at a time, in submission
+/// order, each to completion, exactly as before -- `pending` only moves
+/// already-queued jobs from the channel's own buffer into this function's,
+/// which is the admission shape slice 5.3's real concurrent stepping builds
+/// on. `run_jobs_processes_already_queued_jobs_one_at_a_time_in_submission_
+/// order` (this module's test) pins that claim.
 pub(crate) fn run_jobs<M: EngineModel>(
     mut model: M,
     rx: Receiver<InferenceJob>,
     cache_stats: SharedCacheStats,
 ) {
-    // Process incoming jobs
-    while let Ok(job) = rx.recv() {
+    let mut pending: VecDeque<InferenceJob> = VecDeque::new();
+
+    loop {
+        if pending.is_empty() {
+            match rx.recv() {
+                Ok(job) => pending.push_back(job),
+                Err(_) => break, // every sender dropped and nothing left queued
+            }
+        }
+        loop {
+            match rx.try_recv() {
+                Ok(job) => pending.push_back(job),
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => break,
+            }
+        }
+
+        let job = pending
+            .pop_front()
+            .expect("pending was just confirmed non-empty above");
+
         let req = Request {
             id: job.id.clone(),
             prompt: job.prompt.clone(),
@@ -918,5 +949,101 @@ mod tests {
             "a dropped streaming receiver must stop generation after the first step's \
              send fails, not run to the job's full max_new_tokens budget (5 here)"
         );
+    }
+
+    /// Records which request each `step_batch` call advanced, and completes
+    /// a request after exactly its own `max_new_tokens` steps -- so the
+    /// recorded sequence is a complete trace of processing order, not just a
+    /// count.
+    struct OrderRecordingModel {
+        order: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    impl EngineModel for OrderRecordingModel {
+        fn step_batch(&mut self, batch: &mut [RequestContext]) -> Result<Vec<Option<u32>>> {
+            self.order.lock().unwrap().push(batch[0].request.id.clone());
+            if batch[0].tokens_generated == 0 {
+                batch[0].start_decoding();
+            }
+            batch[0].record_token();
+            batch[0]
+                .generated_tokens
+                .push(batch[0].tokens_generated as u32);
+            if batch[0].tokens_generated >= batch[0].request.max_new_tokens {
+                batch[0].complete();
+            }
+            Ok(vec![None])
+        }
+
+        fn decode_text(&self, tokens: &[u32], _skip_special: bool) -> Result<String> {
+            Ok(format!("{tokens:?}"))
+        }
+    }
+
+    /// M4 slice 5.2: `run_jobs`'s admission loop changes shape (non-blocking
+    /// drain into an active `Vec` instead of a single blocking `recv` per
+    /// job), with NO behavior change intended yet -- jobs still process one
+    /// at a time, in the order submitted, to completion each, exactly as
+    /// before. This test is the pre/post pin: run it against the admission
+    /// loop before touching it (baseline) and again after (must stay
+    /// identical). It does not, by itself, prove 5.2 landed correctly --
+    /// the two runs being equal is what proves that; a diff against this
+    /// file's git history at the commit that changed `run_jobs` is the real
+    /// check, not just "this test passes."
+    ///
+    /// Three jobs, three different `max_new_tokens` (2, 3, 1), submitted
+    /// back-to-back before `run_jobs` is ever called (so the channel already
+    /// holds all three when the function starts) -- this is exactly the
+    /// "jobs already queued" case 5.2's non-blocking drain touches; a single
+    /// job in the channel would never exercise it, FIFO or not.
+    #[test]
+    fn run_jobs_processes_already_queued_jobs_one_at_a_time_in_submission_order() {
+        let order = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (tx, rx) = std::sync::mpsc::channel();
+
+        let mut resp_rxs = Vec::new();
+        for (id, max_new_tokens) in [("j1", 2usize), ("j2", 3), ("j3", 1)] {
+            let (resp_tx, resp_rx) = oneshot::channel();
+            tx.send(InferenceJob {
+                id: id.to_string(),
+                prompt: "p".to_string(),
+                max_new_tokens,
+                temperature: 0.0,
+                add_special_tokens: true,
+                response_mode: ResponseMode::Complete(resp_tx),
+            })
+            .unwrap();
+            resp_rxs.push((id, max_new_tokens, resp_rx));
+        }
+        drop(tx); // so run_jobs returns once all three are drained
+
+        run_jobs(
+            OrderRecordingModel {
+                order: order.clone(),
+            },
+            rx,
+            std::sync::Arc::new(std::sync::Mutex::new(
+                crate::cache::PrefixCacheStats::default(),
+            )),
+        );
+
+        assert_eq!(
+            order.lock().unwrap().as_slice(),
+            &["j1", "j1", "j2", "j2", "j2", "j3"],
+            "processing order/interleaving changed -- j1's 2 steps, then j2's 3, then j3's 1, \
+             with no interleaving between jobs, is today's behavior and 5.2 must not change it"
+        );
+
+        for (id, max_new_tokens, mut resp_rx) in resp_rxs {
+            let result = resp_rx
+                .try_recv()
+                .unwrap_or_else(|_| panic!("job {id} never received a result"));
+            let completion = result.unwrap_or_else(|e| panic!("job {id} failed: {e}"));
+            assert_eq!(
+                completion.completion_tokens, max_new_tokens,
+                "job {id} should have generated exactly its own max_new_tokens"
+            );
+            assert_eq!(completion.finish_reason, FinishReason::Length);
+        }
     }
 }

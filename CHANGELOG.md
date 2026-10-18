@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.11.3
+
+### Changed
+- **M4 slice 5.2: `run_jobs`'s admission loop is non-blocking once a job is already in hand**,
+  with no intended behavior change. Previously `while let Ok(job) = rx.recv()` blocked on the
+  channel between every single job; now a `pending: VecDeque<InferenceJob>` drains everything
+  already queued (`rx.try_recv()`) before each job is taken off the front, falling back to a
+  blocking `recv()` only when `pending` is empty. Jobs still process one at a time, in submission
+  order, each fully to completion -- this is pure plumbing for slice 5.3's real concurrent
+  stepping, not a behavior change by itself.
+- New test `run_jobs_processes_already_queued_jobs_one_at_a_time_in_submission_order`
+  (`src/engine/model_runner.rs`): three jobs with different `max_new_tokens` (2, 3, 1), submitted
+  before `run_jobs` is called so the channel already holds all three on entry -- exactly the
+  "jobs already queued" case the drain touches. Confirmed green against the admission loop
+  **before** the refactor (baseline) and **after** (unchanged): same processing order
+  (`["j1","j1","j2","j2","j2","j3"]`, no interleaving), same per-job token counts and finish
+  reasons.
+- `cargo test --lib`: 881 passed, 0 failed, 24 ignored (was 880/0/24 -- the +1 is the new test;
+  every pre-existing `run_jobs`-calling test in this module still passes unchanged).
+  `scripts/clippy_gate.py`: clean, no new or increased lints.
+
 ## 0.11.2
 
 ### Added
