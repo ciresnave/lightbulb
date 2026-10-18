@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.11.2
+
+### Added
+- **M4 slice 5.1: measured, not just read, that cache-slot reuse is safe across unrelated
+  requests.** New test `cache_index_reused_by_a_later_unrelated_request_is_not_corrupted`
+  (`tests/parallel_model_manager_integration.rs`): request A runs to completion and frees its
+  cache index, unrelated request B is admitted into a fresh batch and necessarily reuses that
+  index (`max_batch_size: 1`); B's output is compared bit-for-bit against a control run of B
+  alone on a separate model instance. Measured against a real TinyLlama checkpoint, CPU f32:
+  passes -- identical tokens both ways. De-risks `EngineModel::step_batch`'s documented worry
+  about a scheduler stepping a changing set of live requests corrupting cache state, before any
+  of slice 5.2+ depends on the answer.
+- **Deliberately not `#[ignore]`d**, per CireSnave's standing rule (EXPECTATIONS §5.1g/5.1h): a
+  test that can run on the self-hosted runner runs there rather than being silently excluded via
+  `#[ignore]`. The self-hosted job is being routed (PM); until it lands, `ci.yml`'s hosted `test`
+  step skips this one test by name instead.
+- ROADMAP.md's "Test coverage limits" section gets a self-hosted-runner debt inventory: every
+  other `#[ignore]` in the tree, by file, categorized (Postgres-covered-already /
+  checkpoint-needing / GPU-needing / mixed / not-yet-triaged) with counts from `grep -c`.
+
 ## 0.11.1
 
 ### Added
