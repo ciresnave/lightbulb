@@ -171,7 +171,9 @@ mod api_tests {
         };
 
         let scheduler_config = MemoryAwareConfig::default();
-        let scheduler = Arc::new(MemoryAwareScheduler::new(scheduler_config));
+        let scheduler = Arc::new(std::sync::Mutex::new(MemoryAwareScheduler::new(
+            scheduler_config,
+        )));
 
         // `ApiServer::new` runs the embedded migrations -- this MUST happen
         // before any `provision_test_api_key*` call, not after. It used to

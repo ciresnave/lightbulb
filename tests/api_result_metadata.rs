@@ -118,6 +118,9 @@ fn rendered_prompt(messages: &[(&str, &str)]) -> String {
 /// `Streaming` arm.
 async fn post_raw(path: &str, body: serde_json::Value) -> (StatusCode, Vec<u8>) {
     let dir = tinyllama_dir().expect(MISSING_CHECKPOINT);
+    let scheduler = Arc::new(std::sync::Mutex::new(MemoryAwareScheduler::new(
+        MemoryAwareConfig::default(),
+    )));
     let tx = ModelRunner::start(
         &dir,
         1,
@@ -127,10 +130,11 @@ async fn post_raw(path: &str, body: serde_json::Value) -> (StatusCode, Vec<u8>) 
         std::sync::Arc::new(std::sync::Mutex::new(
             lightbulb::cache::PrefixCacheStats::default(),
         )),
+        scheduler.clone(),
     )
     .expect("starting the model runner");
     let state = AppState {
-        scheduler: Arc::new(MemoryAwareScheduler::new(MemoryAwareConfig::default())),
+        scheduler,
         config: ApiConfig::default(),
         pg_backend: None,
         inference_tx: Some(tx),

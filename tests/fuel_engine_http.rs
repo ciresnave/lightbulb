@@ -139,6 +139,9 @@ async fn fuel_runner_serves_a_coherent_completion_over_http() {
         "no TinyLlama snapshot — this is an acceptance gate, so it fails rather than skipping",
     );
 
+    let scheduler = Arc::new(std::sync::Mutex::new(MemoryAwareScheduler::new(
+        MemoryAwareConfig::default(),
+    )));
     let tx = ModelRunner::start(
         &dir,
         1,
@@ -148,11 +151,12 @@ async fn fuel_runner_serves_a_coherent_completion_over_http() {
         std::sync::Arc::new(std::sync::Mutex::new(
             lightbulb::cache::PrefixCacheStats::default(),
         )),
+        scheduler.clone(),
     )
     .expect("starting the Fuel model runner");
 
     let state = AppState {
-        scheduler: Arc::new(MemoryAwareScheduler::new(MemoryAwareConfig::default())),
+        scheduler,
         config: ApiConfig::default(),
         pg_backend: None,
         inference_tx: Some(tx),
@@ -293,6 +297,9 @@ async fn fuel_runner_serves_a_default_temperature_completion() {
         "no TinyLlama snapshot — this is an acceptance gate, so it fails rather than skipping",
     );
 
+    let scheduler = Arc::new(std::sync::Mutex::new(MemoryAwareScheduler::new(
+        MemoryAwareConfig::default(),
+    )));
     let tx = ModelRunner::start(
         &dir,
         1,
@@ -302,11 +309,12 @@ async fn fuel_runner_serves_a_default_temperature_completion() {
         std::sync::Arc::new(std::sync::Mutex::new(
             lightbulb::cache::PrefixCacheStats::default(),
         )),
+        scheduler.clone(),
     )
     .expect("starting the Fuel model runner");
 
     let state = AppState {
-        scheduler: Arc::new(MemoryAwareScheduler::new(MemoryAwareConfig::default())),
+        scheduler,
         config: ApiConfig::default(),
         pg_backend: None,
         inference_tx: Some(tx),

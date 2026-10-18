@@ -955,15 +955,23 @@ its own test, in this order:
       `check_admission` is `&self`-only (slice 2's design), but `submit_request`/
       `allocate_pending_requests`/`free_slot` all need `&mut self`, so the type itself has to
       change before `run_jobs` (which has no handle to the scheduler at all today) can touch it.
-      1. **5.4a — Make the scheduler mutably shareable and sync real admission/departure into it,
-         no stats or Priority changes yet.** `AppState.scheduler` becomes `Arc<Mutex<
-         MemoryAwareScheduler>>`; a handle threads into `run_jobs` the same way `cache_stats`
-         already does. `admit_pending` calls `submit_request` when a job joins the active set;
-         every removal site (`demux_step_results`'s normal completion, `remove_cancelled_
-         before_step`, `fail_whole_batch`) calls `free_slot` for the same request. Red-first test:
-         after `run_jobs` processes N concurrent jobs, the shared scheduler's `slot_pool().
-         get_ready_batch().len()` reflects real occupancy at a captured mid-run point, not zero
-         (today) or a stale value.
+      1. **5.4a — DONE.** `AppState.scheduler` is now `SharedScheduler` (`Arc<Mutex<
+         MemoryAwareScheduler>>`, defined in `engine/model_runner.rs`); `ModelRunner::start`/
+         `run_jobs` thread it through the same way `cache_stats` already does. `admit_pending`
+         calls `submit_request` + `allocate_pending_requests` when a job joins the active set
+         (using a chars/4 placeholder for `prompt_tokens`, same heuristic `check_admission`
+         already uses -- real tokenization hasn't happened yet at admission time); every removal
+         site (`demux_step_results`, `remove_cancelled_before_step`, `fail_whole_batch`) calls the
+         new `release_scheduler_slot` helper for the same request, unconditionally (unlike
+         `abandon_if_not_completed`, the scheduler mirror has no "the backend already freed it"
+         case to skip). No real admission limit enforced yet -- `submit_request` only queues if
+         the scheduler has no free slot, consistent with the sub-plan's own scope. Red-first test
+         `run_jobs_mirrors_real_admission_and_departure_into_the_shared_scheduler`: two concurrent
+         jobs, the scheduler's `slot_pool().get_ready_batch().len()` reaches 2 while both are in
+         flight (impossible before -- nothing called `submit_request`/`free_slot` from `run_jobs`
+         at all) and returns to 0 once both complete. `check_admission`'s call sites (`chat.rs`,
+         `completions.rs`) updated to lock first. Every `MemoryAwareScheduler` construction site
+         across the tree (production and test fixtures) now wraps in a `Mutex`.
       2. **5.4b — Wire `scheduler_stats`/`scheduler_queue` to read the real shared scheduler**
          instead of `unavailable_reason` (#161). `cache_clear`'s `_scheduler` binding gets a real
          use too if there's a real clear operation to call (`free_slot` per active slot), or stays

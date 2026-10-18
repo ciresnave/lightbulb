@@ -50,8 +50,7 @@ use tokio::net::TcpListener;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 
-use crate::engine::MemoryAwareScheduler;
-use crate::engine::model_runner::ModelRunner;
+use crate::engine::model_runner::{ModelRunner, SharedScheduler};
 use persistant_relational::RelationalBackend;
 use std::path::Path;
 
@@ -331,7 +330,7 @@ pub(crate) fn validate_server_config(config: &ApiConfig) -> Result<()> {
 #[derive(Clone)]
 pub struct AppState {
     /// Inference scheduler
-    pub scheduler: Arc<MemoryAwareScheduler>,
+    pub scheduler: SharedScheduler,
 
     /// API configuration
     pub config: ApiConfig,
@@ -505,6 +504,102 @@ async fn finish_connect(backend: persistant_sqlx::PgBackend) -> Option<persistan
     }
 }
 
+/// Spawn the `auth_attempt_counts` (security audit item 3) expiry task.
+/// Extracted out of `ApiServer::new` (Codacy: still 7 lines over limit
+/// after the first extraction) -- self-contained, reads nothing from
+/// `AppState`.
+///
+/// Written on every request that reaches `pre_auth_attempt_limiter_
+/// middleware`, including every brute-force guess — unlike `api_key_usage`,
+/// whose rows are bounded by the number of PROVISIONED keys, this table's
+/// key space is "every IP that ever made a request," so it needs its own
+/// expiry rather than growing forever. A background task, not a per-request
+/// delete, so the request path pays no extra latency for it.
+fn spawn_auth_attempt_counts_cleanup(pg_backend: Option<persistant_sqlx::PgBackend>) {
+    let Some(backend) = pg_backend else {
+        return;
+    };
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(300));
+        loop {
+            interval.tick().await;
+            if let Err(e) = backend
+                .execute(
+                    "DELETE FROM auth_attempt_counts \
+                     WHERE window_start < NOW() - INTERVAL '1 hour'",
+                    &[],
+                )
+                .await
+            {
+                tracing::warn!(error = %e, "auth_attempt_counts cleanup query failed");
+            }
+        }
+    });
+}
+
+/// Start a model runner thread if a model directory and default model exist,
+/// wiring `state.inference_tx`/`chat_template` on success. Extracted out of
+/// `ApiServer::new` (Codacy: that function was 97 lines / complexity 11,
+/// both over limit) -- a self-contained unit that only reads `state.config`
+/// and writes the two fields above, so pulling it out changes nothing about
+/// what `new` does.
+fn try_start_model_runner(state: &mut AppState) {
+    let Some(models_dir) = &state.config.models_dir else {
+        return;
+    };
+    let model_path = Path::new(models_dir).join(&state.config.default_model);
+    if !model_path.exists() {
+        tracing::warn!(
+            "Model path {} not found; skipping model runner startup",
+            model_path.display()
+        );
+        return;
+    }
+
+    match ModelRunner::start(
+        &model_path,
+        state.config.model_max_batch_size,
+        state.config.model_context_length,
+        Some("f32".to_string()),
+        state.config.model_max_queue_depth,
+        state.cache_stats.clone(),
+        state.scheduler.clone(),
+    ) {
+        Ok(sender) => {
+            state.inference_tx = Some(sender);
+
+            // Resolve the chat template HERE and only here. Both
+            // halves read files, and a per-request read would put
+            // filesystem I/O in the request path for a value that
+            // cannot change while the process runs.
+            //
+            // `resolve_for_serving` owns the "keep it only if a tier
+            // produced one" rule; the three integration harnesses
+            // call the same function so they cannot drift from what
+            // this line builds.
+            state.chat_template = chat_template::resolve_for_serving(&model_path);
+            if let Some(t) = &state.chat_template {
+                tracing::info!(
+                    "Chat template for {} resolved via {:?} (bos {:?}, eos {:?})",
+                    model_path.display(),
+                    t.resolved_by(),
+                    t.tokens.bos,
+                    t.tokens.eos
+                );
+            }
+
+            tracing::info!("Started model runner for {}", model_path.display());
+        }
+        Err(e) => {
+            tracing::error!(
+                "Failed to start model runner for {}: {}",
+                model_path.display(),
+                e
+            );
+        }
+    }
+}
+
 /// API server
 pub struct ApiServer {
     /// Application state
@@ -513,7 +608,7 @@ pub struct ApiServer {
 
 impl ApiServer {
     /// Create new API server
-    pub async fn new(config: ApiConfig, scheduler: Arc<MemoryAwareScheduler>) -> Result<Self> {
+    pub async fn new(config: ApiConfig, scheduler: SharedScheduler) -> Result<Self> {
         validate_auth_policy(&config)?;
         validate_request_timeout(&config)?;
         validate_server_config(&config)?;
@@ -536,32 +631,7 @@ impl ApiServer {
             }
         };
 
-        // `auth_attempt_counts` (security audit item 3) is written on every
-        // request that reaches `pre_auth_attempt_limiter_middleware`,
-        // including every brute-force guess — unlike `api_key_usage`, whose
-        // rows are bounded by the number of PROVISIONED keys, this table's
-        // key space is "every IP that ever made a request," so it needs its
-        // own expiry rather than growing forever. A background task, not a
-        // per-request delete, so the request path pays no extra latency for
-        // it.
-        if let Some(backend) = pg_backend.clone() {
-            tokio::spawn(async move {
-                let mut interval = tokio::time::interval(std::time::Duration::from_secs(300));
-                loop {
-                    interval.tick().await;
-                    if let Err(e) = backend
-                        .execute(
-                            "DELETE FROM auth_attempt_counts \
-                             WHERE window_start < NOW() - INTERVAL '1 hour'",
-                            &[],
-                        )
-                        .await
-                    {
-                        tracing::warn!(error = %e, "auth_attempt_counts cleanup query failed");
-                    }
-                }
-            });
-        }
+        spawn_auth_attempt_counts_cleanup(pg_backend.clone());
 
         // Install the Prometheus recorder NOW, not lazily on the first
         // `/metrics` request. `request_metrics_middleware` (Phase 4
@@ -609,58 +679,7 @@ impl ApiServer {
             queue_depth: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         };
 
-        // Try to start a model runner thread if a model directory and default model exist
-        if let Some(models_dir) = &state.config.models_dir {
-            let model_path = Path::new(models_dir).join(&state.config.default_model);
-            if model_path.exists() {
-                match ModelRunner::start(
-                    &model_path,
-                    state.config.model_max_batch_size,
-                    state.config.model_context_length,
-                    Some("f32".to_string()),
-                    state.config.model_max_queue_depth,
-                    state.cache_stats.clone(),
-                ) {
-                    Ok(sender) => {
-                        state.inference_tx = Some(sender);
-
-                        // Resolve the chat template HERE and only here. Both
-                        // halves read files, and a per-request read would put
-                        // filesystem I/O in the request path for a value that
-                        // cannot change while the process runs.
-                        //
-                        // `resolve_for_serving` owns the "keep it only if a tier
-                        // produced one" rule; the three integration harnesses
-                        // call the same function so they cannot drift from what
-                        // this line builds.
-                        state.chat_template = chat_template::resolve_for_serving(&model_path);
-                        if let Some(t) = &state.chat_template {
-                            tracing::info!(
-                                "Chat template for {} resolved via {:?} (bos {:?}, eos {:?})",
-                                model_path.display(),
-                                t.resolved_by(),
-                                t.tokens.bos,
-                                t.tokens.eos
-                            );
-                        }
-
-                        tracing::info!("Started model runner for {}", model_path.display());
-                    }
-                    Err(e) => {
-                        tracing::error!(
-                            "Failed to start model runner for {}: {}",
-                            model_path.display(),
-                            e
-                        );
-                    }
-                }
-            } else {
-                tracing::warn!(
-                    "Model path {} not found; skipping model runner startup",
-                    model_path.display()
-                );
-            }
-        }
+        try_start_model_runner(&mut state);
 
         Ok(Self { state })
     }
@@ -1370,7 +1389,9 @@ mod tests {
         };
 
         AppState {
-            scheduler: Arc::new(MemoryAwareScheduler::new(MemoryAwareConfig::default())),
+            scheduler: Arc::new(std::sync::Mutex::new(MemoryAwareScheduler::new(
+                MemoryAwareConfig::default(),
+            ))),
             config: ApiConfig {
                 models_dir: models_dir.map(str::to_string),
                 ..ApiConfig::default()
@@ -1773,7 +1794,9 @@ mod tests {
     #[tokio::test]
     async fn api_server_new_starts_degraded_on_unreachable_database() {
         use crate::engine::{MemoryAwareConfig, MemoryAwareScheduler};
-        let scheduler = Arc::new(MemoryAwareScheduler::new(MemoryAwareConfig::default()));
+        let scheduler = Arc::new(std::sync::Mutex::new(MemoryAwareScheduler::new(
+            MemoryAwareConfig::default(),
+        )));
         let config = ApiConfig {
             database_url: Some("postgresql://nouser:nopass@127.0.0.1:1/nodb".to_string()),
             jwt_secret: Some("test-secret".to_string()),
@@ -1793,7 +1816,9 @@ mod tests {
     #[tokio::test]
     async fn api_server_new_refuses_default_config_without_auth() {
         use crate::engine::{MemoryAwareConfig, MemoryAwareScheduler};
-        let scheduler = Arc::new(MemoryAwareScheduler::new(MemoryAwareConfig::default()));
+        let scheduler = Arc::new(std::sync::Mutex::new(MemoryAwareScheduler::new(
+            MemoryAwareConfig::default(),
+        )));
         let config = ApiConfig {
             models_dir: None,
             ..ApiConfig::default()

@@ -919,7 +919,9 @@ mod tests {
     fn state() -> AppState {
         use crate::engine::{MemoryAwareConfig, MemoryAwareScheduler};
         AppState {
-            scheduler: std::sync::Arc::new(MemoryAwareScheduler::new(MemoryAwareConfig::default())),
+            scheduler: std::sync::Arc::new(std::sync::Mutex::new(MemoryAwareScheduler::new(
+                MemoryAwareConfig::default(),
+            ))),
             config: crate::api::ApiConfig::default(),
             pg_backend: None,
             inference_tx: None,

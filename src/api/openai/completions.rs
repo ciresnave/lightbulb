@@ -141,7 +141,12 @@ pub async fn completions(
         PromptInput::Multiple(v) => v.iter().map(|s| s.len()).sum(),
     };
     let estimated_tokens = estimated_prompt_chars / 4 + request.max_tokens.unwrap_or(100);
-    if let Err(reason) = state.scheduler.check_admission(estimated_tokens) {
+    if let Err(reason) = state
+        .scheduler
+        .lock()
+        .unwrap()
+        .check_admission(estimated_tokens)
+    {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(serde_json::json!({
@@ -310,7 +315,9 @@ mod tests {
     ) -> AppState {
         use crate::engine::{MemoryAwareConfig, MemoryAwareScheduler};
         AppState {
-            scheduler: std::sync::Arc::new(MemoryAwareScheduler::new(MemoryAwareConfig::default())),
+            scheduler: std::sync::Arc::new(std::sync::Mutex::new(MemoryAwareScheduler::new(
+                MemoryAwareConfig::default(),
+            ))),
             config: crate::api::ApiConfig::default(),
             pg_backend: None,
             inference_tx,
@@ -384,10 +391,12 @@ mod tests {
         use crate::engine::{MemoryAwareConfig, MemoryAwareScheduler};
 
         let mut state = state_with_runner(None);
-        state.scheduler = std::sync::Arc::new(MemoryAwareScheduler::new(MemoryAwareConfig {
-            max_memory_bytes: 1_000,
-            ..Default::default()
-        }));
+        state.scheduler = std::sync::Arc::new(std::sync::Mutex::new(MemoryAwareScheduler::new(
+            MemoryAwareConfig {
+                max_memory_bytes: 1_000,
+                ..Default::default()
+            },
+        )));
 
         let response = self::completions(State(state), Json(request()))
             .await

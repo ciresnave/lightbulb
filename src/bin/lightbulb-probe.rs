@@ -124,6 +124,7 @@ use lightbulb::engine::ModelRunner;
 use lightbulb::engine::model_runner::{
     CompletionResult, FinishReason, InferenceJob, InferenceRequestSender, ResponseMode,
 };
+use lightbulb::engine::{MemoryAwareConfig, MemoryAwareScheduler};
 
 /// The one conversation every candidate is measured on.
 ///
@@ -289,6 +290,9 @@ async fn probe(
         std::sync::Arc::new(std::sync::Mutex::new(
             lightbulb::cache::PrefixCacheStats::default(),
         )),
+        std::sync::Arc::new(std::sync::Mutex::new(MemoryAwareScheduler::new(
+            MemoryAwareConfig::default(),
+        ))),
     )?;
 
     let mut rows: Vec<ProbeRow> = Vec::new();

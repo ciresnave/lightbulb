@@ -26,6 +26,7 @@ use lightbulb::contracts::{
     validation::RawMessage,
 };
 use lightbulb::engine::model_runner::{InferenceJob, ModelRunner, ResponseMode};
+use lightbulb::engine::{MemoryAwareConfig, MemoryAwareScheduler};
 
 type RunnerTx = std::sync::mpsc::SyncSender<InferenceJob>;
 
@@ -67,6 +68,9 @@ fn init_runner() -> RunnerTx {
         std::sync::Arc::new(std::sync::Mutex::new(
             lightbulb::cache::PrefixCacheStats::default(),
         )),
+        std::sync::Arc::new(std::sync::Mutex::new(MemoryAwareScheduler::new(
+            MemoryAwareConfig::default(),
+        ))),
     )
     .expect("ModelRunner::start failed");
 
