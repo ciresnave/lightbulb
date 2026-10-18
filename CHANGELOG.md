@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.12.1
+
+### Added
+- **M4 slice 5.4b: `scheduler_stats`/`scheduler_queue` read the real shared scheduler**
+  (`MemoryAwareScheduler::get_memory_stats()`), not `unavailable_reason`/`null` always. Real now:
+  `scheduler_queue`'s `pending_requests`/`running_requests`; `scheduler_stats`'s new
+  `active_slots`/`queued_requests`/`scheduler_memory_used_bytes`/`eviction_pressure` fields. Still
+  unavailable, correctly: `queue` (the per-request list -- `priority_queue` has no enumeration
+  API) and `scheduler_stats`'s `total_requests`/`completed_requests`/`failed_requests`/
+  `average_latency_ms`/`throughput_tokens_per_sec` (`GET /metrics` is the right home, per the
+  PM's 2026-10-16 ruling, not a duplicate counter here).
+- **`cache_clear`'s `_scheduler` binding decided: left alone.** Calling `free_slot` on active
+  admission slots from a "clear the prefix cache" endpoint would kill in-flight requests, not
+  clear a cache -- the scheduler was never the right lever for this endpoint.
+- **Corrected in place**, per the retraction rule: `scheduler_queue_reports_unavailable_not_zero`
+  asserted "always null," which is now simply wrong on an idle scheduler (a real `0`). Renamed to
+  `scheduler_queue_reports_real_zero_not_null_when_idle` with corrected assertions, plus two new
+  tests (`..._reports_real_occupancy_once_a_request_is_admitted`, one per endpoint) priming the
+  shared scheduler directly and reading the real occupancy back.
+- `cargo test --lib`: 884 passed, 0 failed, 24 ignored (was 882/0/24 -- the +2 are the new
+  occupancy tests). `scripts/clippy_gate.py`: clean. Both checkpoint-needing tests re-run by hand
+  against real TinyLlama after this change: both still pass.
+
 ## 0.12.0
 
 ### Changed (breaking)
