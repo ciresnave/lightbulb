@@ -504,6 +504,69 @@ async fn finish_connect(backend: persistant_sqlx::PgBackend) -> Option<persistan
     }
 }
 
+/// Start a model runner thread if a model directory and default model exist,
+/// wiring `state.inference_tx`/`chat_template` on success. Extracted out of
+/// `ApiServer::new` (Codacy: that function was 97 lines / complexity 11,
+/// both over limit) -- a self-contained unit that only reads `state.config`
+/// and writes the two fields above, so pulling it out changes nothing about
+/// what `new` does.
+fn try_start_model_runner(state: &mut AppState) {
+    let Some(models_dir) = &state.config.models_dir else {
+        return;
+    };
+    let model_path = Path::new(models_dir).join(&state.config.default_model);
+    if !model_path.exists() {
+        tracing::warn!(
+            "Model path {} not found; skipping model runner startup",
+            model_path.display()
+        );
+        return;
+    }
+
+    match ModelRunner::start(
+        &model_path,
+        state.config.model_max_batch_size,
+        state.config.model_context_length,
+        Some("f32".to_string()),
+        state.config.model_max_queue_depth,
+        state.cache_stats.clone(),
+        state.scheduler.clone(),
+    ) {
+        Ok(sender) => {
+            state.inference_tx = Some(sender);
+
+            // Resolve the chat template HERE and only here. Both
+            // halves read files, and a per-request read would put
+            // filesystem I/O in the request path for a value that
+            // cannot change while the process runs.
+            //
+            // `resolve_for_serving` owns the "keep it only if a tier
+            // produced one" rule; the three integration harnesses
+            // call the same function so they cannot drift from what
+            // this line builds.
+            state.chat_template = chat_template::resolve_for_serving(&model_path);
+            if let Some(t) = &state.chat_template {
+                tracing::info!(
+                    "Chat template for {} resolved via {:?} (bos {:?}, eos {:?})",
+                    model_path.display(),
+                    t.resolved_by(),
+                    t.tokens.bos,
+                    t.tokens.eos
+                );
+            }
+
+            tracing::info!("Started model runner for {}", model_path.display());
+        }
+        Err(e) => {
+            tracing::error!(
+                "Failed to start model runner for {}: {}",
+                model_path.display(),
+                e
+            );
+        }
+    }
+}
+
 /// API server
 pub struct ApiServer {
     /// Application state
@@ -608,59 +671,7 @@ impl ApiServer {
             queue_depth: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         };
 
-        // Try to start a model runner thread if a model directory and default model exist
-        if let Some(models_dir) = &state.config.models_dir {
-            let model_path = Path::new(models_dir).join(&state.config.default_model);
-            if model_path.exists() {
-                match ModelRunner::start(
-                    &model_path,
-                    state.config.model_max_batch_size,
-                    state.config.model_context_length,
-                    Some("f32".to_string()),
-                    state.config.model_max_queue_depth,
-                    state.cache_stats.clone(),
-                    state.scheduler.clone(),
-                ) {
-                    Ok(sender) => {
-                        state.inference_tx = Some(sender);
-
-                        // Resolve the chat template HERE and only here. Both
-                        // halves read files, and a per-request read would put
-                        // filesystem I/O in the request path for a value that
-                        // cannot change while the process runs.
-                        //
-                        // `resolve_for_serving` owns the "keep it only if a tier
-                        // produced one" rule; the three integration harnesses
-                        // call the same function so they cannot drift from what
-                        // this line builds.
-                        state.chat_template = chat_template::resolve_for_serving(&model_path);
-                        if let Some(t) = &state.chat_template {
-                            tracing::info!(
-                                "Chat template for {} resolved via {:?} (bos {:?}, eos {:?})",
-                                model_path.display(),
-                                t.resolved_by(),
-                                t.tokens.bos,
-                                t.tokens.eos
-                            );
-                        }
-
-                        tracing::info!("Started model runner for {}", model_path.display());
-                    }
-                    Err(e) => {
-                        tracing::error!(
-                            "Failed to start model runner for {}: {}",
-                            model_path.display(),
-                            e
-                        );
-                    }
-                }
-            } else {
-                tracing::warn!(
-                    "Model path {} not found; skipping model runner startup",
-                    model_path.display()
-                );
-            }
-        }
+        try_start_model_runner(&mut state);
 
         Ok(Self { state })
     }
