@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.12.2
+
+### Added
+- **M4 slice 5.4c deferred, with the real decision laid out.** Real `Priority` is blocked on how
+  a caller specifies it, not on sizing: OpenAI's chat/completions schema has no priority field.
+  ROADMAP.md now lays out the two real options (a non-standard top-level JSON field vs. a custom
+  HTTP header) with their actual tradeoffs, a recommendation (the header, for an OpenAI-
+  *compatible* API specifically), and an explicit answer to "does this need CireSnave" (no --
+  single-project API extension, not a cross-portfolio or resource decision). Docs only, no code
+  changed.
+
 ## 0.12.1
 
 ### Added
