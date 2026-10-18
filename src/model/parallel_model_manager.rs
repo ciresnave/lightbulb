@@ -933,8 +933,12 @@ impl ParallelModelManager {
             })
     }
 
-    /// Release a cache index back to the pool
-    fn release_cache_index(&mut self, index: usize) {
+    /// Release a cache index back to the pool. `pub(crate)` (not private):
+    /// `EngineModel::abandon`'s impl for this type, in `engine::model_runner`,
+    /// needs this exact release path for a request `run_jobs` cancels
+    /// mid-generation -- the only other caller is this file's own
+    /// `forward_batch` completion branch.
+    pub(crate) fn release_cache_index(&mut self, index: usize) {
         debug_assert!(
             index < self.cache_index_pool.len(),
             "Attempted to release cache index {} >= pool size {}",
