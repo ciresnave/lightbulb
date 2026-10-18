@@ -972,10 +972,27 @@ its own test, in this order:
          at all) and returns to 0 once both complete. `check_admission`'s call sites (`chat.rs`,
          `completions.rs`) updated to lock first. Every `MemoryAwareScheduler` construction site
          across the tree (production and test fixtures) now wraps in a `Mutex`.
-      2. **5.4b — Wire `scheduler_stats`/`scheduler_queue` to read the real shared scheduler**
-         instead of `unavailable_reason` (#161). `cache_clear`'s `_scheduler` binding gets a real
-         use too if there's a real clear operation to call (`free_slot` per active slot), or stays
-         `unavailable_reason`'d with a stated reason if not -- decide once 5.4a's shape is in.
+      2. **5.4b — DONE.** `scheduler_queue`'s `pending_requests`/`running_requests` and
+         `scheduler_stats`'s new `active_slots`/`queued_requests`/`scheduler_memory_used_bytes`/
+         `eviction_pressure` fields now read `MemoryAwareScheduler::get_memory_stats()` on the
+         real shared scheduler (5.4a's doing) -- real numbers, including a genuine `0` when idle,
+         not the pre-5.4b `None`/`unavailable_reason`. `queue` (the per-request list) and
+         `total_requests`/`completed_requests`/`failed_requests`/`average_latency_ms`/
+         `throughput_tokens_per_sec` stay `None` -- no backing API exists for the former
+         (`priority_queue` has no enumeration method), and `GET /metrics` is the right home for
+         the latter (PM ruling, 2026-10-16), not a duplicate counter here.
+         **`cache_clear`'s `_scheduler` binding decided: left alone.** Calling `free_slot` on
+         active admission slots from a "clear the prefix cache" endpoint would kill in-flight
+         requests, not clear a cache -- the scheduler was never the right lever for this endpoint;
+         `cache_clear`'s real gap (cache clearing itself is unimplemented, a separate `TODO`) is
+         untouched, not swept into this slice.
+         **Corrected in place**, per the retraction rule: the old
+         `scheduler_queue_reports_unavailable_not_zero` test's claim ("always null") is now simply
+         wrong on an idle scheduler (real `0`, not `null`) -- renamed and its assertions replaced,
+         plus two new tests (`..._reports_real_occupancy_once_a_request_is_admitted`, one per
+         endpoint) priming the shared scheduler directly (`submit_request` +
+         `allocate_pending_requests`, the same calls `admit_pending` makes) and reading the real
+         occupancy back.
       3. **5.4c — Real `Priority`.** `InferenceJob` gains a `priority: Priority` field; the OpenAI
          request body gets a priority extension (API shape TBD -- OpenAI has no such field, same
          note as the original item 4); `admit_pending` submits via `submit_priority_request`

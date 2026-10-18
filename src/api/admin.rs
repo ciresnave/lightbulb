@@ -136,14 +136,14 @@ async fn cache_clear(
 
 /// Scheduler queue response.
 ///
-/// All three fields are `None`/empty, always, with `unavailable_reason`
-/// explaining why -- NOT the `0`/`[]` a previous version of this returned,
-/// which looked like a real (empty) queue reading rather than no reading
-/// at all. `MemoryAwareScheduler`'s `priority_queue`/`slot_pool` exist
-/// (`src/engine/memory_aware_scheduler.rs`) but nothing in the live
-/// request path calls `submit_priority_request`/`allocate_pending_requests`
-/// -- only `check_admission`, a pure memory-budget check, is used. There
-/// is no real priority-queued-request flow to report a depth for.
+/// `pending_requests`/`running_requests` are now REAL (M4 slice 5.4b):
+/// `run_jobs` mirrors every admission and departure into the shared
+/// scheduler's own bookkeeping (slice 5.4a), so `MemoryAwareScheduler::
+/// get_memory_stats`'s `queued_count`/`active_slots` reflect genuine live
+/// occupancy, not a disconnected instance. `queue` (the per-request list)
+/// stays `None`, with `unavailable_reason` narrowed to explain only that
+/// one field: `MemoryAwareScheduler`'s `priority_queue` has no enumeration
+/// API, only aggregate counts.
 #[derive(Debug, Clone, Serialize)]
 pub struct SchedulerQueueResponse {
     pub pending_requests: Option<usize>,
@@ -163,15 +163,19 @@ pub struct QueuedRequest {
 
 /// Get scheduler queue
 async fn scheduler_queue(State(state): State<AppState>) -> impl IntoResponse {
-    let _scheduler = &state.scheduler;
+    let stats = state
+        .scheduler
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get_memory_stats();
 
     let response = SchedulerQueueResponse {
-        pending_requests: None,
-        running_requests: None,
+        pending_requests: Some(stats.queued_count),
+        running_requests: Some(stats.active_slots),
         queue: None,
         unavailable_reason: Some(
-            "the scheduler's priority queue is not populated by the live request path -- \
-             there is no real per-priority queue depth to report"
+            "per-request queue detail is not tracked, only the aggregate counts above \
+             (both real) -- MemoryAwareScheduler's priority_queue has no enumeration API"
                 .to_string(),
         ),
     };
@@ -181,11 +185,14 @@ async fn scheduler_queue(State(state): State<AppState>) -> impl IntoResponse {
 
 /// Scheduler statistics response.
 ///
-/// Only `memory_usage_bytes` is a real reading (same live `sysinfo`
-/// sampler `GET /v1/lightbulb/admin/metrics` already reads). The other
-/// five are `None`, always, with `unavailable_reason` explaining why --
-/// NOT the `0`/`0.0` a previous version of this returned, which looked
-/// like real zero-valued readings rather than no reading at all. Request
+/// `memory_usage_bytes` is system memory (same live `sysinfo` sampler `GET
+/// /v1/lightbulb/admin/metrics` already reads), unchanged. `active_slots`/
+/// `queued_requests`/`scheduler_memory_used_bytes`/`eviction_pressure` are
+/// NEW (M4 slice 5.4b) and real, for the same reason `scheduler_queue`'s
+/// counts are: `run_jobs` mirrors every admission/departure into the
+/// shared scheduler (slice 5.4a). `total_requests`/`completed_requests`/
+/// `failed_requests`/`average_latency_ms`/`throughput_tokens_per_sec` stay
+/// `None`, `unavailable_reason` narrowed to those five only -- request
 /// count, latency and throughput ARE tracked, just not here: `GET
 /// /metrics` (Phase 4 observability, Prometheus format) records
 /// `lightbulb_http_requests_total` (a counter, labeled route/method/
@@ -203,18 +210,26 @@ pub struct SchedulerStatsResponse {
     pub average_latency_ms: Option<f32>,
     pub throughput_tokens_per_sec: Option<f32>,
     pub memory_usage_bytes: usize,
+    pub active_slots: usize,
+    pub queued_requests: usize,
+    pub scheduler_memory_used_bytes: usize,
+    pub eviction_pressure: f64,
     pub unavailable_reason: Option<String>,
 }
 
 /// Get scheduler statistics
 async fn scheduler_stats(State(state): State<AppState>) -> impl IntoResponse {
-    let _scheduler = &state.scheduler;
-
     let memory_usage_bytes = {
         let mut sys = state.live_system.lock().unwrap_or_else(|e| e.into_inner());
         sys.refresh_memory();
         sys.used_memory() as usize
     };
+
+    let scheduler_stats = state
+        .scheduler
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get_memory_stats();
 
     let response = SchedulerStatsResponse {
         total_requests: None,
@@ -223,6 +238,10 @@ async fn scheduler_stats(State(state): State<AppState>) -> impl IntoResponse {
         average_latency_ms: None,
         throughput_tokens_per_sec: None,
         memory_usage_bytes,
+        active_slots: scheduler_stats.active_slots,
+        queued_requests: scheduler_stats.queued_count,
+        scheduler_memory_used_bytes: scheduler_stats.used_bytes,
+        eviction_pressure: scheduler_stats.eviction_pressure,
         unavailable_reason: Some(
             "request count, latency and throughput are not tracked at this endpoint -- see \
              GET /metrics (lightbulb_http_requests_total, lightbulb_http_request_duration_seconds)"
@@ -1181,14 +1200,21 @@ mod tests {
         );
     }
 
-    /// Breaking change (version bump per project rule): the hardcoded-zero
-    /// stub this replaces returned `0`/`0.0`/`[]`, which LOOKS like a real
-    /// (idle) reading. Every field with no real backing must now be
-    /// `null`, with `unavailable_reason` explaining why -- a caller
-    /// checking `== 0` to mean "idle" would have been silently wrong
-    /// either way, but `null` at least cannot be mistaken for a number.
+    /// **Corrected 2026-10-18 (M4 slice 5.4b superseded this claim).** The
+    /// original version of this test asserted `pending_requests`/
+    /// `running_requests` were ALWAYS `null` -- true only while nothing
+    /// called `submit_request`/`allocate_pending_requests`/`free_slot` from
+    /// the live request path, which slice 5.4a's `run_jobs` now does. On an
+    /// idle scheduler (no job ever submitted, as `state()` builds), the
+    /// real reading is `0` -- a genuine zero, not the pre-5.4b `null`. Only
+    /// `queue` (the per-request list, which the scheduler has no
+    /// enumeration API for) stays `null`. Corrected in place, per the
+    /// retraction rule -- the old assertion is simply wrong now, not a
+    /// style preference. `scheduler_queue_reports_real_occupancy_once_a_
+    /// request_is_admitted` (below) is the positive case: non-zero once a
+    /// request actually exists.
     #[tokio::test]
-    async fn scheduler_queue_reports_unavailable_not_zero() {
+    async fn scheduler_queue_reports_real_zero_not_null_when_idle() {
         let req = Request::builder()
             .method("GET")
             .uri("/v1/lightbulb/admin/scheduler/queue")
@@ -1203,12 +1229,63 @@ mod tests {
             .unwrap();
         let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
 
-        assert!(body["pending_requests"].is_null(), "full body: {body:?}");
-        assert!(body["running_requests"].is_null(), "full body: {body:?}");
-        assert!(body["queue"].is_null(), "full body: {body:?}");
+        assert_eq!(
+            body["pending_requests"], 0,
+            "idle scheduler: a real zero, not null -- full body: {body:?}"
+        );
+        assert_eq!(
+            body["running_requests"], 0,
+            "idle scheduler: a real zero, not null -- full body: {body:?}"
+        );
+        assert!(
+            body["queue"].is_null(),
+            "per-request detail has no backing API -- full body: {body:?}"
+        );
         assert!(
             body["unavailable_reason"].is_string(),
             "full body: {body:?}"
+        );
+    }
+
+    /// M4 slice 5.4b's real claim: `scheduler_queue` reads the SAME shared
+    /// scheduler `run_jobs` would mirror live admission into (slice 5.4a).
+    /// Priming it directly the way `admit_pending` does (`submit_request`
+    /// + `allocate_pending_requests`) and reading the endpoint back must
+    /// show the real occupancy -- `running_requests: 1`, not the `0`/`null`
+    /// an endpoint reading a disconnected scheduler instance would show.
+    #[tokio::test]
+    async fn scheduler_queue_reports_real_occupancy_once_a_request_is_admitted() {
+        let state = state();
+        {
+            let mut sched = state.scheduler.lock().unwrap();
+            sched.submit_request(crate::engine::SlotPoolRequest {
+                id: "primed".to_string(),
+                prompt_tokens: vec![0u32; 4],
+                max_new_tokens: 8,
+                temperature: 0.0,
+                top_p: 1.0,
+            });
+            sched.allocate_pending_requests();
+        }
+
+        let req = Request::builder()
+            .method("GET")
+            .uri("/v1/lightbulb/admin/scheduler/queue")
+            .extension(key_info("admin"))
+            .body(Body::empty())
+            .unwrap();
+        let response = routes().with_state(state).oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+
+        assert_eq!(
+            body["running_requests"], 1,
+            "a request was admitted into the SAME shared scheduler this endpoint reads -- \
+             full body: {body:?}"
         );
     }
 
@@ -1256,6 +1333,57 @@ mod tests {
         assert!(
             actual.abs_diff(expected_used_bytes) <= tolerance,
             "expected memory_usage_bytes near {expected_used_bytes}, got {actual}: full body: {body:?}"
+        );
+
+        // M4 slice 5.4b: new real fields, on an idle scheduler -- genuine
+        // zeros (these fields are never Option, so there is nothing for
+        // them to be null instead of).
+        assert_eq!(body["active_slots"], 0, "full body: {body:?}");
+        assert_eq!(body["queued_requests"], 0, "full body: {body:?}");
+        assert_eq!(
+            body["scheduler_memory_used_bytes"], 0,
+            "full body: {body:?}"
+        );
+        assert_eq!(body["eviction_pressure"], 0.0, "full body: {body:?}");
+    }
+
+    /// The positive case for the new fields above: priming the shared
+    /// scheduler the way `admit_pending` does must show up here too, same
+    /// reasoning as `scheduler_queue_reports_real_occupancy_once_a_
+    /// request_is_admitted`.
+    #[tokio::test]
+    async fn scheduler_stats_reports_real_occupancy_once_a_request_is_admitted() {
+        let state = state();
+        {
+            let mut sched = state.scheduler.lock().unwrap();
+            sched.submit_request(crate::engine::SlotPoolRequest {
+                id: "primed".to_string(),
+                prompt_tokens: vec![0u32; 4],
+                max_new_tokens: 8,
+                temperature: 0.0,
+                top_p: 1.0,
+            });
+            sched.allocate_pending_requests();
+        }
+
+        let req = Request::builder()
+            .method("GET")
+            .uri("/v1/lightbulb/admin/scheduler/stats")
+            .extension(key_info("admin"))
+            .body(Body::empty())
+            .unwrap();
+        let response = routes().with_state(state).oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+
+        assert_eq!(
+            body["active_slots"], 1,
+            "a request was admitted into the SAME shared scheduler this endpoint reads -- \
+             full body: {body:?}"
         );
     }
 }
