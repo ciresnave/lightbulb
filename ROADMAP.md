@@ -833,14 +833,61 @@ comment referencing one of them).
 
 ## The real frontier
 
-**Not the roadmap order.** The largest user-visible gap is that **GGUF loads 1
-model in 30**. That is downstream of a deliberate refusal: `gpt2`-family files all
-carry merges and could be rebuilt, but each declares a different
-`tokenizer.ggml.pre` naming a different pre-tokenizer rule — 12 distinct values in
-the local corpus. Guessing one reproduces the original defect (a tokenizer that is
-plausible and wrong). Closing it means implementing those pre-tokenizers and
-proving each byte-identical against a reference, which
-`tests/gguf_tokenizer_fidelity.rs` already has the harness for.
+**RETRACTED 2026-10-21: the "GGUF loads 1 model in 30" claim below was stale and
+false, never re-derived against this repo's own later-measured numbers.** The
+pre-tokenizer-rule avenue it pointed at is EXHAUSTED, not open — every
+`tokenizer.ggml.pre` value discoverable in the local corpus already has either a
+verified implementation (10 values: `smollm`, `gpt-2`, `falcon`, `qwen2`,
+`deepseek-coder`, `refact`, `deepseek-llm`, `llama-bpe`, `command-r`,
+`starcoder` — PRs #22/#25/#26/#42/#44/#56) or a documented, permanent refusal
+(`qwen35`: no admissible reference exists, structurally — the only two
+checkpoints discriminating it are byte-identical GGUFs with a different label;
+`mpt`: its reference is gated behind HTTP 401 on HuggingFace; an absent `pre` is
+refused by design, not by gap). There is no 12th or 13th rule left to implement.
+
+**Re-measured 2026-10-21 at `main` `f475ed8`, corpus `C:\Models` (32 files, was
+30 files when last measured 2026-09-09) — both tests run only against a local
+`LIGHTBULB_GGUF_CORPUS`, never in hosted CI:**
+
+```text
+tests/gguf_corpus_sweep.rs      32 files: 24 rebuilt, 8 refused
+                                (24 obligated: 1 spm-declared, 5 spm-derived,
+                                 18 byte-level-verified-pre)
+tests/gguf_serving_census.rs    32 files: 19 vocabulary-only (cannot serve by
+                                 construction), 13 carry weights <- the real
+                                 serving denominator
+                                 9  of those load
+                                 3  of those refuse: unrepresentable tensor
+                                    dtype (IQ3_XS/IQ4_XS/Q2_K, documented)
+                                 1  of those refuses for an UNEXPLAINED reason
+                                    (see below) -- `gguf_serving_census`'s own
+                                    anti-drift assertion is currently RED on
+                                    this corpus because of it
+```
+
+Both the 7-vs-8-refused and 11-vs-13-weighted deltas from the 2026-09-09
+figures are new corpus files added since (32 vs 30), not regressions — the
+corpus is environment-dependent (`LIGHTBULB_GGUF_CORPUS`) and these tests
+don't assert a fixed count, by design (see `gguf_corpus_sweep.rs`'s own doc
+comment on why a floor is the wrong fix).
+
+**The ONE new "unexplained" refusal, tracked as its own follow-up PR, next:**
+`stories15M-q4_0.gguf` is a `llama`-model checkpoint with weights whose
+SentencePiece vocabulary (sha256 `2f410d65ece3806aec1f808d3d8fe9d2e296cc5c98c9ecbb74468ccf0f9abd9b`)
+has no declared `tokenizer.ggml.merges` and is not yet on the derivation
+allowlist (`spm_derivation_warrant`) — same shape as the already-solved
+`spm-derived` cases, just not yet checked against an oracle. `gguf_serving_census`
+must go green before this is closed.
+
+**The real remaining gaps, neither one a pre-tokenizer problem:**
+
+1. **3 of 13 weighted files refuse on an unrepresentable IQ/K-quant tensor
+   dtype** (`SmolLM2-135M-Instruct-IQ3_XS/IQ4_XS/Q2_K.gguf`) — scoped and
+   tractable; sized as its own slice plan next.
+2. **3 tokenizer-model types are never constructed at all** (`bert`/`t5`/
+   `gemma`-family tokenizers) — a larger, separate undertaking: building new
+   tokenizer-construction paths from scratch, not implementing a pre-tokenizer
+   splitting rule. Not sized yet.
 
 ---
 

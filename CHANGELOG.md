@@ -1,6 +1,19 @@
 # Changelog
 
-## 0.13.1
+## 0.13.2
+
+### Fixed
+- **Retracted ROADMAP.md's stale "GGUF loads 1 model in 30" claim (PM-tasked
+  2026-10-21).** It was never re-derived against this repo's own later-measured
+  numbers (2026-09-09: 23/30 tokenizers rebuilt, 8/11 weighted files load) and
+  pointed at a pre-tokenizer-rule avenue that is EXHAUSTED, not open -- every
+  `tokenizer.ggml.pre` value in the local corpus already has a verified
+  implementation or a documented permanent refusal. Replaced with today's
+  re-measurement (`main` `f475ed8`, corpus `C:\Models`, 32 files, run only
+  against a local `LIGHTBULB_GGUF_CORPUS` -- never hosted CI): 24/32 tokenizers
+  rebuild, 13 weighted files (9 load, 3 refuse on an unrepresentable IQ/K-quant
+  dtype, 1 refuses for a new, as-yet-unexplained reason -- tracked as its own
+  follow-up PR, not fixed here). Docs only, no code changed.
 
 ### Added
 - **PersistAnt adoption status, added to the Fuel-migration sizing doc (PM-asked 2026-10-21).**
