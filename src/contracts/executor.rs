@@ -99,6 +99,11 @@ pub async fn execute_contract_with_runner(
                     max_new_tokens,
                     temperature,
                     add_special_tokens: prompt.add_special_tokens,
+                    // This wrapper has no HTTP request to read a priority
+                    // header from (see `chat::priority_from_headers`) --
+                    // its callers are integration tests and CLI tools, not
+                    // the `/v1/chat/completions` handler.
+                    priority: crate::engine::Priority::Normal,
                     response_mode: ResponseMode::Complete(resp_tx),
                 };
                 use std::sync::mpsc::TrySendError;

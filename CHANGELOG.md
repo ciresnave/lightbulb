@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.13.0
+
+### Added
+- **M4 slice 5.4c: real request priority, Option B (PM-ruled 2026-10-21).** `InferenceJob` gains
+  a `priority: Priority` field, read from the `X-Lightbulb-Priority` HTTP header on
+  `/v1/chat/completions` and `/v1/completions` (never the OpenAI-compatible JSON body -- see
+  `docs/API-EXTENSIONS.md`), defaulting to `Normal` when the header is absent or unparseable.
+  `admit_pending` now submits via `MemoryAwareScheduler::submit_priority_request` with the job's
+  own priority instead of the plain `submit_request` (which always submitted `Normal`
+  regardless) -- under eviction pressure, a `High`/`Critical` request is now queued rather than
+  rejected where a `Low`/`Normal` one in the identical state is rejected outright. Red-first
+  test: `admit_pending_honors_the_jobs_own_priority_not_always_normal`
+  (`src/engine/model_runner.rs`), which fails against the pre-fix code (both priorities reject
+  identically) and passes against the fix.
+
+### Breaking
+- `InferenceJob` (`src/engine/model_runner.rs`) gains a mandatory `priority: Priority` field --
+  same class of change as 5.4a's `AppState.scheduler` type change (0.11.6 -> 0.12.0), hence the
+  second-number bump pre-1.0. Every in-tree construction site is updated; an out-of-tree
+  constructor would need to add the field.
+
 ## 0.12.4
 
 ### Added

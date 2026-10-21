@@ -484,6 +484,7 @@ async fn generate(tx: &InferenceRequestSender, prompt: String) -> anyhow::Result
         // difference from the general templated case, not a reason to flip the
         // flag: `true` would add a BOS the template did not ask for.
         add_special_tokens: false,
+        priority: lightbulb::engine::Priority::Normal,
         response_mode: ResponseMode::Complete(resp_tx),
     };
     tx.send(job)
