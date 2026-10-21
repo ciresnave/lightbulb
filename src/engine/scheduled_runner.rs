@@ -432,6 +432,7 @@ mod tests {
             max_new_tokens: max_new,
             temperature: 0.0,
             add_special_tokens: true,
+            priority: crate::engine::Priority::Normal,
             response_mode: ResponseMode::Complete(tx),
         };
         (job, rx)
@@ -451,6 +452,7 @@ mod tests {
             max_new_tokens: max_new,
             temperature: 0.0,
             add_special_tokens: true,
+            priority: crate::engine::Priority::Normal,
             response_mode: ResponseMode::Streaming(tx),
         };
         (job, rx)

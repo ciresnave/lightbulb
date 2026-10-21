@@ -287,8 +287,11 @@ const STREAMING_CONTRACT_REJECTION: &str = "`stream: true` cannot be combined \
 /// Chat completions endpoint handler
 pub async fn chat_completions(
     State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
     Json(request): Json<ChatCompletionRequest>,
 ) -> impl IntoResponse {
+    let priority = priority_from_headers(&headers);
+
     // Reject a `model` that does not name what is actually loaded, while a
     // model IS loaded (`inference_tx.is_some()`) — when none is loaded, the
     // existing "No model available on the server" fallback further down
@@ -474,10 +477,10 @@ pub async fn chat_completions(
         // Streaming response: `create_chat_stream` already picks its own
         // status (200 + SSE on success, 503 when the inference queue is
         // full, 500 if the runner is gone).
-        create_chat_stream(state, request)
+        create_chat_stream(state, request, priority)
     } else {
         // Non-streaming response
-        match create_chat_completion(state, request).await {
+        match create_chat_completion(state, request, priority).await {
             Ok(response) => (StatusCode::OK, Json(response)).into_response(),
             Err(e) => queue_error_response(e),
         }
@@ -505,6 +508,34 @@ fn queue_error_response(e: anyhow::Error) -> axum::response::Response {
         StatusCode::INTERNAL_SERVER_ERROR
     };
     (status, Json(serde_json::json!({"error": e.to_string()}))).into_response()
+}
+
+/// M4 slice 5.4c (Option B, PM-ruled 2026-10-21): read request priority from
+/// the `X-Lightbulb-Priority` HTTP header, never the OpenAI-compatible JSON
+/// body -- see `docs/API-EXTENSIONS.md` for why a header was chosen over a
+/// body field. Shared by both `chat::chat_completions` and
+/// `completions::completions`, since both OpenAI-compatible endpoints get
+/// the same extension the same way.
+///
+/// Absent, empty, or any value that doesn't name a [`crate::engine::Priority`]
+/// variant (case-insensitively) all fall back to `Priority::Normal` --
+/// silently, not a 400. A stock OpenAI client never sends this header at
+/// all, so treating "didn't send it" the same as "sent garbage" keeps this
+/// extension from ever being able to break a client that doesn't know about
+/// it, which is the entire reason Option B (a header) was chosen over
+/// Option A (a body field) in the first place.
+pub(crate) fn priority_from_headers(headers: &axum::http::HeaderMap) -> crate::engine::Priority {
+    headers
+        .get("X-Lightbulb-Priority")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| match s.to_ascii_lowercase().as_str() {
+            "low" => Some(crate::engine::Priority::Low),
+            "normal" => Some(crate::engine::Priority::Normal),
+            "high" => Some(crate::engine::Priority::High),
+            "critical" => Some(crate::engine::Priority::Critical),
+            _ => None,
+        })
+        .unwrap_or(crate::engine::Priority::Normal)
 }
 
 /// The pre-template prompt construction: `"{role}: {content}"` per message,
@@ -1003,11 +1034,12 @@ fn record_completion(
 async fn create_chat_completion(
     state: AppState,
     request: ChatCompletionRequest,
+    priority: crate::engine::Priority,
 ) -> anyhow::Result<ChatCompletionResponse> {
     // Delegate to the contract executor when an output contract is requested.
     if let Some(ref lb) = request.lightbulb {
         if lb.output_contract.is_some() {
-            return create_chat_completion_with_contract(state, request).await;
+            return create_chat_completion_with_contract(state, request, priority).await;
         }
     }
 
@@ -1041,6 +1073,7 @@ async fn create_chat_completion(
             max_new_tokens,
             temperature,
             state.config.request_timeout_ms,
+            priority,
         )
         .await?;
 
@@ -1191,6 +1224,7 @@ pub(crate) async fn run_inference_once(
     max_new_tokens: usize,
     temperature: f64,
     timeout_ms: u64,
+    priority: crate::engine::Priority,
 ) -> anyhow::Result<crate::engine::model_runner::CompletionResult> {
     // Counts this job from the moment it's handed to `try_send` to every
     // exit from this function below -- including a `Full`/`Disconnected`
@@ -1207,6 +1241,7 @@ pub(crate) async fn run_inference_once(
         max_new_tokens,
         temperature,
         add_special_tokens: prompt.add_special_tokens,
+        priority,
         response_mode: crate::engine::model_runner::ResponseMode::Complete(resp_tx),
     };
     use std::sync::mpsc::TrySendError;
@@ -1244,6 +1279,7 @@ pub(crate) async fn run_inference_once_owned(
     max_new_tokens: usize,
     temperature: f64,
     timeout_ms: u64,
+    priority: crate::engine::Priority,
 ) -> anyhow::Result<crate::engine::model_runner::CompletionResult> {
     run_inference_once(
         &tx,
@@ -1252,6 +1288,7 @@ pub(crate) async fn run_inference_once_owned(
         max_new_tokens,
         temperature,
         timeout_ms,
+        priority,
     )
     .await
 }
@@ -1271,6 +1308,7 @@ pub(crate) async fn run_inference_once_owned(
 async fn create_chat_completion_with_contract(
     state: AppState,
     request: ChatCompletionRequest,
+    priority: crate::engine::Priority,
 ) -> anyhow::Result<ChatCompletionResponse> {
     use crate::contracts::executor::execute_contract;
     use crate::contracts::validation::RawMessage;
@@ -1353,6 +1391,7 @@ async fn create_chat_completion_with_contract(
                     max_new_tokens,
                     temperature,
                     remaining_ms,
+                    priority,
                 )
                 .await
             }
@@ -1433,7 +1472,11 @@ fn build_contract_response(
 /// attempt — which can fail with a real HTTP status (503 when the queue is
 /// full) before any SSE frame is sent — can report that status instead of
 /// the 200 an already-constructed `Sse` response is stuck with.
-fn create_chat_stream(state: AppState, request: ChatCompletionRequest) -> Response {
+fn create_chat_stream(
+    state: AppState,
+    request: ChatCompletionRequest,
+    priority: crate::engine::Priority,
+) -> Response {
     // The SAME prompt construction as the non-streaming path. These two sites
     // drifting apart is not hypothetical: this one was the second of the two
     // `role: content` joins, and it is the one a fix aimed at
@@ -1476,6 +1519,7 @@ fn create_chat_stream(state: AppState, request: ChatCompletionRequest) -> Respon
             // answers to this is the shape of the defect this file already has
             // history with.
             add_special_tokens: prompt.add_special_tokens,
+            priority,
             response_mode: crate::engine::model_runner::ResponseMode::Streaming(stream_tx),
         };
 
@@ -2495,7 +2539,7 @@ mod tests {
         .expect("the request body must deserialize");
 
         let started = std::time::Instant::now();
-        let response = chat_completions(State(state), Json(request))
+        let response = chat_completions(State(state), axum::http::HeaderMap::new(), Json(request))
             .await
             .into_response();
         let elapsed = started.elapsed();
@@ -2565,7 +2609,7 @@ mod tests {
         }))
         .expect("the request body must deserialize");
 
-        let response = chat_completions(State(state), Json(request))
+        let response = chat_completions(State(state), axum::http::HeaderMap::new(), Json(request))
             .await
             .into_response();
         assert_eq!(
@@ -2643,7 +2687,7 @@ mod tests {
         }))
         .expect("the request body must deserialize");
 
-        let response = chat_completions(State(state), Json(request))
+        let response = chat_completions(State(state), axum::http::HeaderMap::new(), Json(request))
             .await
             .into_response();
         assert_eq!(response.status(), StatusCode::OK);
@@ -3091,9 +3135,13 @@ mod tests {
                 "control: the monitor already held a reading before the request ran"
             );
 
-            let first = chat_completions(State(state.clone()), Json(plain_request(false)))
-                .await
-                .into_response();
+            let first = chat_completions(
+                State(state.clone()),
+                axum::http::HeaderMap::new(),
+                Json(plain_request(false)),
+            )
+            .await
+            .into_response();
             assert_eq!(first.status(), StatusCode::OK);
             assert_eq!(
                 monitor.stop_rate(),
@@ -3102,9 +3150,13 @@ mod tests {
                  the same completion more than once"
             );
 
-            let second = chat_completions(State(state), Json(plain_request(false)))
-                .await
-                .into_response();
+            let second = chat_completions(
+                State(state),
+                axum::http::HeaderMap::new(),
+                Json(plain_request(false)),
+            )
+            .await
+            .into_response();
             assert_eq!(second.status(), StatusCode::OK);
 
             // Both `state` clones are gone, so the stub's `recv` has ended.
@@ -3139,9 +3191,13 @@ mod tests {
 
             // Reading the body drives the stream, and the observation happens on
             // the `Done` frame, which is the last thing it yields.
-            let first = chat_completions(State(state.clone()), Json(plain_request(true)))
-                .await
-                .into_response();
+            let first = chat_completions(
+                State(state.clone()),
+                axum::http::HeaderMap::new(),
+                Json(plain_request(true)),
+            )
+            .await
+            .into_response();
             let frames = sse_frames(first).await;
             assert_eq!(
                 frames.len(),
@@ -3161,9 +3217,13 @@ mod tests {
                  arm recorded the same completion more than once"
             );
 
-            let second = chat_completions(State(state), Json(plain_request(true)))
-                .await
-                .into_response();
+            let second = chat_completions(
+                State(state),
+                axum::http::HeaderMap::new(),
+                Json(plain_request(true)),
+            )
+            .await
+            .into_response();
             assert_eq!(sse_frames(second).await.len(), 2);
 
             let jobs = runner.join().expect("stub runner panicked");
@@ -3189,9 +3249,13 @@ mod tests {
         let (tx, runner) = stub_runner_with(FinishReason::Stop);
         let state = state_with_runner(None, Some(tx));
 
-        let response = chat_completions(State(state), Json(plain_request(true)))
-            .await
-            .into_response();
+        let response = chat_completions(
+            State(state),
+            axum::http::HeaderMap::new(),
+            Json(plain_request(true)),
+        )
+        .await
+        .into_response();
         let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
             .expect("reading the SSE body");
@@ -3219,9 +3283,13 @@ mod tests {
     async fn the_no_runner_fallback_stream_also_ends_with_the_done_sentinel() {
         let state = state_with(None);
 
-        let response = chat_completions(State(state), Json(plain_request(true)))
-            .await
-            .into_response();
+        let response = chat_completions(
+            State(state),
+            axum::http::HeaderMap::new(),
+            Json(plain_request(true)),
+        )
+        .await
+        .into_response();
         let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
             .expect("reading the SSE body");
@@ -3250,9 +3318,13 @@ mod tests {
         // No `inference_tx`: both handlers take their fallback arm.
         let state = state_with_monitor(None, None, monitor.clone());
 
-        let plain = chat_completions(State(state.clone()), Json(plain_request(false)))
-            .await
-            .into_response();
+        let plain = chat_completions(
+            State(state.clone()),
+            axum::http::HeaderMap::new(),
+            Json(plain_request(false)),
+        )
+        .await
+        .into_response();
         assert_eq!(plain.status(), StatusCode::OK);
         let body = json_body(plain).await;
         assert_eq!(
@@ -3267,9 +3339,13 @@ mod tests {
              window now reads 100% EOS for a server with no model in it"
         );
 
-        let streamed = chat_completions(State(state), Json(plain_request(true)))
-            .await
-            .into_response();
+        let streamed = chat_completions(
+            State(state),
+            axum::http::HeaderMap::new(),
+            Json(plain_request(true)),
+        )
+        .await
+        .into_response();
         let frames = sse_frames(streamed).await;
         assert_eq!(
             frames.last().expect("the mock stream yields frames")["choices"][0]["finish_reason"],
@@ -3317,9 +3393,13 @@ mod tests {
             }))
             .expect("the request body must deserialize");
 
-            let first = chat_completions(State(state.clone()), Json(request.clone()))
-                .await
-                .into_response();
+            let first = chat_completions(
+                State(state.clone()),
+                axum::http::HeaderMap::new(),
+                Json(request.clone()),
+            )
+            .await
+            .into_response();
             assert_eq!(first.status(), StatusCode::OK);
             assert_eq!(
                 monitor.stop_rate(),
@@ -3328,9 +3408,10 @@ mod tests {
                  retry this server constructed was counted as a completion"
             );
 
-            let second = chat_completions(State(state), Json(request))
-                .await
-                .into_response();
+            let second =
+                chat_completions(State(state), axum::http::HeaderMap::new(), Json(request))
+                    .await
+                    .into_response();
             assert_eq!(second.status(), StatusCode::OK);
 
             let jobs = runner.join().expect("stub runner panicked");
@@ -3392,9 +3473,13 @@ mod tests {
         let monitor = std::sync::Arc::new(EosMonitor::new(1, DEFAULT_MIN_STOP_RATE));
         let state = state_with_monitor(template, Some(tx), monitor.clone());
 
-        let first = chat_completions(State(state.clone()), Json(plain_request(false)))
-            .await
-            .into_response();
+        let first = chat_completions(
+            State(state.clone()),
+            axum::http::HeaderMap::new(),
+            Json(plain_request(false)),
+        )
+        .await
+        .into_response();
         assert_eq!(first.status(), StatusCode::OK);
         let first_body = json_body(first).await;
         assert!(
@@ -3403,9 +3488,13 @@ mod tests {
              to its token budget, so this test never exercises its claim"
         );
 
-        let second = chat_completions(State(state), Json(plain_request(false)))
-            .await
-            .into_response();
+        let second = chat_completions(
+            State(state),
+            axum::http::HeaderMap::new(),
+            Json(plain_request(false)),
+        )
+        .await
+        .into_response();
         assert_eq!(second.status(), StatusCode::OK);
         let second_body = json_body(second).await;
 
@@ -3500,9 +3589,13 @@ mod tests {
         let (tx, runner) = stub_runner();
         let state = state_with_runner(None, Some(tx));
 
-        let response = chat_completions(State(state), Json(contract_request(true)))
-            .await
-            .into_response();
+        let response = chat_completions(
+            State(state),
+            axum::http::HeaderMap::new(),
+            Json(contract_request(true)),
+        )
+        .await
+        .into_response();
 
         assert_eq!(
             response.status(),
@@ -3556,9 +3649,13 @@ mod tests {
         let (tx, runner) = stub_runner();
         let state = state_with_runner(None, Some(tx));
 
-        let response = chat_completions(State(state), Json(plain_request(true)))
-            .await
-            .into_response();
+        let response = chat_completions(
+            State(state),
+            axum::http::HeaderMap::new(),
+            Json(plain_request(true)),
+        )
+        .await
+        .into_response();
 
         assert_ne!(
             response.status(),
@@ -3596,9 +3693,13 @@ mod tests {
         let (tx, runner) = stub_runner();
         let state = state_with_runner(None, Some(tx));
 
-        let response = chat_completions(State(state), Json(contract_request(false)))
-            .await
-            .into_response();
+        let response = chat_completions(
+            State(state),
+            axum::http::HeaderMap::new(),
+            Json(contract_request(false)),
+        )
+        .await
+        .into_response();
 
         assert_ne!(
             response.status(),
@@ -3668,9 +3769,13 @@ mod tests {
         let monitor = std::sync::Arc::new(EosMonitor::new(1, DEFAULT_MIN_STOP_RATE));
         let state = state_with_monitor(template, Some(tx), monitor.clone());
 
-        let first = chat_completions(State(state.clone()), Json(plain_request(true)))
-            .await
-            .into_response();
+        let first = chat_completions(
+            State(state.clone()),
+            axum::http::HeaderMap::new(),
+            Json(plain_request(true)),
+        )
+        .await
+        .into_response();
         let first_frames = sse_frames(first).await;
         assert!(
             monitor.should_warn(),
@@ -3678,9 +3783,13 @@ mod tests {
              that ran to its token budget, so this test never exercises its claim"
         );
 
-        let second = chat_completions(State(state), Json(plain_request(true)))
-            .await
-            .into_response();
+        let second = chat_completions(
+            State(state),
+            axum::http::HeaderMap::new(),
+            Json(plain_request(true)),
+        )
+        .await
+        .into_response();
         let second_frames = sse_frames(second).await;
 
         let jobs = runner.join().expect("stub runner panicked");
@@ -3948,7 +4057,7 @@ mod tests {
             },
         }]);
 
-        let response = create_chat_completion(state, req)
+        let response = create_chat_completion(state, req, crate::engine::Priority::Normal)
             .await
             .expect("forced generation must not error");
         drop(runner);
@@ -3976,7 +4085,7 @@ mod tests {
         let (tx, runner) = stub_runner_with_text(generated, FinishReason::Stop);
         let state = state_with_runner(None, Some(tx));
 
-        let response = create_chat_completion(state, request())
+        let response = create_chat_completion(state, request(), crate::engine::Priority::Normal)
             .await
             .expect("forced generation must not error");
         drop(runner);
@@ -4004,7 +4113,7 @@ mod tests {
             },
         }]);
 
-        let response = create_chat_completion(state, req)
+        let response = create_chat_completion(state, req, crate::engine::Priority::Normal)
             .await
             .expect("forced generation must not error");
         drop(runner);
@@ -4027,7 +4136,7 @@ mod tests {
             },
         }]);
 
-        let response = chat_completions(State(state), Json(req))
+        let response = chat_completions(State(state), axum::http::HeaderMap::new(), Json(req))
             .await
             .into_response();
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
@@ -4039,7 +4148,7 @@ mod tests {
         let mut req = request();
         req.tool_choice = Some(serde_json::json!("required"));
 
-        let response = chat_completions(State(state), Json(req))
+        let response = chat_completions(State(state), axum::http::HeaderMap::new(), Json(req))
             .await
             .into_response();
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
@@ -4108,7 +4217,7 @@ mod tests {
         let mut req = request();
         req.n = 3;
 
-        let response = chat_completions(State(state), Json(req))
+        let response = chat_completions(State(state), axum::http::HeaderMap::new(), Json(req))
             .await
             .into_response();
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
@@ -4122,7 +4231,7 @@ mod tests {
         let req = request();
         assert_eq!(req.n, 1);
 
-        let response = chat_completions(State(state), Json(req))
+        let response = chat_completions(State(state), axum::http::HeaderMap::new(), Json(req))
             .await
             .into_response();
         assert_eq!(response.status(), StatusCode::OK);
@@ -4134,7 +4243,7 @@ mod tests {
         let mut req = request();
         req.top_p = 0.9;
 
-        let response = chat_completions(State(state), Json(req))
+        let response = chat_completions(State(state), axum::http::HeaderMap::new(), Json(req))
             .await
             .into_response();
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
@@ -4148,7 +4257,7 @@ mod tests {
         let req = request();
         assert_eq!(req.top_p, 1.0);
 
-        let response = chat_completions(State(state), Json(req))
+        let response = chat_completions(State(state), axum::http::HeaderMap::new(), Json(req))
             .await
             .into_response();
         assert_eq!(response.status(), StatusCode::OK);
@@ -4175,7 +4284,7 @@ mod tests {
         req.stream = true;
         req.stop = Some(StopSequences::Single("</s>".to_string()));
 
-        let response = chat_completions(State(state), Json(req))
+        let response = chat_completions(State(state), axum::http::HeaderMap::new(), Json(req))
             .await
             .into_response();
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
@@ -4190,7 +4299,8 @@ mod tests {
         req.stream = true;
         req.stop = Some(StopSequences::Multiple(vec![String::new()]));
 
-        let response = chat_completions(State(state), Json(req)).await;
+        let response =
+            chat_completions(State(state), axum::http::HeaderMap::new(), Json(req)).await;
         // Streaming responses are SSE, not a JSON body with a status this
         // harness can read directly the same way — reaching `create_chat_stream`
         // at all (rather than the 400 branch above it) is what this test
@@ -4210,7 +4320,7 @@ mod tests {
         req.model = state.config.default_model.clone();
         req.stream = true;
 
-        let response = chat_completions(State(state), Json(req))
+        let response = chat_completions(State(state), axum::http::HeaderMap::new(), Json(req))
             .await
             .into_response();
 
@@ -4248,7 +4358,7 @@ mod tests {
         req.model = state.config.default_model.clone();
         req.stream = true;
 
-        let response = chat_completions(State(state), Json(req))
+        let response = chat_completions(State(state), axum::http::HeaderMap::new(), Json(req))
             .await
             .into_response();
 
@@ -4276,7 +4386,7 @@ mod tests {
         let mut req = request();
         req.model = state.config.default_model.clone();
 
-        let response = chat_completions(State(state), Json(req))
+        let response = chat_completions(State(state), axum::http::HeaderMap::new(), Json(req))
             .await
             .into_response();
 
@@ -4301,9 +4411,10 @@ mod tests {
             },
         )));
 
-        let response = chat_completions(State(state), Json(request()))
-            .await
-            .into_response();
+        let response =
+            chat_completions(State(state), axum::http::HeaderMap::new(), Json(request()))
+                .await
+                .into_response();
 
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
@@ -4315,9 +4426,10 @@ mod tests {
     async fn chat_completions_accepts_a_request_within_the_default_memory_budget() {
         let state = state_with(None);
 
-        let response = chat_completions(State(state), Json(request()))
-            .await
-            .into_response();
+        let response =
+            chat_completions(State(state), axum::http::HeaderMap::new(), Json(request()))
+                .await
+                .into_response();
 
         assert_eq!(response.status(), StatusCode::OK);
     }
@@ -4333,7 +4445,7 @@ mod tests {
         let mut req = request();
         req.stop = Some(StopSequences::Single("</s>".to_string()));
 
-        let response = create_chat_completion(state, req)
+        let response = create_chat_completion(state, req, crate::engine::Priority::Normal)
             .await
             .expect("forced generation must not error");
         drop(runner);
@@ -4354,7 +4466,7 @@ mod tests {
         let (tx, runner) = stub_runner_with_text("ordinary answer", FinishReason::Stop);
         let state = state_with_runner(None, Some(tx));
 
-        let response = create_chat_completion(state, request())
+        let response = create_chat_completion(state, request(), crate::engine::Priority::Normal)
             .await
             .expect("forced generation must not error");
         drop(runner);
@@ -4390,6 +4502,7 @@ mod tests {
             8,
             0.0,
             20,
+            crate::engine::Priority::Normal,
         )
         .await;
 
@@ -4423,6 +4536,7 @@ mod tests {
             8,
             0.0,
             30_000,
+            crate::engine::Priority::Normal,
         )
         .await;
         drop(tx);

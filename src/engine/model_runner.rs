@@ -120,6 +120,14 @@ pub struct InferenceJob {
     /// a prompt that came out of `ResolvedTemplate::render` — which now
     /// includes every contract-executor attempt.
     pub add_special_tokens: bool,
+    /// M4 slice 5.4c (Option B): the priority this job was submitted with,
+    /// read from the `X-Lightbulb-Priority` HTTP header (never the OpenAI-
+    /// compatible JSON body -- see `docs/API-EXTENSIONS.md`), defaulting to
+    /// `Priority::Normal` when the header is absent or unparseable.
+    /// Reaches the shared scheduler via `admit_pending`'s
+    /// `submit_priority_request` call, not `submit_request` (which always
+    /// submits `Normal` regardless of what is passed to it).
+    pub priority: crate::engine::Priority,
     /// Response mode (complete or streaming)
     pub response_mode: ResponseMode,
 }
@@ -582,13 +590,20 @@ fn release_scheduler_slot(scheduler: &SharedScheduler, request_id: &str) {
 ///
 /// M4 slice 5.4a: also mirrors the admission into the shared scheduler's own
 /// bookkeeping (`SlotPool` via `MemoryAwareScheduler`) -- for observability
-/// (slice 5.4b) and future real admission limits, NOT a second source of
-/// truth for whether this job actually runs; `batch`/`modes` is. No real
-/// admission limit is enforced here yet (still this slice's scope, not
-/// 5.4a's): `submit_request` only queues if the scheduler has no free slot,
-/// it never rejects. `prompt_tokens` is a LENGTH placeholder (chars/4, the
-/// same heuristic `check_admission` already uses in the HTTP layer), not
-/// real tokenization -- the scheduler only ever reads its `.len()`.
+/// (slice 5.4b), real priority admission under memory pressure (5.4c), and
+/// future real admission limits more generally, NOT a second source of
+/// truth for whether this job actually runs; `batch`/`modes` is.
+/// `prompt_tokens` is a LENGTH placeholder (chars/4, the same heuristic
+/// `check_admission` already uses in the HTTP layer), not real
+/// tokenization -- the scheduler only ever reads its `.len()`.
+///
+/// M4 slice 5.4c (Option B): submits via `submit_priority_request` with
+/// `job.priority`, not the plain `submit_request` (which always submits
+/// `Priority::Normal` regardless of what the job carries) -- a request
+/// whose own estimate exceeds the budget under eviction pressure is only
+/// rejected outright when its priority is below `Priority::High`
+/// (`MemoryAwareScheduler::allocate_pending_requests`); a lower-priority
+/// job otherwise still just queues, same as before this slice.
 fn admit_pending(
     pending: &mut VecDeque<InferenceJob>,
     batch: &mut Vec<RequestContext>,
@@ -609,13 +624,16 @@ fn admit_pending(
         ctx.add_special_tokens = job.add_special_tokens;
 
         if let Ok(mut sched) = scheduler.lock() {
-            sched.submit_request(crate::engine::SlotPoolRequest {
-                id: job.id.clone(),
-                prompt_tokens: vec![0u32; job.prompt.len() / 4],
-                max_new_tokens: job.max_new_tokens,
-                temperature: job.temperature,
-                top_p: 1.0,
-            });
+            sched.submit_priority_request(
+                crate::engine::SlotPoolRequest {
+                    id: job.id.clone(),
+                    prompt_tokens: vec![0u32; job.prompt.len() / 4],
+                    max_new_tokens: job.max_new_tokens,
+                    temperature: job.temperature,
+                    top_p: 1.0,
+                },
+                job.priority,
+            );
             sched.allocate_pending_requests();
         }
 
@@ -984,6 +1002,7 @@ mod tests {
                 max_new_tokens: 1,
                 temperature: 0.0,
                 add_special_tokens: want,
+                priority: crate::engine::Priority::Normal,
                 response_mode: ResponseMode::Complete(resp_tx),
             })
             .unwrap();
@@ -1067,6 +1086,7 @@ mod tests {
             max_new_tokens: 5,
             temperature: 0.0,
             add_special_tokens: true,
+            priority: crate::engine::Priority::Normal,
             response_mode: ResponseMode::Complete(resp_tx),
         })
         .unwrap();
@@ -1116,6 +1136,7 @@ mod tests {
             max_new_tokens: 5,
             temperature: 0.0,
             add_special_tokens: true,
+            priority: crate::engine::Priority::Normal,
             response_mode: ResponseMode::Streaming(stream_tx),
         })
         .unwrap();
@@ -1183,6 +1204,7 @@ mod tests {
             max_new_tokens,
             temperature: 0.0,
             add_special_tokens: true,
+            priority: crate::engine::Priority::Normal,
             response_mode: ResponseMode::Complete(resp_tx),
         })
         .unwrap();
@@ -1357,6 +1379,84 @@ mod tests {
         assert!(resp_rx_b.try_recv().unwrap().is_ok());
     }
 
+    /// M4 slice 5.4c, Option B: a job's `priority` must reach the
+    /// scheduler's own `submit_priority_request`, not always `Normal` --
+    /// before this slice, `admit_pending` called the plain `submit_request`
+    /// (hardcoded `Priority::Normal`) regardless of what the job carried.
+    ///
+    /// `priority_queue` is private, so this observes the one place
+    /// `Priority` changes scheduler BEHAVIOUR instead:
+    /// `allocate_pending_requests` only REJECTS (bumps `rejected_count`) a
+    /// request that is both over its memory budget AND below
+    /// `Priority::High` -- a `High` request in the identical state is
+    /// requeued, not rejected. Two identically-primed schedulers, one fed a
+    /// `Low` job and one a `High` job through `admit_pending` itself (not
+    /// through `submit_priority_request` directly -- that would not prove
+    /// `admit_pending` reads `job.priority` at all), must diverge on
+    /// `rejected_count`. Before this slice both arms reject (admit_pending
+    /// always submitted `Normal`, and `Normal < High`).
+    #[test]
+    fn admit_pending_honors_the_jobs_own_priority_not_always_normal() {
+        fn pressured_scheduler() -> SharedScheduler {
+            let scheduler = std::sync::Arc::new(std::sync::Mutex::new(
+                crate::engine::MemoryAwareScheduler::new(crate::engine::MemoryAwareConfig {
+                    max_memory_bytes: 1000,
+                    memory_per_slot_base: 600,
+                    memory_per_token: 1,
+                    eviction_pressure_threshold: 0.5,
+                    memory_safety_margin: 0.0,
+                }),
+            ));
+            // Prime: one request big enough that, once allocated, eviction
+            // pressure (0.6) sits above the 0.5 threshold for whatever is
+            // admitted next.
+            {
+                let mut sched = scheduler.lock().unwrap();
+                sched.submit_request(crate::engine::SlotPoolRequest {
+                    id: "prime".to_string(),
+                    prompt_tokens: vec![],
+                    max_new_tokens: 0,
+                    temperature: 0.0,
+                    top_p: 1.0,
+                });
+                sched.allocate_pending_requests();
+            }
+            scheduler
+        }
+
+        fn admit_one(priority: crate::engine::Priority) -> usize {
+            let scheduler = pressured_scheduler();
+            let mut pending = VecDeque::new();
+            let (resp_tx, _resp_rx) = oneshot::channel();
+            pending.push_back(InferenceJob {
+                id: "job".to_string(),
+                prompt: "p".to_string(),
+                max_new_tokens: 0,
+                temperature: 0.0,
+                add_special_tokens: true,
+                priority,
+                response_mode: ResponseMode::Complete(resp_tx),
+            });
+            let mut batch = Vec::new();
+            let mut modes = Vec::new();
+            admit_pending(&mut pending, &mut batch, &mut modes, &scheduler);
+            scheduler.lock().unwrap().get_memory_stats().rejected_count
+        }
+
+        assert_eq!(
+            admit_one(crate::engine::Priority::Low),
+            1,
+            "a Low-priority job over budget under pressure must be rejected"
+        );
+        assert_eq!(
+            admit_one(crate::engine::Priority::High),
+            0,
+            "a High-priority job in the identical over-budget/pressure state must NOT be \
+             rejected -- admit_pending must submit it with its own priority, not always \
+             Normal (Normal < High would reject it exactly like the Low case)"
+        );
+    }
+
     /// **Pre-existing bug, not introduced by any M4 slice.** `run_jobs`'s two
     /// cancellation paths drop `batch` without a final `step_batch` call
     /// that would hit `ParallelModelManager::forward_batch`'s own completion
@@ -1415,6 +1515,7 @@ mod tests {
             max_new_tokens: 20,
             temperature: 0.0,
             add_special_tokens: true,
+            priority: crate::engine::Priority::Normal,
             response_mode: ResponseMode::Streaming(stream_tx),
         })
         .unwrap();
@@ -1427,6 +1528,7 @@ mod tests {
             max_new_tokens: 2,
             temperature: 0.0,
             add_special_tokens: true,
+            priority: crate::engine::Priority::Normal,
             response_mode: ResponseMode::Complete(resp_tx),
         })
         .unwrap();

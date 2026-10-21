@@ -86,6 +86,7 @@ fn init_runner() -> RunnerTx {
         temperature: 0.0,
         // Raw text, no chat template applied, so the tokenizer supplies BOS.
         add_special_tokens: true,
+        priority: lightbulb::engine::Priority::Normal,
         response_mode: ResponseMode::Complete(resp_tx),
     })
     .expect("probe send failed — model thread exited before responding");
@@ -168,6 +169,7 @@ async fn live_smoke_plain_generation() {
         temperature: 0.0,
         // Raw text, no chat template applied, so the tokenizer supplies BOS.
         add_special_tokens: true,
+        priority: lightbulb::engine::Priority::Normal,
         response_mode: ResponseMode::Complete(resp_tx),
     })
     .expect("send failed");

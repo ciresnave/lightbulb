@@ -90,8 +90,11 @@ pub struct Usage {
 /// Completions endpoint handler
 pub async fn completions(
     State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
     Json(request): Json<CompletionRequest>,
 ) -> impl IntoResponse {
+    let priority = crate::api::openai::chat::priority_from_headers(&headers);
+
     // Same check and same reasoning as `openai::chat::chat_completions` —
     // reject a `model` that does not name what is actually loaded, only
     // while a model IS loaded, so the existing "No model available on the
@@ -159,7 +162,7 @@ pub async fn completions(
             .into_response();
     }
 
-    match create_completion(state, request).await {
+    match create_completion(state, request, priority).await {
         Ok(response) => (StatusCode::OK, Json(response)).into_response(),
         Err(e) => {
             // `QueueFullError` (503, safe to retry) and `RequestTimeoutError`
@@ -188,6 +191,7 @@ pub async fn completions(
 async fn create_completion(
     state: AppState,
     request: CompletionRequest,
+    priority: crate::engine::Priority,
 ) -> anyhow::Result<CompletionResponse> {
     let created = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)?
@@ -232,6 +236,7 @@ async fn create_completion(
         max_new_tokens,
         temperature,
         state.config.request_timeout_ms,
+        priority,
     )
     .await?;
 
@@ -365,7 +370,7 @@ mod tests {
         let mut req = request();
         req.top_p = 0.9;
 
-        let response = self::completions(State(state), Json(req))
+        let response = self::completions(State(state), axum::http::HeaderMap::new(), Json(req))
             .await
             .into_response();
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
@@ -377,7 +382,7 @@ mod tests {
         let req = request();
         assert_eq!(req.top_p, 1.0);
 
-        let response = self::completions(State(state), Json(req))
+        let response = self::completions(State(state), axum::http::HeaderMap::new(), Json(req))
             .await
             .into_response();
         assert_eq!(response.status(), StatusCode::OK);
@@ -398,9 +403,10 @@ mod tests {
             },
         )));
 
-        let response = self::completions(State(state), Json(request()))
-            .await
-            .into_response();
+        let response =
+            self::completions(State(state), axum::http::HeaderMap::new(), Json(request()))
+                .await
+                .into_response();
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 
@@ -410,7 +416,7 @@ mod tests {
         let mut req = request();
         req.n = 3;
 
-        let response = self::completions(State(state), Json(req))
+        let response = self::completions(State(state), axum::http::HeaderMap::new(), Json(req))
             .await
             .into_response();
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
@@ -429,7 +435,7 @@ mod tests {
             "</s>".to_string(),
         ));
 
-        let response = create_completion(state, req)
+        let response = create_completion(state, req, crate::engine::Priority::Normal)
             .await
             .expect("forced generation must not error");
         drop(runner);
@@ -455,7 +461,7 @@ mod tests {
             "</s>".to_string(),
         ));
 
-        let response = create_completion(state, req)
+        let response = create_completion(state, req, crate::engine::Priority::Normal)
             .await
             .expect("forced generation must not error");
         drop(runner);
@@ -478,7 +484,7 @@ mod tests {
         let mut req = request();
         req.model = state.config.default_model.clone();
 
-        let response = self::completions(State(state), Json(req))
+        let response = self::completions(State(state), axum::http::HeaderMap::new(), Json(req))
             .await
             .into_response();
 
