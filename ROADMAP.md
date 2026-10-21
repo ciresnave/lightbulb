@@ -1019,8 +1019,25 @@ its own test, in this order:
            authority, or cross-portfolio-standard question, so a PM-level call (or delegating the
            choice back to this lane) seems sufficient; flagged rather than assumed, since the PM
            asked.
-   5. **5.5 — `run_jobs` complexity refactor (slice plan item 6, below)**, sequenced last as that
-      item already said, now that 5.1-5.4 have settled what the function actually looks like.
+   5. **5.5 — `run_jobs` complexity refactor (slice plan item 6, below) — VERIFICATION FINDING
+      (2026-10-21): the refactor this item describes appears to already be done, as a side
+      effect of extraction work landed across 5.1-5.4b, not as dedicated 5.5 work.** Measured on
+      branch `feat/m4-slice5.5-run-jobs-refactor` at `origin/main` 7abfa0a (the PR #184 merge):
+      `run_jobs` itself (`src/engine/model_runner.rs`) is now 46 lines start-to-close-brace
+      (`awk` line count), with the streaming/complete-mode branches already split out into
+      `stream_job_step`/`finish_complete_job`/`demux_step_results`, admission into
+      `admit_pending`, pre-step cancellation into `remove_cancelled_before_step`, and batch-wide
+      failure into `fail_whole_batch` — exactly the split item 6 asks for. Manually counting
+      decision points in the remaining body (1 `loop`, 2 `if batch.is_empty()`, 1
+      `while let Ok(job) = rx.try_recv()`, 2 two-armed `match`es) gives cyclomatic complexity
+      ~7, against item 6's cited limit of 12 (it was 18 before extraction). All 10
+      `engine::model_runner::tests::*` unit tests pass unchanged. **Caveat: this is a manual
+      estimate, not a read of Codacy's own number** — Codacy comments per-PR on changed lines,
+      and no PR in this slice plan touched `run_jobs` for its own sake, so there is no PR comment
+      to read `run_jobs`'s current score from directly; the closest proxies (PRs #182/#183, which
+      touched it incidentally) both reported "0 new issues." The next PR that touches this
+      function should confirm against its own Codacy comment before this item is marked
+      COMPLETE outright.
 
    Each of 5.1-5.4 lands as its own PR, red-first, with cargo test --lib green before AND the new
    test failing-then-passing demonstrated in the PR description — not just "compiles" at the end.

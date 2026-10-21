@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.12.3
+
+### Changed
+- **M4 slice 5.5 verification finding: the `run_jobs` complexity refactor (ROADMAP.md slice plan
+  item 6) appears already done**, as a side effect of extraction landed across slices 5.1-5.4b,
+  not as dedicated 5.5 work. `run_jobs` is now 46 lines with the streaming/complete-mode branches
+  already split into named helpers (`stream_job_step`, `finish_complete_job`,
+  `demux_step_results`, `admit_pending`, `remove_cancelled_before_step`, `fail_whole_batch`);
+  manual cyclomatic count on the remaining body is ~7, against item 6's cited limit of 12 (it was
+  18 pre-extraction). All 10 `engine::model_runner::tests::*` unit tests pass. Flagged as a
+  finding rather than closed outright: this is a manual estimate, not a read of Codacy's own
+  number, since no PR in the slice plan touched `run_jobs` for its own sake to generate one. Docs
+  only, no code changed.
+
 ## 0.12.2
 
 ### Added
