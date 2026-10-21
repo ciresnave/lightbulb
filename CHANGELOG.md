@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.13.4
+
+### Changed
+- **Parked ROADMAP.md's "task A" (IQ3_XS/IQ4_XS/Q2_K dtype refusals) as blocked on the Fuel
+  migration (PM-tasked 2026-10-21).** candlelight's vendored `candle-core` 0.10.2 (the shipping
+  default path) is missing dequantization kernels for the entire IQ codebook family (dtype
+  codes 16-29) -- 180-210 of 272 tensors in each of the 3 refusing files, not "one tensor."
+  Fuel's own GAP-211 B2 already implemented this class of decode for Fuel's path (`0.20.14`);
+  writing the same kernels into candlelight now, a fork lightbulb is migrating away from, would
+  be throwaway work. Docs only, no code changed.
+
 ## 0.13.3
 
 ### Fixed
