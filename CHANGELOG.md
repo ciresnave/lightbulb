@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.13.5
+
+### Added
+- **Multi-GPU hardware limitation note + AWQ loader wiring slice plan (PM-tasked 2026-10-21).**
+  (1) Recorded that this box has exactly one GPU, so the 8 known multi-GPU bail sites
+  (`src/multi_gpu/*.rs`) are UNVERIFIED BY HARDWARE here -- design/unit review only, no
+  multi-GPU work started. (2) ROADMAP's "Phase 3 IN PROGRESS: Model loader integration" claim
+  for AWQ was wrong -- measured at 0% wired: `load_awq_llama` has zero callers anywhere, no
+  `--awq` flag exists, and `ParallelModelManager::load`/`load_adaptive` both call
+  `load_local_llama` unconditionally. Sized as a 2-slice plan: slice 1 proves the existing
+  loader/model correct standalone against a real small AWQ checkpoint and a pinned reference
+  (needs finding a small-enough model first); slice 2 wires it into the real batched serving
+  engine (not sized yet -- `AwqQwen3`'s forward pass doesn't match the engine's batched
+  interface, and which fix is right depends on slice 1's findings). Docs only, no code changed.
+
 ## 0.13.4
 
 ### Changed
