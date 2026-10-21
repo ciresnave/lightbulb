@@ -403,9 +403,10 @@ mod tests {
             },
         )));
 
-        let response = self::completions(State(state), axum::http::HeaderMap::new(), Json(request()))
-            .await
-            .into_response();
+        let response =
+            self::completions(State(state), axum::http::HeaderMap::new(), Json(request()))
+                .await
+                .into_response();
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 
