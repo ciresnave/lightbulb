@@ -882,8 +882,26 @@ must go green before this is closed.
 **The real remaining gaps, neither one a pre-tokenizer problem:**
 
 1. **3 of 13 weighted files refuse on an unrepresentable IQ/K-quant tensor
-   dtype** (`SmolLM2-135M-Instruct-IQ3_XS/IQ4_XS/Q2_K.gguf`) — scoped and
-   tractable; sized as its own slice plan next.
+   dtype** (`SmolLM2-135M-Instruct-IQ3_XS/IQ4_XS/Q2_K.gguf`) —
+   **PARKED 2026-10-21, blocked on the migration to Fuel, not scoped as a
+   lightbulb-repo fix.** candlelight's vendored `candle-core` 0.10.2 (the
+   shipping default path) has a 15-code `GgmlDType` table
+   (`{0,1,2,3,6,7,8,9,10,11,12,13,14,15,30}`, read off `GgmlDType::from_u32`);
+   codes 16-29, the ENTIRE IQ codebook family (`IQ2_XXS/XS/S`, `IQ3_XXS/S`,
+   `IQ1_S/M`, `IQ4_NL`, `IQ3_S`, `IQ4_XS`, `IQ2_S`, `TQ1/2_0`), are missing
+   entirely — not a missing table entry, a missing dequantization kernel
+   family. Per `tests/gguf_dtype_census.rs`'s own prior analysis (corroborated
+   independently by the mlmf lane): these 3 files are 180-210 of 272 tensors
+   in an unsupported IQ dtype EACH (a mixed-precision K-quant export, most
+   layers IQ-coded despite the filename), not "one tensor." Closing this needs
+   real dequantization kernels in `candlelight`'s own `candle-core` fork (a
+   separate repo), the same class of work Fuel's own GAP-211 B2 just did for
+   Fuel's path (IQ2/IQ3/IQ1 decode, landed `0.20.14`) — not reusable here
+   directly, since lightbulb's shipping default is candlelight, not Fuel.
+   Lightbulb is migrating onto Fuel (see "Fuel dependency migration" above);
+   once that lands, this dtype gap is Fuel's problem to have already solved,
+   not a kernel this repo should write into a fork it is leaving. Writing IQ
+   kernels into candlelight now would be throwaway work.
 2. **3 tokenizer-model types are never constructed at all** (`bert`/`t5`/
    `gemma`-family tokenizers) — a larger, separate undertaking: building new
    tokenizer-construction paths from scratch, not implementing a pre-tokenizer
