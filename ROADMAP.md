@@ -1303,6 +1303,77 @@ once the PM confirms priority against the rest of the roadmap.
 
 ---
 
+## Multi-GPU 8 unimplemented paths — UNVERIFIED BY HARDWARE (note added 2026-10-21)
+
+The 8 bail sites the older "Three COMPLETE claims" section above lists (`src/multi_gpu/
+distributed_cache.rs:180,184`; `pipeline_parallel.rs:361,365,422,426`; `tensor_parallel.rs:222,248`
+— re-checked against `origin/main` `87ddf0b` 2026-10-21, line numbers still current) are real and
+unchanged. **This machine has exactly one GPU** (an RTX 4070 Laptop), so nothing about
+multi-GPU behavior — correct or otherwise — can be exercised here beyond design review and
+unit tests against mocked devices. Any future claim about these paths made on this box must say
+so; it is not evidence about real multi-GPU hardware. No work started, per the PM's call
+(2026-10-21): record the limitation, don't attempt it here.
+
+---
+
+## AWQ loader wiring: slice plan (added 2026-10-21, PM-tasked)
+
+**Corrects the M3 section's "Phase 3 IN PROGRESS: Model loader integration (3-5 days)" line
+below** — measured, not estimated, at `origin/main` 2026-10-21: the loader is **0% wired**, not
+partway through. `grep -rln "load_awq_llama" src/ tests/` returns exactly one file
+(`src/loaders/mod.rs`, the definition itself) — zero callers anywhere, not from `main.rs`, not
+from any `bin`, not from any test. No `--awq` CLI flag exists.
+
+**What already exists and is NOT the gap:** `src/loaders/awq.rs` (`AwqConfig`, `AwqLinear`,
+`load_awq_metadata`) and `src/loaders/mod.rs::load_awq_llama` form a complete, working loader —
+it opens an AWQ checkpoint directory, parses `quantization_config`, finds the safetensors
+files, builds a `VarBuilder`, and constructs a real `AwqQwen3` model end to end. `src/model/
+awq_qwen3.rs::AwqQwen3` is a real Qwen3 implementation using Marlin-backed `AwqLinear` layers.
+None of this is a stub.
+
+**The actual gap, in two parts:**
+
+1. **No call site.** `ParallelModelManager::load`/`load_adaptive`
+   (`src/model/parallel_model_manager.rs:133`, `:541`) both call `load_local_llama`
+   unconditionally — neither has any AWQ-format detection (e.g. reading
+   `config.json`'s `quantization_config.quant_method`) that would route to
+   `load_awq_llama` instead. Pointing either function at an AWQ checkpoint directory today
+   attempts to load AWQ's `qweight`/`qzeros`/`scales` tensors through the plain-weight path and
+   fails.
+2. **`AwqQwen3` does not implement whatever the serving engine needs from a model.**
+   `AwqQwen3::forward(&mut self, input_ids, offset) -> Result<Tensor>`
+   (`src/model/awq_qwen3.rs:385`) is single-sequence, returns only the last token's logits, and
+   keeps its own KV cache internally per decoder layer — it has no `impl` of any trait
+   `ParallelModelManager`/`BatchedTransformer`/the M4 scheduler's `EngineModel` expects, and no
+   per-request-slot cache structure compatible with `ParallelCacheBuilder`. It cannot be dropped
+   into the real continuous-batching serving path as-is; that would mean rewriting its KV-cache
+   and forward-pass shape to match the rest of the engine, which is new work, not wiring.
+
+**Proposed slices, smallest proof first:**
+
+1. **Slice 1 — prove correctness standalone, not in the real server.** Wire
+   `load_awq_llama`/`AwqQwen3::forward` into a minimal, single-request, non-batched path (e.g.
+   a dedicated test or a small binary in the shape of `lightbulb-probe`), load a REAL small
+   AWQ-quantized checkpoint on this box's one GPU, generate a short completion, and compare
+   token-for-token against a reference run (e.g. HuggingFace `transformers` + `autoawq`, with
+   that reference's library/model version pinned in the test, same discipline as the GGUF
+   fidelity tests). **Needs a real small AWQ model found first** — `../models/Qwen3-32B-AWQ`
+   (the existing `#[ignore]`d tests' default path) is far too large for this box; no small AWQ
+   checkpoint is in the local corpus today. Scoped, GPU-testable here, no fuel/candlelight
+   dependency.
+2. **Slice 2 — wire into the real serving engine.** Only after slice 1 proves the loader and
+   model are correct in isolation: either (a) give `AwqQwen3` a batched, per-slot-cache forward
+   path matching `BatchedTransformer`'s shape, or (b) run AWQ models through a separate,
+   explicitly single-request serving path (a real product limitation to state, not hide, if
+   chosen). **Not sized in detail here** — which option is right depends on what slice 1's
+   `AwqQwen3` internals turn out to need, and sizing it now would be guessing ahead of that
+   evidence.
+
+**Not started.** Slice 1's first concrete step is finding or obtaining a real small AWQ
+checkpoint this box can run.
+
+---
+
 ## Pipeline execution driver — module deleted, not built (resolved 2026-10-17)
 
 `src/engine/pipeline.rs` (`Pipeline`/`PipelineBuilder`/`PipelineConfig`, a synchronous DAG
@@ -1872,11 +1943,10 @@ M3 — Acceleration features (0.4)
 - **AWQ (Activation-aware Weight Quantization)** - 4-bit weight quantization (M3.7-M3.9)
   - ✅ **Phase 1 COMPLETE**: Kernel infrastructure (7 CUDA files, FFI bindings, build script)
   - ✅ **Phase 2 COMPLETE**: CustomOp wrappers (marlin.rs with MarlinMatMul for GPTQ/AWQ)
-  - 🔄 **Phase 3 IN PROGRESS**: Model loader integration (3-5 days)
-    - Integrate AWQ loader for .safetensors and GGUF formats
-    - Add CLI flag: `--awq` to enable AWQ loading
-    - Automatic Marlin kernel selection for 4-bit GPTQ/AWQ weights
-    - Acceptance: Load and run AWQ-quantized models end-to-end; throughput ≥1.5× vs FP16; accuracy within 1% of unquantized
+  - ⚠️ **"Phase 3 IN PROGRESS" was wrong — measured 2026-10-21 at 0% wired, not partway.**
+    See "AWQ loader wiring: slice plan" above for the real state (a complete, unused loader;
+    no call site; the model's forward pass doesn't match the serving engine's interface) and
+    the proposed slices.
   - References: docs/ADVANCED_QUANTIZATION_RESEARCH.md, src/backend/marlin.rs, kernels/
 
 - **Norm Tweaking** - Universal quantization plugin (M3.10, 2-3 days)
