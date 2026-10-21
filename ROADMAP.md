@@ -1055,6 +1055,58 @@ it earlier risks conflicting with every one of slices 1-5 touching the same func
 
 ---
 
+## Fuel dependency migration: git rev → crates.io (sizing, added 2026-10-21, PM-tasked)
+
+**Why now:** CireSnave's standing Sources rule (crates.io only, no `git =`/path deps) plus his
+"most recent versions at all times" rule both apply to the `fuel`/`fuel-*` dependency block
+(`Cargo.toml`), which is pinned to a git rev today. PORTFOLIO-ROADMAP.md §2 had flagged this as
+"not scheduled... an integration, not a version edit" — this section is that integration's
+sizing, not an attempt to do it as a drive-by Cargo.toml edit. **Blocks research track item 1,
+slice 1** (below) per the PM's ordering: this migration lands as its own PR(s) first.
+
+**Crates.io readiness, checked 2026-10-21 against the live API:** `fuel`,
+`fuel-inference`, `fuel-model-llama`, `fuel-ir`, `fuel-transformers`, `fuel-loaders`,
+`fuel-cpu-backend`, `fuel-cuda-backend`, `fuel-vulkan-backend`, `fuel-dispatch`,
+`fuel-hardware`, `fuel-tensor`, and `fuel-kv-pool` are all published, all at `0.20.14`
+(created 2026-10-14, last updated 2026-10-18). Fuel's own `origin/main` workspace version is
+`0.20.54` — ahead of its own last crates.io release, so `0.20.14` is genuinely the latest
+*installable* version today, not a stale snapshot. **Re-check the live API again before
+actually bumping** — this is a point-in-time reading, not a pin.
+
+**What changed between the pinned rev and `0.20.14`:** 114 commits (measured
+`git log --oneline <pinned-rev>..origin/main` in the `fuel` checkout, 2026-10-21 — the
+288-commit figure in PORTFOLIO-ROADMAP.md §2 is from an earlier measurement and is stale; use
+this one). The one that matters most for lightbulb: **GAP-348 dissolved the `fuel-core`
+package entirely** (fuel#366, tagged `0.19.0`) — every symbol it carried moved into the crate
+that actually owns it (`fuel-ir`, `fuel-tensor`, `fuel-loaders`, etc.), and the `fuel` facade
+crate (plain name, not `fuel-core`) re-exports them from `fuel::lazy`/`fuel::...` so that
+`use fuel::...` "still resolves identically" per the facade crate's own doc comment
+(`fuel/Cargo.toml`'s header). Lightbulb's own `Cargo.toml` pins `fuel = { git = ...,
+package = "fuel-core" }` — that package name **no longer exists upstream at all**, so this line
+specifically must change to depend on the plain `fuel` crate by its real name, not just gain a
+version number in place of `git`/`rev`.
+
+**Lightbulb's own exposure, checked by grep (2026-10-21):**
+- `grep -rln "fuel_core::" src/` → **0 hits.** Lightbulb already imports everything through the
+  `fuel::` facade path, never the dissolved package's own path directly — the lowest-risk
+  starting position this migration could have.
+- `grep -rln "fuel::lazy::" src/model_fuel/` → 5 files, 9 usages (`batched.rs`, `device.rs`,
+  `loader_f32.rs`, `mod.rs`, `scheduler_driver.rs`) — all `fuel::lazy::{Tensor, LayerWeights,
+  WeightStorage, SamplingStrategy, load_tensor_as_f32, load_transposed_matrix}`. Per the facade's
+  own guarantee above, these should NOT need call-site changes — but that guarantee is read from
+  a doc comment, not proven by compiling against `0.20.14` yet.
+
+**Not sized here, deliberately:** the full API-surface diff across all 114 commits (GAP-211's
+quantized IQ2/IQ3/IQ1 decode work and whatever else landed) is not audited line-by-line —
+doing that speculatively costs more than just changing the dependency lines and reading the
+compiler's own error list. **Proposed approach:** one PR that (1) replaces every `fuel`/`fuel-*`
+git dependency line with a crates.io version pin (dropping `package = "fuel-core"` on the
+`fuel` line), (2) runs `cargo check --all-features` and fixes whatever the compiler actually
+flags, (3) re-runs the full test suite including `fuel-engine`-gated tests. Real cost is
+whatever step 2 turns up, reported honestly rather than estimated in advance.
+
+---
+
 ## Research track item 1 — prefix-matching into the Fuel serving path: slice plan (added 2026-10-14, PM-tasked)
 
 **Scope correction up front, the single most important fact in this section:** the default,
