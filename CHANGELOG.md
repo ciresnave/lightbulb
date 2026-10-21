@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.12.4
+
+### Added
+- **Fuel dependency migration sizing (PM-tasked 2026-10-21).** ROADMAP.md gets a new section
+  sizing the move from lightbulb's git-pinned Fuel rev to crates.io: `fuel` and its 12 companion
+  crates are all published at `0.20.14` (checked live against the crates.io API), the pinned rev
+  predates Fuel's GAP-348 `fuel-core` dissolution (so `Cargo.toml`'s `package = "fuel-core"`
+  alias names a package that no longer exists upstream), and lightbulb's own exposure is lower
+  than expected -- zero `fuel_core::` path references anywhere in `src/`, only nine
+  `fuel::lazy::` facade-path usages across five files. Docs only, no dependency or code change;
+  this is the sizing that must land before the migration itself, per the PM's ordering.
+
 ## 0.12.3
 
 ### Changed
