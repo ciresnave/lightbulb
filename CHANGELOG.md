@@ -1,5 +1,35 @@
 # Changelog
 
+## 0.13.1
+
+### Added
+- **PersistAnt adoption status, added to the Fuel-migration sizing doc (PM-asked 2026-10-21).**
+  ROADMAP.md now records that PersistAnt adoption is already complete in shipped code
+  (`persistant-sqlx`/`persistant-relational` 0.7.4, "Step 5") for lightbulb's Postgres-backed
+  API keys, audit logs, sessions, rate-limit usage and auth-attempt-count storage --
+  `tokio-postgres`/`refinery`/`postgres-types` remain only in `[dev-dependencies]`, deliberately,
+  for upgrade-path and raw-schema tests. Nothing blocked.
+
+### Fixed
+- **RustSec lock-only update.** `cargo update` for the semver-compatible fixes:
+  `rustls` 0.23.45 -> 0.23.46 (RUSTSEC-2026-0346/0347/0348/0349), `rustls-webpki` 0.103.15 ->
+  0.103.16 (RUSTSEC-2026-0382), `webpki-root-certs` 1.0.9 -> 1.0.10 (RUSTSEC-2026-0383),
+  `webpki-roots` 1.0.9 -> 1.0.10 (RUSTSEC-2026-0381; the OTHER `webpki-roots` line in the lock,
+  0.26.11, pulled by `ureq` v2.12.1 via our own `hf-hub` v0.4.3 dependency, is **not** flagged by
+  any advisory -- confirmed via `cargo audit`, not assumed), `h2` 0.4.15 -> 0.4.20 and
+  `quinn-proto` 0.11.16 -> 0.11.19 (RUSTSEC-2026-0258/0338/0339/0340/0341/0342, found by the same
+  audit pass though not in the PM's original list). `cargo check --bins` and `cargo test --lib`
+  (886 passed) both green after the bump.
+- **Not fixable from this repo, reported rather than attempted:** `zip` 7.2.0 (pulled by
+  `candle-core` via `candlelight`) and `zip` 8.6.0 (pulled by `fuel-core` and others via `fuel`)
+  both need >=9.0.0 (RUSTSEC-2026-0367/0368/0369) -- both are transitive pins one major version
+  below the fix, owned by candlelight's and fuel's own `Cargo.toml`, not lightbulb's; `cargo
+  update -p zip` cannot cross a major-version boundary a dependent itself declared. Likewise
+  `h2` 0.3.27 (RUSTSEC-2026-0258, pulled by `distributed-config` v0.1.0's own `reqwest` v0.11
+  dependency) has no newer `distributed-config` release to move to (checked crates.io: `0.1.0`
+  is still the newest). Both need the owning upstream crate to bump its own dependency, not a
+  lightbulb-side fix.
+
 ## 0.13.0
 
 ### Added
