@@ -1105,6 +1105,15 @@ git dependency line with a crates.io version pin (dropping `package = "fuel-core
 flags, (3) re-runs the full test suite including `fuel-engine`-gated tests. Real cost is
 whatever step 2 turns up, reported honestly rather than estimated in advance.
 
+**PersistAnt adoption status (added 2026-10-21, PM-asked — not blocked on anything):**
+lightbulb stores API keys, audit logs, user sessions, rate-limit usage counters, and auth
+attempt counts, all in Postgres, and adoption is **already complete** in shipped code
+(`persistant-sqlx`/`persistant-relational` 0.7.4, "PersistAnt adoption Step 5" per
+`Cargo.toml`'s `[dev-dependencies]` comment) — `tokio-postgres`/`refinery`/`postgres-types`
+remain only in `[dev-dependencies]`, deliberately, to simulate a pre-Step-5 deployment's
+refinery-migrated database and inspect raw schema in tests, never in the shipped binary.
+Nothing here blocks or needs further PersistAnt work.
+
 ---
 
 ## Research track item 1 — prefix-matching into the Fuel serving path: slice plan (added 2026-10-14, PM-tasked)
