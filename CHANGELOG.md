@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.13.3
+
+### Fixed
+- **`stories15M-q4_0.gguf`'s "unexplained refusal" in `gguf_serving_census`, closed (PM-tasked
+  2026-10-21).** Root cause: it is `LLAMA_SPM_VOCAB_SHA256`'s own oracle-verified 32000-token
+  vocabulary with exactly one token (id 30143) corrupted by this file's own conversion, from
+  `"\u{feff}"` (BOM) to `""` -- confirmed by a token-by-token diff against three independent
+  sources (its own sibling `stories15M-q8_0.gguf`, `tinyllama-1.1b-chat-v1.0.Q4_0.gguf`,
+  `ggml-vocab-llama-spm.gguf`), not a new or different vocabulary. Added
+  `STORIES15M_Q4_VOCAB_SHA256` to `spm_derivation_warrant`'s allowlist, with the strongest
+  warrant of the four weaker entries (an oracle-verified parent vocabulary, not "no oracle
+  exists"). Red-first test:
+  `stories15m_q4_0_shares_the_llama_vocabulary_minus_one_corrupted_token` -- demonstrated
+  failing with the allowlist entry removed (`the allowlist entry for this digest is missing`),
+  passing with it restored. `gguf_serving_census` (local corpus only, never hosted CI) goes
+  from 9/13 to 10/13 weighted files loading, 0 "unexplained" refusals (was 1).
+
 ## 0.13.2
 
 ### Fixed

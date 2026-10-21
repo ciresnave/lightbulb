@@ -165,6 +165,33 @@ const BAICHUAN_VOCAB_SHA256: &str =
 const V1_TOY_VOCAB_SHA256: &str =
     "7a2789d1f98cbf816342283ab2820525ef3698da3aa30533f63ae4b0d63555cf";
 
+/// SHA-256 of `stories15M-q4_0.gguf`'s 32000-token vocabulary.
+///
+/// ⚠️ A DIFFERENT DIGEST FROM `LLAMA_SPM_VOCAB_SHA256`, AND THE SAME VOCABULARY
+/// UNDERNEATH -- WITH ONE TOKEN CORRUPTED BY THIS FILE'S OWN CONVERSION.
+/// Compared token-by-token (not just by digest) against three independent
+/// Llama-SPM-vocabulary sources -- `tinyllama-1.1b-chat-v1.0.Q4_0.gguf`
+/// (`LLAMA_SPM_VOCAB_SHA256`'s own file), `ggml-vocab-llama-spm.gguf`, and
+/// this file's own sibling `stories15M-q8_0.gguf` (whose digest IS
+/// `LLAMA_SPM_VOCAB_SHA256`) -- all 32000 ids agree except id 30143: the
+/// sibling and both references carry `"\u{feff}"` (BOM) there; this file
+/// carries `""`. One token, one file, consistent with a converter dropping a
+/// BOM character rather than a different vocabulary.
+///
+/// ⚠️ THE CORRUPTION DOES NOT CHANGE THE DERIVED MERGE LIST -- MEASURED, NOT
+/// REASONED ABOUT. `derive_merges` on this file's own 32000 tokens produces
+/// the SAME 61249 merges, SET-IDENTICAL to `LLAMA_SPM_VOCAB_SHA256`'s own
+/// derivation, confirmed token-set-equal by
+/// `stories15m_q4_0_shares_the_llama_vocabulary_minus_one_corrupted_token`.
+/// (Why it is plausible, not why it is true: `derive_merges` only ever
+/// produces a split of a NON-EMPTY token at an internal boundary, which can
+/// never yield an empty string on either side, so token 30143's own content
+/// is never itself a derivable split product -- but whether some OTHER
+/// token's split happens to equal `"\u{feff}"` is an empirical question the
+/// test settles, not this comment.)
+const STORIES15M_Q4_VOCAB_SHA256: &str =
+    "2f410d65ece3806aec1f808d3d8fe9d2e296cc5c98c9ecbb74468ccf0f9abd9b";
+
 /// Convert our own parser's metadata into candle's `Value` shape.
 ///
 /// ⚠️ EXISTS BECAUSE CANDLE CANNOT ALWAYS PARSE A FILE WE CAN. Both enums are
@@ -953,6 +980,9 @@ impl Content {
             ),
             V1_TOY_VOCAB_SHA256 => Some(
                 "The 512-token vocabulary of `tinyllamas-stories-260k-f32.gguf`. ⚠️ SAME WEAKER WARRANT AS BAICHUAN AND OVER FAR FEWER OBSERVATIONS: no file shares or extends this vocabulary, so there is no oracle. The derived merge order contradicts the converter's own `tokenizer.ggml.scores` ordering 0 times -- but state the population, because it is the whole caveat: 164 adjacent pairs, of which 150 carry order information and 14 are ties. ⚠️ AND STATE THE NEGATIVE CASE BESIDE IT: A BROKEN COMPARATOR RETURNS 0 ON 164 PAIRS TOO. The forcing arm is the only thing that distinguishes those two outcomes, and it fires -- perturbing the first id in the measured sequence raises the count. ⚠️ SMALL IS NOT WEAK: at 8.5% ties this file has the HIGHEST informative fraction of the three allowlisted vocabularies (Baichuan 44.4% ties, the Llama reference 51.7%), so the limitation is how MANY observations there are, not how much each one can tell you. PROOF AGAINST GROSS FAILURE, NOT PROOF OF CORRECTNESS. See `the_v1_toy_order_agrees_over_a_small_but_clean_population`.",
+            ),
+            STORIES15M_Q4_VOCAB_SHA256 => Some(
+                "`stories15M-q4_0.gguf`'s 32000-token vocabulary. STRONGEST WARRANT OF THE FOUR WEAKER ENTRIES: this is not a vocabulary with no oracle, it is `LLAMA_SPM_VOCAB_SHA256`'s own oracle-verified vocabulary with exactly one token (id 30143) corrupted by this file's own conversion from `\"\\u{feff}\"` (BOM) to `\"\"` -- confirmed by a token-by-token diff against three independent sources (this file's own sibling `stories15M-q8_0.gguf`, `tinyllama-1.1b-chat-v1.0.Q4_0.gguf`, and `ggml-vocab-llama-spm.gguf`), not merely a similar size or name. The derived merge list is SET-IDENTICAL (61249 of 61249) to the Llama reference's own oracle-proven derivation despite the corruption. See `stories15m_q4_0_shares_the_llama_vocabulary_minus_one_corrupted_token`.",
             ),
             _ => None,
         }
@@ -2984,6 +3014,78 @@ mod spm_derivation_tests {
         assert_eq!(
             derived, declared,
             "phi-3's derived merges are not the declared list, so the shared-prefix oracle does not carry"
+        );
+    }
+
+    /// `stories15M-q4_0.gguf` (found in the corpus 2026-10-21, `gguf_serving_census`'s
+    /// first "unexplained refusal") is `LLAMA_SPM_VOCAB_SHA256`'s own vocabulary with
+    /// exactly one token corrupted by this file's own conversion, not a new
+    /// vocabulary needing its own independent oracle.
+    #[test]
+    #[ignore = "needs a local GGUF corpus; set LIGHTBULB_GGUF_CORPUS"]
+    fn stories15m_q4_0_shares_the_llama_vocabulary_minus_one_corrupted_token() {
+        let (Some(q4_c), Some(q8_c), Some(spm_c)) = (
+            read_corpus("stories15M-q4_0.gguf"),
+            read_corpus("stories15M-q8_0.gguf"),
+            read_corpus("tinyllama-1.1b-chat-v1.0.Q4_0.gguf"),
+        ) else {
+            lightbulb_skip();
+            return;
+        };
+        let q4_tokens = tokens_of(&q4_c);
+        let q8_tokens = tokens_of(&q8_c);
+        let spm_tokens = tokens_of(&spm_c);
+
+        assert_eq!(
+            Content::vocab_sha256(&q4_tokens),
+            STORIES15M_Q4_VOCAB_SHA256,
+            "this test's own fixture no longer matches the constant it exists to justify"
+        );
+        // The sibling file, converted without the defect, IS the oracle-verified
+        // Llama vocabulary -- confirms this is the same model family, not a
+        // coincidence of size.
+        assert_eq!(Content::vocab_sha256(&q8_tokens), LLAMA_SPM_VOCAB_SHA256);
+
+        assert_eq!(
+            q4_tokens.len(),
+            spm_tokens.len(),
+            "a length mismatch would mean this is a different vocabulary, not a corrupted one"
+        );
+        let diffs: Vec<(usize, &str, &str)> = q4_tokens
+            .iter()
+            .zip(spm_tokens.iter())
+            .enumerate()
+            .filter(|(_, (a, b))| a != b)
+            .map(|(i, (a, b))| (i, a.as_str(), b.as_str()))
+            .collect();
+        assert_eq!(
+            diffs,
+            vec![(30143, "", "\u{feff}")],
+            "expected exactly one corrupted token (id 30143, BOM dropped to empty string); \
+             a different diff means this file's defect has changed and the warrant above needs \
+             re-checking, not silently trusting the digest"
+        );
+
+        // THE CLAIM THAT MATTERS: the corruption did not change what this
+        // file's own tokenizer rebuild would derive.
+        let derived_q4: std::collections::HashSet<_> =
+            Content::derive_merges(&q4_tokens).into_iter().collect();
+        let derived_spm: std::collections::HashSet<_> =
+            Content::derive_merges(&spm_tokens).into_iter().collect();
+        assert_eq!(
+            derived_q4, derived_spm,
+            "the corrupted token changed the derived merge list -- the warrant's structural \
+             argument (an empty token is never itself a split product) does not cover whatever \
+             changed"
+        );
+
+        // The actual gate `gguf_serving_census`/`derived_merge_warrant` reads --
+        // red before this slice's allowlist entry existed (no digest == this
+        // one was registered), green after.
+        assert!(
+            Content::spm_derivation_warrant(STORIES15M_Q4_VOCAB_SHA256).is_some(),
+            "the allowlist entry for this digest is missing -- stories15M-q4_0.gguf still \
+             refuses in gguf_serving_census"
         );
     }
 
