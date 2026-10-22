@@ -104,18 +104,19 @@ pub struct LayerCacheStats {
 
 /// Get cache statistics
 ///
-/// Reports the prefix cache's real stats (board item M4 slice 1), written by
-/// the model-runner thread after every job -- see `AppState::cache_stats`.
-/// `layers` stays empty: no per-layer breakdown exists in the prefix cache
-/// today, so this is an honest absence, not a mock.
+/// Reports the prefix cache's real stats, written by `ServingDriver`
+/// (`src/model_fuel/scheduled_llama_engine.rs`) after every admission -- see
+/// `AppState::cache_stats`. `layers` stays empty: no per-layer breakdown
+/// exists in the prefix cache today, so this is an honest absence, not a
+/// mock.
 ///
-/// Gated on `CACHE_METRICS_LIVE` (currently `false`): Fuel's
-/// `ModelRunner::start` never writes `AppState::cache_stats`, so the handle
-/// this reads is permanently its construction-time zero on the live
-/// serving path -- reporting it as a real reading would be indistinguishable
-/// from an honest idle cache. See `CACHE_METRICS_LIVE`'s doc comment
-/// (`src/engine/model_runner.rs`) for why this stays unavailable even now
-/// that `scheduler_stats`/`scheduler_queue` are live.
+/// Gated on `CACHE_METRICS_LIVE` (now `true`, board PM task, 2026-10-22).
+/// `total_entries`/`hit_rate`/`eviction_count` are real repeat-prefix
+/// DETECTION counts, not a measure of compute actually saved -- see
+/// `CACHE_METRICS_LIVE`'s doc comment (`src/engine/model_runner.rs`) for why
+/// that distinction matters and what would need to change to close it.
+/// `total_size_bytes` stays an honest `0`: the index stores token-hash
+/// chains, not KV bytes, so there is nothing real to report there yet.
 async fn cache_stats(State(state): State<AppState>) -> impl IntoResponse {
     let stats = state
         .cache_stats
@@ -1182,29 +1183,53 @@ mod tests {
         }
     }
 
-    /// **Corrected 2026-10-22 (board PM ruling, after
-    /// `docs/FUEL-GAPS-FROM-CANDLE-REMOVAL.md` gap #1).** The original
-    /// version of this test proved `cache_stats` read through to
-    /// `AppState.cache_stats`'s real values -- true only while candlelight's
-    /// `run_jobs` was the live writer. Fuel's `ModelRunner::start` never
-    /// writes that handle, so reading through to it now would report a
-    /// permanently-stale snapshot as if it were live. This is now the
-    /// regression guard in the other direction: prime the handle with
-    /// asymmetric, non-zero, non-default values a real writer might
-    /// plausibly produce, and assert the response reports
-    /// `unavailable_on_backend` anyway -- if a future change makes this
-    /// handler read through to the mutex again without first flipping
-    /// `CACHE_METRICS_LIVE`, this test fails on the leaked mock values.
+    /// **Corrected 2026-10-22 (board PM task, after Fuel 0.20.71
+    /// published): `CACHE_METRICS_LIVE` is `true`.** `ServingDriver`
+    /// (`src/model_fuel/scheduled_llama_engine.rs`) now records real prefix
+    /// detection from the live Fuel path, so an idle cache reports a genuine
+    /// `0`, not `unavailable_on_backend`.
     #[tokio::test]
-    async fn cache_stats_reports_unavailable_on_backend_not_a_leaked_mock() {
+    async fn cache_stats_reports_real_zero_when_idle() {
+        let req = Request::builder()
+            .method("GET")
+            .uri("/v1/lightbulb/admin/cache/stats")
+            .extension(key_info("admin"))
+            .body(Body::empty())
+            .unwrap();
+        let response = routes().with_state(state()).oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+
+        for field in [
+            "total_entries",
+            "total_size_bytes",
+            "hit_rate",
+            "eviction_count",
+        ] {
+            assert_eq!(
+                body[field]["status"], "live",
+                "{field}: full body: {body:?}"
+            );
+        }
+        assert_eq!(body["total_entries"]["value"], 0, "full body: {body:?}");
+    }
+
+    /// Priming the shared handle directly is the same mechanism
+    /// `ServingDriver::detect_and_record_prefix` now calls from the live
+    /// Fuel path (real `BlockPrefixStats` counts, not a mock) -- this
+    /// proves the handler reads a real detection-count change through, not
+    /// a leaked default.
+    #[tokio::test]
+    async fn cache_stats_reports_real_hits_once_primed() {
         let app_state = state();
         {
             let mut guard = app_state.cache_stats.lock().unwrap();
-            guard.hits = 7;
-            guard.misses = 3;
-            guard.evictions = 2;
-            guard.entries = 5;
-            guard.size_bytes = 4096;
+            guard.hits = 1;
+            guard.entries = 1;
         }
 
         let req = Request::builder()
@@ -1221,21 +1246,14 @@ mod tests {
             .unwrap();
         let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
 
-        for field in [
-            "total_entries",
-            "total_size_bytes",
-            "hit_rate",
-            "eviction_count",
-        ] {
-            assert_eq!(
-                body[field]["status"], "unavailable_on_backend",
-                "{field}: full body: {body:?}"
-            );
-            assert!(
-                body[field].get("value").is_none(),
-                "{field} must carry no value, not a leaked mock: full body: {body:?}"
-            );
-        }
+        assert_eq!(
+            body["total_entries"],
+            serde_json::json!({"status": "live", "value": 1}),
+            "a detected prefix recorded into the shared handle must read through as \
+             real occupancy: full body: {body:?}"
+        );
+        assert_eq!(body["hit_rate"]["status"], "live", "full body: {body:?}");
+        assert_eq!(body["hit_rate"]["value"], 1.0, "full body: {body:?}");
     }
 
     /// `system_metrics` must report the machine's real total memory (a

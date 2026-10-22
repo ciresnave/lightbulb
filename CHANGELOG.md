@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.18.0
+
+### Changed (breaking)
+- **`cache_stats`/`CACHE_METRICS_LIVE` real again (board PM task, 2026-10-22, ROADMAP research
+  track item 1 / `docs/FUEL-GAPS-FROM-CANDLE-REMOVAL.md` entry #1).** `ServingDriver`
+  (`src/model_fuel/scheduled_llama_engine.rs`) now carries a
+  `BlockPrefixIndexFor<SessionId>` — the chain-hash prefix index
+  `src/model_fuel/policies.rs`'s `BlockPrefixIndex` already built and proved correct for Fuel's
+  block-pool `SessionHandle`, generalized (`BlockPrefixIndexFor<D>`, zero other callers so this
+  is safe) so a caller with no live `KvBlockPool` session can still use it — and records/looks
+  up every admitted prompt's token prefix on the live Fuel path, writing real
+  `hits`/`misses`/`insertions`/`entries`/`evictions` into `SharedCacheStats`.
+  **Detection only, not exploitation**: a detected hit is NOT spliced into the donor's KV blocks
+  and does NOT skip prefill yet — that needs `fuel_inference::multi_session::
+  PagedSessionScheduler` (`add_session_sharing_prefix`), a different scheduler than the
+  currently-wired `SessionScheduler`, out of scope for this slice. `CacheStatsResponse` never
+  surfaces a "tokens saved" figure, so nothing here claims one. `total_size_bytes` stays an
+  honest `0`: the index stores hash chains, not KV bytes. **Breaking**: `/v1/lightbulb/admin/
+  cache/stats` now reports `status: "live"` with real values instead of
+  `unavailable_on_backend` — a behavior change on an existing endpoint's response shape.
+  `src/api/admin.rs`'s cache-stats regression-guard tests rewritten to assert real values
+  (idle-zero + primed-real), mirroring the `scheduler_stats`/`scheduler_queue` pattern #204 set.
+
 ## 0.17.3
 
 ### Changed

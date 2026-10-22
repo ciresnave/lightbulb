@@ -41,19 +41,32 @@ endpoint's data is still wanted; otherwise the endpoint should be changed to
 say "not available on this backend" rather than silently reporting zeros,
 which is the current (actually worse) state and not fixed by this removal.
 
-**Still dark after Fuel 0.20.71 (2026-10-22) — and gap #2's fix below does
-NOT close this one too.** `src/engine/model_runner.rs`'s old combined
-`SCHEDULER_AND_CACHE_METRICS_LIVE` flag was split into
-`SCHEDULER_METRICS_LIVE` (now `true`, see gap #2) and `CACHE_METRICS_LIVE`
-(still `false`) because they are genuinely different states now: the
-currently-wired `fuel_inference::multi_session::SessionScheduler` exposes
-real KV-pool counters (`kv_free_blocks`/`kv_capacity`/`kv_bytes_resident`,
-Fuel 0.20.64) but has NO prefix-sharing concept at all, so there is nothing
-real behind `PrefixCacheStats`' hit/miss/eviction/entry fields yet — mapping
-the KV-pool numbers onto them would answer a different question and
-reintroduce the exact "never-written value passed off as real" defect #201
-stopped. Stays routed here until research track item 1 (prefix matching)
-is wired to the live path, which is what would actually give this data.
+**Detection half RESOLVED 2026-10-22 (board PM task, once Fuel 0.20.71
+published) — the exploitation half stays open, tracked below.**
+`src/engine/model_runner.rs`'s old combined `SCHEDULER_AND_CACHE_METRICS_LIVE`
+flag was split into `SCHEDULER_METRICS_LIVE` (`true`, see gap #2) and
+`CACHE_METRICS_LIVE` (**now also `true`**). `ServingDriver`
+(`src/model_fuel/scheduled_llama_engine.rs`) carries a
+`BlockPrefixIndexFor<SessionId>` — `src/model_fuel/policies.rs`'s
+`BlockPrefixIndex` chain-hash algorithm, generalized off Fuel's block-pool
+`SessionHandle` (that type's one field is private to its own crate, so a
+caller with no live `KvBlockPool` session cannot mint one to key by) — and
+records/looks up every admitted prompt's token prefix on the live path, so
+`hits`/`misses`/`insertions`/`entries`/`evictions` are real.
+
+**This closes DETECTION, not EXPLOITATION.** A detected hit is NOT spliced
+into the donor's KV blocks and does NOT skip prefill: the currently-wired
+`fuel_inference::multi_session::SessionScheduler` has no splice concept at
+all. That needs `PagedSessionScheduler` (`add_session_sharing_prefix`/
+`register_prefix`), a DIFFERENT scheduler Fuel already ships, not new
+Fuel-side work — but switching `ServingDriver` from `SessionScheduler` to
+`PagedSessionScheduler` is a real, separate port (different `DecodeModel`
+trait bound: `PagedDecodeModel`), out of this slice's scope. `CacheStatsResponse`
+never surfaces a "tokens saved" figure, so nothing here claims one;
+`total_size_bytes` stays an honest `0` (the index stores hash chains, not KV
+bytes). Add-to-Lightbulb decision for the exploitation half: is the
+`PagedSessionScheduler` port worth doing for the TTFT win, given `ServingDriver`
+would need a second enum-dispatch rebuild on top of it?
 
 ### 2. `scheduler_stats`/`scheduler_queue` admin endpoints go dark
 **What it was:** `SharedScheduler` (`MemoryAwareScheduler`), mirrored by
