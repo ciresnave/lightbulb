@@ -587,75 +587,87 @@ mod tests {
         ]
     }
 
+    /// The tensors one `Qwen3AwqDecoderLayer` needs, named under `model.layers.{idx}`.
+    /// Factored out of `base_model_tensors` to keep that function under Codacy's 50-line
+    /// limit, not because this half is reused anywhere else.
+    fn decoder_layer_tensors(idx: usize, cfg: &Qwen3Config, dev: &Device) -> Vec<(String, Tensor)> {
+        let head_dim = cfg.hidden_size / cfg.num_attention_heads;
+        let p = format!("model.layers.{idx}");
+        let mut t = Vec::new();
+        t.extend(awq_linear_tensors(
+            &format!("{p}.self_attn.q_proj"),
+            cfg.hidden_size,
+            cfg.num_attention_heads * head_dim,
+            dev,
+        ));
+        t.extend(awq_linear_tensors(
+            &format!("{p}.self_attn.k_proj"),
+            cfg.hidden_size,
+            cfg.num_key_value_heads * head_dim,
+            dev,
+        ));
+        t.extend(awq_linear_tensors(
+            &format!("{p}.self_attn.v_proj"),
+            cfg.hidden_size,
+            cfg.num_key_value_heads * head_dim,
+            dev,
+        ));
+        t.extend(awq_linear_tensors(
+            &format!("{p}.self_attn.o_proj"),
+            cfg.num_attention_heads * head_dim,
+            cfg.hidden_size,
+            dev,
+        ));
+        t.push((
+            format!("{p}.self_attn.q_norm.weight"),
+            Tensor::zeros(head_dim, DType::F16, dev).unwrap(),
+        ));
+        t.push((
+            format!("{p}.self_attn.k_norm.weight"),
+            Tensor::zeros(head_dim, DType::F16, dev).unwrap(),
+        ));
+        t.extend(awq_linear_tensors(
+            &format!("{p}.mlp.gate_proj"),
+            cfg.hidden_size,
+            cfg.intermediate_size,
+            dev,
+        ));
+        t.extend(awq_linear_tensors(
+            &format!("{p}.mlp.up_proj"),
+            cfg.hidden_size,
+            cfg.intermediate_size,
+            dev,
+        ));
+        t.extend(awq_linear_tensors(
+            &format!("{p}.mlp.down_proj"),
+            cfg.intermediate_size,
+            cfg.hidden_size,
+            dev,
+        ));
+        t.push((
+            format!("{p}.input_layernorm.weight"),
+            Tensor::zeros(cfg.hidden_size, DType::F16, dev).unwrap(),
+        ));
+        t.push((
+            format!("{p}.post_attention_layernorm.weight"),
+            Tensor::zeros(cfg.hidden_size, DType::F16, dev).unwrap(),
+        ));
+        t
+    }
+
     /// Every tensor `AwqQwen3::new` needs EXCEPT `lm_head.*` -- the embedding, every decoder
     /// layer's attention/MLP/norms, and the final norm. Shared by the tied and untied tests so
     /// a divergence between them can only be the one tensor set each adds on top.
-    fn base_model_tensors(cfg: &Qwen3Config, dev: &Device) -> std::collections::HashMap<String, Tensor> {
-        let head_dim = cfg.hidden_size / cfg.num_attention_heads;
+    fn base_model_tensors(
+        cfg: &Qwen3Config,
+        dev: &Device,
+    ) -> std::collections::HashMap<String, Tensor> {
         let mut t: Vec<(String, Tensor)> = vec![(
             "model.embed_tokens.weight".to_string(),
             Tensor::zeros((cfg.vocab_size, cfg.hidden_size), DType::F16, dev).unwrap(),
         )];
         for i in 0..cfg.num_hidden_layers {
-            let p = format!("model.layers.{i}");
-            t.extend(awq_linear_tensors(
-                &format!("{p}.self_attn.q_proj"),
-                cfg.hidden_size,
-                cfg.num_attention_heads * head_dim,
-                dev,
-            ));
-            t.extend(awq_linear_tensors(
-                &format!("{p}.self_attn.k_proj"),
-                cfg.hidden_size,
-                cfg.num_key_value_heads * head_dim,
-                dev,
-            ));
-            t.extend(awq_linear_tensors(
-                &format!("{p}.self_attn.v_proj"),
-                cfg.hidden_size,
-                cfg.num_key_value_heads * head_dim,
-                dev,
-            ));
-            t.extend(awq_linear_tensors(
-                &format!("{p}.self_attn.o_proj"),
-                cfg.num_attention_heads * head_dim,
-                cfg.hidden_size,
-                dev,
-            ));
-            t.push((
-                format!("{p}.self_attn.q_norm.weight"),
-                Tensor::zeros(head_dim, DType::F16, dev).unwrap(),
-            ));
-            t.push((
-                format!("{p}.self_attn.k_norm.weight"),
-                Tensor::zeros(head_dim, DType::F16, dev).unwrap(),
-            ));
-            t.extend(awq_linear_tensors(
-                &format!("{p}.mlp.gate_proj"),
-                cfg.hidden_size,
-                cfg.intermediate_size,
-                dev,
-            ));
-            t.extend(awq_linear_tensors(
-                &format!("{p}.mlp.up_proj"),
-                cfg.hidden_size,
-                cfg.intermediate_size,
-                dev,
-            ));
-            t.extend(awq_linear_tensors(
-                &format!("{p}.mlp.down_proj"),
-                cfg.intermediate_size,
-                cfg.hidden_size,
-                dev,
-            ));
-            t.push((
-                format!("{p}.input_layernorm.weight"),
-                Tensor::zeros(cfg.hidden_size, DType::F16, dev).unwrap(),
-            ));
-            t.push((
-                format!("{p}.post_attention_layernorm.weight"),
-                Tensor::zeros(cfg.hidden_size, DType::F16, dev).unwrap(),
-            ));
+            t.extend(decoder_layer_tensors(i, cfg, dev));
         }
         t.push((
             "model.norm.weight".to_string(),
