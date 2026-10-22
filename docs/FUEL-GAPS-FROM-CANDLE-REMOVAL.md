@@ -232,7 +232,7 @@ never independently wired to the Fuel path either; if anyone wants that
 specific accuracy/memory tradeoff on Fuel's KV cache, that would be new work
 against `fuel::kv_block_pool`, not a restoration of this code.
 
-### 11. GGUF serving census lost its measurement target (test coverage gap, not a Fuel gap)
+### 11. GGUF serving census lost its measurement target (test coverage gap, not a Fuel gap) — RE-CREATED 2026-10-22
 **What it was:** `tests/gguf_serving_census.rs` — measured how many corpus
 checkpoints `ParallelModelManager::load_gguf` ("the reader that is actually
 reachable", per its own doc) could load, and why each failure happened. This
@@ -244,9 +244,13 @@ calling convention and failure-classification shape (architecture refusal
 vs. dtype refusal vs. something else) — real work, not a mechanical
 candlelight swap, and getting the classification wrong would produce a
 confidently-wrong census, which is worse than no census.
-**Action needed:** re-create this measurement against the Fuel loader as its
-own small task, not swept into this removal. Also deleted for the same
-reason: `tests/flash_attention_tests.rs` (candlelight's FlashAttention vs.
+**RE-CREATED as `tests/gguf_e2e_weight_load_census.rs`**, calling Fuel's
+real loaders directly: 9 of 11 weighted corpus files load end-to-end
+(including all 3 IQ-coded ones — the dtype gap closure holds at
+weight-decode time too), 2 fail on a real, different, Fuel-side gap
+(`llama.attention.head_count_kv` not defaulted for pre-GQA exports). See
+`ROADMAP.md`'s GGUF corpus section for the full writeup. Also deleted for the
+same reason: `tests/flash_attention_tests.rs` (candlelight's FlashAttention vs.
 manual-attention parity — no Fuel equivalent exists to compare against, so
 there is nothing to port this to, only to re-derive if FlashAttention parity
 matters on the Fuel path) and `tests/enhanced_correctness_tests.rs` (493
