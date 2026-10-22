@@ -881,24 +881,43 @@ must go green before this is closed.
 
 **The real remaining gaps, neither one a pre-tokenizer problem:**
 
-1. **3 of 13 weighted files refuse on an unrepresentable IQ/K-quant tensor
-   dtype** (`SmolLM2-135M-Instruct-IQ3_XS/IQ4_XS/Q2_K.gguf`) —
-   **LIKELY RESOLVED 2026-10-22, NOT YET RE-MEASURED.** Both preconditions
-   this entry was parked on have landed: candlelight (the old blocker, whose
-   `candle-core` 0.10.2 fork had no IQ dequant kernels at all) was removed
-   entirely (PR #195, 2026-10-22) — Fuel is now the ONLY serving path, not an
-   alternative to migrate onto. And Fuel 0.20.61 (the crates.io migration,
-   same day) confirmed GAP-211 B1 widened `GgmlDType::from_u32`
+1. **RESOLVED 2026-10-22, RE-MEASURED.** Was "3 of 13 weighted files refuse on
+   an unrepresentable IQ/K-quant tensor dtype" (`SmolLM2-135M-Instruct-
+   IQ3_XS/IQ4_XS/Q2_K.gguf`, measured 2026-09-09). **Re-run at `origin/main`
+   24cc235 (2026-10-22) against the same corpus
+   (`tests/gguf_dtype_census.rs -- --ignored --nocapture`,
+   `LIGHTBULB_GGUF_CORPUS=C:\Models\gguf-corpus`): 0 of 11 weighted files
+   refuse (`unsupported=[]` on every one, including the three that carry
+   180-210 tensors each of dtype 20/21/23 — IQ4_NL/IQ3_S/IQ4_XS).** One file
+   lands in `no histogram` (unrelated to dtype, a GGUFv1 vocab-only file our
+   own parser's tensor-directory reader refuses), none of the rest are
+   affected. The 13-vs-11 weighted-file count difference from the September
+   measurement is the corpus directory's own state at each measurement time,
+   not a discrepancy to reconcile — this count is the current, authoritative
+   one.
+   Two changes landed the same day this was re-measured: candlelight (the old
+   blocker, whose `candle-core` 0.10.2 fork had no IQ dequant kernels at all)
+   was removed entirely (PR #195) — Fuel is now the ONLY serving path, not an
+   alternative to migrate onto. And the Fuel crates.io migration (PR #196,
+   Fuel 0.20.61) confirmed GAP-211 B1 widened `GgmlDType::from_u32`
    (`fuel-ir/src/quantized.rs`) to accept the entire IQ family (codes 16-23,
-   29), TQ (34, 35), and MXFP4/NVFP4 (39, 40) — on top of GAP-211 B2's
-   decode-kernel work already landed at `0.20.14`. This is TABLE acceptance,
-   verified directly against the `fuel-ir`/`fuel-formats` 0.20.61 source, not
-   inferred from a changelog. **What is NOT yet verified**: whether the 3 real
-   corpus files above now actually LOAD end-to-end (table acceptance plus
-   decode-kernel coverage together, not just one or the other) — re-run
-   `tests/gguf_dtype_census.rs` against the real corpus
-   (`LIGHTBULB_GGUF_CORPUS`) to get the current true count before updating
-   this entry to CLOSED.
+   29), TQ (34, 35), and MXFP4/NVFP4 (39, 40), on top of GAP-211 B2's
+   decode-kernel work already landed at `0.20.14`. `tests/gguf_dtype_census.rs`
+   was updated in the same PR as this re-measurement: its table (now
+   `FUEL_ACCEPTS`) matches Fuel 0.20.61, and its regression-guard test
+   (renamed `the_iq_dtype_gap_stays_closed`) now asserts zero refusals rather
+   than requiring at least one, since the scenario it used to pin
+   (misreading a dtype-refusal error message) has no subject matter left in
+   this corpus.
+   **Still open, deliberately not claimed here**: this measures METADATA/
+   tensor-directory acceptance (`Content::read` + `tensor_infos()` succeed),
+   not that the actual quantized weight bytes decode correctly end-to-end
+   through a real model load. `tests/gguf_serving_census.rs`, which used to
+   measure that via `ParallelModelManager::load_gguf`, was deleted in PR #195
+   (its loader is gone) and not yet re-created against Fuel's own loader
+   (`model_fuel::loader_gguf`/`loader_gguf_qwen3`) — see
+   `docs/FUEL-GAPS-FROM-CANDLE-REMOVAL.md`'s entry on that deletion. Re-create
+   it against the Fuel loader before calling end-to-end serving CLOSED.
 2. **3 tokenizer-model types are never constructed at all** (`bert`/`t5`/
    `gemma`-family tokenizers) — a larger, separate undertaking: building new
    tokenizer-construction paths from scratch, not implementing a pre-tokenizer

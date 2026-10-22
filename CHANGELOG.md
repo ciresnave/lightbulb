@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.16.2
+
+### Fixed
+- **Re-measured the IQ dtype gap on the real GGUF corpus — RESOLVED.** Was "3 of 13 weighted
+  files refuse on an unrepresentable IQ/K-quant tensor dtype" (measured 2026-09-09, parked on
+  the Fuel migration). After PR #195 (candlelight removed) and PR #196 (Fuel 0.20.61, GAP-211
+  B1's widened `GgmlDType` table): **0 of 11 weighted corpus files refuse**, including the
+  three carrying 180-210 tensors each of dtype 20/21/23 (IQ4_NL/IQ3_S/IQ4_XS). Updated
+  `tests/gguf_dtype_census.rs`'s accepted-dtype table (`CANDLE_ACCEPTS` → `FUEL_ACCEPTS`,
+  matching Fuel 0.20.61's real table) and rewrote its regression-guard test (`the_refused_
+  number_is_a_dtype_code_and_not_a_tensor_index` → `the_iq_dtype_gap_stays_closed`) to assert
+  zero refusals going forward rather than requiring at least one — the old test's own "both
+  arms or nothing" guard correctly caught that its original scenario no longer has any subject
+  matter in this corpus. `ROADMAP.md`'s entry updated with the dated re-measurement and its
+  ref. Still open, not claimed here: end-to-end weight-loading verification through Fuel's own
+  loader (`tests/gguf_serving_census.rs`, deleted in PR #195, not yet re-created) — this
+  re-measurement is metadata/tensor-directory acceptance only.
+
+Verified clean: `cargo check --lib --tests --examples --benches --features fuel-engine`,
+`cargo fmt --check`, `python scripts/clippy_gate.py`, `cargo metadata --locked`, and
+`cargo test --test gguf_dtype_census -- --ignored --nocapture` against the real corpus.
+
 ## 0.16.1
 
 ### Changed
