@@ -13,22 +13,26 @@ It is **not** released and the API is **not** stable.
 
 ## Backends
 
-Lightbulb runs its models through one of two engines, chosen at compile time.
+**Lightbulb runs its models entirely through Fuel** (`src/model_fuel/`,
+crate `fuel` on crates.io). The candlelight backend (a fork of Hugging Face
+Candle) that used to be the default was removed entirely on 2026-10-22
+(CireSnave: "Remove all dependencies on Candle and Candlelight..."; PR #195).
+There is no compile-time choice between backends any more — `fuel-engine` is
+now a no-op feature flag kept only so existing callers don't break, and an
+ordinary `cargo build` gives you Fuel regardless of whether it's passed.
 
-| backend | feature | state |
-| --- | --- | --- |
-| **candlelight** (a fork of Hugging Face Candle) | default | the shipping path |
-| **Fuel** (`src/model_fuel/`) | `fuel-engine` | opt-in, **not yet at parity** |
+`fuel` and its sibling crates (`fuel-cpu-backend`, `fuel-transformers`,
+`fuel-loaders`, `fuel-ir`, `fuel-inference`, `fuel-cuda-backend`) are
+unconditional dependencies, pinned by version on crates.io (`0.20.61` as of
+the 2026-10-22 migration off the git source, PR #196) — see the comments
+around the dependency in `Cargo.toml` for the history.
 
-**`default = []`, so an ordinary `cargo build` gives you candlelight.** The port
-to Fuel is in progress and is the project's main architectural thread, but
-"being ported to Fuel" does not mean Fuel is live — both backends compile today
-and candlelight is what serves.
-
-`fuel-core` is an unconditional dependency regardless of which engine is
-selected, so Fuel's format readers are available in every build. It is pinned by
-git revision, not floating; see the comments around the dependency in
-`Cargo.toml` for why.
+Removing candlelight opened two real, tracked capability gaps (the
+`cache_stats`/`scheduler_stats`/`scheduler_queue` admin endpoints have no
+live data source on Fuel's path; AWQ quantized-inference parity is
+unverified against the portfolio's other quantization code) — see
+`docs/FUEL-GAPS-FROM-CANDLE-REMOVAL.md` for the full accounting and
+`ROADMAP.md` for routing.
 
 Other features: `cuda`, `fuel-cuda`, `vulkan`. Op placement on the Fuel path is
 per-op and decided by Fuel's planner — enabling a GPU feature does not mean
