@@ -24,6 +24,11 @@ pub struct Qwen3Config {
     pub rope_theta: f64,
     #[serde(default = "default_hidden_act")]
     pub hidden_act: Activation,
+    /// Whether `lm_head` reuses `embed_tokens`' weight rather than carrying its own. HF's own
+    /// default is `false` when the field is absent from `config.json`, so a missing field here
+    /// must not be read as "tied" — see `LmHead::load` for why this flag alone is not trusted.
+    #[serde(default)]
+    pub tie_word_embeddings: bool,
 }
 
 fn default_rope_theta() -> f64 {
@@ -344,13 +349,70 @@ impl Qwen3AwqDecoderLayer {
     }
 }
 
+/// The output projection: either its own AWQ-quantized weight, or a tied reuse of
+/// `embed_tokens`'s (non-quantized) embedding weight.
+///
+/// ⚠️ A SEPARATE TYPE, NOT A BOOL BRANCH INSIDE `AwqQwen3`, because the two cases load
+/// different tensors under different names and the quantized path's weight is 4-bit while the
+/// tied path's is not — collapsing them into one `AwqLinear` field was exactly the bug this
+/// type exists to fix (it made the tied case structurally unrepresentable, not just unhandled).
+#[derive(Debug, Clone)]
+enum LmHead {
+    Quantized(AwqLinear),
+    Tied(candlelight::nn::Linear),
+}
+
+impl LmHead {
+    /// Decide which case this checkpoint is, from what is actually on disk — not from
+    /// `config.json`'s `tie_word_embeddings` alone.
+    ///
+    /// ⚠️ THE TENSOR'S PRESENCE IS THE GROUND TRUTH, THE CONFIG FLAG IS ONLY A FALLBACK CHECK.
+    /// A checkpoint could in principle set `tie_word_embeddings: true` and still ship its own
+    /// `lm_head.*` tensors (some conversion pipelines do this defensively), in which case using
+    /// the real weight is strictly more correct than reusing the embedding one. Trusting the
+    /// config flag over the tensor's presence would silently discard a real quantized lm_head
+    /// the checkpoint actually shipped.
+    fn load(cfg: &Qwen3Config, embed_tokens: &Embedding, vb: VarBuilder) -> Result<Self> {
+        let lm_head_vb = vb.pp("lm_head");
+        if lm_head_vb.contains_tensor("qweight") {
+            let awq = AwqLinear::new(cfg.hidden_size, cfg.vocab_size, lm_head_vb).map_err(|e| {
+                candlelight::core::Error::Msg(format!("Failed to load lm_head: {}", e))
+            })?;
+            return Ok(Self::Quantized(awq));
+        }
+        if cfg.tie_word_embeddings {
+            return Ok(Self::Tied(candlelight::nn::Linear::new(
+                embed_tokens.embeddings().clone(),
+                None,
+            )));
+        }
+        candlelight::core::bail!(
+            "no lm_head.qweight tensor and config.json's tie_word_embeddings is false -- this \
+             checkpoint names neither a quantized lm_head nor a tied one"
+        )
+    }
+}
+
+impl candlelight::core::Module for LmHead {
+    fn forward(&self, x: &Tensor) -> Result<Tensor> {
+        match self {
+            // `AwqLinear` has both an inherent `forward` (`anyhow::Result`, used by its CUDA
+            // Marlin path) and this `Module::forward` (`candle::Result`) -- `.forward(x)` here
+            // would resolve to the inherent one and mismatch this method's return type, so the
+            // trait method is named explicitly.
+            Self::Quantized(awq) => candlelight::core::Module::forward(awq, x),
+            Self::Tied(linear) => linear.forward(x),
+        }
+    }
+}
+
 /// AWQ-quantized Qwen3 model
 #[derive(Debug)]
 pub struct AwqQwen3 {
     embed_tokens: Embedding,
     layers: Vec<Qwen3AwqDecoderLayer>,
     norm: RmsNorm,
-    lm_head: AwqLinear,
+    lm_head: LmHead,
     device: Device,
     dtype: DType,
 }
@@ -372,8 +434,7 @@ impl AwqQwen3 {
         }
 
         let norm = RmsNorm::new(cfg.hidden_size, cfg.rms_norm_eps, vb.pp("model.norm"))?;
-        let lm_head = AwqLinear::new(cfg.hidden_size, cfg.vocab_size, vb.pp("lm_head"))
-            .map_err(|e| candlelight::core::Error::Msg(format!("Failed to load lm_head: {}", e)))?;
+        let lm_head = LmHead::load(cfg, &embed_tokens, vb.clone())?;
 
         Ok(Self {
             embed_tokens,
@@ -467,11 +528,209 @@ mod tests {
             rms_norm_eps: 1e-6,
             rope_theta: 1000000.0,
             hidden_act: Activation::Silu,
+            tie_word_embeddings: false,
         };
 
         let rope = Qwen3RotaryEmbedding::new(DType::F32, &cfg, &device).unwrap();
         assert_eq!(rope.head_dim, 80); // 5120 / 64
         assert_eq!(rope.sin.dims(), &[40960, 80]);
         assert_eq!(rope.cos.dims(), &[40960, 80]);
+    }
+
+    /// A tiny config whose every dimension still satisfies `AwqLinear`'s hard-coded
+    /// `group_size = 128` divisibility (`in_features` a multiple of 128 and of 8,
+    /// `out_features` a multiple of 8) -- smaller numbers would make `AwqLinear::new` itself
+    /// fail with a shape error unrelated to what this test is checking.
+    fn tiny_cfg(tie_word_embeddings: bool) -> Qwen3Config {
+        Qwen3Config {
+            vocab_size: 16,
+            hidden_size: 128,
+            intermediate_size: 128,
+            num_hidden_layers: 1,
+            num_attention_heads: 2,
+            num_key_value_heads: 1,
+            max_position_embeddings: 16,
+            rms_norm_eps: 1e-6,
+            rope_theta: 10000.0,
+            hidden_act: Activation::Silu,
+            tie_word_embeddings,
+        }
+    }
+
+    /// The three tensors one `AwqLinear` needs, named under `prefix`, zero-filled (construction
+    /// only reads shapes, never values).
+    fn awq_linear_tensors(
+        prefix: &str,
+        in_features: usize,
+        out_features: usize,
+        dev: &Device,
+    ) -> Vec<(String, Tensor)> {
+        const GROUP_SIZE: usize = 128; // matches AwqLinear::new's own hard-coded value
+        vec![
+            (
+                format!("{prefix}.qweight"),
+                Tensor::zeros((in_features / 8, out_features), DType::U32, dev).unwrap(),
+            ),
+            (
+                format!("{prefix}.qzeros"),
+                Tensor::zeros(
+                    (in_features / GROUP_SIZE, out_features / 8),
+                    DType::U32,
+                    dev,
+                )
+                .unwrap(),
+            ),
+            (
+                format!("{prefix}.scales"),
+                Tensor::zeros((in_features / GROUP_SIZE, out_features), DType::F16, dev).unwrap(),
+            ),
+        ]
+    }
+
+    /// Every tensor `AwqQwen3::new` needs EXCEPT `lm_head.*` -- the embedding, every decoder
+    /// layer's attention/MLP/norms, and the final norm. Shared by the tied and untied tests so
+    /// a divergence between them can only be the one tensor set each adds on top.
+    fn base_model_tensors(cfg: &Qwen3Config, dev: &Device) -> std::collections::HashMap<String, Tensor> {
+        let head_dim = cfg.hidden_size / cfg.num_attention_heads;
+        let mut t: Vec<(String, Tensor)> = vec![(
+            "model.embed_tokens.weight".to_string(),
+            Tensor::zeros((cfg.vocab_size, cfg.hidden_size), DType::F16, dev).unwrap(),
+        )];
+        for i in 0..cfg.num_hidden_layers {
+            let p = format!("model.layers.{i}");
+            t.extend(awq_linear_tensors(
+                &format!("{p}.self_attn.q_proj"),
+                cfg.hidden_size,
+                cfg.num_attention_heads * head_dim,
+                dev,
+            ));
+            t.extend(awq_linear_tensors(
+                &format!("{p}.self_attn.k_proj"),
+                cfg.hidden_size,
+                cfg.num_key_value_heads * head_dim,
+                dev,
+            ));
+            t.extend(awq_linear_tensors(
+                &format!("{p}.self_attn.v_proj"),
+                cfg.hidden_size,
+                cfg.num_key_value_heads * head_dim,
+                dev,
+            ));
+            t.extend(awq_linear_tensors(
+                &format!("{p}.self_attn.o_proj"),
+                cfg.num_attention_heads * head_dim,
+                cfg.hidden_size,
+                dev,
+            ));
+            t.push((
+                format!("{p}.self_attn.q_norm.weight"),
+                Tensor::zeros(head_dim, DType::F16, dev).unwrap(),
+            ));
+            t.push((
+                format!("{p}.self_attn.k_norm.weight"),
+                Tensor::zeros(head_dim, DType::F16, dev).unwrap(),
+            ));
+            t.extend(awq_linear_tensors(
+                &format!("{p}.mlp.gate_proj"),
+                cfg.hidden_size,
+                cfg.intermediate_size,
+                dev,
+            ));
+            t.extend(awq_linear_tensors(
+                &format!("{p}.mlp.up_proj"),
+                cfg.hidden_size,
+                cfg.intermediate_size,
+                dev,
+            ));
+            t.extend(awq_linear_tensors(
+                &format!("{p}.mlp.down_proj"),
+                cfg.intermediate_size,
+                cfg.hidden_size,
+                dev,
+            ));
+            t.push((
+                format!("{p}.input_layernorm.weight"),
+                Tensor::zeros(cfg.hidden_size, DType::F16, dev).unwrap(),
+            ));
+            t.push((
+                format!("{p}.post_attention_layernorm.weight"),
+                Tensor::zeros(cfg.hidden_size, DType::F16, dev).unwrap(),
+            ));
+        }
+        t.push((
+            "model.norm.weight".to_string(),
+            Tensor::zeros(cfg.hidden_size, DType::F16, dev).unwrap(),
+        ));
+        t.into_iter().collect()
+    }
+
+    /// A checkpoint that ties `lm_head` to `embed_tokens` (no `lm_head.*` tensors at all, same
+    /// shape `__metadata__` would record for a real such checkpoint) must still load.
+    ///
+    /// **This is the red-first case.** Before `LmHead`/`LmHead::load` existed,
+    /// `AwqQwen3::new` always built `AwqLinear::new(..., vb.pp("lm_head"))` unconditionally,
+    /// which fails with a `qweight` shape/missing-tensor error on exactly this fixture --
+    /// demonstrated by temporarily reverting the fix and re-running this test, which errors on
+    /// `"Failed to load lm_head"` rather than succeeding.
+    #[test]
+    fn awq_qwen3_loads_a_tied_embedding_checkpoint_with_no_lm_head_tensors() {
+        let dev = Device::Cpu;
+        let cfg = tiny_cfg(true);
+        let tensors = base_model_tensors(&cfg, &dev);
+        assert!(
+            !tensors.keys().any(|k| k.starts_with("lm_head")),
+            "fixture bug: a tied-checkpoint fixture must not itself carry lm_head tensors"
+        );
+        let vb = VarBuilder::from_tensors(tensors, DType::F16, &dev);
+
+        let model = AwqQwen3::new(&cfg, vb)
+            .expect("a tied checkpoint (tie_word_embeddings=true, no lm_head.* tensors) must load");
+
+        assert!(
+            matches!(model.lm_head, LmHead::Tied(_)),
+            "loaded, but not through the tied path -- the fixture or the detection logic has drifted"
+        );
+    }
+
+    /// The untied, AWQ-quantized `lm_head` path must keep working -- same fixture plus its own
+    /// `lm_head.*` tensors, `tie_word_embeddings: false`.
+    #[test]
+    fn awq_qwen3_loads_an_untied_checkpoint_with_its_own_lm_head() {
+        let dev = Device::Cpu;
+        let cfg = tiny_cfg(false);
+        let mut tensors = base_model_tensors(&cfg, &dev);
+        tensors.extend(awq_linear_tensors(
+            "lm_head",
+            cfg.hidden_size,
+            cfg.vocab_size,
+            &dev,
+        ));
+        let vb = VarBuilder::from_tensors(tensors, DType::F16, &dev);
+
+        let model = AwqQwen3::new(&cfg, vb)
+            .expect("an untied checkpoint with its own lm_head.* tensors must load");
+
+        assert!(
+            matches!(model.lm_head, LmHead::Quantized(_)),
+            "loaded, but not through the quantized path -- the fixture or the detection logic has drifted"
+        );
+    }
+
+    /// Neither a quantized `lm_head` nor `tie_word_embeddings: true` names a genuine gap, not
+    /// something to silently paper over with a guess.
+    #[test]
+    fn awq_qwen3_refuses_a_checkpoint_naming_neither_a_quantized_nor_a_tied_lm_head() {
+        let dev = Device::Cpu;
+        let cfg = tiny_cfg(false);
+        let tensors = base_model_tensors(&cfg, &dev);
+        let vb = VarBuilder::from_tensors(tensors, DType::F16, &dev);
+
+        let err = AwqQwen3::new(&cfg, vb).expect_err(
+            "neither lm_head.qweight nor tie_word_embeddings=true is present; this must refuse, not guess",
+        );
+        assert!(
+            err.to_string().contains("tie_word_embeddings"),
+            "expected the refusal to name the missing signal, got: {err}"
+        );
     }
 }

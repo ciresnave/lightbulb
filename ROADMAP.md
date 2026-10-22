@@ -1351,26 +1351,47 @@ None of this is a stub.
 
 **Proposed slices, smallest proof first:**
 
-1. **Slice 1 — prove correctness standalone, not in the real server.** Wire
+1. **Slice 1 — tied-embedding support, DONE.** Corrected scope (was "prove correctness
+   standalone"; the correction below is itself what sizing this task found): the first real
+   small Qwen3 AWQ checkpoint picked for end-to-end proof (`Orion-zhen/Qwen3-0.6B-AWQ`) turned
+   out to be structurally unloadable by `AwqQwen3::new` as written, and not as a quirk of that
+   one repo — every Qwen3 dense model up to ~4B ships with `tie_word_embeddings: true`
+   (checked: `Qwen/Qwen3-1.7B`'s `config.json` too), which means `lm_head` is a *shared-tensor
+   alias* to `embed_tokens.weight` (confirmed via a safetensors header range-fetch:
+   `__metadata__` carries `{"lm_head.weight": "model.embed_tokens.weight"}`), never its own
+   AWQ-quantized tensor set. `AwqQwen3::new` unconditionally built `AwqLinear::new(...,
+   vb.pp("lm_head"))`, which fails outright (missing `qweight`) on every such checkpoint — not
+   just the one first tried.
+   Fixed: `Qwen3Config` gained `tie_word_embeddings` (`#[serde(default)]`, matching HF's own
+   default); a new `LmHead` enum (`Quantized(AwqLinear)` / `Tied(candlelight::nn::Linear)`)
+   replaces the bare `AwqLinear` field, with `LmHead::load` checking the TENSOR's presence
+   first (`vb.pp("lm_head").contains_tensor("qweight")`) and the config flag only as a
+   fallback — a checkpoint that sets the flag but still ships its own quantized `lm_head` must
+   not have it silently discarded. Red-first, with a synthetic in-memory fixture
+   (`VarBuilder::from_tensors`, no downloaded weights): a test demonstrated failing against the
+   pre-fix code on a tied-shaped fixture (`"Failed to load lm_head: Failed to load qweight"`),
+   passing after. Three tests total: tied-checkpoint loads via `LmHead::Tied`, untied
+   checkpoint still loads via `LmHead::Quantized` (regression coverage for the pre-existing
+   path), and a checkpoint naming neither case refuses with a clear message rather than
+   guessing. CPU-only, no GPU/corpus dependency, runs in the ordinary `cargo test --lib`.
+2. **Slice 2 — prove correctness end-to-end, not in the real server.** Wire
    `load_awq_llama`/`AwqQwen3::forward` into a minimal, single-request, non-batched path (e.g.
-   a dedicated test or a small binary in the shape of `lightbulb-probe`), load a REAL small
-   AWQ-quantized checkpoint on this box's one GPU, generate a short completion, and compare
-   token-for-token against a reference run (e.g. HuggingFace `transformers` + `autoawq`, with
-   that reference's library/model version pinned in the test, same discipline as the GGUF
-   fidelity tests). **Needs a real small AWQ model found first** — `../models/Qwen3-32B-AWQ`
-   (the existing `#[ignore]`d tests' default path) is far too large for this box; no small AWQ
-   checkpoint is in the local corpus today. Scoped, GPU-testable here, no fuel/candlelight
-   dependency.
-2. **Slice 2 — wire into the real serving engine.** Only after slice 1 proves the loader and
-   model are correct in isolation: either (a) give `AwqQwen3` a batched, per-slot-cache forward
+   a dedicated test or a small binary in the shape of `lightbulb-probe`), load the real
+   `Orion-zhen/Qwen3-0.6B-AWQ` checkpoint (revision pinned, licence + the Qwen3 base model's
+   licence recorded) on this box's one GPU, generate a short completion, and compare
+   token-for-token against a pinned reference implementation (e.g. HuggingFace `transformers` +
+   `autoawq`, versions pinned) — a third-party quantizer's own output is a claim until this
+   comparison passes, not ground truth. Written WITHOUT `#[ignore]` (same pattern as the two
+   existing checkpoint-needing tests in `model_runner.rs`/`parallel_model_manager.rs`): hosted
+   CI's `gates` job `--skip`s it by name as an interim measure pending a self-hosted GPU
+   runner, per CireSnave's 2026-10-16 ruling. Not started.
+3. **Slice 3 — wire into the real serving engine.** Only after slice 2 proves the loader and
+   model are correct end-to-end: either (a) give `AwqQwen3` a batched, per-slot-cache forward
    path matching `BatchedTransformer`'s shape, or (b) run AWQ models through a separate,
    explicitly single-request serving path (a real product limitation to state, not hide, if
-   chosen). **Not sized in detail here** — which option is right depends on what slice 1's
+   chosen). **Not sized in detail here** — which option is right depends on what slice 2's
    `AwqQwen3` internals turn out to need, and sizing it now would be guessing ahead of that
    evidence.
-
-**Not started.** Slice 1's first concrete step is finding or obtaining a real small AWQ
-checkpoint this box can run.
 
 ---
 
