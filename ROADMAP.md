@@ -2,12 +2,16 @@
 
 Purpose: a clear plan to reach a robust, fast, and memory-efficient inference engine with room for research. This roadmap consolidates our existing plans and literature insights into pragmatic milestones.
 
-> **Note on "Candle-first".** This document originally described the plan as
-> Candle-first. Lightbulb runs on **candlelight** (a Candle fork) by default and
-> is being ported to **Fuel** behind the `fuel-engine` feature; candlelight is
-> still the shipping path and Fuel is not yet at parity. Milestone status claims
-> below predate that port and have not been re-validated — treat them as
-> unverified rather than as findings. See `README.md` for the current picture.
+> **Note on "Candle-first" — RETRACTED 2026-10-22, not just caveated.** This document
+> originally described the plan as Candle-first, and this note previously said candlelight was
+> still the default shipping path with Fuel opt-in and not at parity. **That stopped being true
+> in PR #195 (2026-10-22): candlelight was removed entirely (~40 files, zero production callers
+> each, confirmed file by file) and Fuel is now the sole, unconditional serving engine** — the
+> `fuel-engine` feature flag is a no-op kept only for callers (including CI) that still pass it.
+> Milestone status claims below predate BOTH the original Candle→Fuel port and this full
+> removal, and have not been re-validated against either — treat them as unverified rather than
+> as findings. See `README.md` for the current picture and
+> `docs/FUEL-GAPS-FROM-CANDLE-REMOVAL.md` for what the removal actually cost.
 
 ---
 
@@ -1244,12 +1248,18 @@ Nothing here blocks or needs further PersistAnt work.
 
 ## Research track item 1 — prefix-matching into the Fuel serving path: slice plan (added 2026-10-14, PM-tasked)
 
-**Scope correction up front, the single most important fact in this section:** the default,
-shipping path is **candlelight** (`cargo build` with no features) — that is what serves requests
-today. **Fuel is opt-in** (`--features fuel-engine`) and **not at parity**. Everything below
-changes only the `fuel-engine` path. A caller running the default build sees no change from any
-slice here, ever, until a future, separate decision flips the default (that is Phase D of
-`docs/fuel-migration-pr-sequence.md`, an unrelated migration, not this one).
+**Scope correction, RETRACTED in place 2026-10-22 — the opposite is now true.** This section
+previously said candlelight was the default shipping path, Fuel was opt-in behind
+`fuel-engine`, and a caller on the default build would see no change from any slice here until
+a later, separate decision flipped the default. **Candlelight was removed entirely in PR #195
+(2026-10-22, independent of this slice plan); Fuel is now the sole, unconditional serving
+path, and `fuel-engine` is a no-op flag.** Every slice below now changes the ONLY production
+serving path, for every caller, not an opt-in alternative nobody has to run -- raising the bar
+for "not started... build begins only once the PM confirms priority" below: that confirmation
+now means confirming a change to live production behavior, not an experimental feature flag.
+Nothing in the slices' own technical content (the two unwired primitives, the
+`PagedDecodeModel` gap, the measured paged-attention cost) changes -- only the blast radius of
+actually building them does.
 
 ### What's actually live on the fuel-engine path today
 

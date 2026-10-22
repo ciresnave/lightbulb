@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.17.1
+
+### Fixed
+- **ROADMAP.md still described candlelight as the default shipping path in two places** — the
+  top "Note on Candle-first" banner and the prefix-matching research-track section's own scope
+  correction — both retracted in place 2026-10-22 (not just caveated): candlelight was removed
+  entirely in PR #195, Fuel is the sole, unconditional serving path, `fuel-engine` is a no-op.
+  The prefix-matching section's blast-radius claim ("a caller on the default build sees no
+  change") is now the opposite of true, since every slice there now touches the only production
+  path. Docs only, no code changed.
+
 ## 0.17.0
 
 ### Changed
