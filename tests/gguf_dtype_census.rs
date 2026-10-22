@@ -61,11 +61,24 @@ use lightbulb::gguf::Content;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-/// The GGML type codes `candle-core` 0.10.2 can represent, read off
-/// `GgmlDType::from_u32`. Everything else is refused — this is a TABLE, not a
-/// range, and the gaps are real (4, 5 are deprecated; 16..29 are the IQ
-/// codebook family plus the integer and f64 types).
-const CANDLE_ACCEPTS: &[u32] = &[0, 1, 2, 3, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 30];
+/// The GGML type codes the live reader can represent, read off
+/// `GgmlDType::from_u32` (`fuel-ir/src/quantized.rs`, Fuel 0.20.61). This is a
+/// TABLE, not a range, and the remaining gaps are real (4, 5 are deprecated;
+/// no code above 40 is assigned).
+///
+/// Was candle-core 0.10.2's table (`&[0, 1, 2, 3, 6..=15, 30]`) until two
+/// changes on 2026-10-22: PR #195 removed candlelight entirely (Fuel is now
+/// the only reader this crate has), and the Fuel 0.20.61 crates.io migration
+/// (PR #196) confirmed GAP-211 B1 widened Fuel's own table to the set below —
+/// the entire IQ family (16-23, 29), TQ (34, 35), and MXFP4/NVFP4 (39, 40),
+/// on top of GAP-211 B2's decode-kernel work for IQ2/IQ3/IQ1 already landed
+/// at `0.20.14`. This table is TABLE acceptance (`from_u32` returns `Ok`);
+/// whether tensor data actually decodes correctly for a given type is a
+/// separate claim this census does not make.
+const FUEL_ACCEPTS: &[u32] = &[
+    0, 1, 2, 3, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 29, 30, 34, 35,
+    39, 40,
+];
 
 fn corpus() -> Option<(Vec<PathBuf>, Vec<String>)> {
     let root = PathBuf::from(std::env::var_os("LIGHTBULB_GGUF_CORPUS")?);
@@ -151,7 +164,7 @@ fn row_for(path: &PathBuf) -> Row {
     let unsupported: Vec<u32> = hist
         .keys()
         .copied()
-        .filter(|d| !CANDLE_ACCEPTS.contains(d))
+        .filter(|d| !FUEL_ACCEPTS.contains(d))
         .collect();
     let shown: Vec<String> = hist.iter().map(|(d, n)| format!("{d}:{n}")).collect();
     println!(
@@ -163,14 +176,14 @@ fn row_for(path: &PathBuf) -> Row {
         None => {
             assert!(
                 unsupported.is_empty(),
-                "{name} was ACCEPTED by candle while carrying dtypes it does not list: {unsupported:?}"
+                "{name} was ACCEPTED by the live reader while carrying dtypes it does not list: {unsupported:?}"
             );
             Row::Accepted(name)
         }
         Some(msg) => {
             assert!(
                 !unsupported.is_empty(),
-                "{name} was REFUSED while every dtype it carries is in candle's table -- the refusal is about something else: {msg}"
+                "{name} was REFUSED while every dtype it carries is in the live reader's table -- the refusal is about something else: {msg}"
             );
             // ⚠️ THE CLAIM THIS FILE EXISTS FOR. The number candle prints is a
             // DTYPE, so it must appear in the unsupported set. Under the
@@ -181,7 +194,7 @@ fn row_for(path: &PathBuf) -> Row {
                 .collect();
             assert!(
                 reported.iter().any(|r| unsupported.contains(r)),
-                "candle's refusal for {name} names no dtype from its unsupported set {unsupported:?}; numbers seen in the message were {reported:?}. Either the message changed or the number is not a dtype after all: {msg}"
+                "the live reader's refusal for {name} names no dtype from its unsupported set {unsupported:?}; numbers seen in the message were {reported:?}. Either the message changed or the number is not a dtype after all: {msg}"
             );
             Row::Refused(name, unsupported)
         }
@@ -223,7 +236,7 @@ impl Census {
     fn report(&self) {
         println!(
             "
-  accepted by candle: {}",
+  accepted by the live reader: {}",
             self.accepted.len()
         );
         println!(
@@ -238,9 +251,33 @@ impl Census {
     }
 }
 
+/// Measured 2026-09-09 (this file's own header): 3 of this corpus' weighted
+/// files refused with an unrepresentable tensor dtype. **RE-MEASURED
+/// 2026-10-22, RESOLVED: 0 of 11 weighted files refuse.** Two changes landed
+/// the same day: PR #195 removed candlelight entirely (the reader that used
+/// to refuse the whole file outright is gone); PR #196 moved `fuel` onto
+/// crates.io 0.20.61, which carries GAP-211's widened `GgmlDType` table
+/// (`FUEL_ACCEPTS` above) AND its lenient `Content::read` (an unsupported
+/// tensor is now skipped, never aborts the whole file -- see
+/// `tests/chat_template_render.rs::a_gguf_with_an_unsupported_tensor_dtype_
+/// still_resolves_its_metadata`, fixed in the same PR). Every one of this
+/// corpus' weighted files, including the three that used to be in
+/// `IQ3_XS`/`IQ4_XS`/`Q2_K` filenames and carry 180-210 IQ-coded tensors
+/// each, now loads with `unsupported=[]`.
+///
+/// This test used to assert the OPPOSITE: that `the_refused_number_...` claim
+/// (candle's/Fuel's dtype-refusal message names a dtype code, not a tensor
+/// index) needed at least one genuinely refused file to exercise at all. It
+/// no longer can -- re-running it against this same corpus now trips its own
+/// "both arms or nothing" guard, correctly, because the refused arm is empty.
+/// Rather than weaken that guard (it would still be right to fire if some
+/// *other* corpus ever had a refused file again), this test is rewritten to
+/// assert the NEW fact directly: it is a regression guard against the dtype
+/// gap reopening, not a test of the old misreading-prevention claim, which
+/// has no subject matter left in this corpus.
 #[test]
 #[ignore = "needs a local GGUF corpus; set LIGHTBULB_GGUF_CORPUS"]
-fn the_refused_number_is_a_dtype_code_and_not_a_tensor_index() {
+fn the_iq_dtype_gap_stays_closed() {
     let Some((files, unreadable_dirs)) = corpus() else {
         lightbulb::test_notice::skip_unless_required(
             "LIGHTBULB_REQUIRE_CORPUS",
@@ -257,18 +294,20 @@ fn the_refused_number_is_a_dtype_code_and_not_a_tensor_index() {
     let c = Census::of(&files);
     c.report();
 
-    // ⚠️ BOTH ARMS OR NOTHING. A corpus where every file is accepted makes the
-    // refusal assertion unreachable, and one where every file is refused makes
-    // the acceptance assertion unreachable. Either way the test would pass
-    // having compared nothing -- and a one-sided population is the shape that
-    // let the original misreading stand.
+    // The one claim this test now exists to hold: every weighted file this
+    // corpus has loads. A non-empty `accepted` is the positive control --
+    // without it, an empty `refused` would be indistinguishable from "every
+    // file in the corpus failed to even reach a bucket."
     assert!(
         !c.accepted.is_empty(),
-        "no file was accepted, so the acceptance arm never ran and this test compared nothing"
+        "no file was accepted, so this corpus proves nothing about the dtype gap"
     );
     assert!(
-        !c.refused.is_empty(),
-        "no file was refused, so the dtype-code assertion never ran -- the claim this file exists to hold is untested on this corpus"
+        c.refused.is_empty(),
+        "the IQ dtype gap reopened: {:?} refused with an unsupported dtype -- \
+         re-check FUEL_ACCEPTS against the Fuel version in use, this may be a \
+         real regression",
+        c.refused
     );
 
     // Every file lands in exactly one bucket. A conservation law is not a
