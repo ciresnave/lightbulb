@@ -178,7 +178,8 @@ pub const AWQ_PINNED_REVISION: &str = "9f607bee5fca19cba0bd2b383ba804c89385ea18"
 /// checkpoint is fetched with `hf download --local-dir`, not through the cache, so there is no
 /// snapshot-revision directory structure to search):
 /// 1. `$LIGHTBULB_AWQ_MODEL_DIR` -- explicit, wins.
-/// 2. The portfolio models chain ([`models_root`]), joined with `AWQ_MODEL_DIR_NAME`.
+/// 2. The portfolio models chain (`models_root`, private to this module), joined with
+///    `AWQ_MODEL_DIR_NAME`.
 pub const AWQ_MODEL_DIR_NAME: &str = "Qwen3-0.6B-AWQ";
 
 pub fn awq_qwen3_dir() -> Option<PathBuf> {
