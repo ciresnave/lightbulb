@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.16.5
+
+### Fixed
+- **README.md still described candlelight as the default, shipping backend** — removed
+  entirely in PR #195 (2026-10-22). Rewrote the "Backends" section: Fuel is now the sole
+  engine, `fuel-engine` is a no-op flag, dependencies are pinned by crates.io version
+  (`0.20.61`, PR #196) rather than git revision. Added a pointer to
+  `docs/FUEL-GAPS-FROM-CANDLE-REMOVAL.md` for the two real capability gaps the removal opened.
+  No code changed; version bumped per the standing convention.
+
 ## 0.16.4
 
 ### Fixed
