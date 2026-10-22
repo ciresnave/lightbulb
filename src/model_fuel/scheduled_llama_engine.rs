@@ -109,7 +109,13 @@ impl<'m> ServingDriver<'m> {
     /// `top_p` has no real value here -- `SchedulerDriver::try_admit` never
     /// receives one -- so `1.0` (no nucleus truncation) is used as a
     /// placeholder; nothing downstream of the mirror reads it back.
-    fn mirror_admission(&mut self, id: fuel_inference::multi_session::SessionId, prompt: &[u32], max_new: usize, temperature: f64) {
+    fn mirror_admission(
+        &mut self,
+        id: fuel_inference::multi_session::SessionId,
+        prompt: &[u32],
+        max_new: usize,
+        temperature: f64,
+    ) {
         let request_id = format!("session-{}", id.0);
         let request = SlotRequest {
             id: request_id.clone(),

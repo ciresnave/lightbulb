@@ -1309,11 +1309,13 @@ mod tests {
         let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
 
         assert_eq!(
-            body["pending_requests"], serde_json::json!({"status": "live", "value": 0}),
+            body["pending_requests"],
+            serde_json::json!({"status": "live", "value": 0}),
             "full body: {body:?}"
         );
         assert_eq!(
-            body["running_requests"], serde_json::json!({"status": "live", "value": 0}),
+            body["running_requests"],
+            serde_json::json!({"status": "live", "value": 0}),
             "full body: {body:?}"
         );
         assert!(
@@ -1360,7 +1362,8 @@ mod tests {
         let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
 
         assert_eq!(
-            body["running_requests"], serde_json::json!({"status": "live", "value": 1}),
+            body["running_requests"],
+            serde_json::json!({"status": "live", "value": 1}),
             "a request admitted into the shared scheduler must read through as real \
              occupancy: full body: {body:?}"
         );
@@ -1422,12 +1425,14 @@ mod tests {
             "scheduler_memory_used_bytes",
         ] {
             assert_eq!(
-                body[field], serde_json::json!({"status": "live", "value": 0}),
+                body[field],
+                serde_json::json!({"status": "live", "value": 0}),
                 "{field}: full body: {body:?}"
             );
         }
         assert_eq!(
-            body["eviction_pressure"], serde_json::json!({"status": "live", "value": 0.0}),
+            body["eviction_pressure"],
+            serde_json::json!({"status": "live", "value": 0.0}),
             "full body: {body:?}"
         );
     }
@@ -1465,7 +1470,8 @@ mod tests {
         let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
 
         assert_eq!(
-            body["active_slots"], serde_json::json!({"status": "live", "value": 1}),
+            body["active_slots"],
+            serde_json::json!({"status": "live", "value": 1}),
             "a request admitted into the shared scheduler must read through as real \
              occupancy: full body: {body:?}"
         );
