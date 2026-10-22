@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.14.0
+
+### Added
+- **AWQ slice 1: `AwqQwen3` now loads tied-embedding Qwen3 checkpoints (PM-tasked 2026-10-21).**
+  Every Qwen3 dense model up to ~4B ships `tie_word_embeddings: true` -- `lm_head` is a
+  shared-tensor alias to `embed_tokens.weight` (confirmed via a safetensors header range-fetch
+  on `Orion-zhen/Qwen3-0.6B-AWQ`: `__metadata__` carries `{"lm_head.weight":
+  "model.embed_tokens.weight"}`), never its own AWQ-quantized tensor set. `AwqQwen3::new`
+  previously built an `AwqLinear` for `lm_head` unconditionally, failing on every such
+  checkpoint. A new `LmHead` enum (`Quantized`/`Tied`) checks the tensor's actual presence
+  first, the config flag only as a fallback. Red-first, with a synthetic in-memory
+  `VarBuilder::from_tensors` fixture (no downloaded weights): demonstrated failing against the
+  pre-fix code, passing after. `cargo test --lib`: 889 passed, 0 failed, 25 ignored.
+- ROADMAP.md's AWQ slice plan corrected: this is now slice 1 (done); the previously-sized
+  "prove correctness end-to-end against a real checkpoint" work moves to slice 2.
+
+### Breaking
+- `Qwen3Config` (`src/model/awq_qwen3.rs`) gains a mandatory `tie_word_embeddings: bool` field
+  for direct struct construction (Rust struct literals don't honor `#[serde(default)]`; only
+  `serde` deserialization does) -- same class of change as 5.4a/M4's priority field, hence the
+  second-number bump pre-1.0.
+
 ## 0.13.5
 
 ### Added
