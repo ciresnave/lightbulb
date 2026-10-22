@@ -184,28 +184,32 @@ impl Census {
 /// confirms that closure holds at the weight-decode layer too, not just at
 /// metadata acceptance.
 ///
-/// The remaining 2 (`stories15M-q4_0.gguf`, `stories15M-q8_0.gguf`) fail for
-/// an UNRELATED, real reason: Fuel's `derive_config` requires
-/// `llama.attention.head_count_kv` and deliberately does not default it
-/// (its own error: "required to derive a llama config, not defaulted").
-/// These tiny karpathy-era "tinystories" GGUF exports do not declare that
-/// key at all (not malformed -- just older than the GQA convention; their
-/// own architecture is plain multi-head attention, kv heads == attention
-/// heads). This is a Fuel-side gap, not a lightbulb one: `derive_config`
-/// could default `head_count_kv` to `head_count` when the key is absent
-/// (matching llama.cpp's own documented behavior for pre-GQA exports)
-/// instead of refusing. Routed to the Fuel lane as a board row rather than
-/// worked around here.
+/// The remaining 2 (`stories15M-q4_0.gguf`, `stories15M-q8_0.gguf`) failed
+/// for `llama.attention.head_count_kv` not being defaulted. Fuel 0.20.71
+/// (`derive_config`) now defaults it for pre-GQA exports -- **re-measured
+/// 2026-10-22 against 0.20.71: that specific cause is gone**, but both
+/// files still fail, now for a DIFFERENT, previously-masked key:
+/// `llama.rope.freq_base`, also "required to derive a llama config, not
+/// defaulted". Same tiny karpathy-era "tinystories" exports, same shape of
+/// gap (an old GGUF convention that predates a key llama.cpp itself
+/// defaults — llama.cpp's documented default is `10000.0`) -- a second
+/// Fuel-side `derive_config` default to add, not a lightbulb fix, and not
+/// yet routed as its own board row (the head_count_kv fix only just
+/// landed; this is reported here so it isn't lost, not sized or routed).
 ///
 /// **Both-arms guard**: a corpus where every file lands in `unsupported_
 /// architecture`/`vocab_only`/`unreadable` would make `loaded` empty and
 /// this test pass having exercised no loader at all. The exact-match on
 /// `KNOWN_FAILURES` means both a further improvement (one starts loading)
 /// and a new regression (a different file starts failing, or these two fail
-/// for a different reason) are caught, not just silently tolerated.
+/// for a different reason) are caught, not just silently tolerated -- which
+/// is exactly what caught the head_count_kv -> freq_base cause change above:
+/// this test went red against 0.20.71 until `KNOWN_FAILURES` below was
+/// updated to the new cause, not just left alone because the file count
+/// didn't change.
 const KNOWN_FAILURES: &[(&str, &str)] = &[
-    ("stories15M-q4_0.gguf", "head_count_kv"),
-    ("stories15M-q8_0.gguf", "head_count_kv"),
+    ("stories15M-q4_0.gguf", "freq_base"),
+    ("stories15M-q8_0.gguf", "freq_base"),
 ];
 
 /// The two assertion passes `KNOWN_FAILURES` needs: every actual failure is

@@ -940,19 +940,20 @@ must go green before this is closed.
    corpus files load end-to-end — INCLUDING all three IQ-coded files**
    (`IQ3_XS`/`IQ4_XS`/`Q2_K`), confirming the dtype-gap closure above holds
    at weight-DECODE time, not just metadata acceptance.
-   **New, unrelated gap found**: `stories15M-q4_0.gguf`/`stories15M-q8_0.gguf`
-   fail with `fuel derive_config(...): missing metadata key
+   **Gap found, then partially closed, then a second gap found underneath
+   it.** `stories15M-q4_0.gguf`/`stories15M-q8_0.gguf` originally failed with
+   `fuel derive_config(...): missing metadata key
    "llama.attention.head_count_kv" -- required to derive a llama config, not
-   defaulted`. These are pre-GQA karpathy-era "tinystories" GGUF exports —
-   not malformed, just older than the key's convention (their real
-   architecture has one KV-head count equal to the attention-head count,
-   which `head_count_kv`'s absence should imply, not refuse over). **Fuel
-   row candidate, not a lightbulb fix**: `derive_config` could default
-   `head_count_kv` to `head_count` when the key is absent, matching
-   llama.cpp's own documented behavior for pre-GQA exports. Pinned as
-   `KNOWN_FAILURES` in the new test so either direction (fixed upstream, or
-   a different/new file starting to fail) is caught rather than silently
-   passing either way.
+   defaulted`. Fuel 0.20.71 now defaults `head_count_kv` to `head_count` for
+   pre-GQA exports (the fix this row asked for). **Re-measured 2026-10-22
+   against 0.20.71: that cause is gone, but both files still fail** — same
+   tiny karpathy-era "tinystories" exports, now for `llama.rope.freq_base`
+   not being defaulted either (llama.cpp's own documented default is
+   `10000.0`). Same shape of gap, not yet sized or routed as its own board
+   row (this is a report, not a decision). `KNOWN_FAILURES` in the test was
+   updated to the new cause rather than removed — the both-arms guard it's
+   built on caught the cause change immediately (red until updated), exactly
+   as designed.
 2. **3 tokenizer-model types are never constructed at all** (`bert`/`t5`/
    `gemma`-family tokenizers) — a larger, separate undertaking: building new
    tokenizer-construction paths from scratch, not implementing a pre-tokenizer

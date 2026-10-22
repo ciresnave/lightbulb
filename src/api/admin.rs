@@ -19,7 +19,7 @@ use sha2::{Digest, Sha256};
 use crate::api::AppState;
 use crate::api::auth_middleware::{ApiKeyInfo, admin_check_middleware};
 use crate::api::persistant_migrate;
-use crate::engine::model_runner::SCHEDULER_AND_CACHE_METRICS_LIVE;
+use crate::engine::model_runner::{CACHE_METRICS_LIVE, SCHEDULER_METRICS_LIVE};
 use persistant_relational::{Isolation, RelationalBackend, RelationalTx};
 
 /// A metric this module can report on some backends but not others.
@@ -109,11 +109,13 @@ pub struct LayerCacheStats {
 /// `layers` stays empty: no per-layer breakdown exists in the prefix cache
 /// today, so this is an honest absence, not a mock.
 ///
-/// Gated on `SCHEDULER_AND_CACHE_METRICS_LIVE` (currently `false`): Fuel's
+/// Gated on `CACHE_METRICS_LIVE` (currently `false`): Fuel's
 /// `ModelRunner::start` never writes `AppState::cache_stats`, so the handle
 /// this reads is permanently its construction-time zero on the live
 /// serving path -- reporting it as a real reading would be indistinguishable
-/// from an honest idle cache. See `docs/FUEL-GAPS-FROM-CANDLE-REMOVAL.md`.
+/// from an honest idle cache. See `CACHE_METRICS_LIVE`'s doc comment
+/// (`src/engine/model_runner.rs`) for why this stays unavailable even now
+/// that `scheduler_stats`/`scheduler_queue` are live.
 async fn cache_stats(State(state): State<AppState>) -> impl IntoResponse {
     let stats = state
         .cache_stats
@@ -121,7 +123,7 @@ async fn cache_stats(State(state): State<AppState>) -> impl IntoResponse {
         .map(|guard| guard.clone())
         .unwrap_or_default();
 
-    let live = SCHEDULER_AND_CACHE_METRICS_LIVE;
+    let live = CACHE_METRICS_LIVE;
     let response = CacheStatsResponse {
         total_entries: Metric::from_backend(stats.entries, live),
         total_size_bytes: Metric::from_backend(stats.size_bytes, live),
@@ -172,18 +174,17 @@ async fn cache_clear(
 
 /// Scheduler queue response.
 ///
-/// `pending_requests`/`running_requests` were REAL on the candlelight path
-/// (M4 slice 5.4b): `run_jobs` mirrored every admission and departure into
-/// the shared scheduler's own bookkeeping (slice 5.4a), so
+/// `pending_requests`/`running_requests` are REAL again (2026-10-22, rebuilt
+/// against the live Fuel path once Fuel 0.20.71 published):
+/// `ServingDriver` (`src/model_fuel/scheduled_llama_engine.rs`) mirrors every
+/// admission and departure into the shared scheduler's own bookkeeping, so
 /// `MemoryAwareScheduler::get_memory_stats`'s `queued_count`/`active_slots`
-/// reflected genuine live occupancy. **Gated on
-/// `SCHEDULER_AND_CACHE_METRICS_LIVE` (currently `false`)**: Fuel's
-/// `ModelRunner::start` never mirrors admission/departure into this handle
-/// at all, so both fields report `unavailable_on_backend`, not a disconnected
-/// scheduler's permanent zero. `queue` (the per-request list) stays `None`
-/// regardless -- `MemoryAwareScheduler`'s `priority_queue` has no
-/// enumeration API, only aggregate counts, independent of which backend is
-/// live.
+/// reflect genuine live occupancy. Gated on `SCHEDULER_METRICS_LIVE` (now
+/// `true`), not inferred from the handle's own zero value -- a real idle
+/// scheduler and a disconnected one are still indistinguishable that way.
+/// `queue` (the per-request list) stays `None` regardless --
+/// `MemoryAwareScheduler`'s `priority_queue` has no enumeration API, only
+/// aggregate counts, independent of which backend is live.
 #[derive(Debug, Clone, Serialize)]
 pub struct SchedulerQueueResponse {
     pub pending_requests: Metric<usize>,
@@ -209,16 +210,15 @@ async fn scheduler_queue(State(state): State<AppState>) -> impl IntoResponse {
         .unwrap_or_else(|e| e.into_inner())
         .get_memory_stats();
 
-    let live = SCHEDULER_AND_CACHE_METRICS_LIVE;
+    let live = SCHEDULER_METRICS_LIVE;
     let unavailable_reason = if live {
         "per-request queue detail is not tracked, only the aggregate counts above \
          (both real) -- MemoryAwareScheduler's priority_queue has no enumeration API"
             .to_string()
     } else {
         "the active Fuel serving path never mirrors admission/departure into the shared \
-         scheduler (board PM ruling 2026-10-22; see docs/FUEL-GAPS-FROM-CANDLE-REMOVAL.md) \
-         -- pending_requests/running_requests report unavailable_on_backend, and the \
-         per-request queue detail has no enumeration API on any backend"
+         scheduler -- pending_requests/running_requests report unavailable_on_backend, and \
+         the per-request queue detail has no enumeration API on any backend"
             .to_string()
     };
 
@@ -269,8 +269,8 @@ pub struct SchedulerStatsResponse {
 /// Get scheduler statistics
 ///
 /// `memory_usage_bytes` stays a real reading regardless of
-/// `SCHEDULER_AND_CACHE_METRICS_LIVE`: it comes from `live_system`, not the
-/// shared scheduler handle. `active_slots`/`queued_requests`/
+/// `SCHEDULER_METRICS_LIVE`: it comes from `live_system`, not the shared
+/// scheduler handle. `active_slots`/`queued_requests`/
 /// `scheduler_memory_used_bytes`/`eviction_pressure` are gated on that flag
 /// the same way `scheduler_queue`'s counts are -- see its doc comment.
 async fn scheduler_stats(State(state): State<AppState>) -> impl IntoResponse {
@@ -286,7 +286,7 @@ async fn scheduler_stats(State(state): State<AppState>) -> impl IntoResponse {
         .unwrap_or_else(|e| e.into_inner())
         .get_memory_stats();
 
-    let live = SCHEDULER_AND_CACHE_METRICS_LIVE;
+    let live = SCHEDULER_METRICS_LIVE;
     let unavailable_reason = if live {
         "request count, latency and throughput are not tracked at this endpoint -- see \
          GET /metrics (lightbulb_http_requests_total, lightbulb_http_request_duration_seconds)"
@@ -295,8 +295,7 @@ async fn scheduler_stats(State(state): State<AppState>) -> impl IntoResponse {
         "request count, latency and throughput are not tracked at this endpoint -- see GET \
          /metrics. active_slots/queued_requests/scheduler_memory_used_bytes/eviction_pressure \
          report unavailable_on_backend: the active Fuel serving path never mirrors \
-         admission/departure into the shared scheduler (board PM ruling 2026-10-22; see \
-         docs/FUEL-GAPS-FROM-CANDLE-REMOVAL.md)"
+         admission/departure into the shared scheduler"
             .to_string()
     };
 
@@ -1195,8 +1194,7 @@ mod tests {
     /// plausibly produce, and assert the response reports
     /// `unavailable_on_backend` anyway -- if a future change makes this
     /// handler read through to the mutex again without first flipping
-    /// `SCHEDULER_AND_CACHE_METRICS_LIVE`, this test fails on the leaked
-    /// mock values.
+    /// `CACHE_METRICS_LIVE`, this test fails on the leaked mock values.
     #[tokio::test]
     async fn cache_stats_reports_unavailable_on_backend_not_a_leaked_mock() {
         let app_state = state();
@@ -1289,8 +1287,13 @@ mod tests {
     /// "real zero" and "backend never writes this" are now indistinguishable
     /// from the handle alone -- this asserts the typed signal that tells
     /// them apart.
+    /// **Corrected 2026-10-22 (board PM ruling, after Fuel 0.20.71
+    /// published): `SCHEDULER_METRICS_LIVE` is `true` again.** `ServingDriver`
+    /// (`src/model_fuel/scheduled_llama_engine.rs`) now mirrors real
+    /// admission/departure into this handle from the live Fuel path, so an
+    /// idle scheduler reports a genuine `0`, not `unavailable_on_backend`.
     #[tokio::test]
-    async fn scheduler_queue_reports_unavailable_on_backend_when_idle() {
+    async fn scheduler_queue_reports_real_zero_when_idle() {
         let req = Request::builder()
             .method("GET")
             .uri("/v1/lightbulb/admin/scheduler/queue")
@@ -1306,11 +1309,13 @@ mod tests {
         let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
 
         assert_eq!(
-            body["pending_requests"]["status"], "unavailable_on_backend",
+            body["pending_requests"],
+            serde_json::json!({"status": "live", "value": 0}),
             "full body: {body:?}"
         );
         assert_eq!(
-            body["running_requests"]["status"], "unavailable_on_backend",
+            body["running_requests"],
+            serde_json::json!({"status": "live", "value": 0}),
             "full body: {body:?}"
         );
         assert!(
@@ -1323,17 +1328,12 @@ mod tests {
         );
     }
 
-    /// The known-bad regression guard: prime the shared scheduler directly
-    /// the way `admit_pending` would (`submit_request` +
-    /// `allocate_pending_requests`), the same priming the pre-correction
-    /// test used to prove "reads through to real data." Fuel's serving path
-    /// never does this priming in production, so if this handler ever goes
-    /// back to reading the mutex's value without checking
-    /// `SCHEDULER_AND_CACHE_METRICS_LIVE`, this test catches the leaked
-    /// `running_requests: 1` instead of the required
-    /// `unavailable_on_backend`.
+    /// Priming the shared scheduler directly (`submit_request` +
+    /// `allocate_pending_requests`) is the same mechanism `ServingDriver::
+    /// mirror_admission` now calls from the live Fuel path -- this proves
+    /// the handler reads a real occupancy change through, not a mock.
     #[tokio::test]
-    async fn scheduler_queue_reports_unavailable_on_backend_even_when_primed() {
+    async fn scheduler_queue_reports_real_occupancy_once_primed() {
         let state = state();
         {
             let mut sched = state.scheduler.lock().unwrap();
@@ -1362,29 +1362,23 @@ mod tests {
         let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
 
         assert_eq!(
-            body["running_requests"]["status"], "unavailable_on_backend",
-            "priming the mutex directly is not how Fuel's serving path would ever populate \
-             it -- a real reading here would mean the backend gate was bypassed: \
-             full body: {body:?}"
-        );
-        assert!(
-            body["running_requests"].get("value").is_none(),
-            "must carry no leaked value: full body: {body:?}"
+            body["running_requests"],
+            serde_json::json!({"status": "live", "value": 1}),
+            "a request admitted into the shared scheduler must read through as real \
+             occupancy: full body: {body:?}"
         );
     }
 
-    /// **Corrected 2026-10-22 (board PM ruling, after
-    /// `docs/FUEL-GAPS-FROM-CANDLE-REMOVAL.md` gap #2).** `memory_usage_bytes`
-    /// stays real (it comes from `live_system`, independent of the
-    /// scheduler handle). `active_slots`/`queued_requests`/
-    /// `scheduler_memory_used_bytes`/`eviction_pressure` were asserted as
-    /// genuine zeros on 2026-10-18 -- true only while candlelight's
-    /// `run_jobs` mirrored admission into this handle. Fuel's
-    /// `ModelRunner::start` never does, so these now assert the typed
-    /// `unavailable_on_backend` signal instead of a zero indistinguishable
-    /// from real idle state.
+    /// **Corrected 2026-10-22 (board PM ruling, after Fuel 0.20.71
+    /// published): `SCHEDULER_METRICS_LIVE` is `true` again.**
+    /// `memory_usage_bytes` stays real regardless (it comes from
+    /// `live_system`, independent of the scheduler handle). `active_slots`/
+    /// `queued_requests`/`scheduler_memory_used_bytes`/`eviction_pressure`
+    /// are real again too -- `ServingDriver` mirrors admission/departure
+    /// into this handle from the live Fuel path, so an idle scheduler
+    /// reports genuine zeros, not the typed `unavailable_on_backend` signal.
     #[tokio::test]
-    async fn scheduler_stats_reports_real_memory_and_unavailable_for_the_rest() {
+    async fn scheduler_stats_reports_real_memory_and_real_scheduler_fields_when_idle() {
         let expected_used_bytes = sysinfo::System::new_all().used_memory();
 
         let req = Request::builder()
@@ -1429,23 +1423,25 @@ mod tests {
             "active_slots",
             "queued_requests",
             "scheduler_memory_used_bytes",
-            "eviction_pressure",
         ] {
             assert_eq!(
-                body[field]["status"], "unavailable_on_backend",
+                body[field],
+                serde_json::json!({"status": "live", "value": 0}),
                 "{field}: full body: {body:?}"
             );
         }
+        assert_eq!(
+            body["eviction_pressure"],
+            serde_json::json!({"status": "live", "value": 0.0}),
+            "full body: {body:?}"
+        );
     }
 
-    /// The known-bad regression guard, same reasoning as
-    /// `scheduler_queue_reports_unavailable_on_backend_even_when_primed`:
-    /// priming the shared scheduler directly must NOT leak through as a
-    /// real `active_slots: 1` -- Fuel's serving path never primes it this
-    /// way, so a leaked value here would mean the backend gate was
-    /// bypassed.
+    /// Same priming mechanism `ServingDriver::mirror_admission` calls from
+    /// the live Fuel path -- proves `scheduler_stats` reads a real
+    /// occupancy change through too, not just `scheduler_queue`.
     #[tokio::test]
-    async fn scheduler_stats_reports_unavailable_on_backend_even_when_primed() {
+    async fn scheduler_stats_reports_real_occupancy_once_primed() {
         let state = state();
         {
             let mut sched = state.scheduler.lock().unwrap();
@@ -1474,13 +1470,10 @@ mod tests {
         let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
 
         assert_eq!(
-            body["active_slots"]["status"], "unavailable_on_backend",
-            "a request admitted directly into the mutex must not leak through -- \
-             full body: {body:?}"
-        );
-        assert!(
-            body["active_slots"].get("value").is_none(),
-            "must carry no leaked value: full body: {body:?}"
+            body["active_slots"],
+            serde_json::json!({"status": "live", "value": 1}),
+            "a request admitted into the shared scheduler must read through as real \
+             occupancy: full body: {body:?}"
         );
     }
 }

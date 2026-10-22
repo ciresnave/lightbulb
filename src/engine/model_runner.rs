@@ -145,28 +145,40 @@ pub type SharedCacheStats = std::sync::Arc<std::sync::Mutex<crate::cache::Prefix
 
 /// Shared, lockable handle on the admission scheduler (M4 slice 5.4a).
 ///
-/// GAP since candlelight's removal (2026-10-22): the candlelight path's
-/// `run_jobs` was the only writer (real admission/departure mirroring,
-/// slices 5.4a/5.4b/5.4c); `ModelRunner::start`'s Fuel implementation accepts
-/// this parameter for signature compatibility and never writes it, so the
-/// `scheduler_stats`/`scheduler_queue` admin endpoints now always read an
-/// empty scheduler. See `docs/FUEL-GAPS-FROM-CANDLE-REMOVAL.md`.
+/// Mirrored again (2026-10-22) by Fuel's own `ServingDriver` in
+/// `src/model_fuel/scheduled_llama_engine.rs` -- the candlelight path's
+/// `run_jobs` was the original writer (slices 5.4a/5.4b/5.4c) before #195
+/// deleted it; this is a rebuild against the live Fuel path, not a
+/// restoration of the deleted code. See `SCHEDULER_METRICS_LIVE` below.
 pub type SharedScheduler = std::sync::Arc<std::sync::Mutex<crate::engine::MemoryAwareScheduler>>;
 
-/// Whether the active serving engine actually writes into `SharedCacheStats`/
-/// `SharedScheduler` (board PM ruling, 2026-10-22, after the two GAP notes
-/// above). `false` today because Fuel's `ModelRunner::start` never calls into
-/// either handle -- the admin endpoints that read them (`cache_stats`,
-/// `scheduler_stats`, `scheduler_queue`) must report that honestly rather
-/// than let a never-written zero pass as a real idle reading.
-///
-/// Flip this to `true` in the same PR that wires Fuel's own admission/cache
-/// mechanisms into these handles (fuel's cache counters 0.20.64, scheduler
-/// stats 0.20.65 -- published upstream but not yet consumed here as of
-/// 2026-10-22). Deliberately not inferred from the handles' own zero values:
-/// a real idle scheduler and an unwired one are indistinguishable that way,
-/// which is the exact defect this constant exists to stop.
-pub const SCHEDULER_AND_CACHE_METRICS_LIVE: bool = false;
+/// Whether the active serving engine actually mirrors real admission/
+/// departure into `SharedScheduler` (board PM ruling, 2026-10-22, flipped
+/// 2026-10-22 once Fuel 0.20.71 published; see
+/// `src/model_fuel/scheduled_llama_engine.rs`'s `ServingDriver::
+/// mirror_admission`/`mirror_departure`). The `scheduler_stats`/
+/// `scheduler_queue` admin endpoints gate on this, not on the handle's own
+/// zero value -- the exact defect the split from the old combined
+/// `SCHEDULER_AND_CACHE_METRICS_LIVE` constant exists to keep preventing,
+/// now that the two backends genuinely differ (see `CACHE_METRICS_LIVE`
+/// below for why they aren't one flag anymore).
+pub const SCHEDULER_METRICS_LIVE: bool = true;
+
+/// Whether the active serving engine actually writes into `SharedCacheStats`
+/// (board PM ruling, 2026-10-22). Still `false`: `SharedCacheStats`
+/// (`PrefixCacheStats`: hits/misses/insertions/evictions/entries/size_bytes)
+/// models a PREFIX cache -- a concept the currently-wired
+/// `fuel_inference::multi_session::SessionScheduler` has none of (no prefix
+/// sharing; that is research track item 1's unwired territory, ROADMAP.md).
+/// Its own KV-pool counters (`kv_free_blocks`/`kv_capacity`/
+/// `kv_bytes_resident`, Fuel 0.20.64) answer a different question --
+/// capacity/occupancy, not hit/miss -- and mapping them onto
+/// `PrefixCacheStats`' fields would be exactly the "a never-written zero
+/// pass as a real idle reading" defect `SCHEDULER_AND_CACHE_METRICS_LIVE`
+/// was created to stop, just with a fabricated non-zero number instead of a
+/// zero. `cache_stats` stays honestly unavailable until prefix matching is
+/// actually wired to the live path.
+pub const CACHE_METRICS_LIVE: bool = false;
 
 /// Live count of inference jobs currently enqueued or in flight — the
 /// `/metrics` endpoint's queue-depth gauge (Phase 4 observability). Plain
@@ -258,10 +270,12 @@ impl ModelRunner {
     /// "bf16" request would change numerics against every golden captured on
     /// the f32 path. The parameter stays for signature compatibility.
     ///
-    /// `cache_stats` and `scheduler` are accepted for signature compatibility with
-    /// callers and never written: this path's scheduling (board item 97) has no
-    /// prefix-cache or admission-tracking concept of its own today. See the GAP
-    /// notes on `SharedCacheStats`/`SharedScheduler` above.
+    /// `scheduler` is mirrored by `ServingDriver`'s real admission/departure
+    /// (`src/model_fuel/scheduled_llama_engine.rs`, `SCHEDULER_METRICS_LIVE`).
+    /// `cache_stats` is still accepted for signature compatibility and never
+    /// written: this path's scheduling (board item 97) has no prefix-cache
+    /// concept of its own today. See `CACHE_METRICS_LIVE`'s doc comment
+    /// above.
     pub fn start(
         model_path: impl Into<PathBuf>,
         max_batch_size: usize,
@@ -269,7 +283,7 @@ impl ModelRunner {
         dtype: Option<String>,
         max_queue_depth: usize,
         _cache_stats: SharedCacheStats,
-        _scheduler: SharedScheduler,
+        scheduler: SharedScheduler,
     ) -> Result<InferenceRequestSender> {
         let model_path = model_path.into();
         let (tx, rx): (SyncSender<InferenceJob>, Receiver<InferenceJob>) =
@@ -316,6 +330,7 @@ impl ModelRunner {
                 max_batch_size,
                 context_length,
                 rx,
+                scheduler,
             );
         });
 

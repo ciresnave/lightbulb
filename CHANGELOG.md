@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.17.3
+
+### Changed
+- **Fuel 0.20.71 published; bumped the dependency pin (all `fuel`/`fuel-*` crates, and
+  `baracuda-*` alpha.140 -> alpha.147 transitively).** Two flips, both from HANDOFF.md:
+  1. **`tests/gguf_e2e_weight_load_census.rs`'s `KNOWN_FAILURES`**: Fuel's `derive_config` now
+     defaults `llama.attention.head_count_kv` for pre-GQA exports, closing that gap. Re-measured
+     against 0.20.71: `stories15M-q4_0.gguf`/`stories15M-q8_0.gguf` still fail, now for a
+     DIFFERENT, previously-masked key (`llama.rope.freq_base`, also not defaulted) — updated
+     `KNOWN_FAILURES` to the new cause rather than removing the entries; still 9/11 weighted
+     corpus files load end-to-end, unchanged.
+  2. **`scheduler_stats`/`scheduler_queue` are live again.** `ServingDriver`
+     (`src/model_fuel/scheduled_llama_engine.rs`) now mirrors every real admission/departure on
+     the Fuel serving path into the shared `MemoryAwareScheduler` (`mirror_admission`/
+     `mirror_departure`), rebuilding what the deleted candlelight `run_jobs` path used to do
+     (M4 slices 5.4a/5.4b), against the live Fuel path instead. Split the old combined
+     `SCHEDULER_AND_CACHE_METRICS_LIVE` flag into `SCHEDULER_METRICS_LIVE` (now `true`) and
+     `CACHE_METRICS_LIVE` (**still `false`**): the cache-stats gap does NOT close the same way --
+     the currently-wired `fuel_inference::multi_session::SessionScheduler` has no prefix-cache
+     concept at all (no prefix sharing; that's research track item 1's unwired territory), so
+     there is nothing real to report yet. Flipping it anyway would have reintroduced exactly the
+     "never-written value passed off as real" defect #201 existed to stop, just with a fabricated
+     non-zero instead of a zero. Updated `src/api/admin.rs`'s regression-guard tests to assert
+     real values for the scheduler fields; `cache_stats`'s stay unchanged (still asserting
+     `unavailable_on_backend`).
+
 ## 0.17.2
 
 ### Fixed
