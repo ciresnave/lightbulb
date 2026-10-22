@@ -208,30 +208,11 @@ const KNOWN_FAILURES: &[(&str, &str)] = &[
     ("stories15M-q8_0.gguf", "head_count_kv"),
 ];
 
-#[test]
-#[ignore = "needs a local GGUF corpus; set LIGHTBULB_GGUF_CORPUS"]
-fn weighted_corpus_files_load_end_to_end_through_fuel() {
-    let Some((files, unreadable_dirs)) = corpus() else {
-        lightbulb::test_notice::skip_unless_required(
-            "LIGHTBULB_REQUIRE_CORPUS",
-            "set LIGHTBULB_GGUF_CORPUS to a directory containing .gguf files",
-        );
-        return;
-    };
-    assert!(
-        unreadable_dirs.is_empty(),
-        "the corpus walk was incomplete: {unreadable_dirs:?}"
-    );
-    assert!(!files.is_empty(), "an empty corpus proves nothing here");
-
-    let c = Census::of(&files);
-    c.report();
-
-    assert!(
-        !c.loaded.is_empty(),
-        "no file loaded end-to-end, so this corpus proves nothing about Fuel's loader"
-    );
-
+/// The two assertion passes `KNOWN_FAILURES` needs: every actual failure is
+/// accounted for, and every expected failure actually happened. Split out of
+/// the test itself to keep that function under Codacy's 50-line limit, not
+/// because this half is reused anywhere else.
+fn assert_failures_match_known(c: &Census) {
     for (name, _, error) in &c.failed {
         let known = KNOWN_FAILURES
             .iter()
@@ -258,6 +239,32 @@ fn weighted_corpus_files_load_end_to_end_through_fuel() {
         KNOWN_FAILURES.len(),
         c.failed
     );
+}
+
+#[test]
+#[ignore = "needs a local GGUF corpus; set LIGHTBULB_GGUF_CORPUS"]
+fn weighted_corpus_files_load_end_to_end_through_fuel() {
+    let Some((files, unreadable_dirs)) = corpus() else {
+        lightbulb::test_notice::skip_unless_required(
+            "LIGHTBULB_REQUIRE_CORPUS",
+            "set LIGHTBULB_GGUF_CORPUS to a directory containing .gguf files",
+        );
+        return;
+    };
+    assert!(
+        unreadable_dirs.is_empty(),
+        "the corpus walk was incomplete: {unreadable_dirs:?}"
+    );
+    assert!(!files.is_empty(), "an empty corpus proves nothing here");
+
+    let c = Census::of(&files);
+    c.report();
+
+    assert!(
+        !c.loaded.is_empty(),
+        "no file loaded end-to-end, so this corpus proves nothing about Fuel's loader"
+    );
+    assert_failures_match_known(&c);
 
     assert_eq!(
         c.total(),
