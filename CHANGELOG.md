@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.16.3
+
+### Added
+- **Re-created the end-to-end GGUF weight-load census through Fuel's own loader**
+  (`tests/gguf_e2e_weight_load_census.rs`), replacing `tests/gguf_serving_census.rs` (deleted
+  in PR #195 along with its `ParallelModelManager::load_gguf` target). Calls `model_fuel::
+  loader_gguf::load_quantized_llama_gguf`/`loader_gguf_qwen3::load_quantized_qwen3_gguf`
+  directly — the real, live serving-path loaders — not just metadata acceptance.
+  **Result: 9 of 11 weighted corpus files load end-to-end, including all three IQ-coded files**
+  (`IQ3_XS`/`IQ4_XS`/`Q2_K`), confirming the IQ dtype-gap closure (0.16.2) holds at
+  weight-decode time, not just metadata acceptance.
+  **New gap found, routed to the Fuel lane, not fixed here**: `stories15M-q4_0.gguf`/
+  `stories15M-q8_0.gguf` fail — Fuel's `derive_config` requires `llama.attention.head_count_kv`
+  and does not default it. These are pre-GQA karpathy-era exports that never declared the key
+  (kv heads == attention heads is implied by its absence, per llama.cpp's own convention); not
+  malformed, not an IQ-dtype issue. Pinned as `KNOWN_FAILURES` in the new test so either
+  direction (fixed upstream, or a new/different failure) is caught rather than silently passing.
+  `ROADMAP.md`'s GGUF corpus section and `docs/FUEL-GAPS-FROM-CANDLE-REMOVAL.md`'s entry #11
+  updated with the full writeup.
+
+Verified clean: `cargo check --lib --tests --examples --benches --features fuel-engine`,
+`cargo fmt --check`, `python scripts/clippy_gate.py`, `cargo metadata --locked`, `cargo doc
+--no-deps --lib`, and `cargo test --test gguf_e2e_weight_load_census -- --ignored --nocapture`
+against the real corpus.
+
 ## 0.16.2
 
 ### Fixed

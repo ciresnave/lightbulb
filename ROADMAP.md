@@ -909,15 +909,28 @@ must go green before this is closed.
    than requiring at least one, since the scenario it used to pin
    (misreading a dtype-refusal error message) has no subject matter left in
    this corpus.
-   **Still open, deliberately not claimed here**: this measures METADATA/
-   tensor-directory acceptance (`Content::read` + `tensor_infos()` succeed),
-   not that the actual quantized weight bytes decode correctly end-to-end
-   through a real model load. `tests/gguf_serving_census.rs`, which used to
-   measure that via `ParallelModelManager::load_gguf`, was deleted in PR #195
-   (its loader is gone) and not yet re-created against Fuel's own loader
-   (`model_fuel::loader_gguf`/`loader_gguf_qwen3`) — see
-   `docs/FUEL-GAPS-FROM-CANDLE-REMOVAL.md`'s entry on that deletion. Re-create
-   it against the Fuel loader before calling end-to-end serving CLOSED.
+   **End-to-end weight-load census RE-CREATED and RUN, 2026-10-22** (same
+   day, `origin/main` 09584dd): `tests/gguf_e2e_weight_load_census.rs`
+   replaces the deleted `tests/gguf_serving_census.rs`, calling Fuel's own
+   loaders (`model_fuel::loader_gguf::load_quantized_llama_gguf`/
+   `loader_gguf_qwen3::load_quantized_qwen3_gguf`) directly rather than the
+   removed `ParallelModelManager::load_gguf`. Result: **9 of 11 weighted
+   corpus files load end-to-end — INCLUDING all three IQ-coded files**
+   (`IQ3_XS`/`IQ4_XS`/`Q2_K`), confirming the dtype-gap closure above holds
+   at weight-DECODE time, not just metadata acceptance.
+   **New, unrelated gap found**: `stories15M-q4_0.gguf`/`stories15M-q8_0.gguf`
+   fail with `fuel derive_config(...): missing metadata key
+   "llama.attention.head_count_kv" -- required to derive a llama config, not
+   defaulted`. These are pre-GQA karpathy-era "tinystories" GGUF exports —
+   not malformed, just older than the key's convention (their real
+   architecture has one KV-head count equal to the attention-head count,
+   which `head_count_kv`'s absence should imply, not refuse over). **Fuel
+   row candidate, not a lightbulb fix**: `derive_config` could default
+   `head_count_kv` to `head_count` when the key is absent, matching
+   llama.cpp's own documented behavior for pre-GQA exports. Pinned as
+   `KNOWN_FAILURES` in the new test so either direction (fixed upstream, or
+   a different/new file starting to fail) is caught rather than silently
+   passing either way.
 2. **3 tokenizer-model types are never constructed at all** (`bert`/`t5`/
    `gemma`-family tokenizers) — a larger, separate undertaking: building new
    tokenizer-construction paths from scratch, not implementing a pre-tokenizer
