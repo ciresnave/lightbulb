@@ -1129,16 +1129,17 @@ its own test, in this order:
          endpoint) priming the shared scheduler directly (`submit_request` +
          `allocate_pending_requests`, the same calls `admit_pending` makes) and reading the real
          occupancy back.
-      3. **5.4c — API shape PM-ruled 2026-10-22, plumbing target moot.** Option A (optional
-         top-level `priority` field, `"low"|"normal"|"high"`, default `normal`, unknown value =
-         400 typed error, documented as a Lightbulb extension — same convention as vLLM) was
-         chosen over Option B (a custom header). But this sub-slice's described mechanics
-         (`InferenceJob` gaining a `priority` field, `admit_pending` calling
-         `submit_priority_request`) named the candlelight-era `run_jobs` path, which was deleted
-         entirely 2026-10-22 along with candlelight (#195) — see this M4 section's own SUPERSEDED
-         banner above. The ruled API shape carries forward; the plumbing target does not. Current
-         state and the Fuel-side routing decision this now needs:
-         `docs/FUEL-GAPS-FROM-CANDLE-REMOVAL.md` entry #2.
+      3. **5.4c — plumbing target moot; API shape has TWO conflicting PM rulings, unresolved.**
+         Option B (a custom `X-Lightbulb-Priority` header) was PM-ruled 2026-10-21 and already
+         implemented (`docs/API-EXTENSIONS.md`, `InferenceJob.priority`/`priority_from_headers`).
+         Asked again without that surfacing, Option A (an optional top-level `priority` field,
+         `"low"|"normal"|"high"`, default `normal`, 400 on unknown) was PM-ruled 2026-10-22. This
+         sub-slice's described mechanics (`InferenceJob` gaining a `priority` field,
+         `admit_pending` calling `submit_priority_request`) named the candlelight-era `run_jobs`
+         path regardless of option — deleted entirely 2026-10-22 along with candlelight (#195),
+         see this M4 section's own SUPERSEDED banner above. Which ruling governs, and the
+         Fuel-side routing decision this now needs: `docs/FUEL-GAPS-FROM-CANDLE-REMOVAL.md` entry
+         #2 — flagged there for the PM, not resolved here.
    5. **5.5 — `run_jobs` complexity refactor (slice plan item 6, below) — VERIFICATION FINDING
       (2026-10-21): the refactor this item describes appears to already be done, as a side
       effect of extraction work landed across 5.1-5.4b, not as dedicated 5.5 work.** Measured on

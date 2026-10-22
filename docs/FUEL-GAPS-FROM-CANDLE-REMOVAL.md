@@ -56,16 +56,21 @@ admission matters to the production serving path; otherwise these three M4
 slices' work is dead on the shipping build starting now, which the PM/
 CireSnave should know explicitly rather than discover later.
 
-**Priority API shape — PM-ruled 2026-10-22** (asked before this gaps doc's
-"add-to-Fuel vs. superseded" question was fully worked through, so this
-settles the client-facing surface ahead of the routing decision): optional
-top-level `priority` field on chat/completions, values
-`"low"|"normal"|"high"`, default `normal`, unknown value = 400 with a typed
-error — documented as a Lightbulb extension (OpenAI has no such field), same
-convention as vLLM. Plumbs to a new Fuel-side `set_priority` hook once Fuel
-publishes a version carrying it; **Fuel's ordering hook stays parked until
-lightbulb holds a consumer for it** — tell the Fuel lane once this is
-plumbed. Not started: this needs the add-to-Fuel decision above made first
+**⚠️ Two conflicting PM rulings on the same question — not resolved by this doc, flagged for
+the PM.** `docs/API-EXTENSIONS.md` documents **Option B** (the `X-Lightbulb-Priority` header
+above, `low`/`normal`/`high`/`critical`, invalid values silently default — **PM-ruled
+2026-10-21**, already implemented: `InferenceJob.priority`/`priority_from_headers` in
+`src/api/openai/chat.rs`/`src/engine/model_runner.rs`, dead on the Fuel path per this entry's
+"Fuel today" line, same as everything else here). Asked again without that prior ruling surfacing,
+**PM-ruled 2026-10-22: Option A** — optional top-level `priority` field on chat/completions,
+values `"low"|"normal"|"high"`, default `normal`, unknown value = 400 with a typed error, same
+convention as vLLM. **Neither has been implemented against the live Fuel path**, so nothing is
+shipped-and-wrong yet, but `docs/API-EXTENSIONS.md` currently asserts Option B is the answer and
+would need updating (or retracting) if Option A is the one that stands. Which ruling governs is
+for the PM to say, not this doc. Once settled, whichever option it is plumbs to a new Fuel-side
+`set_priority` hook once Fuel publishes a version carrying it; **Fuel's ordering hook stays
+parked until lightbulb holds a consumer for it** — tell the Fuel lane once this is plumbed. Not
+started: this needs the add-to-Fuel decision above made first
 (there is nothing in Fuel yet to plumb to), then Fuel's crates.io publish.
 
 ### 3. Dtype selection (f16/bf16) for SafeTensors models
