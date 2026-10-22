@@ -4,7 +4,7 @@
     license     = "MIT OR Apache-2.0"
     name        = "lightbulb"
     repository  = "https://github.com/ciresnave/lightbulb"
-    version     = "0.16.0"
+    version     = "0.16.1"
 
 [features]
     # CUDA, via Fuel only. Was `["candlelight/cuda", "fuel/cuda"]`; candlelight
@@ -161,102 +161,62 @@
     # revisit once a Fuel-based loader replaces the candlelight one this
     # comment used to point at.
 
-    # Fuel — the ML framework Lightbulb is porting ONTO. Lives alongside
-    # candlelight during the port; candlelight is deleted once model_fuel/
-    # reaches parity (see docs/superpowers/specs/2026-07-28-fuel-port-design.md).
+    # Fuel — the ML framework backing the (now sole) serving path in
+    # `src/model_fuel/` (candlelight was removed entirely 2026-10-22, PR #195).
     #
-    # MUST be the git dependency: `fuel-core` on crates.io is an UNRELATED
-    # project (the Fuel blockchain client, v0.48.x). `cargo add fuel-core`
-    # silently pulls the wrong crate.
-    # GIT deps pinned to an exact rev. These were absolute Windows PATH deps to a
-    # local worktree during the port — fine on one machine, unbuildable anywhere
-    # else, which is exactly what a public PR exposed.
+    # Published to crates.io as of Fuel 0.20.61 (2026-10-22, all 40 crates) --
+    # moved off the git dependency this block used to be (history:
+    # `git log -p -- Cargo.toml`, search for "d90b481" or "PINNED, not
+    # floating" before this commit). The main package publishes under the
+    # name `fuel` directly (no `package = "fuel-core"` rename needed, unlike
+    # the git source) -- crates.io's own `fuel-core` (v0.48.x) is an UNRELATED
+    # project (the Fuel blockchain client); `cargo add fuel-core` would
+    # silently pull the wrong crate, but the name `fuel` itself is free and is
+    # what this one publishes as.
     #
-    # PINNED, not floating: `fuel`'s main moved six times on 2026-08-06 alone,
-    # including one revision where `fuel-core` did not compile under
-    # `--features cuda` at all. A branch dependency would make this crate's
-    # buildability a function of when you cloned it.
-    #
-    # `4910b37` is the rev every test here was verified against (lightbulb#97,
-    # 2026-09-27): `cargo test --tests`, 908 passed, 0 failed, 95 ignored, 44
-    # suites. NOT a lockfile-only bump from the predecessor `2d0c04b7` --
-    # fuel's own "fuel-core dissolution" moved `LlamaConfig`/`LlamaModel`/
-    # `LlamaWeights` into a new `fuel-model-llama` crate and
-    # `lazy_llama_full`/`lazy_quantized_llama`/`lazy_llama2c` into
-    # `fuel-transformers::models` (both added as direct deps below), and
-    # several `fuel_core::lazy::Tensor` constructors (`from_f32`,
-    # `const_u32_like`) became fallible where they previously returned
-    # `Tensor` directly. ~10 call sites in `src/model_fuel/` needed a `?` or
-    # `.map_err` added; none of this was mentioned in fuel's own PR list
-    # (`#244`/`#245`/`#246`/`#247`/`#253`) or in issue #97's original body --
-    # it was found only by running the compiler after the bump, which is the
-    # whole reason this paragraph demands a re-run rather than a rev-string
-    # edit.
-    #
-    # The predecessor `8771997e` is kept here as history, NOT as a baseline: it
-    # predates Fuel's GAP-182, so it carried a HIGH (`libyml`, unsound +
-    # unmaintained, no patch) and a MEDIUM (`serde_yml`) advisory into this
-    # crate; both are cleared at `2d0c04b7`, and the replacement
-    # `unsafe-libyaml 0.2.11` is past GHSA-r24f-hg58-vfrw's 0.2.10 fix.
-    #
-    # Bump it deliberately, with a re-run, not as a drive-by -- and UPDATE THIS
-    # PARAGRAPH WHEN YOU DO. A comment naming a tested baseline is a factual
-    # claim with no compiler behind it: this one asserted `8771997e` for one
-    # commit after the manifest already said otherwise, which would have pointed
-    # the next reader at a rev 651 commits stale.
-    #
-    # LOCAL DEVELOPMENT against a Fuel checkout: do NOT edit these lines back to
-    # paths. Add a gitignored `.cargo/config.toml` instead —
+    # LOCAL DEVELOPMENT against a Fuel checkout: do not edit these lines back
+    # to paths or git. Add a gitignored `.cargo/config.toml` instead —
     #     paths = ["../fuel-lightbulb-port"]
-    # — which overrides the git source without touching the manifest, so a
-    # working tree stays publishable.
-    fuel             = { git = "https://github.com/ciresnave/fuel", rev = "d90b481fde7d84cb25284375274677a37a946703", package = "fuel-core" }
-    fuel-cpu-backend = { git = "https://github.com/ciresnave/fuel", rev = "d90b481fde7d84cb25284375274677a37a946703" }
-    # `LlamaConfig`/`LlamaModel`/`LlamaWeights` moved out of `fuel-core::lazy`
-    # into this crate as of the bump to `4910b37` (fuel-core dissolution, one
-    # architecture per crate) -- not mentioned in lightbulb#97's own body,
-    # which predates discovering it. Every `fuel::lazy::Llama*` import in
-    # `src/model_fuel/` had to move here in the same change as the rev bump.
-    fuel-model-llama = { git = "https://github.com/ciresnave/fuel", rev = "d90b481fde7d84cb25284375274677a37a946703" }
-    # `lazy_llama_full`/`lazy_quantized_llama` (the config/quantized-model
-    # types `model_fuel/loader.rs` and `loader_gguf.rs` build on) live in this
-    # crate's `models` module, not in `fuel-core` -- same dissolution as above.
-    # Also where fuel's per-architecture quantized models (`lazy_quantized_qwen3`
-    # and siblings, see lightbulb#97's follow-up) would come from.
-    fuel-transformers = { git = "https://github.com/ciresnave/fuel", rev = "d90b481fde7d84cb25284375274677a37a946703" }
+    # — which overrides the registry source without touching the manifest, so
+    # a working tree stays publishable.
+    fuel             = "0.20.61"
+    fuel-cpu-backend = "0.20.61"
+    # `LlamaConfig`/`LlamaModel`/`LlamaWeights` -- fuel's "fuel-core
+    # dissolution" moved these out of `fuel::lazy` into this crate (one
+    # architecture per crate). Every `fuel::lazy::Llama*` import in
+    # `src/model_fuel/` goes through here.
+    fuel-model-llama = "0.20.61"
+    # `lazy_llama_full`/`lazy_quantized_llama`/`lazy_quantized_qwen3` (the
+    # config/quantized-model types `model_fuel/loader.rs` and
+    # `loader_gguf*.rs` build on) live in this crate's `models` module, not in
+    # `fuel` itself -- same dissolution as above.
+    fuel-transformers = "0.20.61"
     # `fuel_loaders::quantized::config_from_gguf::derive_config` -- the
-    # architecture-parameterized GGUF config reader lightbulb#97 (step 2)
-    # replaces `src/model_fuel/loader_gguf.rs`'s own `llama_full_config_from_gguf`
-    # with. Reads the file through fuel's OWN `gguf_file::Content`, a
-    # metadata-only parse distinct from `crate::gguf::Content` (Lightbulb's
-    # reader, kept for the tokenizer extraction `derive_config` deliberately
-    # does not do).
-    fuel-loaders = { git = "https://github.com/ciresnave/fuel", rev = "d90b481fde7d84cb25284375274677a37a946703" }
-    # `fuel_ir::probe::BackendId` and `fuel_ir::backend::TransferPath` — neither
-    # is re-exported through the `fuel` facade (`fuel-core`'s `lib.rs` has no
+    # architecture-parameterized GGUF config reader `src/model_fuel/
+    # loader_gguf*.rs` builds on. Reads the file through fuel's OWN
+    # `gguf_file::Content`, a metadata-only parse distinct from
+    # `crate::gguf::Content` (Lightbulb's reader, kept for the tokenizer
+    # extraction `derive_config` deliberately does not do).
+    fuel-loaders = "0.20.61"
+    # `fuel_ir::probe::BackendId` and `fuel_ir::backend::TransferPath` —
+    # neither is re-exported through the `fuel` facade (its `lib.rs` has no
     # `pub use fuel_ir::...` at all; it only re-exports the SPECIFIC fuel_ir
     # items it needs under its own names, e.g. `DeviceLocation`). Needed by
-    # `multi_gpu::topology::DeviceTopology::discover` (board item 106, PR 1) to
-    # filter `ProbeReport`'s descriptors to CUDA and read real P2P status off
+    # `multi_gpu::topology::DeviceTopology::discover` to filter `ProbeReport`'s
+    # descriptors to CUDA and read real P2P status off
     # `SystemTopology::transfer_path`. `ProbeReport`/`SystemTopology`/
     # `TransferEstimate` themselves ARE reachable via the facade
-    # (`fuel::probe`, `fuel::topology`, `fuel::transfer_cost` — see
-    # `fuel-core/src/lib.rs`'s `pub use fuel_hardware::probe`/
-    # `pub use fuel_dispatch::topology`/`pub use fuel_hardware::transfer_cost`),
-    # so this is the only new crate-level dependency PR 1 needs.
-    fuel-ir = { git = "https://github.com/ciresnave/fuel", rev = "d90b481fde7d84cb25284375274677a37a946703" }
-    # fuel-inference: `multi_session::SessionScheduler` + `DecodeModel` — the
-    # proven batched multi-session decode driver board item 97 wires in via
-    # `src/model_fuel/scheduler_driver.rs`. PROMOTED from [dev-dependencies]
-    # (2026-10-03): it was dev-only while nothing but `tests/paged_plan_once.rs`
-    # touched it ("Lightbulb's library does not depend on Fuel's scheduler, it
-    # has its own" was true until this point). Consistent with the rest of this
-    # block: `fuel`/`fuel-transformers`/etc. are already unconditional real
-    # dependencies regardless of the `fuel-engine` feature, which only gates
-    # the runtime code path in `model_runner.rs` — this is not a new exception.
-    fuel-inference = { git = "https://github.com/ciresnave/fuel", rev = "d90b481fde7d84cb25284375274677a37a946703" }
+    # (`fuel::probe`, `fuel::topology`, `fuel::transfer_cost`), so this is the
+    # only reason for a direct dependency on this crate.
+    fuel-ir = "0.20.61"
+    # `multi_session::SessionScheduler` + `DecodeModel` — the batched
+    # multi-session decode driver `src/model_fuel/scheduler_driver.rs` wires
+    # in. Consistent with the rest of this block: `fuel`/`fuel-transformers`/
+    # etc. are already unconditional real dependencies regardless of the
+    # (now no-op) `fuel-engine` feature flag.
+    fuel-inference = "0.20.61"
     # Only used to CONSTRUCT a `CudaDevice` in the GPU measurement harness.
-    # `fuel-core` provides `impl From<CudaDevice> for Device` (its `cuda_backend`
+    # `fuel` provides `impl From<CudaDevice> for Device` (its `cuda_backend`
     # module) but re-exports only `builder_arg`, not `CudaDevice` itself — so a
     # consumer that wants to name a GPU must depend on the backend crate.
     #
@@ -265,7 +225,7 @@
     # allowed to be optional"), and a PLAIN dev-dependency would run nvcc on
     # every `cargo test` including CPU-only ones. Optional + feature-activated
     # keeps default builds free of it entirely.
-    fuel-cuda-backend = { git = "https://github.com/ciresnave/fuel", rev = "d90b481fde7d84cb25284375274677a37a946703", optional = true }
+    fuel-cuda-backend = { version = "0.20.61", optional = true }
 sysinfo = { version = "0.39.6", default-features = false, features = ["system"] }
     # `metrics` is a pure facade (the `gauge!`/`counter!` macros record
     # against a global recorder, with no dependencies of their own beyond
