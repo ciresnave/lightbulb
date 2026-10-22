@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.16.4
+
+### Fixed
+- **Retracted two stale ROADMAP.md sections describing code deleted in PR #195 (candlelight
+  removal) as though it still existed.** "M3.6 — Multi-GPU Inference" (two call sites: the
+  top-of-file honesty-audit summary and the detailed M3.6 section) described `src/multi_gpu/
+  {distributed_cache,pipeline_parallel,tensor_parallel}.rs`'s eight runtime-bail sites and
+  `ParallelCacheBuilder` — every one of those files and that type were deleted entirely in the
+  candlelight removal (zero external callers, confirmed before deletion). "M4 —
+  MemoryAwareScheduler integration: slice plan" described `run_jobs`/`admit_pending`/
+  `EngineModel`/`ParallelModelManager` and the real `SharedScheduler` wiring slices 5.4a/5.4b
+  landed into `run_jobs` — all of it removed in the same PR, confirmed by that file's own
+  pre-removal comment ("`run_jobs` itself survives only as the candlelight path's job loop").
+  `cache_stats`/`scheduler_stats`/`scheduler_queue`/real priority admission are consequently
+  back to reporting nothing real on the current (Fuel-only) path — the exact hole this whole
+  M4 plan existed to fill — already tracked as a real, open capability gap in
+  `docs/FUEL-GAPS-FROM-CANDLE-REMOVAL.md` entries #1/#2, not re-derived here. Added prominent
+  `SUPERSEDED` banners at each site rather than deleting the detailed history, which records
+  real work and real lessons (the `EngineModel::step_batch` batch-shape hazard in particular)
+  that whoever rebuilds this against Fuel should read.
+
+No code changed; `Cargo.toml`/`Cargo.lock` bumped per the versioning convention
+(every pushed change bumps), verified with `cargo metadata --locked`.
+
 ## 0.16.3
 
 ### Added

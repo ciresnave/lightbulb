@@ -87,6 +87,18 @@ in place further down; they are collected here because the pattern matters more
 than any single instance.
 
 **1. `M3.6 — Multi-GPU Inference` says ✅ COMPLETE (October 27, 2025).**
+
+> ⚠️ **SUPERSEDED 2026-10-22.** `src/multi_gpu/{distributed_cache,pipeline_parallel,
+> tensor_parallel}.rs` — every file this item names below — were DELETED entirely in PR #195
+> (candlelight removal): all three were candlelight-`Tensor`-typed with zero external callers,
+> confirmed before deletion, independent of the honesty findings below. `ParallelCacheBuilder`
+> is gone too (superseded by Fuel's `kv_block_pool`, PR #196). The "0 of 3 implemented but now
+> honest" state this item fixed no longer has code to BE honest or dishonest about — the
+> question moved from "does this bail correctly" to "does this exist at all," and the answer is
+> no. `multi_gpu::{config,topology}` (plain, candlelight-free) survive. See
+> `docs/FUEL-GAPS-FROM-CANDLE-REMOVAL.md`'s multi-GPU entry. Kept below as the historical record
+> of a real documentation-honesty fix, not as a description of current code.
+
 Eight selectable code paths bail at runtime:
 
 ```
@@ -712,7 +724,7 @@ comment referencing one of them).
 | M2 — Performance enablers | COMPLETE |
 | **M3 — Acceleration features** | **IN PROGRESS** — M3.3 done; AWQ CPU + quant dtypes open |
 | M3.5 — Testing & Hardening | COMPLETE |
-| **M3.6 — Multi-GPU Inference** | **CLAIMED COMPLETE, 8 PATHS UNIMPLEMENTED** (see above) |
+| **M3.6 — Multi-GPU Inference** | **DELETED 2026-10-22, PR #195** (candlelight-typed, zero callers; see above) |
 | M3.7 — Dynamic Name Mapping | CORE COMPLETE, integrations PLANNED |
 | **M4 — Advanced scheduling** | **PLANNED** |
 | **M5 — Frontier options** | **PLANNED** |
@@ -939,6 +951,26 @@ must go green before this is closed.
 ---
 
 ## M4 — MemoryAwareScheduler integration: slice plan (added 2026-10-14, PM-approved)
+
+> ⚠️ **SUPERSEDED 2026-10-22 — read before acting on anything below.** Every slice in this
+> plan (1 through 5.4c, including `run_jobs`, `admit_pending`, `EngineModel`,
+> `ParallelModelManager`, and the `SharedScheduler` wiring INTO `run_jobs` that 5.4a/5.4b
+> landed) was built against the candlelight-backed serving path. That path — `run_jobs` and
+> every function this section names as having landed real work in it — was removed entirely in
+> PR #195, the same day Fuel became the sole serving path. **None of slices 2 through 5.4c's
+> wiring exists in the current tree.** `cache_stats` (slice 1) genuinely still works, because
+> `SharedCacheStats`/`SharedScheduler` as PARAMETERS survived candlelight's removal — Fuel's
+> `ModelRunner::start` accepts them for signature compatibility — but nothing on the Fuel path
+> writes into them, so `cache_stats`/`scheduler_stats`/`scheduler_queue`/real priority admission
+> are back to reporting nothing real, the same hole this whole plan existed to fill. This is
+> documented as the real, open capability gap it is in
+> `docs/FUEL-GAPS-FROM-CANDLE-REMOVAL.md` entries #1/#2 — read those for the current state and
+> routing (PM is deciding add-to-Fuel vs. accept the loss), not this section. The detailed
+> history below is kept as a record of real, verified work and the lessons it found (the
+> `EngineModel::step_batch` batch-shape warning in slice 5's note is still a real hazard
+> whoever rebuilds this against Fuel should read) — not as a description of anything currently
+> true. Do not resume numbering from 5.5 or 6 against the Fuel path without first sizing it as
+> new construction, which is what it would be.
 
 V1_ROADMAP.md's Phase 3 names this as one block ("MemoryAwareScheduler Integration"). Confirmed
 still genuinely unbuilt (2026-10-14): `grep -rn MemoryAwareScheduler src/engine/model_runner.rs`
@@ -2196,7 +2228,15 @@ M3.5 establishes comprehensive testing and validation infrastructure for product
 
 M3.6 — Multi-GPU Inference (0.4+)
 
-**Status**: ⚠️ **CLAIMED COMPLETE (October 27, 2025) — CONTRADICTED.**
+**Status**: ⚠️ **DELETED 2026-10-22, PR #195** — `src/multi_gpu/{distributed_cache,
+pipeline_parallel,tensor_parallel}.rs` (every file this section names) were removed entirely
+in the candlelight-dependency removal: candlelight-`Tensor`-typed, zero external callers,
+confirmed before deletion. `ParallelCacheBuilder` is also gone (superseded by Fuel's
+`kv_block_pool`, PR #196). See `docs/FUEL-GAPS-FROM-CANDLE-REMOVAL.md`'s multi-GPU entry for
+current routing. Everything below this line is historical record of a real
+documentation-honesty fix (2026-09-02), not a description of code that still exists.
+
+**Status (historical, pre-deletion)**: ⚠️ **CLAIMED COMPLETE (October 27, 2025) — CONTRADICTED.**
 Eight selectable paths bail at runtime: `Sharded`/`Hybrid` cache sync,
 `PipeDream`/`Interleaved1F1B` pipeline scheduling, `Hybrid` tensor sharding.
 `CacheSyncStrategy` offers three variants and implements NONE. `Replicated`
