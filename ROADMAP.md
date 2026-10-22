@@ -2,12 +2,18 @@
 
 Purpose: a clear plan to reach a robust, fast, and memory-efficient inference engine with room for research. This roadmap consolidates our existing plans and literature insights into pragmatic milestones.
 
-> **Note on "Candle-first".** This document originally described the plan as
-> Candle-first. Lightbulb runs on **candlelight** (a Candle fork) by default and
-> is being ported to **Fuel** behind the `fuel-engine` feature; candlelight is
-> still the shipping path and Fuel is not yet at parity. Milestone status claims
-> below predate that port and have not been re-validated — treat them as
-> unverified rather than as findings. See `README.md` for the current picture.
+> **Note on "Candle-first" — RETRACTED 2026-10-22, not just caveated.** This document
+> originally described the plan as Candle-first, and this note previously said candlelight was
+> still the default shipping path with Fuel opt-in and not at parity. **That stopped being true
+> in PR #195 (2026-10-22): candlelight was removed entirely (~40 files, zero production callers
+> each, confirmed file by file) and Fuel is now the sole, unconditional serving engine** — the
+> `fuel-engine` feature flag is a no-op kept only for callers (including CI) that still pass it.
+> Milestone status claims below that predate the original Candle→Fuel port or this full
+> removal have not been re-validated against either — treat those specific claims as
+> unverified rather than as findings; this does not sweep in claims logged after either date
+> (e.g. the 2026-10-14 research-track entries or the 2026-10-22 remeasurements elsewhere in
+> this file), which already account for both. See `README.md` for the current picture and
+> `docs/FUEL-GAPS-FROM-CANDLE-REMOVAL.md` for what the removal actually cost.
 
 ---
 
@@ -34,16 +40,20 @@ conflicting claims; they are superseded and carry banners saying so:
 **The server builds and serves.** `cargo check -j 4 --bins` → exit 0.
 `cargo test --lib` → **643 passed, 0 failed, 14 ignored**.
 
-**The Candle→Fuel port — this project's stated direction — is early.**
+**RETRACTED 2026-10-22 — the port finished and this paragraph is now backwards.** This
+paragraph and the file-count table below it described the Candle→Fuel port as "early," with
+Fuel behind the `fuel-engine` feature and candlelight as the shipping path, as measured
+2026-09-01. **Candlelight was removed entirely in PR #195 (2026-10-22); Fuel is now the sole,
+unconditional serving engine, and `fuel-engine` is a no-op flag** kept only for callers
+(including CI) that still pass it. The table is a historical snapshot, not current. See
+`README.md` for the current picture and `docs/FUEL-GAPS-FROM-CANDLE-REMOVAL.md` for what the
+removal cost.
 
 ```
-files importing candlelight    45
-files importing fuel           11
+files importing candlelight    45   (2026-09-01 snapshot — candlelight fully removed since)
+files importing fuel           11   (2026-09-01 snapshot — now the only engine)
 total src/**/*.rs             112
 ```
-
-Fuel is behind the `fuel-engine` feature and is **not at parity**. candlelight
-is the shipping path.
 
 ## Research track: forked-agent latent/activation work (added 2026-10-01 by portfolio PM)
 
@@ -1244,16 +1254,27 @@ Nothing here blocks or needs further PersistAnt work.
 
 ## Research track item 1 — prefix-matching into the Fuel serving path: slice plan (added 2026-10-14, PM-tasked)
 
-**Scope correction up front, the single most important fact in this section:** the default,
-shipping path is **candlelight** (`cargo build` with no features) — that is what serves requests
-today. **Fuel is opt-in** (`--features fuel-engine`) and **not at parity**. Everything below
-changes only the `fuel-engine` path. A caller running the default build sees no change from any
-slice here, ever, until a future, separate decision flips the default (that is Phase D of
-`docs/fuel-migration-pr-sequence.md`, an unrelated migration, not this one).
+**Scope correction, RETRACTED in place 2026-10-22 — the opposite is now true.** This section
+previously said candlelight was the default shipping path, Fuel was opt-in behind
+`fuel-engine`, and a caller on the default build would see no change from any slice here until
+a later, separate decision flipped the default. **Candlelight was removed entirely in PR #195
+(2026-10-22, independent of this slice plan); Fuel is now the sole, unconditional serving
+path, and `fuel-engine` is a no-op flag.** That changes the blast radius of this plan, but not
+uniformly across its slices (see the slice list below): **slice 1** (`LlamaPagedAdapter`) only
+adds and tests a new, unwired adapter type with zero callers outside its own test, so it
+changes nothing live; **slice 4** is a reconciliation decision, not code; **slice 5** is
+blocked on an upstream Fuel method (`forward_paged_step` for Qwen3) that does not exist yet.
+**Slices 2 and 3** are the ones that change live serving behavior — slice 2 swaps the
+scheduler `ModelRunner::start` actually drives for every caller, and slice 3 changes admission
+on top of it. That is exactly why "not started... build begins only once the PM confirms
+priority" below now means confirming a change to live production behavior for slices 2/3, not
+an experimental feature flag. Nothing in the slices' own technical content (the two unwired
+primitives, the `PagedDecodeModel` gap, the measured paged-attention cost) changes — only the
+blast radius of actually building slices 2 and 3 does.
 
-### What's actually live on the fuel-engine path today
+### What's actually live on the serving path today
 
-`src/engine/model_runner.rs`'s `fuel-engine` arm of `ModelRunner::start` drives
+`src/engine/model_runner.rs`'s `ModelRunner::start` unconditionally drives
 `crate::model_fuel::scheduled_llama_engine::run_fuel_engine`, which uses
 `FuelSchedulerDriver` (`scheduler_driver.rs`) wrapping Fuel's **`SessionScheduler`**
 (`fuel_inference::multi_session::SessionScheduler<M: DecodeModel>`) — a simple scheduler with no

@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.17.1
+
+### Fixed
+- **ROADMAP.md still described candlelight as the default shipping path in three places** —
+  the top "Note on Candle-first" banner, the "What is actually true" status section's
+  Candle→Fuel port paragraph and file-count table (found during Sourcery review of this PR,
+  missed by the first pass), and the prefix-matching research-track section's own scope
+  correction — all retracted in place 2026-10-22 (not just caveated): candlelight was removed
+  entirely in PR #195, Fuel is the sole, unconditional serving path, `fuel-engine` is a no-op.
+  The prefix-matching section's blast-radius claim is corrected to distinguish which slices
+  actually change live serving behavior (2 and 3) from prep/decision/blocked ones (1, 4, 5) —
+  not every slice there touches the only production path equally. Also fixed: the "fuel-engine
+  arm of `ModelRunner::start`" phrasing, which implied a feature-gated dispatch that no longer
+  exists; and an overbroad "predate" disclaimer that swept in post-port evidence it shouldn't
+  have. Docs only, no code changed.
+
 ## 0.17.0
 
 ### Changed
