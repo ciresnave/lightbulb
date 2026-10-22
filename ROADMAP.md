@@ -62,11 +62,17 @@ longer external brief CireSnave was handed ("Forked-Agent Orchestration: Archite
 Board item 86 in `CIRESNAVE-DECISIONS.md` tracks this; project placement in that brief puts Fuel on KV-
 cache mechanics and OverMind on orchestration policy, with Lightbulb owning the model-facing pieces below.
 
-1. **Wire the existing prefix-matching logic into the serving path — near-term, not research.** This
-   project's own review (2026-09-30) confirmed the donor-must-stay-open copy-on-write mechanism is correct
-   and real, and that a content-addressed matching layer already exists on top of it — but with **zero
-   callers outside its own tests** today. This is an existing, correct, unwired primitive, not new
-   engineering — wire it in.
+1. **Wire the existing prefix-matching logic into the serving path — DETECTION half DONE 2026-10-22
+   (board PM task), EXPLOITATION half still open.** This project's own review (2026-09-30) confirmed the
+   donor-must-stay-open copy-on-write mechanism is correct and real, and that a content-addressed matching
+   layer already exists on top of it — but with zero callers outside its own tests at the time. `ServingDriver`
+   (`src/model_fuel/scheduled_llama_engine.rs`) now wires a generalized `BlockPrefixIndexFor<SessionId>` into
+   the live `try_admit` path: every admitted prompt's token prefix is recorded and looked up, giving
+   `cache_stats` real hit/miss/entry counts (`CACHE_METRICS_LIVE = true`). **Detection is not exploitation**:
+   a hit is not yet spliced into KV blocks or used to skip prefill — that needs
+   `fuel_inference::multi_session::PagedSessionScheduler`, a different scheduler than the one wired today, and
+   switching to it is a real separate port (see `docs/FUEL-GAPS-FROM-CANDLE-REMOVAL.md` entry #1). Donor-must-
+   stay-open COW splicing (the TTFT win this item originally named) is still unwired.
 2. **Fix the live-date chat-template rendering hazard — DONE, #107 (2026-09-30).** Was already
    fixed the same day as the review that surfaced it; this entry was never updated. `strftime_now`
    now caches its rendered string per calendar day (`cached_strftime_now`,

@@ -11,7 +11,7 @@
 //! | Lightbulb decides | Fuel executes |
 //! |---|---|
 //! | [`PagedAdmission::decide`] — admit / reject, incl. a reserve headroom | `blocks_required`, `capacity`, `append` |
-//! | [`BlockPrefixIndex::lookup`] — which donor, how many blocks | `splice` (refcount bump, COW) |
+//! | [`BlockPrefixIndexFor::lookup`] — which donor, how many blocks | `splice` (refcount bump, COW) |
 //! | [`SpanBlockMap::plan`] — which spans die, which blocks that means | `evict_blocks` → [`EvictReport`] |
 //! | [`BlockTierMover`] — which blocks go to disk, and when they come back | `read_block` / `write_block` / `restore` |
 //!
@@ -422,13 +422,22 @@ pub struct BlockPrefixStats {
     pub tokens_lost_to_alignment: usize,
 }
 
-/// A block-aligned prefix hit. Constructed only by [`BlockPrefixIndex::lookup`],
+/// A block-aligned prefix hit. Constructed only by [`BlockPrefixIndexFor::lookup`],
 /// which never produces `blocks == 0` — the structural fix for the
 /// `record_prompt` placeholder hazard that made an empty entry look like a hit.
+///
+/// Generic over the donor id `D` so the same chain-hash algorithm serves both
+/// Fuel's block-pool `SessionHandle` (the [`BlockPrefixIndex`] alias, consumed
+/// by [`splice_prefix`] below) and a scheduler-level session id that never
+/// touches `KvBlockPool` directly, such as `ServingDriver`'s detection-only use
+/// (`src/model_fuel/scheduled_llama_engine.rs`) keyed by
+/// `fuel_inference::multi_session::SessionId` — `SessionHandle`'s one field is
+/// private to its own crate, so a caller without a live `KvBlockPool` session
+/// cannot mint one to use as a donor id.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct PrefixMatch {
-    /// Session whose blocks `[0, blocks)` are to be spliced. Must still be open.
-    pub donor: SessionHandle,
+pub struct PrefixMatchFor<D> {
+    /// Donor whose blocks `[0, blocks)` are to be spliced. Must still be open.
+    pub donor: D,
     /// Whole blocks to share. Always ≥ 1.
     pub blocks: usize,
     /// `blocks * block_size` — tokens the splice actually carries.
@@ -438,14 +447,17 @@ pub struct PrefixMatch {
     pub remainder_tokens: usize,
 }
 
+/// The `KvBlockPool`-backed instantiation: what [`splice_prefix`] consumes.
+pub type PrefixMatch = PrefixMatchFor<SessionHandle>;
+
 #[derive(Clone, Copy, Debug)]
-struct PrefixEntry {
-    donor: SessionHandle,
+struct PrefixEntry<D> {
+    donor: D,
     blocks: usize,
 }
 
 /// Chain-hashed, block-aligned prefix index: `chain_hash(blocks[0..=i]) →
-/// (donor session, i+1 blocks)`.
+/// (donor, i+1 blocks)`.
 ///
 /// No tensors are stored. With a refcounted block pool the KV *is* the donor's
 /// resident blocks, and reuse is a `splice` (refcount bump) — which is why
@@ -459,16 +471,21 @@ struct PrefixEntry {
 /// checked convention.
 ///
 /// **Donor lifetime is this index's responsibility.** A donor must stay open
-/// (never `discard`ed) while it is referenced; [`BlockPrefixIndex::is_donor`]
-/// and [`BlockPrefixIndex::forget_donor`] are the accounting.
-pub struct BlockPrefixIndex {
+/// (never `discard`ed) while it is referenced; [`BlockPrefixIndexFor::is_donor`]
+/// and [`BlockPrefixIndexFor::forget_donor`] are the accounting. Generic over
+/// `D` — see [`PrefixMatchFor`]'s doc comment for why.
+pub struct BlockPrefixIndexFor<D> {
     block_size: usize,
-    by_hash: HashMap<[u8; 32], PrefixEntry>,
-    donor_refs: HashMap<SessionHandle, usize>,
+    by_hash: HashMap<[u8; 32], PrefixEntry<D>>,
+    donor_refs: HashMap<D, usize>,
     stats: BlockPrefixStats,
 }
 
-impl BlockPrefixIndex {
+/// The `KvBlockPool`-backed instantiation: donors are real pool sessions, so a
+/// hit here is eligible for [`splice_prefix`].
+pub type BlockPrefixIndex = BlockPrefixIndexFor<SessionHandle>;
+
+impl<D: Copy + Eq + std::hash::Hash + std::fmt::Debug> BlockPrefixIndexFor<D> {
     pub fn new(block_size: usize) -> Self {
         assert!(block_size > 0, "block_size must be > 0");
         Self {
@@ -485,6 +502,18 @@ impl BlockPrefixIndex {
 
     pub fn stats(&self) -> BlockPrefixStats {
         self.stats
+    }
+
+    /// Entries currently held — distinct from `stats().blocks_indexed`, which
+    /// is a cumulative counter of every `record` addition ever made and never
+    /// decreases. This is the live size: both a re-pointed chain (`record`'s
+    /// own `release_donor` path) and a `forget_donor` call remove from it.
+    pub fn len(&self) -> usize {
+        self.by_hash.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.by_hash.is_empty()
     }
 
     /// Chain hash of `tokens`' whole blocks, one entry per prefix length.
@@ -513,7 +542,7 @@ impl BlockPrefixIndex {
     ///
     /// The caller is asserting that `donor`'s logical blocks `[0, n_full)` hold
     /// exactly the KV for `tokens`' first `n_full * block_size` tokens.
-    pub fn record(&mut self, tokens: &[u32], donor: SessionHandle) -> usize {
+    pub fn record(&mut self, tokens: &[u32], donor: D) -> usize {
         let hashes = self.chain_hashes(tokens);
         let mut added = 0;
         for (i, h) in hashes.into_iter().enumerate() {
@@ -538,9 +567,9 @@ impl BlockPrefixIndex {
     /// Returns `None` on a miss. On a hit, `blocks >= 1` is guaranteed:
     /// a zero-block "hit" is unrepresentable, so a caller cannot skip prefill
     /// on an entry that carries no KV.
-    pub fn lookup(&mut self, tokens: &[u32]) -> Option<PrefixMatch> {
+    pub fn lookup(&mut self, tokens: &[u32]) -> Option<PrefixMatchFor<D>> {
         let hashes = self.chain_hashes(tokens);
-        let mut best: Option<PrefixEntry> = None;
+        let mut best: Option<PrefixEntry<D>> = None;
         for h in &hashes {
             match self.by_hash.get(h) {
                 Some(e) => best = Some(*e),
@@ -564,7 +593,7 @@ impl BlockPrefixIndex {
                 // block-aligned index could not express. Bounded by
                 // block_size - 1 when the whole prompt matched.
                 self.stats.tokens_lost_to_alignment += remainder.min(self.block_size - 1);
-                Some(PrefixMatch {
+                Some(PrefixMatchFor {
                     donor: e.donor,
                     blocks: e.blocks,
                     shared_tokens: shared,
@@ -576,12 +605,12 @@ impl BlockPrefixIndex {
 
     /// Is this session still referenced as a splice source? While true, the
     /// caller must NOT `KvBlockPool::discard` it.
-    pub fn is_donor(&self, s: SessionHandle) -> bool {
+    pub fn is_donor(&self, s: D) -> bool {
         self.donor_refs.get(&s).copied().unwrap_or(0) > 0
     }
 
-    pub fn donors(&self) -> Vec<SessionHandle> {
-        let mut v: Vec<SessionHandle> = self
+    pub fn donors(&self) -> Vec<D> {
+        let mut v: Vec<D> = self
             .donor_refs
             .iter()
             .filter(|&(_, &n)| n > 0)
@@ -593,14 +622,14 @@ impl BlockPrefixIndex {
 
     /// Drop every entry pointing at `donor`, making it safe to `discard`.
     /// Returns the number of entries removed.
-    pub fn forget_donor(&mut self, donor: SessionHandle) -> usize {
+    pub fn forget_donor(&mut self, donor: D) -> usize {
         let before = self.by_hash.len();
         self.by_hash.retain(|_, e| e.donor != donor);
         self.donor_refs.remove(&donor);
         before - self.by_hash.len()
     }
 
-    fn release_donor(&mut self, donor: SessionHandle) {
+    fn release_donor(&mut self, donor: D) {
         if let Some(n) = self.donor_refs.get_mut(&donor) {
             *n = n.saturating_sub(1);
         }

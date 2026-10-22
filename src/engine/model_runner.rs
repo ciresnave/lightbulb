@@ -165,20 +165,28 @@ pub type SharedScheduler = std::sync::Arc<std::sync::Mutex<crate::engine::Memory
 pub const SCHEDULER_METRICS_LIVE: bool = true;
 
 /// Whether the active serving engine actually writes into `SharedCacheStats`
-/// (board PM ruling, 2026-10-22). Still `false`: `SharedCacheStats`
-/// (`PrefixCacheStats`: hits/misses/insertions/evictions/entries/size_bytes)
-/// models a PREFIX cache -- a concept the currently-wired
-/// `fuel_inference::multi_session::SessionScheduler` has none of (no prefix
-/// sharing; that is research track item 1's unwired territory, ROADMAP.md).
-/// Its own KV-pool counters (`kv_free_blocks`/`kv_capacity`/
-/// `kv_bytes_resident`, Fuel 0.20.64) answer a different question --
-/// capacity/occupancy, not hit/miss -- and mapping them onto
-/// `PrefixCacheStats`' fields would be exactly the "a never-written zero
-/// pass as a real idle reading" defect `SCHEDULER_AND_CACHE_METRICS_LIVE`
-/// was created to stop, just with a fabricated non-zero number instead of a
-/// zero. `cache_stats` stays honestly unavailable until prefix matching is
-/// actually wired to the live path.
-pub const CACHE_METRICS_LIVE: bool = false;
+/// (board PM ruling, 2026-10-22; flipped 2026-10-22, board PM task, once
+/// `ServingDriver` started recording real prefix detection). `hits`/
+/// `misses`/`insertions`/`entries`/`evictions` are real:
+/// `BlockPrefixIndexFor<SessionId>` (`src/model_fuel/scheduled_llama_engine.rs`)
+/// chain-hashes every admitted prompt and looks each new one up against it
+/// before recording it, exactly the algorithm `src/model_fuel/policies.rs`'s
+/// `BlockPrefixIndex` already proved correct for Fuel's block-pool
+/// `SessionHandle`, generalized off that type so this scheduler-level use
+/// (no live `KvBlockPool` session to key by) can share it.
+///
+/// **This is detection only, not exploitation.** A detected hit is NOT
+/// spliced into the donor's KV blocks and does NOT skip prefill — the
+/// currently-wired `fuel_inference::multi_session::SessionScheduler` has no
+/// splice concept; that needs `PagedSessionScheduler`
+/// (`add_session_sharing_prefix`/`register_prefix`), a different scheduler,
+/// out of scope for this slice. `CacheStatsResponse` never surfaces a
+/// "tokens saved" figure, so nothing here claims one — reporting a real hit
+/// rate without a real compute saving is an honest "we see the repeat but
+/// don't yet act on it," not the "never-written zero/fabricated non-zero
+/// passed off as a real reading" defect this flag's history already fixed
+/// twice.
+pub const CACHE_METRICS_LIVE: bool = true;
 
 /// Live count of inference jobs currently enqueued or in flight — the
 /// `/metrics` endpoint's queue-depth gauge (Phase 4 observability). Plain
@@ -272,17 +280,18 @@ impl ModelRunner {
     ///
     /// `scheduler` is mirrored by `ServingDriver`'s real admission/departure
     /// (`src/model_fuel/scheduled_llama_engine.rs`, `SCHEDULER_METRICS_LIVE`).
-    /// `cache_stats` is still accepted for signature compatibility and never
-    /// written: this path's scheduling (board item 97) has no prefix-cache
-    /// concept of its own today. See `CACHE_METRICS_LIVE`'s doc comment
-    /// above.
+    /// `cache_stats` is likewise mirrored now (2026-10-22, board PM task):
+    /// `ServingDriver`'s `BlockPrefixIndexFor<SessionId>` records every
+    /// admitted prompt's token prefix and detects repeats against it. See
+    /// `CACHE_METRICS_LIVE`'s doc comment for exactly what is and is not
+    /// real about that.
     pub fn start(
         model_path: impl Into<PathBuf>,
         max_batch_size: usize,
         context_length: usize,
         dtype: Option<String>,
         max_queue_depth: usize,
-        _cache_stats: SharedCacheStats,
+        cache_stats: SharedCacheStats,
         scheduler: SharedScheduler,
     ) -> Result<InferenceRequestSender> {
         let model_path = model_path.into();
@@ -331,6 +340,7 @@ impl ModelRunner {
                 context_length,
                 rx,
                 scheduler,
+                cache_stats,
             );
         });
 

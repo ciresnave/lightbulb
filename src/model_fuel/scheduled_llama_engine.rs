@@ -46,8 +46,11 @@ use fuel_transformers::models::lazy_quantized_qwen3::QuantizedQwen3Model;
 use fuel_inference::multi_session::{KvBudget, SchedulePolicy};
 
 use super::engine_model::effective_generation_budget;
+use super::policies::BlockPrefixIndexFor;
 use super::scheduler_driver::FuelSchedulerDriver;
-use crate::engine::model_runner::{InferenceJob, SharedScheduler, drain_with_error};
+use crate::engine::model_runner::{
+    InferenceJob, SharedCacheStats, SharedScheduler, drain_with_error,
+};
 use crate::engine::scheduled_runner::{
     AdmitError, FinishOutcome, SchedulerDriver, run_scheduled_jobs,
 };
@@ -96,11 +99,31 @@ enum ServingDriverInner<'m> {
 /// request id (`"session-{id}"`) submitted to the mirror, needed because
 /// `reap_finished` only gets the `SessionId` back, not the original
 /// request's own metadata.
+///
+/// `prefix_index`/`cache_stats` give `cache_stats` real DETECTION numbers
+/// (board PM task, 2026-10-22, ROADMAP research-track item 1 / FUEL-GAPS
+/// entry #1) — `BlockPrefixIndexFor<SessionId>` (the policy-level chain-hash
+/// index `src/model_fuel/policies.rs` already built and proved correct, now
+/// generalized off `fuel::kv_block_pool::SessionHandle` so a caller with no
+/// live `KvBlockPool` session can still use it) records every admitted
+/// prompt's token-level prefix and looks up each new one against it. **This
+/// is detection only, not exploitation**: a hit is NOT currently spliced
+/// into the donor's KV blocks or used to skip prefill — that needs
+/// `fuel_inference::multi_session::PagedSessionScheduler`
+/// (`add_session_sharing_prefix`/`register_prefix`), a different scheduler
+/// than `SessionScheduler`/`FuelSchedulerDriver` above, out of scope here.
+/// `hits`/`misses`/`insertions`/`entries` are therefore real; `evictions`
+/// counts real `forget_donor` calls (on departure, below); nothing here
+/// claims a `total_saved_tokens` figure — `CacheStatsResponse` never reads
+/// that field, and claiming it without an actual skipped prefill would be
+/// exactly the fabricated-number defect this project's conventions forbid.
 struct ServingDriver<'m> {
     inner: ServingDriverInner<'m>,
     context_length: usize,
     scheduler: SharedScheduler,
     sessions: std::collections::HashMap<fuel_inference::multi_session::SessionId, String>,
+    prefix_index: BlockPrefixIndexFor<fuel_inference::multi_session::SessionId>,
+    cache_stats: SharedCacheStats,
 }
 
 impl<'m> ServingDriver<'m> {
@@ -137,6 +160,16 @@ impl<'m> ServingDriver<'m> {
     /// queued it rather than allocating it -- freeing a slot that was
     /// never allocated would be a bug, not a no-op, so this checks first).
     fn mirror_departure(&mut self, id: fuel_inference::multi_session::SessionId) {
+        // Bounds the index's growth and gives `evictions` a real count — not
+        // a correctness requirement the way it is for `splice_prefix`'s
+        // actual pool callers (this index never gates a `KvBlockPool::
+        // discard`), just honest bookkeeping for a finished session.
+        if self.prefix_index.forget_donor(id) > 0 {
+            let entries = self.prefix_index.len();
+            let mut stats = self.cache_stats.lock().unwrap_or_else(|e| e.into_inner());
+            stats.evictions += 1;
+            stats.entries = entries;
+        }
         let Some(request_id) = self.sessions.remove(&id) else {
             return;
         };
@@ -147,6 +180,29 @@ impl<'m> ServingDriver<'m> {
             let mut scheduler = self.scheduler.lock().unwrap_or_else(|e| e.into_inner());
             let _ = scheduler.free_slot(slot_id);
         }
+    }
+
+    /// Detect whether `prompt` repeats an already-admitted prefix (real
+    /// chain-hash lookup, not exploited — see this struct's doc comment),
+    /// then index `prompt` itself under `id` so a LATER admission can be
+    /// detected against it. Mirrors the real `BlockPrefixStats` into
+    /// `SharedCacheStats` every time so `cache_stats` always reads the
+    /// latest real counts, the same immediate-write pattern
+    /// `mirror_admission`/`mirror_departure` already use for the scheduler.
+    fn detect_and_record_prefix(
+        &mut self,
+        id: fuel_inference::multi_session::SessionId,
+        prompt: &[u32],
+    ) {
+        let _hit = self.prefix_index.lookup(prompt);
+        self.prefix_index.record(prompt, id);
+        let block_stats = self.prefix_index.stats();
+        let entries = self.prefix_index.len();
+        let mut stats = self.cache_stats.lock().unwrap_or_else(|e| e.into_inner());
+        stats.hits = block_stats.hits;
+        stats.misses = block_stats.misses;
+        stats.insertions = block_stats.blocks_indexed;
+        stats.entries = entries;
     }
 }
 
@@ -183,6 +239,7 @@ impl<'m> SchedulerDriver for ServingDriver<'m> {
         };
         if let Ok(id) = admitted {
             self.mirror_admission(id, prompt, effective_max_new, temperature);
+            self.detect_and_record_prefix(id, prompt);
         }
         admitted
     }
@@ -234,10 +291,16 @@ struct BatchedServeConfig {
     policy: SchedulePolicy,
     budget: KvBudget,
     scheduler: SharedScheduler,
+    cache_stats: SharedCacheStats,
 }
 
 impl BatchedServeConfig {
-    fn new(max_batch_size: usize, context_length: usize, scheduler: SharedScheduler) -> Self {
+    fn new(
+        max_batch_size: usize,
+        context_length: usize,
+        scheduler: SharedScheduler,
+        cache_stats: SharedCacheStats,
+    ) -> Self {
         let max_batch_size = max_batch_size.max(1);
         Self {
             device: super::device::select(),
@@ -249,6 +312,7 @@ impl BatchedServeConfig {
                 num_blocks: max_batch_size * context_length.div_ceil(KV_BLOCK_SIZE),
             },
             scheduler,
+            cache_stats,
         }
     }
 }
@@ -283,6 +347,8 @@ fn run_batched<'m, M: fuel_inference::multi_session::DecodeModel>(
         context_length,
         scheduler: config.scheduler,
         sessions: std::collections::HashMap::new(),
+        prefix_index: BlockPrefixIndexFor::new(KV_BLOCK_SIZE),
+        cache_stats: config.cache_stats,
     };
     // `tokenizer.encode`/`.decode` each need their own `move` closure below,
     // and `Tokenizer` is not `Copy` — an `Arc` is what lets both closures
@@ -330,8 +396,9 @@ pub(crate) fn run_fuel_engine(
     context_length: usize,
     rx: Receiver<InferenceJob>,
     scheduler: SharedScheduler,
+    cache_stats: SharedCacheStats,
 ) {
-    let config = BatchedServeConfig::new(max_batch_size, context_length, scheduler);
+    let config = BatchedServeConfig::new(max_batch_size, context_length, scheduler, cache_stats);
     let is_gguf = model_path
         .extension()
         .is_some_and(|ext| ext.eq_ignore_ascii_case("gguf"));
@@ -453,6 +520,10 @@ fn load_failed(model_path: &Path, e: anyhow::Error, rx: Receiver<InferenceJob>) 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::{MemoryAwareConfig, MemoryAwareScheduler};
+    use fuel::lazy::LayerWeights;
+    use fuel_model_llama::{LlamaConfig, LlamaModel, LlamaWeights};
+    use std::sync::{Arc, Mutex};
 
     #[test]
     fn eos_ids_from_reads_through_none_and_single() {
@@ -468,6 +539,148 @@ mod tests {
         assert_eq!(
             eos_ids_from(Some(&LlamaEosToks::Multiple(vec![7, 8, 9]))),
             Some(vec![7, 8, 9])
+        );
+    }
+
+    // Mirrors `scheduler_driver.rs`'s own `tiny_cfg`/`tiny_weights`/
+    // `tiny_model` byte-for-byte (same seeded PRNG) -- kept local rather
+    // than shared, same reasoning that module gives for its own copy of
+    // fuel's `#[cfg(test)]`-private fixture: this file needs a real
+    // `ServingDriver` constructed with direct (private-field) access, which
+    // only a `#[cfg(test)] mod tests` inside THIS module can do.
+    fn tiny_cfg() -> LlamaConfig {
+        LlamaConfig {
+            vocab_size: 16,
+            dim: 8,
+            n_layers: 2,
+            n_heads: 2,
+            n_kv_heads: 2,
+            head_dim: 4,
+            ffn_dim: 16,
+            norm_eps: 1e-5,
+            rope_base: 10000.0,
+        }
+    }
+
+    fn tiny_weights(cfg: &LlamaConfig, seed: u32) -> LlamaWeights {
+        let mut s = seed;
+        let mut next = || {
+            s = s.wrapping_mul(1103515245).wrapping_add(12345);
+            ((s >> 16) as u16 as f32 / 65535.0 - 0.5) * 0.1
+        };
+        let mut vec_of =
+            |n: usize| -> Arc<[f32]> { Arc::from((0..n).map(|_| next()).collect::<Vec<_>>()) };
+        let kv = cfg.n_kv_heads * cfg.head_dim;
+        LlamaWeights {
+            instance: fuel::decode_shape::ModelInstanceId::next(),
+            token_embedding: vec_of(cfg.vocab_size * cfg.dim),
+            layers: (0..cfg.n_layers)
+                .map(|_| LayerWeights {
+                    attn_q: vec_of(cfg.dim * cfg.dim).into(),
+                    attn_q_bias: None,
+                    attn_k: vec_of(cfg.dim * kv).into(),
+                    attn_k_bias: None,
+                    attn_v: vec_of(cfg.dim * kv).into(),
+                    attn_v_bias: None,
+                    attn_o: vec_of(cfg.dim * cfg.dim).into(),
+                    ffn_gate: vec_of(cfg.dim * cfg.ffn_dim).into(),
+                    ffn_up: vec_of(cfg.dim * cfg.ffn_dim).into(),
+                    ffn_down: vec_of(cfg.ffn_dim * cfg.dim).into(),
+                    attn_norm_gain: Arc::from(vec![1.0; cfg.dim]),
+                    ffn_norm_gain: Arc::from(vec![1.0; cfg.dim]),
+                })
+                .collect(),
+            final_norm_gain: Arc::from(vec![1.0; cfg.dim]),
+            output: vec_of(cfg.dim * cfg.vocab_size).into(),
+        }
+    }
+
+    fn tiny_model(seed: u32) -> LlamaModel {
+        let cfg = tiny_cfg();
+        LlamaModel {
+            config: cfg.clone(),
+            weights: tiny_weights(&cfg, seed),
+        }
+    }
+
+    /// A real `ServingDriver` wrapping a real tiny `LlamaModel`, generous
+    /// enough on KV capacity that admission never fails for these tests'
+    /// short prompts -- the point is `try_admit`'s prefix-detection wiring,
+    /// not capacity edge cases (those belong to `scheduler_driver.rs`'s own
+    /// tests).
+    fn serving_driver(model: &LlamaModel) -> ServingDriver<'_> {
+        let fuel_scheduler = FuelSchedulerDriver::new(
+            model,
+            fuel::Device::cpu(),
+            fuel::DType::F32,
+            SchedulePolicy::RoundRobin,
+            KvBudget {
+                block_size: 2,
+                num_blocks: 4096,
+            },
+            None,
+        )
+        .expect("tiny model's uniform per-head KV must satisfy ModelDims::from_model");
+        ServingDriver {
+            inner: ServingDriverInner::F32(fuel_scheduler),
+            context_length: 4096,
+            scheduler: Arc::new(Mutex::new(MemoryAwareScheduler::new(
+                MemoryAwareConfig::default(),
+            ))),
+            sessions: std::collections::HashMap::new(),
+            prefix_index: BlockPrefixIndexFor::new(2),
+            cache_stats: Arc::new(Mutex::new(crate::cache::PrefixCacheStats::default())),
+        }
+    }
+
+    /// The test `detect_and_record_prefix` exists for: admitting the SAME
+    /// prompt twice must detect the second admission as a repeat (a real
+    /// `BlockPrefixIndexFor::lookup` hit), while a genuinely different
+    /// prompt must miss. If `try_admit`'s call into
+    /// `detect_and_record_prefix` were ever deleted, `hits` would stay `0`
+    /// and this test would fail -- the mutation this slice's board task
+    /// asked to be provable against.
+    #[test]
+    fn repeated_prefix_is_detected_as_a_real_hit_distinct_prompt_is_a_real_miss() {
+        let model = tiny_model(1);
+        let mut d = serving_driver(&model);
+
+        // Two whole blocks (block_size 2): long enough to be indexed.
+        let shared_prompt = [1u32, 2, 3, 4];
+        d.try_admit(&shared_prompt, 1, 0.0)
+            .expect("first admission must fit in the generous budget");
+        assert_eq!(
+            d.cache_stats.lock().unwrap().hits,
+            0,
+            "the FIRST admission of a prompt can never be a hit -- nothing was \
+             indexed yet when its own lookup ran"
+        );
+
+        // Same tokens again: must hit against the first admission's record.
+        d.try_admit(&shared_prompt, 1, 0.0)
+            .expect("second admission must also fit");
+        let stats_after_repeat = d.cache_stats.lock().unwrap().clone();
+        assert_eq!(
+            stats_after_repeat.hits, 1,
+            "repeating an already-admitted prompt must register a real hit"
+        );
+        assert!(
+            stats_after_repeat.entries >= 1,
+            "a real record must have been indexed: {stats_after_repeat:?}"
+        );
+
+        // A genuinely different prompt: must miss, not hit.
+        let distinct_prompt = [9u32, 10, 11, 12];
+        d.try_admit(&distinct_prompt, 1, 0.0)
+            .expect("third admission must also fit");
+        let stats_after_distinct = d.cache_stats.lock().unwrap().clone();
+        assert_eq!(
+            stats_after_distinct.hits, stats_after_repeat.hits,
+            "a distinct prompt must not be counted as a hit"
+        );
+        assert!(
+            stats_after_distinct.misses >= 1,
+            "a distinct prompt must register a real miss: {stats_after_distinct:?}"
         );
     }
 }
