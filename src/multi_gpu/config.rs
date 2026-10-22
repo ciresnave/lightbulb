@@ -1,6 +1,22 @@
 use crate::multi_gpu::topology::DeviceTopology;
 use anyhow::Result;
 
+/// Sharding strategy for tensor parallelism. Moved here from the deleted
+/// `tensor_parallel.rs` 2026-10-22 (candlelight removal, CireSnave: "Remove
+/// all dependencies on Candle and Candlelight..."): this enum itself was
+/// always candlelight-free, but the `TensorShard`/`ShardedLinear` types it
+/// shared a file with were not and had zero production callers (see
+/// `docs/FUEL-GAPS-FROM-CANDLE-REMOVAL.md`). Only the enum survives.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShardingStrategy {
+    /// Column-wise sharding (split along output dimension)
+    ColumnWise,
+    /// Row-wise sharding (split along input dimension)
+    RowWise,
+    /// Hybrid (column for some layers, row for others)
+    Hybrid,
+}
+
 /// Parallelism strategy for multi-GPU inference
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ParallelismMode {
@@ -71,7 +87,7 @@ pub struct MultiGPUConfig {
     pub topology: DeviceTopology,
 
     /// Sharding strategy for tensor parallelism
-    pub sharding_strategy: crate::multi_gpu::tensor_parallel::ShardingStrategy,
+    pub sharding_strategy: ShardingStrategy,
 
     /// Communication backend (NCCL, custom)
     pub communication_backend: CommunicationBackend,
@@ -101,7 +117,7 @@ impl MultiGPUConfig {
         Ok(Self {
             mode,
             topology,
-            sharding_strategy: crate::multi_gpu::tensor_parallel::ShardingStrategy::ColumnWise,
+            sharding_strategy: ShardingStrategy::ColumnWise,
             communication_backend: CommunicationBackend::Candle,
             distributed_kv_cache: true,
             load_balancing: LoadBalancingStrategy::MemoryAware,
@@ -137,7 +153,7 @@ impl MultiGPUConfig {
         Ok(Self {
             mode,
             topology,
-            sharding_strategy: crate::multi_gpu::tensor_parallel::ShardingStrategy::ColumnWise,
+            sharding_strategy: ShardingStrategy::ColumnWise,
             communication_backend: CommunicationBackend::Candle,
             distributed_kv_cache: true,
             load_balancing: LoadBalancingStrategy::MemoryAware,
@@ -209,7 +225,7 @@ mod tests {
         MultiGPUConfig {
             mode,
             topology: cpu_topology(gpus),
-            sharding_strategy: crate::multi_gpu::tensor_parallel::ShardingStrategy::ColumnWise,
+            sharding_strategy: ShardingStrategy::ColumnWise,
             communication_backend: CommunicationBackend::Candle,
             distributed_kv_cache: true,
             load_balancing: LoadBalancingStrategy::MemoryAware,

@@ -1,5 +1,59 @@
 # Changelog
 
+## 0.16.0
+
+### Breaking
+- **Removed the `candlelight` dependency entirely** (CireSnave, 2026-10-22, verbatim: "I've
+  got an easy solution for Lightbulb. Remove all dependencies on Candle and Candlelight and
+  then start fixing the errors that leaves."). The default, non-opt-in serving path is now
+  unconditionally Fuel-backed (`src/model_fuel/`) -- the `fuel-engine` feature flag that used
+  to select it is now a no-op kept only so existing callers (including CI) don't break.
+  Removed: `ParallelModelManager` and its 16 supporting `src/model/*.rs` files; `run_jobs`/
+  `EngineModel` and ~10 helper functions in `src/engine/model_runner.rs` (confirmed dead by
+  that file's own pre-removal comment: Fuel's path never called `run_jobs`); `AwqQwen3` +
+  Marlin kernels (`src/backend/marlin.rs`) + the whole `src/loaders/` module (zero production
+  callers -- `load_awq_llama` was never wired in); the `lora`, `pruning` (algorithm body --
+  `name_mapping` survives) and `quantization::norm_tweaking` modules (zero callers); the
+  Tensor-typed halves of `src/cache/{prefix_cache,tiered_storage}.rs` (the byte-level
+  `DiskStore`/plain `PrefixCacheConfig`/`PrefixCacheStats` survive -- real Fuel dependencies);
+  the entire `ParallelCacheBuilder`/`ParallelKvCache`/`kv_compression`/`tensor_codec` cluster
+  (confirmed superseded, not a gap -- `tests/parallel_kv_cache.rs`'s own pre-removal doc
+  comment already named Fuel's `kv_block_pool` as "a strict superset"); candlelight-typed
+  multi-GPU tensor/pipeline parallelism (zero callers, never wired to the 8 known multi-GPU
+  bail sites); `SpeculativeModel`/`SpeculativeDecoder` (zero callers; `SpeculativeConfig`/
+  `SpeculativeStats` survive). `src/gguf/mod.rs`'s `Value`/`TensorInfo`/`Content` repointed to
+  `fuel_loaders::quantized::gguf_file`'s API-compatible equivalents (confirmed field-for-field
+  match against candle-core 0.10.2's shapes) rather than deleted, since this is genuinely live
+  code (GGUF metadata introspection used throughout the test suite).
+  Deleted (not ported -- real porting work, not a mechanical swap, tracked as follow-up in
+  `docs/FUEL-GAPS-FROM-CANDLE-REMOVAL.md`): `tests/gguf_serving_census.rs`,
+  `tests/enhanced_correctness_tests.rs`, `tests/flash_attention_tests.rs`,
+  `tests/multi_gpu_validation.rs`, `tests/fused_rmsnorm_{perf,parity}.rs`, 30 of 34
+  `examples/*.rs`, the sole `[[bench]]` target. Fixed two silu/sigmoid tests in
+  `tests/kissref_differential.rs` that claimed to test "the real code path" -- true via
+  candlelight, no longer true now that the real path is `fuel::lazy::Tensor::silu()`
+  (`src/model_fuel/batched.rs:975`); kept the harness-self-test by swapping in plain f32 math.
+  Found and fixed along the way: `ModelRunner::start`'s Fuel implementation was still
+  `#[cfg(feature = "fuel-engine")]`-gated even though it is now the only implementation --
+  `src/api/mod.rs` calls it unconditionally, so the default (non-`fuel-engine`) build no longer
+  compiled until this was made unconditional too.
+  **Real capability gaps opened** (candlelight provided these; Fuel's live path does not, and
+  this is NOT a Lightbulb-side bug to fix -- see `docs/FUEL-GAPS-FROM-CANDLE-REMOVAL.md` for
+  the full writeup and routing): the `cache_stats`/`scheduler_stats`/`scheduler_queue` admin
+  endpoints silently go dark (M4 slices 5.4a-c's real admission/departure mirroring and
+  prefix-cache stats had no Fuel-side equivalent to move to); f16/bf16 dtype selection for
+  SafeTensors models (pre-existing Fuel limitation, no longer avoidable via the candlelight
+  fallback). AWQ quantized inference is recorded as likely-superseded-but-unverified: three
+  other portfolio projects (fuel, baracuda, mlmf) have their own quantization/Marlin code,
+  parity not yet checked from this side. The WSL2 AWQ reference-fixture methodology
+  (`scripts/awq_reference/`) is kept regardless -- it validates any AWQ implementation,
+  including whichever one (if any) eventually replaces this.
+  `cargo check --lib --tests --examples --benches --features fuel-engine`, `cargo fmt --check`,
+  `cargo test --tests` (CI's skip list), `cargo test --features fuel-engine --tests --no-run`,
+  `cargo doc --no-deps --lib`, `cargo metadata --locked`, and `python scripts/clippy_gate.py`
+  (baseline updated: 610 -> 289 diagnostics, a real drop from deleting ~40 files, not a
+  measurement artifact) are all clean.
+
 ## 0.15.0
 
 ### Fixed

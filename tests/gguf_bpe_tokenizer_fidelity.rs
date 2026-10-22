@@ -317,7 +317,7 @@ const CASES: &[&str] = &[
 /// Falls back to the single-pair variables when it is unset.
 /// The `tokenizer.ggml.pre` a GGUF declares, or `"<absent>"`.
 fn declared_pre(path: &str) -> String {
-    use candlelight::core::quantized::gguf_file::Value;
+    use lightbulb::gguf::Value;
     lightbulb::gguf::Content::read(path)
         .ok()
         .and_then(|c| match c.metadata().get("tokenizer.ggml.pre") {

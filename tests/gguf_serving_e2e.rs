@@ -86,7 +86,7 @@ const MISSING: &str = "no GGUF checkpoint. Set LIGHTBULB_GGUF to a .gguf file.";
 /// constants. Returns an empty string for a token the checkpoint does not
 /// declare, which is a real and correct answer rather than a failure to read.
 fn declared_special_tokens(path: &Path) -> (String, String) {
-    use candlelight::core::quantized::gguf_file::Value;
+    use lightbulb::gguf::Value;
     let content = lightbulb::gguf::Content::read(path).expect("reading the GGUF");
     let tokens: Vec<String> = match content.metadata().get("tokenizer.ggml.tokens") {
         Some(Value::Array(a)) => a
