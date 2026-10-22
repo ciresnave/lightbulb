@@ -883,25 +883,22 @@ must go green before this is closed.
 
 1. **3 of 13 weighted files refuse on an unrepresentable IQ/K-quant tensor
    dtype** (`SmolLM2-135M-Instruct-IQ3_XS/IQ4_XS/Q2_K.gguf`) —
-   **PARKED 2026-10-21, blocked on the migration to Fuel, not scoped as a
-   lightbulb-repo fix.** candlelight's vendored `candle-core` 0.10.2 (the
-   shipping default path) has a 15-code `GgmlDType` table
-   (`{0,1,2,3,6,7,8,9,10,11,12,13,14,15,30}`, read off `GgmlDType::from_u32`);
-   codes 16-29, the ENTIRE IQ codebook family (`IQ2_XXS/XS/S`, `IQ3_XXS/S`,
-   `IQ1_S/M`, `IQ4_NL`, `IQ3_S`, `IQ4_XS`, `IQ2_S`, `TQ1/2_0`), are missing
-   entirely — not a missing table entry, a missing dequantization kernel
-   family. Per `tests/gguf_dtype_census.rs`'s own prior analysis (corroborated
-   independently by the mlmf lane): these 3 files are 180-210 of 272 tensors
-   in an unsupported IQ dtype EACH (a mixed-precision K-quant export, most
-   layers IQ-coded despite the filename), not "one tensor." Closing this needs
-   real dequantization kernels in `candlelight`'s own `candle-core` fork (a
-   separate repo), the same class of work Fuel's own GAP-211 B2 just did for
-   Fuel's path (IQ2/IQ3/IQ1 decode, landed `0.20.14`) — not reusable here
-   directly, since lightbulb's shipping default is candlelight, not Fuel.
-   Lightbulb is migrating onto Fuel (see "Fuel dependency migration" above);
-   once that lands, this dtype gap is Fuel's problem to have already solved,
-   not a kernel this repo should write into a fork it is leaving. Writing IQ
-   kernels into candlelight now would be throwaway work.
+   **LIKELY RESOLVED 2026-10-22, NOT YET RE-MEASURED.** Both preconditions
+   this entry was parked on have landed: candlelight (the old blocker, whose
+   `candle-core` 0.10.2 fork had no IQ dequant kernels at all) was removed
+   entirely (PR #195, 2026-10-22) — Fuel is now the ONLY serving path, not an
+   alternative to migrate onto. And Fuel 0.20.61 (the crates.io migration,
+   same day) confirmed GAP-211 B1 widened `GgmlDType::from_u32`
+   (`fuel-ir/src/quantized.rs`) to accept the entire IQ family (codes 16-23,
+   29), TQ (34, 35), and MXFP4/NVFP4 (39, 40) — on top of GAP-211 B2's
+   decode-kernel work already landed at `0.20.14`. This is TABLE acceptance,
+   verified directly against the `fuel-ir`/`fuel-formats` 0.20.61 source, not
+   inferred from a changelog. **What is NOT yet verified**: whether the 3 real
+   corpus files above now actually LOAD end-to-end (table acceptance plus
+   decode-kernel coverage together, not just one or the other) — re-run
+   `tests/gguf_dtype_census.rs` against the real corpus
+   (`LIGHTBULB_GGUF_CORPUS`) to get the current true count before updating
+   this entry to CLOSED.
 2. **3 tokenizer-model types are never constructed at all** (`bert`/`t5`/
    `gemma`-family tokenizers) — a larger, separate undertaking: building new
    tokenizer-construction paths from scratch, not implementing a pre-tokenizer

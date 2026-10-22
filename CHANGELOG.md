@@ -1,5 +1,43 @@
 # Changelog
 
+## 0.16.1
+
+### Changed
+- **Moved the `fuel` dependency family off the git source onto crates.io** (Fuel 0.20.61, all
+  40 crates, published 2026-10-22; CireSnave's standing rule, CIRESNAVE-EXPECTATIONS §6.8: no
+  cross-repo deps by relative path/git where crates.io has them). `fuel`/`fuel-cpu-backend`/
+  `fuel-model-llama`/`fuel-transformers`/`fuel-loaders`/`fuel-ir`/`fuel-inference`/
+  `fuel-cuda-backend` all pinned to `"0.20.61"` by version. The main crate publishes under the
+  name `fuel` directly -- no `package = "fuel-core"` rename needed as it was for the git
+  source; crates.io's own `fuel-core` (v0.48.x) is the unrelated Fuel blockchain client and was
+  confirmed NOT accidentally pulled (checked `Cargo.lock`: no `fuel-core` entry anywhere).
+
+### Fixed
+- **Found and fixed a stale test while verifying the migration**:
+  `tests/chat_template_render.rs`'s `a_gguf_with_an_unsupported_tensor_dtype_falls_through_
+  and_says_why` pinned the OLD behavior -- a GGUF whose tensor directory names an unmodeled
+  quantization used to make the whole file unreadable (metadata included). Fuel 0.20.61
+  (GAP-211 B1) made `fuel_formats::gguf::Content::read` lenient: an unsupported tensor dtype is
+  now recorded and skipped rather than aborting the read, so metadata (including
+  `tokenizer.chat_template`) resolves normally regardless of what any individual tensor's dtype
+  is. Verified this is unconditional (not dtype-specific) with a deliberately-invalid dtype code
+  (`100`, never a valid GGML type). Renamed to
+  `a_gguf_with_an_unsupported_tensor_dtype_still_resolves_its_metadata` and rewritten to assert
+  the new (better) behavior. Also updated a stale comment in `src/gguf/mod.rs` asserting "the
+  IQ codebook family is rejected by candle AND by fuel", which this exact migration made false.
+  **Known follow-up, not done here**: GAP-211 also widened `GgmlDType::from_u32` to accept the
+  entire IQ family (codes 16-23, 29), TQ (34, 35), and MXFP4/NVFP4 (39, 40) -- the "3 of 13
+  weighted GGUF corpus files refuse on an unrepresentable dtype" figure in `HANDOFF.md`/
+  `ROADMAP.md` is now stale and needs re-measuring against the real corpus
+  (`tests/gguf_dtype_census.rs`), not assumed fixed.
+- `cargo audit`: unchanged from pre-migration (`h2`/`chacha20`/etc. findings are pre-existing,
+  confirmed by diffing `Cargo.lock` against `origin/main`'s, not introduced by this migration).
+
+Verified clean: `cargo check --lib --tests --examples --benches --features fuel-engine`,
+`cargo fmt --check`, `cargo test --tests` (CI's skip list), `cargo test --features fuel-engine
+--tests --no-run`, `cargo doc --no-deps --lib`, `cargo metadata --locked`, `python
+scripts/clippy_gate.py`.
+
 ## 0.16.0
 
 ### Breaking

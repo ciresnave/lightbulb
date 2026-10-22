@@ -2862,52 +2862,47 @@ fn a_gguf_without_a_template_falls_through_to_no_template() {
     assert_eq!(tk.eos, "");
 }
 
-/// Spec §7 row 2: a VALID GGUF with READABLE metadata that Fuel refuses to open
-/// over a tensor quantization it does not implement.
+/// Spec §7 row 2, UPDATED 2026-10-22 (Fuel 0.20.61 crates.io migration,
+/// GAP-211 B1): a VALID GGUF with READABLE metadata whose tensor directory
+/// names an unsupported quantization -- which no longer makes Fuel refuse to
+/// open the file at all.
 ///
-/// This is the row `1740582` added and the only one with no coverage before
-/// this test. It is reachable from the synthetic builder: give the file one
-/// tensor whose dtype code is `20` (`IQ4_NL`), which
-/// `GgmlDType::from_u32` (`fuel-ir/src/quantized.rs:35`, accepts only
-/// `{0,1,2,3,6..=15,30}`) rejects at `fuel-formats/src/gguf.rs:432-433` —
-/// AFTER the metadata block has already been parsed in full.
+/// This row originally pinned a refusal: candlelight's parser (removed PR
+/// #195) and the pre-migration git `fuel` rev both failed `Content::read`
+/// outright on hitting one tensor with an unmodeled `GgmlDType`, so METADATA
+/// became unreadable over a TENSOR-loading concern that had nothing to do
+/// with it. GAP-211 fixed this at the root: `fuel_formats::gguf::Content::
+/// read` (`fuel-formats/src/gguf.rs:522-526`) now records an unsupported
+/// tensor's raw dtype code and `continue`s rather than aborting the read, so
+/// the file opens and its metadata -- including `tokenizer.chat_template` --
+/// resolves normally regardless of what any individual tensor's dtype is.
+/// Verified empirically that this is unconditional, not dtype-specific:
+/// dtype code `100` (never a valid GGML type, let alone IQ4_NL's old `20`)
+/// resolves exactly the same way.
 ///
-/// Asserts the fall-through AND that the operator is told the real cause. A
-/// bare fall-through here would reproduce the §1 defect on every IQ-quantized
-/// model: a family guess with no end-of-turn marker, and a log line pointing
-/// at corruption that does not exist.
+/// So the behavior this row now pins is the opposite of before: a tensor
+/// dtype Fuel cannot model is NOT an operator-visible event at the metadata
+/// layer at all, because it no longer needs to be -- loading weights is a
+/// separate concern this resolution path never touches.
 #[test]
-fn a_gguf_with_an_unsupported_tensor_dtype_falls_through_and_says_why() {
+fn a_gguf_with_an_unsupported_tensor_dtype_still_resolves_its_metadata() {
     // `gguf_tensor_bytes` extends the builder with a tensor-info record:
     // name, u32 n_dims = 1, u64 dim = 1, u32 dtype code, u64 offset = 0.
+    // The dtype code is deliberately not a valid GGML type at all (not even
+    // one of the IQ/TQ/MXFP4 codes GAP-211 added) -- the point is that NO
+    // dtype code, valid or not, can make this fail any more.
     let p = gguf_fixture_with_tensor(
-        "gguf-iq4nl",
+        "gguf-unknown-dtype",
         &[("tokenizer.chat_template", Kv::Str("{{ eos_token }}"))],
-        ("blk.0.attn_q.weight", 20u32),
+        ("blk.0.attn_q.weight", 100u32),
     );
-    let logs = capture_logs(|| {
-        let t = lightbulb::api::chat_template::resolve(&p);
-        assert_eq!(
-            t.resolved_by,
-            Resolution::None,
-            "Fuel cannot open this file, so its template must not be reported as \
-             read; and this fixture's directory matches no family rule, so \
-             resolution runs off the end"
-        );
-    });
-    // The whole point of spec §7 row 2. A bare fall-through here is satisfied by
-    // an implementation that logs nothing, or that says "not a valid GGUF" —
-    // which is FALSE about this file and sends an operator hunting corruption
-    // that does not exist.
-    assert!(
-        logs.contains("quantization") && logs.contains("ggml type table"),
-        "the warn must name the real cause — a tensor quantization outside Fuel's \
-         type table — not merely fall through; got: {logs}"
-    );
-    assert!(
-        !logs.contains("not a valid GGUF"),
-        "this file IS a valid GGUF with readable metadata; saying otherwise is a \
-         false statement about the operator's file: {logs}"
+    let t = lightbulb::api::chat_template::resolve(&p);
+    assert_eq!(
+        t.resolved_by,
+        Resolution::GgufMetadata,
+        "an unmodeled tensor dtype must not prevent reading this file's own \
+         tokenizer.chat_template -- tensor loading and metadata reading are \
+         unrelated concerns as of GAP-211"
     );
 }
 
