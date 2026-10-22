@@ -56,6 +56,20 @@ admission matters to the production serving path; otherwise these three M4
 slices' work is dead on the shipping build starting now, which the PM/
 CireSnave should know explicitly rather than discover later.
 
+**Priority API shape — RESOLVED 2026-10-22: Option B stands, Option A withdrawn.** A same-day
+Option A ruling (top-level `priority` body field) was made without reading
+`docs/API-EXTENSIONS.md` first and is retracted; **Option B** (the `X-Lightbulb-Priority` header
+above, `low`/`normal`/`high`/`critical`, invalid values silently default — PM-ruled 2026-10-21,
+already implemented: `InferenceJob.priority`/`priority_from_headers` in
+`src/api/openai/chat.rs`/`src/engine/model_runner.rs`) is the governing answer. It's still dead on
+the live Fuel path per this entry's "Fuel today" line, same as everything else here — nothing is
+shipped-and-wrong, there was just briefly a second, wrong answer on record. Once the add-to-Fuel
+decision above is made, Option B plumbs to a new Fuel-side `set_priority` hook once Fuel publishes
+a version carrying it; **Fuel's ordering hook stays parked until lightbulb holds a consumer for
+it** — tell the Fuel lane once this is plumbed. Not started: this needs the add-to-Fuel decision
+above made first
+(there is nothing in Fuel yet to plumb to), then Fuel's crates.io publish.
+
 ### 3. Dtype selection (f16/bf16) for SafeTensors models
 **What it was:** `ModelRunner::start`'s `dtype` parameter, honored by the
 candlelight path to load weights as f16/bf16 for memory/speed.

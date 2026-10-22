@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.17.2
+
+### Fixed
+- **ROADMAP.md's M4 slice 5.4c still described plumbing into `admit_pending`/`run_jobs`**, the
+  candlelight-era path deleted entirely in #195 — corrected in place: that plumbing target is
+  gone regardless of API shape.
+- **Found while fixing the above (Sourcery, this PR): two conflicting PM rulings on 5.4c's
+  priority API shape.** `docs/API-EXTENSIONS.md` documents Option B (the `X-Lightbulb-Priority`
+  header, already implemented) per a 2026-10-21 ruling; this PR's own first draft recorded
+  Option A (a top-level `priority` body field) per a same-day 2026-10-22 ruling made without
+  reading `docs/API-EXTENSIONS.md` first. **RESOLVED 2026-10-22: Option B stands, Option A
+  withdrawn.** `docs/FUEL-GAPS-FROM-CANDLE-REMOVAL.md` entry #2 and `ROADMAP.md`'s 5.4c note now
+  say so. Neither option is wired to the live Fuel path, so nothing shipped was ever wrong.
+  Docs only, no code changed.
+
 ## 0.17.1
 
 ### Fixed
