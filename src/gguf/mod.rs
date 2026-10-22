@@ -26,7 +26,7 @@ use std::sync::Arc;
 pub use parser::{GGUFHeader, MetadataValue, TensorInfo as LightningTensorInfo};
 
 // Re-export types from Candle for compatibility
-pub use candlelight::core::quantized::gguf_file::{TensorInfo, Value};
+pub use fuel_loaders::quantized::gguf_file::{TensorInfo, Value};
 
 /// Memory-mapped GGUF file content with zero-copy tensor access
 ///
@@ -66,7 +66,7 @@ pub struct Content {
     ///
     /// It is needed only to LOAD TENSORS. Everything metadata-shaped is served
     /// from `header`, which our own parser produced before this was attempted.
-    candle_content: Option<candlelight::core::quantized::gguf_file::Content>,
+    candle_content: Option<fuel_loaders::quantized::gguf_file::Content>,
 
     /// Why candle refused, when it did. Carried so the error names the real
     /// cause at the point of use rather than "unavailable".
@@ -293,7 +293,7 @@ impl Content {
         // it cannot type is a file whose tensors it could not have loaded.
         let mut file = File::open(path)?;
         let (candle_content, candle_refusal) =
-            match candlelight::core::quantized::gguf_file::Content::read(&mut file) {
+            match fuel_loaders::quantized::gguf_file::Content::read(&mut file) {
                 Ok(c) => (Some(c), None),
                 Err(e) => (None, Some(e.to_string())),
             };
@@ -1383,44 +1383,6 @@ impl Content {
 
         // Return zero-copy slice
         Ok(&self.mmap[start..end])
-    }
-
-    /// Load a quantized tensor by name from the GGUF file
-    ///
-    /// This is the key method for loading quantized model weights! It reads the tensor
-    /// data from the memory-mapped file and returns a QTensor ready for use with QMatMul.
-    ///
-    /// # Arguments
-    /// * `reader` - A readable file handle (must be the same file that was memory-mapped)
-    /// * `name` - Tensor name (e.g., "blk.0.attn_q.weight")
-    /// * `device` - Device to load tensor on (CPU/CUDA)
-    ///
-    /// # Returns
-    /// A QTensor containing the quantized weights
-    ///
-    /// # Example
-    /// ```ignore
-    /// let mut file = File::open("model.gguf")?;
-    /// let content = gguf::Content::read("model.gguf")?;
-    /// let q_tensor = content.tensor(&mut file, "blk.0.attn_q.weight", &device)?;
-    /// let qmatmul = QMatMul::from_qtensor(q_tensor)?;
-    /// ```
-    pub fn tensor<R: std::io::Seek + std::io::Read>(
-        &self,
-        reader: &mut R,
-        name: &str,
-        device: &candlelight::core::Device,
-    ) -> candlelight::core::Result<candlelight::core::quantized::QTensor> {
-        // Delegate to Candle's proven tensor loading logic.
-        match &self.candle_content {
-            Some(c) => c.tensor(reader, name, device),
-            None => Err(candlelight::core::Error::Msg(format!(
-                "cannot load tensor {name:?}: {}",
-                self.candle_refusal
-                    .as_deref()
-                    .unwrap_or("candle refused this file")
-            ))),
-        }
     }
 }
 

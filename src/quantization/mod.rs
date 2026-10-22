@@ -48,7 +48,6 @@
 //! ```
 
 pub mod gguf_ops;
-pub mod norm_tweaking;
 
 // Re-export commonly used types from ggml-quants
 pub use ggml_quants::{
@@ -56,10 +55,8 @@ pub use ggml_quants::{
     bf16, f16,
 };
 
-// Re-export Norm Tweaking types
-pub use norm_tweaking::{
-    LayerAdjustments, LayerStats, NormTweaker, NormTweakingConfig, apply_norm_tweaking,
-};
+// Norm Tweaking removed 2026-10-22 (candlelight removal): Tensor-typed,
+// zero external callers. See docs/FUEL-GAPS-FROM-CANDLE-REMOVAL.md.
 
 use anyhow::Result;
 

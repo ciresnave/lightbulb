@@ -84,7 +84,7 @@ pub use slot_pool::{
     CompletedToken, Request as SlotPoolRequest, RequestId, SlotId, SlotPool, SlotPoolError,
     SlotPoolStats, SlotState,
 };
-pub use speculative::{SpeculativeConfig, SpeculativeDecoder, SpeculativeModel, SpeculativeStats};
+pub use speculative::{SpeculativeConfig, SpeculativeStats};
 pub use state_persistence::{
     CheckpointId, CheckpointManager, CheckpointMetadata, InferenceCheckpoint,
     KnowledgeBaseSnapshot, KvCacheSnapshot, PipelineSnapshot, create_checkpoint,
@@ -326,7 +326,5 @@ impl BatchAssembler {
     }
 }
 
-// Re-export cache types for direct use throughout the codebase
-pub use crate::cache::parallel_cache_builder::{
-    IndicesAndMask, ParallelCacheBuilder, ParallelKvCache,
-};
+// `ParallelCacheBuilder`/`ParallelKvCache`/`IndicesAndMask` removed 2026-10-22
+// (candlelight removal) -- see docs/FUEL-GAPS-FROM-CANDLE-REMOVAL.md.

@@ -23,7 +23,6 @@
 //! evaluation and errors on structural or tensor ops. Tensor and subgraph
 //! (`eval_recipe`) differentials are the tier-1 work and land separately.
 
-use candlelight::core::{Device, Tensor};
 use kiss_ops_vocab::Op;
 use kiss_ref_core::{
     DetClass, FlatDag, Monoid, Node, Tolerance, diff_f32, eval_recipe, reference_f32,
@@ -126,42 +125,16 @@ fn assert_matches_reference(op: Op, inputs: &[f32], candidate: &[f32], tol: Tole
     }
 }
 
-/// SiLU (x * sigmoid(x)) is the activation in Lightbulb's MLP path
-/// (`candlelight::nn::ops::silu`), so this is a real code path rather than a
-/// synthetic one.
-#[test]
-fn silu_matches_kiss_ref() -> anyhow::Result<()> {
-    let inputs = activation_probe_values();
-    let device = Device::Cpu;
-
-    // Lightbulb's actual path: the same `silu` its MLP layers call.
-    let t = Tensor::new(inputs.as_slice(), &device)?;
-    let candidate = candlelight::nn::ops::silu(&t)?.to_vec1::<f32>()?;
-
-    assert_eq!(candidate.len(), inputs.len(), "silu changed element count");
-
-    // SiLU declares no §6.8 ceiling (it is a non-primitive), so the bound is
-    // DERIVED from the transcendental it decomposes through: sigmoid → exp.
-    // Not a guessed 4 — exp's own declared ceiling.
-    assert_matches_reference(Op::Silu, &inputs, &candidate, tolerance_via(Op::Exp));
-    Ok(())
-}
-
-/// Sigmoid on its own — isolates whether any SiLU disagreement comes from the
-/// sigmoid or from the multiply.
-#[test]
-fn sigmoid_matches_kiss_ref() -> anyhow::Result<()> {
-    let inputs = activation_probe_values();
-    let device = Device::Cpu;
-
-    let t = Tensor::new(inputs.as_slice(), &device)?;
-    // sigmoid(x) = 1 / (1 + exp(-x)), via Candle's own ops.
-    let candidate = candlelight::nn::ops::sigmoid(&t)?.to_vec1::<f32>()?;
-
-    // Same derivation: sigmoid(x) = 1/(1+exp(-x)), so exp grounds the bound.
-    assert_matches_reference(Op::Sigmoid, &inputs, &candidate, tolerance_via(Op::Exp));
-    Ok(())
-}
+// `silu_matches_kiss_ref`/`sigmoid_matches_kiss_ref` removed 2026-10-22
+// (candlelight removal, CireSnave: "Remove all dependencies on Candle and
+// Candlelight..."): both claimed to test "the real code path" Lightbulb's
+// MLP layers call, via candlelight::nn::ops::{silu,sigmoid}. That stopped
+// being true once ParallelModelManager (candlelight's serving path) was
+// removed in the same pass -- the real path is now fuel::lazy::Tensor's
+// `.silu()` (src/model_fuel/batched.rs:975), a lazy-eval API this test
+// would need to learn to drive. Re-deriving these against Fuel's real
+// activation path is real porting work, not a mechanical swap -- see
+// docs/FUEL-GAPS-FROM-CANDLE-REMOVAL.md.
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Tier 1: subgraph recipes.
@@ -272,72 +245,16 @@ fn rmsnorm_probe_input() -> (Vec<f32>, usize, usize) {
     (x, rows, d)
 }
 
-#[test]
-fn rmsnorm_fragment_matches_kiss_ref_recipe() -> anyhow::Result<()> {
-    use lightbulb::model::fused_rmsnorm::FusedRmsNorm;
-
-    let (x_data, rows, d) = rmsnorm_probe_input();
-    let w_data: Vec<f32> = vec![1.0, 0.5, 2.0, -1.0, 0.25, 1.5, -0.5, 3.0];
-    let eps = 1e-5_f64;
-    let device = Device::Cpu;
-
-    // ---- Lightbulb: its actual RMSNorm path ----
-    let x = Tensor::from_vec(x_data.clone(), (rows, d), &device)?;
-    let w = Tensor::from_vec(w_data.clone(), d, &device)?;
-    let norm = FusedRmsNorm::new_with_weight(w, eps);
-    let candidate = norm.forward(&x)?.flatten_all()?.to_vec1::<f32>()?;
-
-    // ---- kiss-ref: the same fragment as a recipe ----
-    let dag = rmsnorm_recipe();
-    let kx = kiss_ref_core::Tensor::from_vec(x_data, &[rows, d])
-        .map_err(|e| anyhow::anyhow!("kiss-ref input tensor: {e:?}"))?;
-    let kw = kiss_ref_core::Tensor::from_vec(w_data, &[d])
-        .map_err(|e| anyhow::anyhow!("kiss-ref weight tensor: {e:?}"))?;
-    let evaluated = eval_recipe::<f32>(&dag, &[kx, kw], &[eps as f32], &[])
-        .map_err(|e| anyhow::anyhow!("eval_recipe: {e:?}"))?;
-    let reference = evaluated.outputs[0].as_slice();
-
-    assert_eq!(
-        candidate.len(),
-        reference.len(),
-        "element count differs — the recipe's shape does not match Lightbulb's output"
-    );
-
-    // The root carries a Sum reduction, so it is nondeterministic by kiss-ref's
-    // own classification: tolerance-compare, never bit-compare.
-    let root_det = evaluated.dets[10];
-    assert!(
-        !matches!(root_det, DetClass::ExactByte),
-        "root unexpectedly ExactByte ({root_det:?}) — if kiss-ref now classifies \
-         this fragment as exact, the comparison below is weaker than it could be"
-    );
-
-    let mut worst = 0.0_f32;
-    let mut detail = String::new();
-    for (i, (&r, &c)) in reference.iter().zip(&candidate).enumerate() {
-        let denom = r.abs().max(1e-30);
-        let rel = (r - c).abs() / denom;
-        if rel > worst {
-            worst = rel;
-        }
-        if rel > 1e-5 {
-            detail.push_str(&format!(
-                "\n  [{i}] kiss-ref={r:e}  lightbulb={c:e}  rel={rel:e}"
-            ));
-        }
-    }
-
-    assert!(
-        detail.is_empty(),
-        "RMSNorm fragment disagrees with the kiss-ref recipe (worst rel {worst:e}).\n\
-         kiss-ref is a differential target, not a verdict — determine which side is wrong.{detail}"
-    );
-    Ok(())
-}
+// `rmsnorm_fragment_matches_kiss_ref_recipe` removed 2026-10-22
+// (candlelight removal): same reason, same file. See
+// docs/FUEL-GAPS-FROM-CANDLE-REMOVAL.md.
 
 /// Control for the recipe path. A recipe that silently evaluated to the wrong
-/// shape, or a comparison that never actually compared, would make the test
-/// above pass for the wrong reason.
+/// shape, or a comparison that never actually compared, would make a
+/// recipe-vs-candlelight comparison pass for the wrong reason -- that
+/// comparison (`rmsnorm_fragment_matches_kiss_ref_recipe`) was removed
+/// 2026-10-22 (candlelight removal), but this control, which checks the
+/// kiss-ref recipe path on its own, still has independent value.
 #[test]
 fn recipe_harness_detects_a_wrong_candidate() -> anyhow::Result<()> {
     let (x_data, rows, d) = rmsnorm_probe_input();
@@ -377,10 +294,11 @@ fn recipe_harness_detects_a_wrong_candidate() -> anyhow::Result<()> {
 #[test]
 fn harness_detects_a_wrong_candidate() -> anyhow::Result<()> {
     let inputs = activation_probe_values();
-    let device = Device::Cpu;
 
-    let t = Tensor::new(inputs.as_slice(), &device)?;
-    let mut candidate = candlelight::nn::ops::silu(&t)?.to_vec1::<f32>()?;
+    // A plain f32 computation of SiLU stands in for "a real candidate" here --
+    // this test's whole point is that the HARNESS catches corruption, not that
+    // this value matches anything Lightbulb runs. silu(x) = x * sigmoid(x).
+    let mut candidate: Vec<f32> = inputs.iter().map(|&x| x / (1.0 + (-x).exp())).collect();
 
     // Perturb one entry well beyond any plausible ULP tolerance.
     candidate[5] += 1.0;
@@ -418,66 +336,13 @@ fn declared_ceilings_are_what_we_think() {
     // declared_tolerance() is for ops that declare a ceiling.
     assert_eq!(declared_tolerance(Op::Sqrt), Tolerance::Ulp(2));
     // For the non-primitives the bound is derived from the atom they decompose
-    // through, which is what the SiLU/sigmoid tests above actually use.
+    // through (e.g. SiLU/sigmoid via exp).
     assert_eq!(tolerance_via(Op::Exp), Tolerance::Ulp(4));
 }
 
-/// NaN as a **structural tracer**: which inputs influence which outputs?
-///
-/// This is the sharpest tier-1 test in the file, and it checks something the
-/// value comparison cannot. RMSNorm reduces over the feature axis *within a
-/// row*, so a NaN in row 0 must contaminate **exactly row 0's outputs** and
-/// leave row 1 untouched. If either implementation reduced over the wrong axis,
-/// or broadcast the reciprocal-RMS across the wrong dimension, the NaN would
-/// spread to a different set of positions — while ordinary finite inputs would
-/// still produce plausible-looking numbers that a tolerance check might pass.
-///
-/// A wrong-axis reduction is precisely the graph-construction bug tier 1 exists
-/// to catch, and NaN propagation makes it visible as a *pattern* rather than a
-/// magnitude.
-#[test]
-fn nan_contamination_pattern_matches_kiss_ref() -> anyhow::Result<()> {
-    use lightbulb::model::fused_rmsnorm::FusedRmsNorm;
-
-    let (mut x_data, rows, d) = rmsnorm_probe_input();
-    // One NaN, in row 0 only.
-    x_data[2] = f32::NAN;
-
-    let w_data: Vec<f32> = vec![1.0, 0.5, 2.0, -1.0, 0.25, 1.5, -0.5, 3.0];
-    let eps = 1e-5_f64;
-    let device = Device::Cpu;
-
-    let x = Tensor::from_vec(x_data.clone(), (rows, d), &device)?;
-    let w = Tensor::from_vec(w_data.clone(), d, &device)?;
-    let candidate = FusedRmsNorm::new_with_weight(w, eps)
-        .forward(&x)?
-        .flatten_all()?
-        .to_vec1::<f32>()?;
-
-    let dag = rmsnorm_recipe();
-    let kx = kiss_ref_core::Tensor::from_vec(x_data, &[rows, d])
-        .map_err(|e| anyhow::anyhow!("{e:?}"))?;
-    let kw = kiss_ref_core::Tensor::from_vec(w_data, &[d]).map_err(|e| anyhow::anyhow!("{e:?}"))?;
-    let evaluated = eval_recipe::<f32>(&dag, &[kx, kw], &[eps as f32], &[])
-        .map_err(|e| anyhow::anyhow!("{e:?}"))?;
-    let reference = evaluated.outputs[0].as_slice();
-
-    let cand_nan: Vec<bool> = candidate.iter().map(|v| v.is_nan()).collect();
-    let ref_nan: Vec<bool> = reference.iter().map(|v| v.is_nan()).collect();
-
-    assert_eq!(
-        cand_nan, ref_nan,
-        "NaN contamination pattern differs — one side reduces or broadcasts over a          different axis.
-  lightbulb: {cand_nan:?}
-  kiss-ref:  {ref_nan:?}"
-    );
-
-    // And pin the expectation itself, so agreeing-but-both-wrong is caught:
-    // row 0 fully contaminated, row 1 entirely clean.
-    let expected: Vec<bool> = (0..rows * d).map(|i| i < d).collect();
-    assert_eq!(
-        cand_nan, expected,
-        "both implementations agree, but not with RMSNorm's semantics — a NaN in          row 0 must contaminate exactly row 0 (per-row feature reduction)"
-    );
-    Ok(())
-}
+// `nan_contamination_pattern_matches_kiss_ref` (NaN as a structural tracer: which inputs influence which outputs) removed 2026-10-22
+// (candlelight removal): used the now-deleted `lightbulb::model::
+// fused_rmsnorm::FusedRmsNorm`. Re-derive against Fuel's RMSNorm
+// (`model_fuel::batched::affine_rms_norm`) if this NaN-propagation
+// structural check is still wanted -- see
+// docs/FUEL-GAPS-FROM-CANDLE-REMOVAL.md.
