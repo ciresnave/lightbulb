@@ -155,6 +155,45 @@ pub fn describe() -> String {
     }
 }
 
+/// The AWQ checkpoint AWQ slice 2 (`ROADMAP.md`'s "AWQ loader wiring: slice plan") proves
+/// correctness end-to-end against. A different repo from [`tinyllama_dir`]'s, so it gets its
+/// own resolver rather than overloading one name for two unrelated checkpoints.
+pub const AWQ_MODEL_REPO: &str = "Orion-zhen/Qwen3-0.6B-AWQ";
+
+/// The base model AWQ slice 2's AWQ checkpoint quantizes, for the licence this repo's
+/// provenance obligations require recording alongside the AWQ repo's own (gpl-3.0): the base
+/// model is apache-2.0 (`Qwen/Qwen3-0.6B`, checked 2026-10-22). `Orion-zhen/Qwen3-0.6B-AWQ`
+/// itself ships `license: gpl-3.0` in its own `config.json`/README metadata.
+pub const AWQ_BASE_MODEL_REPO: &str = "Qwen/Qwen3-0.6B";
+
+/// The commit AWQ slice 2's recorded measurements were taken against — the HEAD of
+/// `Orion-zhen/Qwen3-0.6B-AWQ`'s `main` branch as of 2026-10-22 (`curl -s
+/// https://huggingface.co/api/models/Orion-zhen/Qwen3-0.6B-AWQ` -> `.sha`). The repo carries no
+/// tagged release, so this is the only stable way to say which weights a measurement used.
+pub const AWQ_PINNED_REVISION: &str = "9f607bee5fca19cba0bd2b383ba804c89385ea18";
+
+/// The checkpoint directory for AWQ slice 2's target model.
+///
+/// Resolution order, mirroring [`tinyllama_dir_with`] minus the HuggingFace-cache tier (this
+/// checkpoint is fetched with `hf download --local-dir`, not through the cache, so there is no
+/// snapshot-revision directory structure to search):
+/// 1. `$LIGHTBULB_AWQ_MODEL_DIR` -- explicit, wins.
+/// 2. The portfolio models chain (`models_root`, private to this module), joined with
+///    `AWQ_MODEL_DIR_NAME`.
+pub const AWQ_MODEL_DIR_NAME: &str = "Qwen3-0.6B-AWQ";
+
+pub fn awq_qwen3_dir() -> Option<PathBuf> {
+    let has = |p: &PathBuf| p.join(WEIGHTS_SENTINEL).is_file();
+
+    if let Some(v) = std::env::var_os("LIGHTBULB_AWQ_MODEL_DIR") {
+        let p = PathBuf::from(v);
+        return has(&p).then_some(p);
+    }
+
+    let chained = models_root().join(AWQ_MODEL_DIR_NAME);
+    has(&chained).then_some(chained)
+}
+
 /// A tiny synthetic Llama-shaped checkpoint generator -- for `#[cfg(test)]`
 /// unit tests under `src/` that need a loadable checkpoint but not correct
 /// trained values. See `docs/CHECKPOINT_FIXTURE_FEASIBILITY.md`.

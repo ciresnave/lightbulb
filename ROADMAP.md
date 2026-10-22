@@ -1374,17 +1374,41 @@ None of this is a stub.
    checkpoint still loads via `LmHead::Quantized` (regression coverage for the pre-existing
    path), and a checkpoint naming neither case refuses with a clear message rather than
    guessing. CPU-only, no GPU/corpus dependency, runs in the ordinary `cargo test --lib`.
-2. **Slice 2 — prove correctness end-to-end, not in the real server.** Wire
-   `load_awq_llama`/`AwqQwen3::forward` into a minimal, single-request, non-batched path (e.g.
-   a dedicated test or a small binary in the shape of `lightbulb-probe`), load the real
-   `Orion-zhen/Qwen3-0.6B-AWQ` checkpoint (revision pinned, licence + the Qwen3 base model's
-   licence recorded) on this box's one GPU, generate a short completion, and compare
-   token-for-token against a pinned reference implementation (e.g. HuggingFace `transformers` +
-   `autoawq`, versions pinned) — a third-party quantizer's own output is a claim until this
-   comparison passes, not ground truth. Written WITHOUT `#[ignore]` (same pattern as the two
-   existing checkpoint-needing tests in `model_runner.rs`/`parallel_model_manager.rs`): hosted
-   CI's `gates` job `--skip`s it by name as an interim measure pending a self-hosted GPU
-   runner, per CireSnave's 2026-10-16 ruling. Not started.
+2. **Slice 2 — prove correctness end-to-end, not in the real server. PART 1 DONE, PART 2
+   BLOCKED on a Windows packaging gap.**
+   Part 1 (done): loading `Orion-zhen/Qwen3-0.6B-AWQ` for real (checkpoint downloaded, revision
+   pinned to `9f607bee5fca19cba0bd2b383ba804c89385ea18` -- no tagged release, so this is the
+   HEAD of `main` as of 2026-10-22; licence `gpl-3.0`, base model `Qwen/Qwen3-0.6B` licence
+   `apache-2.0`, both recorded in `src/test_models.rs`) surfaced a SECOND structural bug past
+   slice 1's tied-embedding fix: `Qwen3RotaryEmbedding::new`/`Qwen3AwqAttention::new` both
+   computed `head_dim = hidden_size / num_attention_heads` directly (64 for this checkpoint),
+   but its `config.json` sets `head_dim: 128` explicitly -- true of every real Qwen3 dense
+   model, independent of that ratio (same fact `fuel_transformers`' GGUF Qwen3 reader already
+   respects, reading `qwen3.attention.key_length` rather than deriving it). Fixed: `Qwen3Config`
+   gained `head_dim: Option<usize>` + `effective_head_dim()`; every call site uses it now.
+   Red-first, synthetic `VarBuilder` fixture (`head_dim: Some(256)` against a config whose
+   formula gives 64, CPU-only): failed pre-fix (`"Failed to load q_proj: Failed to load
+   qweight"`), passes after.
+   Part 2 (blocked, not started): the actual generate-and-compare-token-for-token-against-a-
+   pinned-reference-implementation step. `pip install autoawq==0.2.9` has no prebuilt wheel for
+   Windows + Python 3.12 and falls back to a from-source build; its `triton` dependency has no
+   Windows wheel on PyPI at all (`triton-windows`, a community port, satisfies the import but
+   not pip's dependency resolution, since it is a differently-named package). Options sized but
+   not chosen, PM input wanted: (a) build autoawq's CUDA extension from source on this box
+   (uncertain, slow, fights an MSVC/nvcc toolchain that is already fragile here per HANDOFF's
+   CUDA 13.3 note); (b) stand up WSL2 with CUDA passthrough for the reference step only (this
+   box has a stopped Alpine WSL distro and a running `docker-desktop` one already using GPU
+   passthrough, suggesting it's feasible, but is new infrastructure); (c) skip autoawq
+   entirely and dequantize the AWQ tensors ourselves (pure Python/NumPy, no CUDA kernel) into
+   an ordinary fp16 checkpoint, then compare against vanilla (unquantized) HF `transformers` --
+   this changes what the comparison validates, from "matches an independent quantizer's own
+   kernel" to "matches our own dequantization math against unquantized HF inference", which is
+   a real design trade worth a second opinion rather than a unilateral pick. Each hour spent
+   here is an hour not spent elsewhere, so this is parked pending PM direction rather than
+   guessed at. WITHOUT `#[ignore]` once written (same pattern as the two existing
+   checkpoint-needing tests in `model_runner.rs`/`parallel_model_manager.rs`): hosted CI's
+   `gates` job `--skip`s it by name as an interim measure pending a self-hosted GPU runner, per
+   CireSnave's 2026-10-16 ruling.
 3. **Slice 3 — wire into the real serving engine.** Only after slice 2 proves the loader and
    model are correct end-to-end: either (a) give `AwqQwen3` a batched, per-slot-cache forward
    path matching `BatchedTransformer`'s shape, or (b) run AWQ models through a separate,
