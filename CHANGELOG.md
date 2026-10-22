@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.17.0
+
+### Changed
+- **BREAKING: `cache_stats`/`scheduler_stats`/`scheduler_queue` report a typed
+  `{"status":"live"|"unavailable_on_backend","value"?}` for every field that depends on the
+  shared `SharedCacheStats`/`SharedScheduler` handles, instead of a raw number/`null`.** Fuel's
+  `ModelRunner::start` never writes either handle (`docs/FUEL-GAPS-FROM-CANDLE-REMOVAL.md` gaps
+  #1/#2) — now that Fuel is the sole serving path (PR #195), those endpoints were reporting a
+  permanently-stale construction-time zero as if it were a genuine idle reading, which the
+  gaps doc itself flagged as worse than the state before candlelight's removal. Affected
+  fields: `cache_stats`'s `total_entries`/`total_size_bytes`/`hit_rate`/`eviction_count`;
+  `scheduler_queue`'s `pending_requests`/`running_requests`; `scheduler_stats`'s
+  `active_slots`/`queued_requests`/`scheduler_memory_used_bytes`/`eviction_pressure`. All
+  report `unavailable_on_backend` today. Gated on a single new constant,
+  `model_runner::SCHEDULER_AND_CACHE_METRICS_LIVE` (currently `false`) — flip it, and wire the
+  handles, once Fuel's own admission/cache-counter mechanisms publish (cache counters 0.20.64,
+  scheduler stats 0.20.65) and this shape goes live without further endpoint changes.
+  `memory_usage_bytes` (system memory, unrelated to either handle) is unaffected.
+
 ## 0.16.5
 
 ### Fixed

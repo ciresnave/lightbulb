@@ -153,6 +153,21 @@ pub type SharedCacheStats = std::sync::Arc<std::sync::Mutex<crate::cache::Prefix
 /// empty scheduler. See `docs/FUEL-GAPS-FROM-CANDLE-REMOVAL.md`.
 pub type SharedScheduler = std::sync::Arc<std::sync::Mutex<crate::engine::MemoryAwareScheduler>>;
 
+/// Whether the active serving engine actually writes into `SharedCacheStats`/
+/// `SharedScheduler` (board PM ruling, 2026-10-22, after the two GAP notes
+/// above). `false` today because Fuel's `ModelRunner::start` never calls into
+/// either handle -- the admin endpoints that read them (`cache_stats`,
+/// `scheduler_stats`, `scheduler_queue`) must report that honestly rather
+/// than let a never-written zero pass as a real idle reading.
+///
+/// Flip this to `true` in the same PR that wires Fuel's own admission/cache
+/// mechanisms into these handles (fuel's cache counters 0.20.64, scheduler
+/// stats 0.20.65 -- published upstream but not yet consumed here as of
+/// 2026-10-22). Deliberately not inferred from the handles' own zero values:
+/// a real idle scheduler and an unwired one are indistinguishable that way,
+/// which is the exact defect this constant exists to stop.
+pub const SCHEDULER_AND_CACHE_METRICS_LIVE: bool = false;
+
 /// Live count of inference jobs currently enqueued or in flight — the
 /// `/metrics` endpoint's queue-depth gauge (Phase 4 observability). Plain
 /// `Arc<AtomicUsize>` rather than threading a counter through the channel
