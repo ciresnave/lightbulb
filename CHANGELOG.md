@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.17.2
+
+### Fixed
+- **ROADMAP.md's M4 slice 5.4c still described plumbing into `admit_pending`/`run_jobs`**, the
+  candlelight-era path deleted entirely in #195 — corrected in place: the PM-ruled priority API
+  shape (top-level `priority: "low"|"normal"|"high"`, default `normal`, 400 on an unknown value,
+  documented as a Lightbulb extension) carries forward, but the plumbing target does not. Moved
+  the ruling to `docs/FUEL-GAPS-FROM-CANDLE-REMOVAL.md` entry #2 (the live current-state
+  document for this area) alongside its real blocker: a not-yet-made add-to-Fuel decision for a
+  `set_priority` hook, then Fuel's crates.io publish. Docs only, no code changed.
+
 ## 0.17.1
 
 ### Fixed

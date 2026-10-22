@@ -1129,32 +1129,16 @@ its own test, in this order:
          endpoint) priming the shared scheduler directly (`submit_request` +
          `allocate_pending_requests`, the same calls `admit_pending` makes) and reading the real
          occupancy back.
-      3. **5.4c — DEFERRED (2026-10-18, PM-ruled): real `Priority`, blocked on an API-surface
-         decision, not sizing.** `InferenceJob` would gain a `priority: Priority` field and
-         `admit_pending` would submit via `submit_priority_request` instead of `submit_request`
-         -- that half is mechanical and already sized. The real decision is HOW a caller
-         specifies priority, since OpenAI's chat/completions schema has no such field:
-         - **Option A -- a non-standard top-level JSON field** (e.g. `"priority": "high"`
-           alongside the OpenAI-compatible fields). Simple, but an OpenAI-API-shaped client that
-           doesn't know about it just never sends one (fine, defaults to `Normal`) -- the real
-           risk is a STRICT client-side schema validator rejecting an unknown field on responses
-           that echo the request back, which none of lightbulb's response shapes currently do, so
-           probably safe, but worth checking against a real OpenAI client library before shipping.
-         - **Option B -- a custom HTTP header** (e.g. `X-Lightbulb-Priority: high`). Never touches
-           the request body schema at all, so zero compatibility risk with any OpenAI-shaped
-           client or validator; the cost is it's less discoverable (not in the JSON body an API
-           consumer would naturally read) and needs documenting separately from the request
-           schema.
-         - Recommendation (not a ruling): Option B is the lower-risk default for an OpenAI-
-           *compatible* API specifically, since the whole point of that compatibility is "an
-           unmodified OpenAI client keeps working" -- a header a stock client never sends doesn't
-           touch that guarantee, while a body field relies on "probably fine" rather than a
-           checked guarantee.
-         - **Does this need CireSnave?** No ruling made here -- this is a single-project API
-           extension (lightbulb is not a shared crate other projects depend on), not a resource,
-           authority, or cross-portfolio-standard question, so a PM-level call (or delegating the
-           choice back to this lane) seems sufficient; flagged rather than assumed, since the PM
-           asked.
+      3. **5.4c — API shape PM-ruled 2026-10-22, plumbing target moot.** Option A (optional
+         top-level `priority` field, `"low"|"normal"|"high"`, default `normal`, unknown value =
+         400 typed error, documented as a Lightbulb extension — same convention as vLLM) was
+         chosen over Option B (a custom header). But this sub-slice's described mechanics
+         (`InferenceJob` gaining a `priority` field, `admit_pending` calling
+         `submit_priority_request`) named the candlelight-era `run_jobs` path, which was deleted
+         entirely 2026-10-22 along with candlelight (#195) — see this M4 section's own SUPERSEDED
+         banner above. The ruled API shape carries forward; the plumbing target does not. Current
+         state and the Fuel-side routing decision this now needs:
+         `docs/FUEL-GAPS-FROM-CANDLE-REMOVAL.md` entry #2.
    5. **5.5 — `run_jobs` complexity refactor (slice plan item 6, below) — VERIFICATION FINDING
       (2026-10-21): the refactor this item describes appears to already be done, as a side
       effect of extraction work landed across 5.1-5.4b, not as dedicated 5.5 work.** Measured on

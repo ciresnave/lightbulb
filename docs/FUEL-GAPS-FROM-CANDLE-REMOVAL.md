@@ -56,6 +56,18 @@ admission matters to the production serving path; otherwise these three M4
 slices' work is dead on the shipping build starting now, which the PM/
 CireSnave should know explicitly rather than discover later.
 
+**Priority API shape — PM-ruled 2026-10-22** (asked before this gaps doc's
+"add-to-Fuel vs. superseded" question was fully worked through, so this
+settles the client-facing surface ahead of the routing decision): optional
+top-level `priority` field on chat/completions, values
+`"low"|"normal"|"high"`, default `normal`, unknown value = 400 with a typed
+error — documented as a Lightbulb extension (OpenAI has no such field), same
+convention as vLLM. Plumbs to a new Fuel-side `set_priority` hook once Fuel
+publishes a version carrying it; **Fuel's ordering hook stays parked until
+lightbulb holds a consumer for it** — tell the Fuel lane once this is
+plumbed. Not started: this needs the add-to-Fuel decision above made first
+(there is nothing in Fuel yet to plumb to), then Fuel's crates.io publish.
+
 ### 3. Dtype selection (f16/bf16) for SafeTensors models
 **What it was:** `ModelRunner::start`'s `dtype` parameter, honored by the
 candlelight path to load weights as f16/bf16 for memory/speed.
