@@ -7,13 +7,12 @@
   candlelight-era path deleted entirely in #195 — corrected in place: that plumbing target is
   gone regardless of API shape.
 - **Found while fixing the above (Sourcery, this PR): two conflicting PM rulings on 5.4c's
-  priority API shape, surfaced by the first version of this fix.** `docs/API-EXTENSIONS.md`
-  documents Option B (the `X-Lightbulb-Priority` header, already implemented) per a 2026-10-21
-  ruling; this PR's own first draft recorded Option A (a top-level `priority` body field) per a
-  2026-10-22 ruling asked without the 2026-10-21 one surfacing. Neither is wired to the live Fuel
-  path, so nothing shipped is wrong yet, but `docs/API-EXTENSIONS.md` currently asserts an answer
-  that may not stand. `docs/FUEL-GAPS-FROM-CANDLE-REMOVAL.md` entry #2 and `ROADMAP.md`'s 5.4c
-  note now flag the conflict explicitly for the PM to resolve, rather than this PR picking one.
+  priority API shape.** `docs/API-EXTENSIONS.md` documents Option B (the `X-Lightbulb-Priority`
+  header, already implemented) per a 2026-10-21 ruling; this PR's own first draft recorded
+  Option A (a top-level `priority` body field) per a same-day 2026-10-22 ruling made without
+  reading `docs/API-EXTENSIONS.md` first. **RESOLVED 2026-10-22: Option B stands, Option A
+  withdrawn.** `docs/FUEL-GAPS-FROM-CANDLE-REMOVAL.md` entry #2 and `ROADMAP.md`'s 5.4c note now
+  say so. Neither option is wired to the live Fuel path, so nothing shipped was ever wrong.
   Docs only, no code changed.
 
 ## 0.17.1
