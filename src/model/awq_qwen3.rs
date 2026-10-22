@@ -29,6 +29,30 @@ pub struct Qwen3Config {
     /// must not be read as "tied" — see `LmHead::load` for why this flag alone is not trusted.
     #[serde(default)]
     pub tie_word_embeddings: bool,
+    /// Per-head dimension of Q/K/V, read straight from `config.json`. Every real Qwen3 dense
+    /// checkpoint (0.6B through ~4B, confirmed on `Qwen/Qwen3-0.6B`'s and
+    /// `Orion-zhen/Qwen3-0.6B-AWQ`'s `config.json`) sets this to 128 **regardless of
+    /// `hidden_size`/`num_attention_heads`** — HF `transformers`' own `Qwen3Config` keeps the
+    /// two independent, and `fuel_transformers`' GGUF Qwen3 reader (`loader_gguf_qwen3.rs`)
+    /// reads it from `qwen3.attention.key_length`, never derives it. `#[serde(default)]` so a
+    /// `config.json` that omits the field (HF's own default, used when the two happen to
+    /// agree) falls back to the formula in [`Qwen3Config::effective_head_dim`] rather than
+    /// failing to parse.
+    #[serde(default)]
+    pub head_dim: Option<usize>,
+}
+
+impl Qwen3Config {
+    /// The head dimension actually used by Q/K/V projections, rotary embeddings and the
+    /// per-head norms. Prefers the explicit `head_dim`; falls back to the formula ONLY when
+    /// the checkpoint's `config.json` omits the field, matching HF `transformers`' own
+    /// default. Every call site that used to compute `hidden_size / num_attention_heads`
+    /// directly must go through this instead — that formula is wrong whenever `head_dim` is
+    /// set and disagrees with it, which is every real Qwen3 dense checkpoint.
+    pub fn effective_head_dim(&self) -> usize {
+        self.head_dim
+            .unwrap_or(self.hidden_size / self.num_attention_heads)
+    }
 }
 
 fn default_rope_theta() -> f64 {
@@ -77,7 +101,7 @@ struct Qwen3RotaryEmbedding {
 
 impl Qwen3RotaryEmbedding {
     fn new(dtype: DType, cfg: &Qwen3Config, device: &Device) -> Result<Self> {
-        let head_dim = cfg.hidden_size / cfg.num_attention_heads;
+        let head_dim = cfg.effective_head_dim();
         let max_seq_len = cfg.max_position_embeddings;
         let theta = cfg.rope_theta;
 
@@ -209,7 +233,7 @@ impl Qwen3AwqAttention {
         let hidden_size = cfg.hidden_size;
         let num_heads = cfg.num_attention_heads;
         let num_kv_heads = cfg.num_key_value_heads;
-        let head_dim = hidden_size / num_heads;
+        let head_dim = cfg.effective_head_dim();
 
         let q_proj = AwqLinear::new(hidden_size, num_heads * head_dim, vb.pp("q_proj"))
             .map_err(|e| candlelight::core::Error::Msg(format!("Failed to load q_proj: {}", e)))?;
@@ -529,6 +553,7 @@ mod tests {
             rope_theta: 1000000.0,
             hidden_act: Activation::Silu,
             tie_word_embeddings: false,
+            head_dim: None,
         };
 
         let rope = Qwen3RotaryEmbedding::new(DType::F32, &cfg, &device).unwrap();
@@ -554,6 +579,18 @@ mod tests {
             rope_theta: 10000.0,
             hidden_act: Activation::Silu,
             tie_word_embeddings,
+            head_dim: None,
+        }
+    }
+
+    /// Like [`tiny_cfg`], but with an explicit `head_dim` that the formula
+    /// (`hidden_size / num_attention_heads == 64`) would get wrong — the shape every real
+    /// Qwen3 dense checkpoint is in. `256` rather than something formula-adjacent, so a
+    /// transposed or halved head_dim could not accidentally satisfy both.
+    fn tiny_cfg_with_head_dim_override(tie_word_embeddings: bool) -> Qwen3Config {
+        Qwen3Config {
+            head_dim: Some(256),
+            ..tiny_cfg(tie_word_embeddings)
         }
     }
 
@@ -590,7 +627,10 @@ mod tests {
     /// The attention-block tensors for one decoder layer, named under `model.layers.{idx}`.
     /// Split out of `decoder_layer_tensors` to keep every helper under Codacy's 50-line limit.
     fn decoder_attn_tensors(p: &str, cfg: &Qwen3Config, dev: &Device) -> Vec<(String, Tensor)> {
-        let head_dim = cfg.hidden_size / cfg.num_attention_heads;
+        // The REAL shape a checkpoint's tensors carry, which is `cfg.head_dim` where the
+        // checkpoint sets one -- never the formula, which the override test below relies on
+        // disagreeing with.
+        let head_dim = cfg.effective_head_dim();
         let mut t = Vec::new();
         t.extend(awq_linear_tensors(
             &format!("{p}.self_attn.q_proj"),
@@ -759,5 +799,44 @@ mod tests {
             err.to_string().contains("tie_word_embeddings"),
             "expected the refusal to name the missing signal, got: {err}"
         );
+    }
+
+    /// Every real Qwen3 dense checkpoint sets `head_dim` independently of
+    /// `hidden_size`/`num_attention_heads` -- `Qwen/Qwen3-0.6B`'s `config.json` sets
+    /// `hidden_size: 1024`, `num_attention_heads: 16` (formula: 64) and `head_dim: 128`
+    /// explicitly; `Orion-zhen/Qwen3-0.6B-AWQ` (the AWQ slice-2 target, same base model)
+    /// carries the identical override.
+    ///
+    /// **Red-first**: before `Qwen3Config::effective_head_dim` existed, `Qwen3RotaryEmbedding::
+    /// new` and `Qwen3AwqAttention::new` each recomputed `hidden_size / num_attention_heads`
+    /// directly, ignoring any `head_dim` override. On this fixture (`head_dim: Some(256)`,
+    /// formula gives 64) that sized `q_proj`/`k_proj`/`v_proj`/`o_proj` for the wrong shape and
+    /// `AwqQwen3::new` failed inside `Failed to load q_proj` with a `qweight` shape mismatch --
+    /// demonstrated by reverting those two call sites (and `decoder_attn_tensors` above) back
+    /// to the formula and re-running this test. This is the deeper reason slice 1's real
+    /// target checkpoint still could not load once tied embeddings were handled.
+    #[test]
+    fn awq_qwen3_loads_a_checkpoint_whose_head_dim_disagrees_with_the_formula() {
+        let dev = Device::Cpu;
+        let cfg = tiny_cfg_with_head_dim_override(true);
+        assert_ne!(
+            cfg.effective_head_dim(),
+            cfg.hidden_size / cfg.num_attention_heads,
+            "fixture bug: the override must disagree with the formula, or this test cannot \
+             tell the fixed code apart from the bug"
+        );
+        let tensors = base_model_tensors(&cfg, &dev);
+        let vb = VarBuilder::from_tensors(tensors, DType::F16, &dev);
+
+        // Construction is the whole claim here: it is the one step that reads q_proj/k_proj/
+        // v_proj/o_proj's shapes against `cfg`, which is exactly where the formula and the
+        // override disagree. `forward` additionally requires CUDA (`AwqLinear`'s Marlin
+        // kernel has no CPU path -- see `load_awq_llama`'s own `bail!`), which is this test's
+        // reason to stay CPU-only rather than exercise it.
+        let model = AwqQwen3::new(&cfg, vb).expect(
+            "a checkpoint whose head_dim overrides the formula must still load -- every \
+             attention/rotary call site must read cfg.effective_head_dim(), not recompute it",
+        );
+        assert!(matches!(model.lm_head, LmHead::Tied(_)));
     }
 }

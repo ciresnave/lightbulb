@@ -1,5 +1,40 @@
 # Changelog
 
+## 0.15.0
+
+### Fixed
+- **AWQ slice 2 (part 1): `AwqQwen3` used the wrong `head_dim` for every real Qwen3 dense
+  checkpoint.** `Qwen3RotaryEmbedding::new` and `Qwen3AwqAttention::new` both computed
+  `head_dim = hidden_size / num_attention_heads` directly, but every Qwen3 dense model
+  (confirmed on `Qwen/Qwen3-0.6B`'s and the AWQ slice-2 target `Orion-zhen/Qwen3-0.6B-AWQ`'s
+  `config.json`, both of which set `hidden_size: 1024`, `num_attention_heads: 16` -- formula:
+  64 -- and `head_dim: 128` explicitly) sets `head_dim` independently of that ratio, the same
+  way `fuel_transformers`' GGUF Qwen3 reader already treats it (read from
+  `qwen3.attention.key_length`, never derived). `AwqQwen3::new` sized `q_proj`/`k_proj`/
+  `v_proj`/`o_proj` for the wrong shape and failed with a `qweight` shape mismatch on exactly
+  this checkpoint -- the deeper reason slice 1's tied-embedding fix alone was not enough to
+  load it. Fixed: `Qwen3Config` gains `head_dim: Option<usize>` (`#[serde(default)]`, matching
+  HF's own optional field) and `effective_head_dim()`, which every call site now uses instead
+  of recomputing the formula. Red-first, synthetic `VarBuilder` fixture (`head_dim: Some(256)`
+  against a config whose formula gives 64, CPU-only, no GPU/corpus dependency): demonstrated
+  failing against the pre-fix code (`"Failed to load q_proj: Failed to load qweight"`), passing
+  after.
+- AWQ checkpoint pinned for slice 2's end-to-end proof: `Orion-zhen/Qwen3-0.6B-AWQ` at commit
+  `9f607bee5fca19cba0bd2b383ba804c89385ea18` (no tagged release; HEAD of `main` as of
+  2026-10-22). Licence: the AWQ repo itself is `gpl-3.0`; its base model `Qwen/Qwen3-0.6B` is
+  `apache-2.0`. Recorded in `src/test_models.rs` (`AWQ_MODEL_REPO`, `AWQ_BASE_MODEL_REPO`,
+  `AWQ_PINNED_REVISION`) alongside a `LIGHTBULB_AWQ_MODEL_DIR`-resolving `awq_qwen3_dir()`,
+  mirroring `tinyllama_dir`'s convention. The end-to-end GPU generation-vs-reference-
+  implementation test itself is blocked on a Windows packaging gap in `autoawq` (no prebuilt
+  wheel for this platform/Python combination; its `triton` dependency has no Windows wheel on
+  PyPI either) -- not started; see the PM thread for the options.
+
+### Breaking
+- `Qwen3Config` (`src/model/awq_qwen3.rs`) gains a mandatory `head_dim: Option<usize>` field
+  for direct struct construction (Rust struct literals don't honor `#[serde(default)]`; only
+  `serde` deserialization does) -- same class of change, and reason, as 0.14.0's
+  `tie_word_embeddings` bump.
+
 ## 0.14.0
 
 ### Added
