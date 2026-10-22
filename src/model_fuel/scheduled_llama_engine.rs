@@ -47,10 +47,11 @@ use fuel_inference::multi_session::{KvBudget, SchedulePolicy};
 
 use super::engine_model::effective_generation_budget;
 use super::scheduler_driver::FuelSchedulerDriver;
-use crate::engine::model_runner::{InferenceJob, drain_with_error};
+use crate::engine::model_runner::{InferenceJob, SharedScheduler, drain_with_error};
 use crate::engine::scheduled_runner::{
     AdmitError, FinishOutcome, SchedulerDriver, run_scheduled_jobs,
 };
+use crate::engine::slot_pool::Request as SlotRequest;
 use crate::gguf::{GgufArchitecture, detect_architecture};
 
 /// The checkpoint's full EOS set, in fuel's `eos_ids: Option<Vec<u32>>`
@@ -82,9 +83,65 @@ enum ServingDriverInner<'m> {
 /// NOT `FuelSchedulerDriver`'s concern (it has no notion of a server-wide
 /// context ceiling), but IS this integration layer's, same role
 /// `FuelEngineModel::step_one` played in the old serial path.
+///
+/// `scheduler`/`sessions` mirror every real admission/departure into the
+/// shared `MemoryAwareScheduler` (board PM ruling, 2026-10-22, now that
+/// Fuel 0.20.71 is published) — the same role `run_jobs`'s `admit_pending`/
+/// `release_scheduler_slot` played on the deleted candlelight path (M4
+/// slice 5.4a), rebuilt here against the live Fuel path instead. A passive
+/// mirror, not a second authority: Fuel's own `try_admit` above already
+/// decided admission via its real KV-block capacity check; this only
+/// records that decision so `scheduler_stats`/`scheduler_queue` have real
+/// numbers to report. `sessions` maps Fuel's `SessionId` to the synthetic
+/// request id (`"session-{id}"`) submitted to the mirror, needed because
+/// `reap_finished` only gets the `SessionId` back, not the original
+/// request's own metadata.
 struct ServingDriver<'m> {
     inner: ServingDriverInner<'m>,
     context_length: usize,
+    scheduler: SharedScheduler,
+    sessions: std::collections::HashMap<fuel_inference::multi_session::SessionId, String>,
+}
+
+impl<'m> ServingDriver<'m> {
+    /// Mirror a just-admitted session into the shared scheduler: submit a
+    /// synthetic [`SlotRequest`] and immediately try to allocate it a slot.
+    /// `top_p` has no real value here -- `SchedulerDriver::try_admit` never
+    /// receives one -- so `1.0` (no nucleus truncation) is used as a
+    /// placeholder; nothing downstream of the mirror reads it back.
+    fn mirror_admission(&mut self, id: fuel_inference::multi_session::SessionId, prompt: &[u32], max_new: usize, temperature: f64) {
+        let request_id = format!("session-{}", id.0);
+        let request = SlotRequest {
+            id: request_id.clone(),
+            prompt_tokens: prompt.to_vec(),
+            max_new_tokens: max_new,
+            temperature,
+            top_p: 1.0,
+        };
+        let mut scheduler = self.scheduler.lock().unwrap_or_else(|e| e.into_inner());
+        scheduler.submit_request(request);
+        scheduler.allocate_pending_requests();
+        drop(scheduler);
+        self.sessions.insert(id, request_id);
+    }
+
+    /// Mirror a just-reaped session's departure: free its slot in the
+    /// shared scheduler, if the earlier mirrored admission ever got one
+    /// (it may not have, if the mirror's own smaller/misconfigured budget
+    /// queued it rather than allocating it -- freeing a slot that was
+    /// never allocated would be a bug, not a no-op, so this checks first).
+    fn mirror_departure(&mut self, id: fuel_inference::multi_session::SessionId) {
+        let Some(request_id) = self.sessions.remove(&id) else {
+            return;
+        };
+        let scheduler = self.scheduler.lock().unwrap_or_else(|e| e.into_inner());
+        let slot_id = scheduler.slot_pool().get_request_slot(&request_id).copied();
+        drop(scheduler);
+        if let Some(slot_id) = slot_id {
+            let mut scheduler = self.scheduler.lock().unwrap_or_else(|e| e.into_inner());
+            let _ = scheduler.free_slot(slot_id);
+        }
+    }
 }
 
 impl<'m> SchedulerDriver for ServingDriver<'m> {
@@ -109,7 +166,7 @@ impl<'m> SchedulerDriver for ServingDriver<'m> {
                  generate instead of erroring mid-decode"
             );
         }
-        match &mut self.inner {
+        let admitted = match &mut self.inner {
             ServingDriverInner::F32(d) => d.try_admit(prompt, effective_max_new, temperature),
             ServingDriverInner::QuantizedGguf(d) => {
                 d.try_admit(prompt, effective_max_new, temperature)
@@ -117,7 +174,11 @@ impl<'m> SchedulerDriver for ServingDriver<'m> {
             ServingDriverInner::QuantizedGgufQwen3(d) => {
                 d.try_admit(prompt, effective_max_new, temperature)
             }
+        };
+        if let Ok(id) = admitted {
+            self.mirror_admission(id, prompt, effective_max_new, temperature);
         }
+        admitted
     }
 
     fn step(&mut self) -> Result<Vec<(Self::Id, u32)>, String> {
@@ -129,11 +190,15 @@ impl<'m> SchedulerDriver for ServingDriver<'m> {
     }
 
     fn reap_finished(&mut self) -> Vec<(Self::Id, FinishOutcome)> {
-        match &mut self.inner {
+        let reaped = match &mut self.inner {
             ServingDriverInner::F32(d) => d.reap_finished(),
             ServingDriverInner::QuantizedGguf(d) => d.reap_finished(),
             ServingDriverInner::QuantizedGgufQwen3(d) => d.reap_finished(),
+        };
+        for (id, _) in &reaped {
+            self.mirror_departure(*id);
         }
+        reaped
     }
 
     fn has_active_sessions(&self) -> bool {
@@ -152,16 +217,21 @@ impl<'m> SchedulerDriver for ServingDriver<'m> {
 const KV_BLOCK_SIZE: usize = 16;
 
 /// The server-wide (not per-request) pieces of the batched path, bundled so
-/// [`run_batched`] takes one parameter instead of three — `device`/`policy`/
-/// `budget` are all `Copy`, so sharing this by reference costs nothing.
+/// every function between [`run_fuel_engine`] and [`run_batched`] takes one
+/// parameter instead of two or more — `device`/`policy`/`budget` are all
+/// `Copy`; `scheduler` is an `Arc` clone away from being too, so bundling it
+/// here too keeps every one of those functions at the same parameter count
+/// it had before the 2026-10-22 scheduler-mirroring wiring added a new
+/// cross-cutting dependency (`clippy::too_many_arguments`, not just style).
 struct BatchedServeConfig {
     device: fuel::Device,
     policy: SchedulePolicy,
     budget: KvBudget,
+    scheduler: SharedScheduler,
 }
 
 impl BatchedServeConfig {
-    fn new(max_batch_size: usize, context_length: usize) -> Self {
+    fn new(max_batch_size: usize, context_length: usize, scheduler: SharedScheduler) -> Self {
         let max_batch_size = max_batch_size.max(1);
         Self {
             device: super::device::select(),
@@ -172,6 +242,7 @@ impl BatchedServeConfig {
                 block_size: KV_BLOCK_SIZE,
                 num_blocks: max_batch_size * context_length.div_ceil(KV_BLOCK_SIZE),
             },
+            scheduler,
         }
     }
 }
@@ -190,7 +261,7 @@ fn run_batched<'m, M: fuel_inference::multi_session::DecodeModel>(
     rx: Receiver<InferenceJob>,
     wrap: fn(FuelSchedulerDriver<'m, M>) -> ServingDriverInner<'m>,
 ) {
-    let scheduler = match FuelSchedulerDriver::new(
+    let fuel_scheduler = match FuelSchedulerDriver::new(
         model,
         config.device,
         fuel::DType::F32,
@@ -202,8 +273,10 @@ fn run_batched<'m, M: fuel_inference::multi_session::DecodeModel>(
         Err(e) => return drain_with_error(rx, &format!("building the scheduler: {e}")),
     };
     let driver = ServingDriver {
-        inner: wrap(scheduler),
+        inner: wrap(fuel_scheduler),
         context_length,
+        scheduler: config.scheduler,
+        sessions: std::collections::HashMap::new(),
     };
     // `tokenizer.encode`/`.decode` each need their own `move` closure below,
     // and `Tokenizer` is not `Copy` — an `Arc` is what lets both closures
@@ -250,8 +323,9 @@ pub(crate) fn run_fuel_engine(
     max_batch_size: usize,
     context_length: usize,
     rx: Receiver<InferenceJob>,
+    scheduler: SharedScheduler,
 ) {
-    let config = BatchedServeConfig::new(max_batch_size, context_length);
+    let config = BatchedServeConfig::new(max_batch_size, context_length, scheduler);
     let is_gguf = model_path
         .extension()
         .is_some_and(|ext| ext.eq_ignore_ascii_case("gguf"));

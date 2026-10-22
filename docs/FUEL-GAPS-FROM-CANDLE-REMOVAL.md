@@ -41,6 +41,20 @@ endpoint's data is still wanted; otherwise the endpoint should be changed to
 say "not available on this backend" rather than silently reporting zeros,
 which is the current (actually worse) state and not fixed by this removal.
 
+**Still dark after Fuel 0.20.71 (2026-10-22) — and gap #2's fix below does
+NOT close this one too.** `src/engine/model_runner.rs`'s old combined
+`SCHEDULER_AND_CACHE_METRICS_LIVE` flag was split into
+`SCHEDULER_METRICS_LIVE` (now `true`, see gap #2) and `CACHE_METRICS_LIVE`
+(still `false`) because they are genuinely different states now: the
+currently-wired `fuel_inference::multi_session::SessionScheduler` exposes
+real KV-pool counters (`kv_free_blocks`/`kv_capacity`/`kv_bytes_resident`,
+Fuel 0.20.64) but has NO prefix-sharing concept at all, so there is nothing
+real behind `PrefixCacheStats`' hit/miss/eviction/entry fields yet — mapping
+the KV-pool numbers onto them would answer a different question and
+reintroduce the exact "never-written value passed off as real" defect #201
+stopped. Stays routed here until research track item 1 (prefix matching)
+is wired to the live path, which is what would actually give this data.
+
 ### 2. `scheduler_stats`/`scheduler_queue` admin endpoints go dark
 **What it was:** `SharedScheduler` (`MemoryAwareScheduler`), mirrored by
 `run_jobs` on every admission/departure (M4 slices 5.4a/5.4b/5.4c — real
@@ -55,6 +69,18 @@ PRs #182/#183/#186) that the Fuel path never had. Add to Fuel if priority
 admission matters to the production serving path; otherwise these three M4
 slices' work is dead on the shipping build starting now, which the PM/
 CireSnave should know explicitly rather than discover later.
+
+**Admission/departure mirroring RESOLVED 2026-10-22, once Fuel 0.20.71
+published.** `ServingDriver` (`src/model_fuel/scheduled_llama_engine.rs`)
+now mirrors every real `try_admit`/`reap_finished` on the live Fuel path
+into the shared `MemoryAwareScheduler` (`mirror_admission`/
+`mirror_departure`) — a rebuild against Fuel, not a restoration of the
+deleted `run_jobs` code. `SCHEDULER_METRICS_LIVE` is `true`;
+`scheduler_stats`/`scheduler_queue` report real `active_slots`/
+`queued_requests`/`scheduler_memory_used_bytes`/`eviction_pressure` again.
+This closes the slot-occupancy half of this gap — the priority half (the
+API-shape question just below, and actually wiring `Priority` through to
+Fuel's own `set_priority`) is still open and tracked separately.
 
 **Priority API shape — RESOLVED 2026-10-22: Option B stands, Option A withdrawn.** A same-day
 Option A ruling (top-level `priority` body field) was made without reading
