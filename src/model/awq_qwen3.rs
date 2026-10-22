@@ -587,12 +587,10 @@ mod tests {
         ]
     }
 
-    /// The tensors one `Qwen3AwqDecoderLayer` needs, named under `model.layers.{idx}`.
-    /// Factored out of `base_model_tensors` to keep that function under Codacy's 50-line
-    /// limit, not because this half is reused anywhere else.
-    fn decoder_layer_tensors(idx: usize, cfg: &Qwen3Config, dev: &Device) -> Vec<(String, Tensor)> {
+    /// The attention-block tensors for one decoder layer, named under `model.layers.{idx}`.
+    /// Split out of `decoder_layer_tensors` to keep every helper under Codacy's 50-line limit.
+    fn decoder_attn_tensors(p: &str, cfg: &Qwen3Config, dev: &Device) -> Vec<(String, Tensor)> {
         let head_dim = cfg.hidden_size / cfg.num_attention_heads;
-        let p = format!("model.layers.{idx}");
         let mut t = Vec::new();
         t.extend(awq_linear_tensors(
             &format!("{p}.self_attn.q_proj"),
@@ -626,6 +624,13 @@ mod tests {
             format!("{p}.self_attn.k_norm.weight"),
             Tensor::zeros(head_dim, DType::F16, dev).unwrap(),
         ));
+        t
+    }
+
+    /// The MLP-block and norm tensors for one decoder layer, named under `model.layers.{idx}`.
+    /// Split out of `decoder_layer_tensors` to keep every helper under Codacy's 50-line limit.
+    fn decoder_mlp_tensors(p: &str, cfg: &Qwen3Config, dev: &Device) -> Vec<(String, Tensor)> {
+        let mut t = Vec::new();
         t.extend(awq_linear_tensors(
             &format!("{p}.mlp.gate_proj"),
             cfg.hidden_size,
@@ -652,6 +657,16 @@ mod tests {
             format!("{p}.post_attention_layernorm.weight"),
             Tensor::zeros(cfg.hidden_size, DType::F16, dev).unwrap(),
         ));
+        t
+    }
+
+    /// The tensors one `Qwen3AwqDecoderLayer` needs, named under `model.layers.{idx}`.
+    /// Factored out of `base_model_tensors` to keep that function under Codacy's 50-line
+    /// limit, not because this half is reused anywhere else.
+    fn decoder_layer_tensors(idx: usize, cfg: &Qwen3Config, dev: &Device) -> Vec<(String, Tensor)> {
+        let p = format!("model.layers.{idx}");
+        let mut t = decoder_attn_tensors(&p, cfg, dev);
+        t.extend(decoder_mlp_tensors(&p, cfg, dev));
         t
     }
 
