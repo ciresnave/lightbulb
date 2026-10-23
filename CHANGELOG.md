@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.18.2
+
+### Changed
+- **Commit the AWQ independent-reference fixture; retract the AWQ loader-wiring slice plan
+  (PM-tasked, 2026-10-23).** `scripts/awq_reference/` (a WSL2+autoawq 0.2.9 reference-generation
+  harness) and its output (`tests/fixtures/awq_reference/v1/qwen3_0_6b_awq_greedy.json`, real GPU
+  provenance) are committed per PM ruling (`docs/FUEL-GAPS-FROM-CANDLE-REMOVAL.md` entry #4): the
+  fixture validates any AWQ implementation's correctness, not only the one it was originally
+  built against. **No Rust-side comparison test is added**: `src/loaders/awq.rs` and
+  `src/model/awq_qwen3.rs`, the code `ROADMAP.md`'s "AWQ loader wiring: slice plan" sized a
+  three-slice plan against, were themselves deleted in the candlelight removal (#195, 0.16.0,
+  2026-10-22) — one day after that plan was written, before its own slice 2 part 2 reference
+  comparison ever ran. `ROADMAP.md` retracted that section in place (not just caveated) and added
+  a new "AWQ validation — blocked on a verified Fuel-side path" row naming the three
+  not-yet-checked candidates elsewhere in the portfolio (`fuel_transformers::quant_w4a16`,
+  `baracuda`'s Marlin, `mlmf-awq`) that might eventually consume this fixture. Two other stale
+  AWQ claims found while fixing the above (an M3 status-table cell, a "CPU-unusable" bail-site
+  list naming the same deleted files) corrected in place for the same reason.
+
 ## 0.18.1
 
 ### Changed

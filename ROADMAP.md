@@ -680,9 +680,10 @@ relative error **0.50 → 0.1185**, bound tightened to `0.20`, and
 Listed separately because the distinction matters: **a gap nobody claimed to have
 closed is an honest gap.** These are open work, not false claims.
 
-- **AWQ is CPU-unusable** — `src/loaders/awq.rs:188` and `src/loaders/mod.rs:349`
-  both bail, CUDA only. (AWQ *Phase 2*, the CustomOp wrappers, is claimed complete
-  and that claim was not checked here.)
+- **AWQ is CPU-unusable** — RETRACTED 2026-10-23, not just caveated: `src/loaders/awq.rs` and
+  `src/model/awq_qwen3.rs` named here no longer exist, deleted entirely in the candlelight
+  removal (#195, 0.16.0, 2026-10-22). See "AWQ validation — blocked on a verified Fuel-side
+  path" below for the current state.
 - **Quantization has open dtype holes** — `src/quantization/mod.rs:245` and `:325`
   bail for unlisted dtypes, on both quantize and dequantize.
 
@@ -742,7 +743,7 @@ comment referencing one of them).
 | M1.4 — Parallel batching infrastructure | COMPLETE |
 | M1.5 — Hardware adaptivity | COMPLETE |
 | M2 — Performance enablers | COMPLETE |
-| **M3 — Acceleration features** | **IN PROGRESS** — M3.3 done; AWQ CPU + quant dtypes open |
+| **M3 — Acceleration features** | **IN PROGRESS** — M3.3 done; AWQ (candlelight-typed) DELETED 2026-10-22, PR #195, see "AWQ validation" below; quant dtypes open |
 | M3.5 — Testing & Hardening | COMPLETE |
 | **M3.6 — Multi-GPU Inference** | **DELETED 2026-10-22, PR #195** (candlelight-typed, zero callers; see above) |
 | M3.7 — Dynamic Name Mapping | CORE COMPLETE, integrations PLANNED |
@@ -1393,106 +1394,40 @@ so; it is not evidence about real multi-GPU hardware. No work started, per the P
 
 ---
 
-## AWQ loader wiring: slice plan (added 2026-10-21, PM-tasked)
+## AWQ loader wiring: slice plan — RETRACTED 2026-10-23, not just caveated
 
-**Corrects the M3 section's "Phase 3 IN PROGRESS: Model loader integration (3-5 days)" line
-below** — measured, not estimated, at `origin/main` 2026-10-21: the loader is **0% wired**, not
-partway through. `grep -rln "load_awq_llama" src/ tests/` returns exactly one file
-(`src/loaders/mod.rs`, the definition itself) — zero callers anywhere, not from `main.rs`, not
-from any `bin`, not from any test. No `--awq` CLI flag exists.
+**Everything this section originally sized (`src/loaders/awq.rs`, `src/model/awq_qwen3.rs::
+AwqQwen3`, and the three-slice plan built on them) was deleted wholesale in the candlelight
+removal (#195, 0.16.0, 2026-10-22) — the day after this section was written, before slice 2
+part 2's reference comparison ever ran on this box.** `docs/FUEL-GAPS-FROM-CANDLE-REMOVAL.md`
+entry #4 already records this; kept here only as the historical record of a real sizing effort
+against code that no longer exists, not as a description of anything buildable today.
 
-**What already exists and is NOT the gap:** `src/loaders/awq.rs` (`AwqConfig`, `AwqLinear`,
-`load_awq_metadata`) and `src/loaders/mod.rs::load_awq_llama` form a complete, working loader —
-it opens an AWQ checkpoint directory, parses `quantization_config`, finds the safetensors
-files, builds a `VarBuilder`, and constructs a real `AwqQwen3` model end to end. `src/model/
-awq_qwen3.rs::AwqQwen3` is a real Qwen3 implementation using Marlin-backed `AwqLinear` layers.
-None of this is a stub.
+**What survived:** the independent-reference methodology slice 2 part 2 built — generating AWQ
+ground truth via HF `transformers` + `autoawq` in WSL2 (CUDA passthrough works there; this box's
+native Windows toolchain cannot run `autoawq` at all — no Windows wheel for its `triton`
+dependency) — is real and reusable. PM ruling (2026-10-22, repeated 2026-10-23): keep
+`scripts/awq_reference/` and its committed fixture
+(`tests/fixtures/awq_reference/v1/qwen3_0_6b_awq_greedy.json`); it validates **any** AWQ
+implementation, not just the deleted one. No Rust-side comparison test exists right now because
+there is nothing in this tree to compare against.
 
-**The actual gap, in two parts:**
+## AWQ validation — blocked on a verified Fuel-side path (added 2026-10-23, PM-tasked)
 
-1. **No call site.** `ParallelModelManager::load`/`load_adaptive`
-   (`src/model/parallel_model_manager.rs:133`, `:541`) both call `load_local_llama`
-   unconditionally — neither has any AWQ-format detection (e.g. reading
-   `config.json`'s `quantization_config.quant_method`) that would route to
-   `load_awq_llama` instead. Pointing either function at an AWQ checkpoint directory today
-   attempts to load AWQ's `qweight`/`qzeros`/`scales` tensors through the plain-weight path and
-   fails.
-2. **`AwqQwen3` does not implement whatever the serving engine needs from a model.**
-   `AwqQwen3::forward(&mut self, input_ids, offset) -> Result<Tensor>`
-   (`src/model/awq_qwen3.rs:385`) is single-sequence, returns only the last token's logits, and
-   keeps its own KV cache internally per decoder layer — it has no `impl` of any trait
-   `ParallelModelManager`/`BatchedTransformer`/the M4 scheduler's `EngineModel` expects, and no
-   per-request-slot cache structure compatible with `ParallelCacheBuilder`. It cannot be dropped
-   into the real continuous-batching serving path as-is; that would mean rewriting its KV-cache
-   and forward-pass shape to match the rest of the engine, which is new work, not wiring.
+Three candidates already exist elsewhere in the portfolio that might be AWQ-format-compatible
+(same `qweight`/`qzeros`/`scales` packing, same `gemm` version) — **not yet checked from
+Lightbulb's side**, per the same PM cross-project line-count pass that found them
+(`docs/FUEL-GAPS-FROM-CANDLE-REMOVAL.md` entry #4):
 
-**Proposed slices, smallest proof first:**
+1. `fuel_transformers::quant_w4a16` (~745 lines)
+2. `baracuda`'s Marlin implementation (~2.5k lines)
+3. `mlmf-awq` (~975 lines)
 
-1. **Slice 1 — tied-embedding support, DONE.** Corrected scope (was "prove correctness
-   standalone"; the correction below is itself what sizing this task found): the first real
-   small Qwen3 AWQ checkpoint picked for end-to-end proof (`Orion-zhen/Qwen3-0.6B-AWQ`) turned
-   out to be structurally unloadable by `AwqQwen3::new` as written, and not as a quirk of that
-   one repo — every Qwen3 dense model up to ~4B ships with `tie_word_embeddings: true`
-   (checked: `Qwen/Qwen3-1.7B`'s `config.json` too), which means `lm_head` is a *shared-tensor
-   alias* to `embed_tokens.weight` (confirmed via a safetensors header range-fetch:
-   `__metadata__` carries `{"lm_head.weight": "model.embed_tokens.weight"}`), never its own
-   AWQ-quantized tensor set. `AwqQwen3::new` unconditionally built `AwqLinear::new(...,
-   vb.pp("lm_head"))`, which fails outright (missing `qweight`) on every such checkpoint — not
-   just the one first tried.
-   Fixed: `Qwen3Config` gained `tie_word_embeddings` (`#[serde(default)]`, matching HF's own
-   default); a new `LmHead` enum (`Quantized(AwqLinear)` / `Tied(candlelight::nn::Linear)`)
-   replaces the bare `AwqLinear` field, with `LmHead::load` checking the TENSOR's presence
-   first (`vb.pp("lm_head").contains_tensor("qweight")`) and the config flag only as a
-   fallback — a checkpoint that sets the flag but still ships its own quantized `lm_head` must
-   not have it silently discarded. Red-first, with a synthetic in-memory fixture
-   (`VarBuilder::from_tensors`, no downloaded weights): a test demonstrated failing against the
-   pre-fix code on a tied-shaped fixture (`"Failed to load lm_head: Failed to load qweight"`),
-   passing after. Three tests total: tied-checkpoint loads via `LmHead::Tied`, untied
-   checkpoint still loads via `LmHead::Quantized` (regression coverage for the pre-existing
-   path), and a checkpoint naming neither case refuses with a clear message rather than
-   guessing. CPU-only, no GPU/corpus dependency, runs in the ordinary `cargo test --lib`.
-2. **Slice 2 — prove correctness end-to-end, not in the real server. PART 1 DONE, PART 2
-   BLOCKED on a Windows packaging gap.**
-   Part 1 (done): loading `Orion-zhen/Qwen3-0.6B-AWQ` for real (checkpoint downloaded, revision
-   pinned to `9f607bee5fca19cba0bd2b383ba804c89385ea18` -- no tagged release, so this is the
-   HEAD of `main` as of 2026-10-22; licence `gpl-3.0`, base model `Qwen/Qwen3-0.6B` licence
-   `apache-2.0`, both recorded in `src/test_models.rs`) surfaced a SECOND structural bug past
-   slice 1's tied-embedding fix: `Qwen3RotaryEmbedding::new`/`Qwen3AwqAttention::new` both
-   computed `head_dim = hidden_size / num_attention_heads` directly (64 for this checkpoint),
-   but its `config.json` sets `head_dim: 128` explicitly -- true of every real Qwen3 dense
-   model, independent of that ratio (same fact `fuel_transformers`' GGUF Qwen3 reader already
-   respects, reading `qwen3.attention.key_length` rather than deriving it). Fixed: `Qwen3Config`
-   gained `head_dim: Option<usize>` + `effective_head_dim()`; every call site uses it now.
-   Red-first, synthetic `VarBuilder` fixture (`head_dim: Some(256)` against a config whose
-   formula gives 64, CPU-only): failed pre-fix (`"Failed to load q_proj: Failed to load
-   qweight"`), passes after.
-   Part 2 (blocked, not started): the actual generate-and-compare-token-for-token-against-a-
-   pinned-reference-implementation step. `pip install autoawq==0.2.9` has no prebuilt wheel for
-   Windows + Python 3.12 and falls back to a from-source build; its `triton` dependency has no
-   Windows wheel on PyPI at all (`triton-windows`, a community port, satisfies the import but
-   not pip's dependency resolution, since it is a differently-named package). Options sized but
-   not chosen, PM input wanted: (a) build autoawq's CUDA extension from source on this box
-   (uncertain, slow, fights an MSVC/nvcc toolchain that is already fragile here per HANDOFF's
-   CUDA 13.3 note); (b) stand up WSL2 with CUDA passthrough for the reference step only (this
-   box has a stopped Alpine WSL distro and a running `docker-desktop` one already using GPU
-   passthrough, suggesting it's feasible, but is new infrastructure); (c) skip autoawq
-   entirely and dequantize the AWQ tensors ourselves (pure Python/NumPy, no CUDA kernel) into
-   an ordinary fp16 checkpoint, then compare against vanilla (unquantized) HF `transformers` --
-   this changes what the comparison validates, from "matches an independent quantizer's own
-   kernel" to "matches our own dequantization math against unquantized HF inference", which is
-   a real design trade worth a second opinion rather than a unilateral pick. Each hour spent
-   here is an hour not spent elsewhere, so this is parked pending PM direction rather than
-   guessed at. WITHOUT `#[ignore]` once written (same pattern as the two existing
-   checkpoint-needing tests in `model_runner.rs`/`parallel_model_manager.rs`): hosted CI's
-   `gates` job `--skip`s it by name as an interim measure pending a self-hosted GPU runner, per
-   CireSnave's 2026-10-16 ruling.
-3. **Slice 3 — wire into the real serving engine.** Only after slice 2 proves the loader and
-   model are correct end-to-end: either (a) give `AwqQwen3` a batched, per-slot-cache forward
-   path matching `BatchedTransformer`'s shape, or (b) run AWQ models through a separate,
-   explicitly single-request serving path (a real product limitation to state, not hide, if
-   chosen). **Not sized in detail here** — which option is right depends on what slice 2's
-   `AwqQwen3` internals turn out to need, and sizing it now would be guessing ahead of that
-   evidence.
+**No work scheduled here.** Once one of these is wired into Lightbulb's serving path, re-run
+(or write new) an independent-reference comparison against `scripts/awq_reference/`'s committed
+fixture before trusting that implementation's own claim of correctness — the fixture's whole
+reason for existing is that a quantizer's output is a claim until an independent comparison
+passes, not ground truth.
 
 ---
 
