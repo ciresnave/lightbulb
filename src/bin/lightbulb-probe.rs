@@ -281,7 +281,7 @@ async fn probe(
     // A single-shot CLI probe never has more than one job in flight, so any
     // depth above 1 is never exercised — the bound exists for the HTTP
     // server's concurrent callers, not this binary.
-    let tx = ModelRunner::start(
+    let (tx, _ctrl_tx) = ModelRunner::start(
         model_dir,
         1,
         512,

@@ -73,6 +73,10 @@ cache mechanics and OverMind on orchestration policy, with Lightbulb owning the 
    `fuel_inference::multi_session::PagedSessionScheduler`, a different scheduler than the one wired today, and
    switching to it is a real separate port (see `docs/FUEL-GAPS-FROM-CANDLE-REMOVAL.md` entry #1). Donor-must-
    stay-open COW splicing (the TTFT win this item originally named) is still unwired.
+   **`cache_clear`'s real implementation landed alongside this (board PM task, 2026-10-22):** it now sends a
+   real `ControlMsg::ClearPrefixCache` to the serving thread, which rebuilds the index and zeroes the stats
+   mirror — superseding the old V1_ROADMAP-era note below (§"MemoryAwareScheduler Integration" slice 4) that
+   called this a separate untouched `TODO`.
 2. **Fix the live-date chat-template rendering hazard — DONE, #107 (2026-09-30).** Was already
    fixed the same day as the review that surfaced it; this entry was never updated. `strftime_now`
    now caches its rendered string per calendar day (`cached_strftime_now`,

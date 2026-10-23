@@ -59,7 +59,7 @@ fn get_template() -> Option<std::sync::Arc<ResolvedTemplate>> {
 fn init_runner() -> RunnerTx {
     let model_dir = find_model_dir();
 
-    let tx = ModelRunner::start(
+    let (tx, _ctrl_tx) = ModelRunner::start(
         &model_dir,
         1,
         512,

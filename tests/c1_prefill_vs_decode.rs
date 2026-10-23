@@ -88,7 +88,7 @@ async fn complete_raw(path: &Path, prompt: &str, max_tokens: usize) -> serde_jso
     let scheduler = Arc::new(std::sync::Mutex::new(MemoryAwareScheduler::new(
         MemoryAwareConfig::default(),
     )));
-    let tx = ModelRunner::start(
+    let (tx, ctrl_tx) = ModelRunner::start(
         path,
         1,
         512,
@@ -105,6 +105,7 @@ async fn complete_raw(path: &Path, prompt: &str, max_tokens: usize) -> serde_jso
         config: ApiConfig::default(),
         pg_backend: None,
         inference_tx: Some(tx),
+        cache_control: Some(ctrl_tx),
         chat_template: None,
         eos_monitor: Default::default(),
         security_sinks: Vec::new(),

@@ -2029,6 +2029,7 @@ mod tests {
             config: crate::api::ApiConfig::default(),
             pg_backend: None,
             inference_tx,
+            cache_control: None,
             chat_template,
             eos_monitor,
             security_sinks: Vec::new(),

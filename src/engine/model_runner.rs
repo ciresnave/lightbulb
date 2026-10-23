@@ -133,6 +133,24 @@ pub struct InferenceJob {
 /// rather than queuing without bound.
 pub type InferenceRequestSender = SyncSender<InferenceJob>;
 
+/// An out-of-band command to the serving thread's `run_scheduled_jobs` loop —
+/// separate from `InferenceJob` because these are administrative, not
+/// inference work, and must reach the loop even while it is idle (see
+/// `engine::scheduled_runner::run_scheduled_jobs`'s control-channel poll).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ControlMsg {
+    /// Clear the real prefix-match index (`src/model_fuel/policies.rs`'s
+    /// `BlockPrefixIndexFor`, wired into `ServingDriver`, #205) and zero
+    /// `SharedCacheStats` -- the `cache_clear` admin endpoint's real
+    /// implementation, board PM task 2026-10-22.
+    ClearPrefixCache,
+}
+
+/// Unbounded on purpose, unlike [`InferenceRequestSender`]: control messages
+/// are rare, administrative, and must never block the caller on backpressure
+/// the way an inference job legitimately can.
+pub type ControlSender = std::sync::mpsc::Sender<ControlMsg>;
+
 /// Shared, cross-thread-readable snapshot of the prefix cache's stats — the
 /// `cache_stats` admin endpoint's data source (board item M4 slice 1).
 ///
@@ -285,6 +303,14 @@ impl ModelRunner {
     /// admitted prompt's token prefix and detects repeats against it. See
     /// `CACHE_METRICS_LIVE`'s doc comment for exactly what is and is not
     /// real about that.
+    ///
+    /// Returns the inference-job sender AND a [`ControlSender`] (board PM
+    /// task, 2026-10-22): the real `cache_clear` admin endpoint sends
+    /// `ControlMsg::ClearPrefixCache` on it, which the serving thread's own
+    /// loop (`engine::scheduled_runner::run_scheduled_jobs`) picks up and
+    /// acts on -- clearing the live index from the HTTP handler's thread
+    /// directly would race the serving thread's own writes to the same
+    /// `SharedCacheStats` handle.
     pub fn start(
         model_path: impl Into<PathBuf>,
         max_batch_size: usize,
@@ -293,10 +319,11 @@ impl ModelRunner {
         max_queue_depth: usize,
         cache_stats: SharedCacheStats,
         scheduler: SharedScheduler,
-    ) -> Result<InferenceRequestSender> {
+    ) -> Result<(InferenceRequestSender, ControlSender)> {
         let model_path = model_path.into();
         let (tx, rx): (SyncSender<InferenceJob>, Receiver<InferenceJob>) =
             std::sync::mpsc::sync_channel(max_queue_depth);
+        let (ctrl_tx, ctrl_rx) = std::sync::mpsc::channel::<ControlMsg>();
 
         if let Some(d) = dtype.as_deref() {
             if d != "f32" {
@@ -339,12 +366,13 @@ impl ModelRunner {
                 max_batch_size,
                 context_length,
                 rx,
+                ctrl_rx,
                 scheduler,
                 cache_stats,
             );
         });
 
-        Ok(tx)
+        Ok((tx, ctrl_tx))
     }
 }
 

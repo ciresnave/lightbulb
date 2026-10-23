@@ -156,18 +156,50 @@ pub struct ClearCacheResponse {
 }
 
 /// Clear cache
+///
+/// Real implementation (board PM task, 2026-10-22): sends
+/// `ControlMsg::ClearPrefixCache` to the serving thread, which rebuilds
+/// `ServingDriver`'s `BlockPrefixIndexFor` from scratch and zeroes
+/// `AppState.cache_stats` to match (`src/model_fuel/scheduled_llama_engine.rs`'s
+/// `clear_prefix_cache`). This handler itself never writes `cache_stats`
+/// directly -- only the serving thread does, so there is exactly one writer
+/// and no race between this endpoint and live detection. `cleared_entries`/
+/// `freed_bytes` report a snapshot taken BEFORE sending the clear signal:
+/// the clear itself is necessarily asynchronous (it happens on the serving
+/// thread), so this is "what existed when you asked," not a guarantee the
+/// clear has completed by the time the response returns.
+///
+/// `layer_indices`/`older_than_seconds` stay honestly unsupported: the
+/// prefix index has no per-layer or per-age structure to select against.
 async fn cache_clear(
     State(state): State<AppState>,
     Json(request): Json<ClearCacheRequest>,
 ) -> impl IntoResponse {
-    // TODO: Implement actual cache clearing
-    let _scheduler = &state.scheduler;
     let _layer_indices = request.layer_indices;
     let _older_than = request.older_than_seconds;
 
+    let snapshot = state
+        .cache_stats
+        .lock()
+        .map(|guard| guard.clone())
+        .unwrap_or_default();
+
+    if let Some(ctrl_tx) = &state.cache_control {
+        // The response still reports the pre-clear snapshot either way (same
+        // "best-effort, what existed when you asked" contract as the
+        // `cache_control: None` case below) -- there is no live index left to
+        // clear if the serving thread is gone -- but a failed send is logged
+        // so the silence doesn't hide a dead serving thread from an operator.
+        let _ = ctrl_tx
+            .send(crate::engine::model_runner::ControlMsg::ClearPrefixCache)
+            .map_err(|e| {
+                tracing::warn!(error = %e, "cache_clear: serving thread is gone, clear not delivered")
+            });
+    }
+
     let response = ClearCacheResponse {
-        cleared_entries: 0,
-        freed_bytes: 0,
+        cleared_entries: snapshot.entries,
+        freed_bytes: snapshot.size_bytes,
     };
 
     (StatusCode::OK, Json(response))
@@ -1009,6 +1041,7 @@ mod tests {
             config: crate::api::ApiConfig::default(),
             pg_backend: None,
             inference_tx: None,
+            cache_control: None,
             chat_template: None,
             eos_monitor: std::sync::Arc::new(crate::engine::eos_monitor::EosMonitor::default()),
             security_sinks: Vec::new(),
@@ -1254,6 +1287,76 @@ mod tests {
         );
         assert_eq!(body["hit_rate"]["status"], "live", "full body: {body:?}");
         assert_eq!(body["hit_rate"]["value"], 1.0, "full body: {body:?}");
+    }
+
+    /// With no model runner started (`cache_control: None`), `cache_clear`
+    /// must stay honest: nothing is listening to clear, so it reports it
+    /// cleared nothing rather than claiming success for an action that
+    /// never reached anywhere.
+    #[tokio::test]
+    async fn cache_clear_reports_zero_when_no_runner_is_listening() {
+        let req = Request::builder()
+            .method("POST")
+            .uri("/v1/lightbulb/admin/cache/clear")
+            .extension(key_info("admin"))
+            .header("content-type", "application/json")
+            .body(Body::from("{}"))
+            .unwrap();
+        let response = routes().with_state(state()).oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["cleared_entries"], 0, "full body: {body:?}");
+        assert_eq!(body["freed_bytes"], 0, "full body: {body:?}");
+    }
+
+    /// The real implementation (board PM task, 2026-10-22): `cache_clear`
+    /// must actually SEND `ControlMsg::ClearPrefixCache` to the serving
+    /// thread -- not just zero `cache_stats` itself, which would desync
+    /// from the live index the serving thread still holds (see
+    /// `ServingDriver::clear_prefix_cache`'s doc comment). Also proves the
+    /// response reports the pre-clear snapshot, not a post-clear zero this
+    /// handler never actually computed.
+    #[tokio::test]
+    async fn cache_clear_sends_the_real_control_message_and_reports_the_snapshot() {
+        let mut app_state = state();
+        {
+            let mut guard = app_state.cache_stats.lock().unwrap();
+            guard.entries = 3;
+            guard.size_bytes = 96;
+        }
+        let (ctrl_tx, ctrl_rx) = std::sync::mpsc::channel();
+        app_state.cache_control = Some(ctrl_tx);
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/v1/lightbulb/admin/cache/clear")
+            .extension(key_info("admin"))
+            .header("content-type", "application/json")
+            .body(Body::from("{}"))
+            .unwrap();
+        let response = routes().with_state(app_state).oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            body["cleared_entries"], 3,
+            "must report the pre-clear snapshot: full body: {body:?}"
+        );
+        assert_eq!(body["freed_bytes"], 96, "full body: {body:?}");
+
+        assert_eq!(
+            ctrl_rx.try_recv(),
+            Ok(crate::engine::model_runner::ControlMsg::ClearPrefixCache),
+            "cache_clear must send a real ControlMsg to the serving thread, not \
+             just report a number and do nothing"
+        );
     }
 
     /// `system_metrics` must report the machine's real total memory (a

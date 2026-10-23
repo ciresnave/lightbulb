@@ -346,6 +346,12 @@ pub struct AppState {
     pub inference_tx:
         Option<std::sync::mpsc::SyncSender<crate::engine::model_runner::InferenceJob>>,
 
+    /// Sender for administrative control messages to the model runner
+    /// thread (if started) -- `cache_clear`'s real implementation (board PM
+    /// task, 2026-10-22). `None` under the same condition `inference_tx` is
+    /// `None`: no model runner means nothing is listening on the other end.
+    pub cache_control: Option<crate::engine::model_runner::ControlSender>,
+
     /// Chat template for the loaded model, plus the special tokens it renders
     /// with — resolved once at startup.
     ///
@@ -565,8 +571,9 @@ fn try_start_model_runner(state: &mut AppState) {
         state.cache_stats.clone(),
         state.scheduler.clone(),
     ) {
-        Ok(sender) => {
+        Ok((sender, ctrl_sender)) => {
             state.inference_tx = Some(sender);
+            state.cache_control = Some(ctrl_sender);
 
             // Resolve the chat template HERE and only here. Both
             // halves read files, and a per-request read would put
@@ -669,6 +676,7 @@ impl ApiServer {
             config: config.clone(),
             pg_backend,
             inference_tx: None,
+            cache_control: None,
             chat_template: None,
             eos_monitor: Arc::new(crate::engine::eos_monitor::EosMonitor::default()),
             security_sinks,
@@ -1398,6 +1406,7 @@ mod tests {
             },
             pg_backend: None,
             inference_tx,
+            cache_control: None,
             chat_template: None,
             eos_monitor: Arc::new(crate::engine::eos_monitor::EosMonitor::default()),
             security_sinks: Vec::new(),

@@ -49,7 +49,7 @@ use super::engine_model::effective_generation_budget;
 use super::policies::BlockPrefixIndexFor;
 use super::scheduler_driver::FuelSchedulerDriver;
 use crate::engine::model_runner::{
-    InferenceJob, SharedCacheStats, SharedScheduler, drain_with_error,
+    ControlMsg, InferenceJob, SharedCacheStats, SharedScheduler, drain_with_error,
 };
 use crate::engine::scheduled_runner::{
     AdmitError, FinishOutcome, SchedulerDriver, run_scheduled_jobs,
@@ -204,6 +204,20 @@ impl<'m> ServingDriver<'m> {
         stats.insertions = block_stats.blocks_indexed;
         stats.entries = entries;
     }
+
+    /// The real `cache_clear` admin endpoint's implementation (board PM
+    /// task, 2026-10-22). Rebuilds `prefix_index` from scratch -- the
+    /// simplest correct "clear": every future lookup is a fresh miss until
+    /// new prompts are admitted and recorded again -- and zeroes the
+    /// `SharedCacheStats` mirror to match. `sessions`/`scheduler`
+    /// (admission bookkeeping) are untouched: clearing the prefix cache
+    /// must never affect in-flight requests' admission state.
+    fn clear_prefix_cache(&mut self) {
+        let block_size = self.prefix_index.block_size();
+        self.prefix_index = BlockPrefixIndexFor::new(block_size);
+        let mut stats = self.cache_stats.lock().unwrap_or_else(|e| e.into_inner());
+        *stats = crate::cache::PrefixCacheStats::default();
+    }
 }
 
 impl<'m> SchedulerDriver for ServingDriver<'m> {
@@ -271,6 +285,12 @@ impl<'m> SchedulerDriver for ServingDriver<'m> {
             ServingDriverInner::QuantizedGgufQwen3(d) => d.has_active_sessions(),
         }
     }
+
+    fn handle_control(&mut self, msg: ControlMsg) {
+        match msg {
+            ControlMsg::ClearPrefixCache => self.clear_prefix_cache(),
+        }
+    }
 }
 
 /// A generous block size: large enough that `kv_blocks_required`'s ceiling
@@ -292,6 +312,7 @@ struct BatchedServeConfig {
     budget: KvBudget,
     scheduler: SharedScheduler,
     cache_stats: SharedCacheStats,
+    ctrl_rx: Receiver<ControlMsg>,
 }
 
 impl BatchedServeConfig {
@@ -300,6 +321,7 @@ impl BatchedServeConfig {
         context_length: usize,
         scheduler: SharedScheduler,
         cache_stats: SharedCacheStats,
+        ctrl_rx: Receiver<ControlMsg>,
     ) -> Self {
         let max_batch_size = max_batch_size.max(1);
         Self {
@@ -313,6 +335,7 @@ impl BatchedServeConfig {
             },
             scheduler,
             cache_stats,
+            ctrl_rx,
         }
     }
 }
@@ -342,6 +365,7 @@ fn run_batched<'m, M: fuel_inference::multi_session::DecodeModel>(
         Ok(s) => s,
         Err(e) => return drain_with_error(rx, &format!("building the scheduler: {e}")),
     };
+    let ctrl_rx = config.ctrl_rx;
     let driver = ServingDriver {
         inner: wrap(fuel_scheduler),
         context_length,
@@ -358,6 +382,7 @@ fn run_batched<'m, M: fuel_inference::multi_session::DecodeModel>(
     run_scheduled_jobs(
         driver,
         rx,
+        ctrl_rx,
         move |text, add_special| {
             encode_tokenizer
                 .encode(text, add_special)
@@ -395,10 +420,17 @@ pub(crate) fn run_fuel_engine(
     max_batch_size: usize,
     context_length: usize,
     rx: Receiver<InferenceJob>,
+    ctrl_rx: Receiver<ControlMsg>,
     scheduler: SharedScheduler,
     cache_stats: SharedCacheStats,
 ) {
-    let config = BatchedServeConfig::new(max_batch_size, context_length, scheduler, cache_stats);
+    let config = BatchedServeConfig::new(
+        max_batch_size,
+        context_length,
+        scheduler,
+        cache_stats,
+        ctrl_rx,
+    );
     let is_gguf = model_path
         .extension()
         .is_some_and(|ext| ext.eq_ignore_ascii_case("gguf"));
@@ -681,6 +713,55 @@ mod tests {
         assert!(
             stats_after_distinct.misses >= 1,
             "a distinct prompt must register a real miss: {stats_after_distinct:?}"
+        );
+    }
+
+    /// The test `handle_control`/`clear_prefix_cache` exist for (board PM
+    /// task, 2026-10-22): fill the index with a real hit, clear it via a
+    /// real `ControlMsg`, then prove the clear actually took -- the SAME
+    /// prefix that was a hit a moment ago must now be a miss, and the
+    /// shared stats must read zero. If `handle_control`'s match arm (or the
+    /// `ClearPrefixCache` message itself) were ever skipped, the repeated
+    /// prompt below would still hit and this test would fail.
+    #[test]
+    fn handle_control_clear_prefix_cache_makes_the_next_identical_prefix_a_real_miss() {
+        let model = tiny_model(1);
+        let mut d = serving_driver(&model);
+
+        let prompt = [1u32, 2, 3, 4];
+        d.try_admit(&prompt, 1, 0.0)
+            .expect("first admission must fit");
+        d.try_admit(&prompt, 1, 0.0)
+            .expect("second admission must also fit");
+        let stats_before_clear = d.cache_stats.lock().unwrap().clone();
+        assert_eq!(
+            stats_before_clear.hits, 1,
+            "sanity check: the index must actually be primed before testing the clear"
+        );
+
+        d.handle_control(ControlMsg::ClearPrefixCache);
+
+        let stats_after_clear = d.cache_stats.lock().unwrap().clone();
+        assert_eq!(stats_after_clear.hits, 0, "{stats_after_clear:?}");
+        assert_eq!(stats_after_clear.misses, 0, "{stats_after_clear:?}");
+        assert_eq!(stats_after_clear.entries, 0, "{stats_after_clear:?}");
+
+        // The SAME prompt that was a hit before the clear must now miss --
+        // proving the live index was actually rebuilt, not just the stats
+        // mirror zeroed out from underneath it (which would desync the two
+        // and make a later real hit under-report).
+        d.try_admit(&prompt, 1, 0.0)
+            .expect("third admission must also fit");
+        let stats_after_repeat = d.cache_stats.lock().unwrap().clone();
+        assert_eq!(
+            stats_after_repeat.hits, 0,
+            "the cleared index must not still recognize the pre-clear prefix: \
+             {stats_after_repeat:?}"
+        );
+        assert_eq!(
+            stats_after_repeat.misses, 1,
+            "the post-clear admission must register as a genuine miss: \
+             {stats_after_repeat:?}"
         );
     }
 }
