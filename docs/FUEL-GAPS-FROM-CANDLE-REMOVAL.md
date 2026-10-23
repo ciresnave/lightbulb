@@ -55,18 +55,17 @@ records/looks up every admitted prompt's token prefix on the live path, so
 `hits`/`misses`/`insertions`/`entries`/`evictions` are real.
 
 **This closes DETECTION, not EXPLOITATION.** A detected hit is NOT spliced
-into the donor's KV blocks and does NOT skip prefill: the currently-wired
-`fuel_inference::multi_session::SessionScheduler` has no splice concept at
-all. That needs `PagedSessionScheduler` (`add_session_sharing_prefix`/
-`register_prefix`), a DIFFERENT scheduler Fuel already ships, not new
-Fuel-side work — but switching `ServingDriver` from `SessionScheduler` to
-`PagedSessionScheduler` is a real, separate port (different `DecodeModel`
-trait bound: `PagedDecodeModel`), out of this slice's scope. `CacheStatsResponse`
-never surfaces a "tokens saved" figure, so nothing here claims one;
-`total_size_bytes` stays an honest `0` (the index stores hash chains, not KV
-bytes). Add-to-Lightbulb decision for the exploitation half: is the
-`PagedSessionScheduler` port worth doing for the TTFT win, given `ServingDriver`
-would need a second enum-dispatch rebuild on top of it?
+into the donor's KV blocks and does NOT skip prefill.
+
+**The scheduler-type half of this gap is RESOLVED 2026-10-23 (ROADMAP research-track item 1,
+slice 2).** `ServingDriver` now runs on `PagedSessionScheduler` (via
+`FuelPagedSchedulerDriver`, `src/model_fuel/scheduler_driver_paged.rs`) for all three
+`ServingDriverInner` arms — `add_session_sharing_prefix`/`register_prefix` are reachable
+now, not a different-scheduler blocker any more. **Still open:** wiring a detected hit INTO an
+actual splice call (ROADMAP slice 3) — the index still only detects, nothing calls
+`add_session_sharing_prefix` yet. `CacheStatsResponse` never surfaces a "tokens saved" figure, so
+nothing here claims one; `total_size_bytes` stays an honest `0` (the index stores hash chains, not
+KV bytes).
 
 ### 2. `scheduler_stats`/`scheduler_queue` admin endpoints go dark
 **What it was:** `SharedScheduler` (`MemoryAwareScheduler`), mirrored by
@@ -108,6 +107,16 @@ a version carrying it; **Fuel's ordering hook stays parked until lightbulb holds
 it** — tell the Fuel lane once this is plumbed. Not started: this needs the add-to-Fuel decision
 above made first
 (there is nothing in Fuel yet to plumb to), then Fuel's crates.io publish.
+
+**Fuel-side hook now exists (2026-10-23, Fuel 0.22.4).** `PagedSessionScheduler::set_priority(id,
+priority: i32)` is published and confirmed directly in `fuel-inference/src/multi_session.rs`.
+`FuelPagedSchedulerDriver::set_priority` (`src/model_fuel/scheduler_driver_paged.rs`, landed as
+part of the paged-scheduler port, ROADMAP research-track item 1 slice 2) exposes it as a
+non-trait method on the driver — but nothing calls it yet: `InferenceJob.priority`/
+`ServingDriver::try_admit` still aren't connected to it. The remaining work is purely on
+lightbulb's side now (thread the already-parsed `Priority` through `try_admit`'s call site and
+invoke `set_priority` right after a successful admission) — no further Fuel-side work or publish
+needed.
 
 ### 3. Dtype selection (f16/bf16) for SafeTensors models
 **What it was:** `ModelRunner::start`'s `dtype` parameter, honored by the

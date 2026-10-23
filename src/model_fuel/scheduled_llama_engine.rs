@@ -1,6 +1,9 @@
-//! Wires `FuelSchedulerDriver` (`super::scheduler_driver`) into
+//! Wires `FuelPagedSchedulerDriver` (`super::scheduler_driver_paged`) into
 //! `ModelRunner::start`'s `fuel-engine` arm (board item 97's actual remaining
-//! deliverable: everything before this file only unblocked it).
+//! deliverable: everything before this file only unblocked it). All three
+//! arms were ported from the block-reservation `FuelSchedulerDriver` to the
+//! paged one once Fuel 0.22.4 published `PagedDecodeModel` for all three
+//! concrete types this file loads (paged-scheduler slice 2, 2026-10-23).
 //!
 //! `ModelRunner::start`'s `fuel-engine` arm can load an eager SafeTensors
 //! checkpoint (`LlamaModel`), a GGUF-quantized Llama one
@@ -43,11 +46,11 @@ use fuel_transformers::models::lazy_llama_full::LlamaEosToks;
 use fuel_transformers::models::lazy_quantized_llama::QuantizedLlama3Model;
 use fuel_transformers::models::lazy_quantized_qwen3::QuantizedQwen3Model;
 
-use fuel_inference::multi_session::{KvBudget, SchedulePolicy};
+use fuel_inference::multi_session::{KvBudget, PagedSchedulePolicy};
 
 use super::engine_model::effective_generation_budget;
 use super::policies::BlockPrefixIndexFor;
-use super::scheduler_driver::FuelSchedulerDriver;
+use super::scheduler_driver_paged::FuelPagedSchedulerDriver;
 use crate::engine::model_runner::{
     ControlMsg, InferenceJob, SharedCacheStats, SharedScheduler, drain_with_error,
 };
@@ -70,9 +73,9 @@ fn eos_ids_from(eos: Option<&LlamaEosToks>) -> Option<Vec<u32>> {
 }
 
 enum ServingDriverInner<'m> {
-    F32(FuelSchedulerDriver<'m, LlamaModel>),
-    QuantizedGguf(FuelSchedulerDriver<'m, QuantizedLlama3Model>),
-    QuantizedGgufQwen3(FuelSchedulerDriver<'m, QuantizedQwen3Model>),
+    F32(FuelPagedSchedulerDriver<'m, LlamaModel>),
+    QuantizedGguf(FuelPagedSchedulerDriver<'m, QuantizedLlama3Model>),
+    QuantizedGgufQwen3(FuelPagedSchedulerDriver<'m, QuantizedQwen3Model>),
 }
 
 /// Enum-dispatch over the concrete `DecodeModel` types `ModelRunner::start`'s
@@ -83,8 +86,8 @@ enum ServingDriverInner<'m> {
 ///
 /// Owns `context_length` so `try_admit` can apply
 /// [`effective_generation_budget`] itself — the one piece of policy that is
-/// NOT `FuelSchedulerDriver`'s concern (it has no notion of a server-wide
-/// context ceiling), but IS this integration layer's, same role
+/// NOT `FuelPagedSchedulerDriver`'s concern (it has no notion of a
+/// server-wide context ceiling), but IS this integration layer's, same role
 /// `FuelEngineModel::step_one` played in the old serial path.
 ///
 /// `scheduler`/`sessions` mirror every real admission/departure into the
@@ -93,12 +96,14 @@ enum ServingDriverInner<'m> {
 /// `release_scheduler_slot` played on the deleted candlelight path (M4
 /// slice 5.4a), rebuilt here against the live Fuel path instead. A passive
 /// mirror, not a second authority: Fuel's own `try_admit` above already
-/// decided admission via its real KV-block capacity check; this only
-/// records that decision so `scheduler_stats`/`scheduler_queue` have real
-/// numbers to report. `sessions` maps Fuel's `SessionId` to the synthetic
-/// request id (`"session-{id}"`) submitted to the mirror, needed because
-/// `reap_finished` only gets the `SessionId` back, not the original
-/// request's own metadata.
+/// decided admission — optimistically, as of the paged-scheduler port (see
+/// `FuelPagedSchedulerDriver`'s own doc comment: there is no up-front
+/// KV-block capacity check any more, only a later per-session failure if it
+/// doesn't fit); this only records that decision so `scheduler_stats`/
+/// `scheduler_queue` have real numbers to report. `sessions` maps Fuel's
+/// `SessionId` to the synthetic request id (`"session-{id}"`) submitted to
+/// the mirror, needed because `reap_finished` only gets the `SessionId`
+/// back, not the original request's own metadata.
 ///
 /// `prefix_index`/`cache_stats` give `cache_stats` real DETECTION numbers
 /// (board PM task, 2026-10-22, ROADMAP research-track item 1 / FUEL-GAPS
@@ -108,11 +113,11 @@ enum ServingDriverInner<'m> {
 /// live `KvBlockPool` session can still use it) records every admitted
 /// prompt's token-level prefix and looks up each new one against it. **This
 /// is detection only, not exploitation**: a hit is NOT currently spliced
-/// into the donor's KV blocks or used to skip prefill — that needs
-/// `fuel_inference::multi_session::PagedSessionScheduler`
-/// (`add_session_sharing_prefix`/`register_prefix`), a different scheduler
-/// than `SessionScheduler`/`FuelSchedulerDriver` above, out of scope here.
-/// `hits`/`misses`/`insertions`/`entries` are therefore real; `evictions`
+/// into the donor's KV blocks or used to skip prefill — this file now runs
+/// on `PagedSessionScheduler` (via `FuelPagedSchedulerDriver`), which DOES
+/// expose `add_session_sharing_prefix`/`register_prefix` for that, but
+/// wiring a detected hit into an actual splice is a separate, not-yet-done
+/// step. `hits`/`misses`/`insertions`/`entries` are therefore real; `evictions`
 /// counts real `forget_donor` calls (on departure, below); nothing here
 /// claims a `total_saved_tokens` figure — `CacheStatsResponse` never reads
 /// that field, and claiming it without an actual skipped prefill would be
@@ -308,7 +313,13 @@ const KV_BLOCK_SIZE: usize = 16;
 /// cross-cutting dependency (`clippy::too_many_arguments`, not just style).
 struct BatchedServeConfig {
     device: fuel::Device,
-    policy: SchedulePolicy,
+    /// Passed to `FuelPagedSchedulerDriver::step`'s `step_batched` every
+    /// tick -- `PagedSchedulePolicy` (below) only controls ORDER (admission
+    /// order vs. priority); batching itself is a separate knob on
+    /// `PagedSessionScheduler::step_batched`, not a policy variant the way
+    /// `SchedulePolicy::Batched` was on the non-paged scheduler.
+    max_batch: usize,
+    policy: PagedSchedulePolicy,
     budget: KvBudget,
     scheduler: SharedScheduler,
     cache_stats: SharedCacheStats,
@@ -326,9 +337,8 @@ impl BatchedServeConfig {
         let max_batch_size = max_batch_size.max(1);
         Self {
             device: super::device::select(),
-            policy: SchedulePolicy::Batched {
-                max_batch: max_batch_size,
-            },
+            max_batch: max_batch_size,
+            policy: PagedSchedulePolicy::AdmissionOrder,
             budget: KvBudget {
                 block_size: KV_BLOCK_SIZE,
                 num_blocks: max_batch_size * context_length.div_ceil(KV_BLOCK_SIZE),
@@ -345,21 +355,22 @@ impl BatchedServeConfig {
 /// [`run_fuel_engine`], which differ only in the CONCRETE `M` and which
 /// `ServingDriverInner` variant wraps it (`wrap`, a tuple-variant
 /// constructor used as a plain `fn`).
-fn run_batched<'m, M: fuel_inference::multi_session::DecodeModel>(
+fn run_batched<'m, M: fuel_inference::multi_session::PagedDecodeModel>(
     model: &'m M,
     config: BatchedServeConfig,
     eos_ids: Option<Vec<u32>>,
     context_length: usize,
     tokenizer: tokenizers::Tokenizer,
     rx: Receiver<InferenceJob>,
-    wrap: fn(FuelSchedulerDriver<'m, M>) -> ServingDriverInner<'m>,
+    wrap: fn(FuelPagedSchedulerDriver<'m, M>) -> ServingDriverInner<'m>,
 ) {
-    let fuel_scheduler = match FuelSchedulerDriver::new(
+    let fuel_scheduler = match FuelPagedSchedulerDriver::new(
         model,
-        config.device,
-        fuel::DType::F32,
-        config.policy,
         config.budget,
+        fuel::DType::F32,
+        &config.device,
+        config.policy,
+        config.max_batch,
         eos_ids,
     ) {
         Ok(s) => s,
@@ -638,18 +649,19 @@ mod tests {
     /// A real `ServingDriver` wrapping a real tiny `LlamaModel`, generous
     /// enough on KV capacity that admission never fails for these tests'
     /// short prompts -- the point is `try_admit`'s prefix-detection wiring,
-    /// not capacity edge cases (those belong to `scheduler_driver.rs`'s own
-    /// tests).
+    /// not capacity edge cases (those belong to `scheduler_driver_paged.rs`'s
+    /// own tests).
     fn serving_driver(model: &LlamaModel) -> ServingDriver<'_> {
-        let fuel_scheduler = FuelSchedulerDriver::new(
+        let fuel_scheduler = FuelPagedSchedulerDriver::new(
             model,
-            fuel::Device::cpu(),
-            fuel::DType::F32,
-            SchedulePolicy::RoundRobin,
             KvBudget {
                 block_size: 2,
                 num_blocks: 4096,
             },
+            fuel::DType::F32,
+            &fuel::Device::cpu(),
+            PagedSchedulePolicy::AdmissionOrder,
+            1,
             None,
         )
         .expect("tiny model's uniform per-head KV must satisfy ModelDims::from_model");

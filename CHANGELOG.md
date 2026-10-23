@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.19.0
+
+### Changed
+- **Dependencies: `fuel`/`fuel-*` 0.20.71 -> 0.22.4 (CireSnave's standing newest-deps rule;
+  publish independently confirmed via crates.io API + sparse index). No code changes needed for
+  the bump itself.
+- **Paged-scheduler port, slice 2 (ROADMAP research-track item 1): all three serving arms swapped
+  from `SessionScheduler` to `PagedSessionScheduler`.** New `src/model_fuel/
+  scheduler_driver_paged.rs::FuelPagedSchedulerDriver` replaces the deleted `scheduler_driver.rs::
+  FuelSchedulerDriver` for `ServingDriverInner::{F32,QuantizedGguf,QuantizedGgufQwen3}` alike --
+  Fuel 0.22.4 implements `PagedDecodeModel` for all three concrete model types, not just the one
+  slice 1 originally sized against. `set_priority` is exposed as a new non-trait method on the
+  driver (not yet called from `try_admit` -- that wiring is separate, tracked in
+  `docs/FUEL-GAPS-FROM-CANDLE-REMOVAL.md` entry #2).
+  **Breaking for anything depending on admission backpressure shape:** `PagedSessionScheduler::
+  add_session` is optimistic (no up-front capacity pre-check), so `try_admit` can no longer return
+  `AdmitError::NoCapacity` -- a session that can't fit is admitted and fails in isolation during
+  its first `step`, surfacing as `FinishOutcome::Failed` instead (proven by a real test, not just
+  documented). `SchedulePolicy::Batched{max_batch}` became `step_batched(max_batch)`, called
+  unconditionally every tick (`max_batch=1` degrades to serial, proven equivalent by test).
+  Verified: `cargo test --lib` 658/658 (incl. two pre-existing `scheduled_llama_engine` tests now
+  exercising the Paged path), 5 new tests in `scheduler_driver_paged.rs`, `cargo fmt --all --check`
+  and `clippy_gate.py` clean.
+
 ## 0.18.5
 
 ### Changed
