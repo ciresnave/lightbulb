@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.19.6
+
+### Added
+- **Advisory, non-blocking CodeRipper portfolio CI check** (CireSnave, 2026-10-23: "Roll out
+  advisory-only, non-blocking CodeRipper checks everywhere.") New `portfolio` job in
+  `.github/workflows/ci.yml`, calling CodeRipper's own reusable `portfolio.yml` workflow (public
+  repo, pinned by SHA like every other action in this file:
+  `ciresnave/coderipper/.github/workflows/portfolio.yml@c665210ad0972cf3ddb7bc81bdd7800c3248a938`).
+  Not a required branch-protection check and no rule is silenced -- the PM's own gate treats this
+  job as informational; the PM separately tracks baseline findings as individual ROADMAP rows per
+  failing rule, not as CI failures to fix in this PR.
+
 ## 0.19.5
 
 ### Removed
