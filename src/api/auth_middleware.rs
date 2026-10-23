@@ -82,22 +82,18 @@ pub async fn pre_auth_attempt_limiter_middleware(
     };
 
     if count > limit {
+        // No security-alert dispatch here (issue #130, PM instruction on
+        // #127's review): this counts EVERY request, successful or not, so
+        // its threshold-crossing is routine traffic shape, not evidence of
+        // a guessing campaign — alerting from here would be noise. The
+        // alert hook fires from `auth_failure_response` instead, keyed off
+        // the failures-only counter that actually targets brute force.
         tracing::warn!(
             %client_ip,
             count,
             limit,
             "pre-auth attempt limiter: refusing before the key lookup"
         );
-        if crate::api::security_event::just_crossed_threshold(count, limit) {
-            let event = crate::api::security_event::SecurityEvent::RepeatedAuthFailures {
-                client_ip,
-                count,
-                limit,
-            };
-            for sink in &state.security_sinks {
-                sink.notify(&event);
-            }
-        }
         let error = ErrorResponse {
             error: ErrorDetail {
                 message: "Too many authentication attempts from this client".to_string(),
@@ -213,6 +209,7 @@ async fn lookup_api_key_by_hash(
 /// Authentication middleware
 pub async fn auth_middleware(
     State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     mut request: Request,
     next: Next,
 ) -> Response {
@@ -257,16 +254,13 @@ pub async fn auth_middleware(
                 return next.run(request).await;
             }
             Ok(None) => {
-                // Not found or expired
-                let error = ErrorResponse {
-                    error: ErrorDetail {
-                        message: "Invalid or expired API key".to_string(),
-                        r#type: "authentication_error".to_string(),
-                        code: Some("unauthorized".to_string()),
-                    },
-                };
-
-                return (StatusCode::UNAUTHORIZED, Json(error)).into_response();
+                return auth_failure_response(
+                    &state,
+                    peer,
+                    request.headers(),
+                    "Invalid or expired API key",
+                )
+                .await;
             }
             Err(()) => {
                 let error = ErrorResponse {
@@ -277,20 +271,123 @@ pub async fn auth_middleware(
                     },
                 };
 
-                return (StatusCode::INTERNAL_SERVER_ERROR, Json(error)).into_response();
+                (StatusCode::INTERNAL_SERVER_ERROR, Json(error)).into_response()
             }
         }
     } else {
-        // Unauthorized
-        let error = ErrorResponse {
-            error: ErrorDetail {
-                message: "Missing or invalid authorization header".to_string(),
-                r#type: "authentication_error".to_string(),
-                code: Some("unauthorized".to_string()),
-            },
-        };
+        auth_failure_response(
+            &state,
+            peer,
+            request.headers(),
+            "Missing or invalid authorization header",
+        )
+        .await
+    }
+}
 
-        (StatusCode::UNAUTHORIZED, Json(error)).into_response()
+/// Build the response for a REAL authentication failure (missing/malformed
+/// header, or a hash that matched no live key) — issue #130's strict,
+/// failures-only brute-force limiter. Deliberately NOT called for a `500`
+/// (`lookup_api_key_by_hash`'s `Err(())` arm): a database error is not
+/// evidence of a guessing attempt, so it must not count toward this
+/// threshold.
+///
+/// Records the failure, and once the strict per-minute threshold
+/// (`ApiConfig::max_auth_failures_per_minute_per_ip`) is crossed, escalates
+/// to `429` instead of the ordinary `401` and fires the security alert
+/// hook (keyed off THIS counter, not `pre_auth_attempt_limiter_middleware`'s
+/// flood-limiter counter — PM instruction on #127's review: "item 4's alert
+/// threshold must key off that, not off this flood limiter, so alerts are
+/// not noise"). A database error recording the failure fails OPEN (returns
+/// the ordinary `401`, logged at `error`): unlike the pre-auth flood
+/// limiter, this sits AFTER a real authentication decision has already
+/// been made, so a counter-write failure here is a observability gap, not
+/// an unmetered-guessing hole.
+async fn auth_failure_response(
+    state: &AppState,
+    peer: SocketAddr,
+    headers: &axum::http::HeaderMap,
+    message: &str,
+) -> Response {
+    let client_ip = effective_client_ip(peer.ip(), headers, &state.config.trusted_proxies);
+    let limit = state.config.max_auth_failures_per_minute_per_ip as i64;
+
+    match record_auth_failure(state, client_ip).await {
+        Ok(count) if count > limit => {
+            tracing::warn!(
+                %client_ip,
+                count,
+                limit,
+                "auth failure limiter: refusing after repeated failed authentication attempts"
+            );
+            if crate::api::security_event::just_crossed_threshold(count, limit) {
+                let event = crate::api::security_event::SecurityEvent::RepeatedAuthFailures {
+                    client_ip,
+                    count,
+                    limit,
+                };
+                for sink in &state.security_sinks {
+                    sink.notify(&event);
+                }
+            }
+            let error = ErrorResponse {
+                error: ErrorDetail {
+                    message: "Too many failed authentication attempts from this client".to_string(),
+                    r#type: "rate_limit_error".to_string(),
+                    code: Some("auth_failures_exceeded".to_string()),
+                },
+            };
+            (StatusCode::TOO_MANY_REQUESTS, Json(error)).into_response()
+        }
+        Ok(_) => unauthorized_response(message),
+        Err(()) => {
+            tracing::error!(
+                %client_ip,
+                "auth failure limiter: database query failed recording a failed attempt; \
+                 returning the ordinary 401 (failing open — this sits after the real \
+                 authentication decision, so a counter-write failure is an observability \
+                 gap, not an unmetered-guessing hole)"
+            );
+            unauthorized_response(message)
+        }
+    }
+}
+
+fn unauthorized_response(message: &str) -> Response {
+    let error = ErrorResponse {
+        error: ErrorDetail {
+            message: message.to_string(),
+            r#type: "authentication_error".to_string(),
+            code: Some("unauthorized".to_string()),
+        },
+    };
+    (StatusCode::UNAUTHORIZED, Json(error)).into_response()
+}
+
+/// Atomic upsert into `auth_failure_counts` (issue #130), returning the
+/// failure count for the current minute window. Same shape as
+/// `record_auth_attempt`, deliberately a separate table: that one counts
+/// EVERY request (success or not) for the flood limiter; this one counts
+/// ONLY real authentication failures, which is what makes a strict
+/// threshold here safe for legitimate traffic.
+async fn record_auth_failure(state: &AppState, client_ip: std::net::IpAddr) -> Result<i64, ()> {
+    let backend = state.pg_backend.as_ref().ok_or(())?;
+    let rows = backend
+        .query(
+            r#"
+            INSERT INTO auth_failure_counts (client_ip, window_start, failure_count)
+            VALUES ($1::inet, date_trunc('minute', now())::timestamp, 1)
+            ON CONFLICT (client_ip, window_start) DO UPDATE
+              SET failure_count = auth_failure_counts.failure_count + 1
+            RETURNING failure_count
+            "#,
+            &[persistant_relational::Value::Text(client_ip.to_string())],
+        )
+        .await
+        .map_err(|_| ())?;
+    match rows.first().and_then(|row| row.values.first()) {
+        Some(persistant_relational::Value::Int(n)) => Ok(*n),
+        _ => Err(()),
     }
 }
 

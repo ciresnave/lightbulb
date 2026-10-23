@@ -162,9 +162,26 @@ pub struct ApiConfig {
     /// from a guess. 300/min (~5/s) still stops a flood before it reaches
     /// the database, without breaking real use. The PROPER brute-force
     /// limiter — a strict, FAILURES-ONLY counter (post-auth 401s per IP,
-    /// e.g. 10/min) — is tracked as a follow-up, not implemented here; see
-    /// the issue filed alongside this change.
+    /// e.g. 10/min) — is [`max_auth_failures_per_minute_per_ip`], below
+    /// (issue #130).
+    ///
+    /// [`max_auth_failures_per_minute_per_ip`]: Self::max_auth_failures_per_minute_per_ip
     pub max_auth_attempts_per_minute_per_ip: u32,
+
+    /// Failed authentication attempts (401s from `auth_middleware`) a
+    /// single client IP may make per minute before `auth_middleware`
+    /// escalates to `429` instead of the ordinary `401` (issue #130). A
+    /// SEPARATE counter from `max_auth_attempts_per_minute_per_ip`: this
+    /// one counts ONLY real auth failures (missing/malformed header, or a
+    /// hash matching no live key) — NOT a 500 from a database error, and
+    /// not a successful request — which is what makes a strict default
+    /// (10/min) safe for legitimate traffic. Legitimate clients essentially
+    /// never produce a stream of 401s; a sustained credential-guessing
+    /// campaign does. This is the limiter security audit item 4's alert
+    /// hook keys off, not the flood limiter above (PM instruction on
+    /// #127's review: "item 4's alert threshold must key off that, not off
+    /// this flood limiter, so alerts are not noise").
+    pub max_auth_failures_per_minute_per_ip: u32,
 
     /// Destination for the security alert hook (security audit item 4) —
     /// read from the `SECURITY_ALERT_EMAIL` environment variable ONLY
@@ -199,6 +216,7 @@ impl Default for ApiConfig {
             no_auth: false,
             trusted_proxies: Vec::new(),
             max_auth_attempts_per_minute_per_ip: 300,
+            max_auth_failures_per_minute_per_ip: 10,
             security_alert_email: None,
         }
     }
@@ -510,17 +528,19 @@ async fn finish_connect(backend: persistant_sqlx::PgBackend) -> Option<persistan
     }
 }
 
-/// Spawn the `auth_attempt_counts` (security audit item 3) expiry task.
-/// Extracted out of `ApiServer::new` (Codacy: still 7 lines over limit
-/// after the first extraction) -- self-contained, reads nothing from
-/// `AppState`.
+/// Spawn the `auth_attempt_counts`/`auth_failure_counts` (security audit
+/// item 3; issue #130) expiry task. Extracted out of `ApiServer::new`
+/// (Codacy: still 7 lines over limit after the first extraction) --
+/// self-contained, reads nothing from `AppState`.
 ///
-/// Written on every request that reaches `pre_auth_attempt_limiter_
-/// middleware`, including every brute-force guess — unlike `api_key_usage`,
-/// whose rows are bounded by the number of PROVISIONED keys, this table's
-/// key space is "every IP that ever made a request," so it needs its own
-/// expiry rather than growing forever. A background task, not a per-request
-/// delete, so the request path pays no extra latency for it.
+/// Both tables are written on every request that reaches their respective
+/// middleware (`pre_auth_attempt_limiter_middleware` / `auth_middleware`'s
+/// failure path), including every brute-force guess — unlike
+/// `api_key_usage`, whose rows are bounded by the number of PROVISIONED
+/// keys, each table's key space is "every IP that ever made a request" (or
+/// "ever failed one"), so both need their own expiry rather than growing
+/// unbounded. One background task, not a per-request delete, so the
+/// request path pays no extra latency for either.
 fn spawn_auth_attempt_counts_cleanup(pg_backend: Option<persistant_sqlx::PgBackend>) {
     let Some(backend) = pg_backend else {
         return;
@@ -538,6 +558,16 @@ fn spawn_auth_attempt_counts_cleanup(pg_backend: Option<persistant_sqlx::PgBacke
                 .await
             {
                 tracing::warn!(error = %e, "auth_attempt_counts cleanup query failed");
+            }
+            if let Err(e) = backend
+                .execute(
+                    "DELETE FROM auth_failure_counts \
+                     WHERE window_start < NOW() - INTERVAL '1 hour'",
+                    &[],
+                )
+                .await
+            {
+                tracing::warn!(error = %e, "auth_failure_counts cleanup query failed");
             }
         }
     });
@@ -1229,6 +1259,16 @@ mod tests {
             ApiConfig::default().max_auth_attempts_per_minute_per_ip,
             300
         );
+    }
+
+    /// Pins the default at 10/min (issue #130) — strict, because this
+    /// counter only ever increments on a REAL authentication failure;
+    /// legitimate clients essentially never produce a stream of 401s, so a
+    /// low threshold here does not risk throttling ordinary traffic the
+    /// way a low threshold on the flood limiter above would.
+    #[test]
+    fn max_auth_failures_per_minute_per_ip_defaults_to_10() {
+        assert_eq!(ApiConfig::default().max_auth_failures_per_minute_per_ip, 10);
     }
 
     /// Security audit item 5: the default must NOT be a known, shared

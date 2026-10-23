@@ -54,6 +54,15 @@ async fn main() -> Result<()> {
             .and_then(|v| v.parse().ok())
             .unwrap_or(300);
 
+    // Issue #130: the strict, failures-only brute-force limiter, separate
+    // from the flood limiter above — see `ApiConfig::
+    // max_auth_failures_per_minute_per_ip`'s own doc.
+    let max_auth_failures_per_minute_per_ip =
+        env::var("LIGHTBULB_MAX_AUTH_FAILURES_PER_MINUTE_PER_IP")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(10);
+
     let request_timeout_ms = env::var("LIGHTBULB_REQUEST_TIMEOUT_MS")
         .ok()
         .and_then(|v| v.parse().ok())
@@ -107,6 +116,7 @@ async fn main() -> Result<()> {
         no_auth,
         trusted_proxies,
         max_auth_attempts_per_minute_per_ip,
+        max_auth_failures_per_minute_per_ip,
         security_alert_email,
     };
 

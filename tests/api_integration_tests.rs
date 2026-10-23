@@ -786,4 +786,129 @@ mod api_tests {
             .body(Body::from(serde_json::to_string(&request_body).unwrap()))
             .unwrap()
     }
+
+    /// Same shape as [`unauthenticated_chat_request`], with an
+    /// `Authorization` header — `token` need not be provisioned; an unknown
+    /// token still reaches `auth_middleware`'s hash lookup and 401s there,
+    /// which is exactly what issue #130's failure limiter counts.
+    fn chat_request_with_token(token: &str) -> Request<Body> {
+        let request_body = json!({
+            "model": "lightbulb-7b",
+            "messages": [{"role": "user", "content": "Hello!"}],
+        });
+        Request::builder()
+            .method("POST")
+            .uri("/v1/chat/completions")
+            .header("content-type", "application/json")
+            .header("authorization", format!("Bearer {token}"))
+            .body(Body::from(serde_json::to_string(&request_body).unwrap()))
+            .unwrap()
+    }
+
+    /// Issue #130: the strict, failures-only limiter escalates
+    /// `auth_middleware`'s ordinary 401 to 429 once
+    /// `max_auth_failures_per_minute_per_ip` real authentication failures
+    /// (never-provisioned token, so every request 401s at the hash lookup)
+    /// land from the same peer within the window.
+    ///
+    /// This is the positive control for the two tests below: it proves the
+    /// limiter actually engages and escalates at `limit + 1`, so a result
+    /// of "still 401" elsewhere in this file means the limiter correctly
+    /// did NOT engage, not that it is a no-op.
+    #[tokio::test]
+    #[ignore] // Requires PostgreSQL
+    async fn test_auth_failure_limiter_escalates_to_429_after_threshold() {
+        let server = create_test_server().await;
+        let limit = server.state().config.max_auth_failures_per_minute_per_ip;
+        let app = server.build_router().with_state(server.state().clone());
+
+        let mut last_status = StatusCode::OK;
+        for _ in 0..=limit {
+            let request = with_fake_peer_at(
+                chat_request_with_token("never-provisioned-token"),
+                [10, 0, 1, 1],
+            );
+            last_status = app.clone().oneshot(request).await.unwrap().status();
+        }
+
+        assert_eq!(
+            last_status,
+            StatusCode::TOO_MANY_REQUESTS,
+            "the (limit+1)th real authentication failure from the same peer within the \
+             window must escalate to 429, not the ordinary 401"
+        );
+    }
+
+    /// Issue #130: a DIFFERENT peer IP must not be affected by another IP's
+    /// failure count — same per-IP keying requirement as the flood
+    /// limiter's own `_is_keyed_per_ip` test, for the separate failures-only
+    /// counter.
+    #[tokio::test]
+    #[ignore] // Requires PostgreSQL
+    async fn test_auth_failure_limiter_is_keyed_per_ip() {
+        let server = create_test_server().await;
+        let limit = server.state().config.max_auth_failures_per_minute_per_ip;
+        let app = server.build_router().with_state(server.state().clone());
+
+        for _ in 0..=limit {
+            let request = with_fake_peer_at(
+                chat_request_with_token("never-provisioned-token"),
+                [10, 0, 1, 2],
+            );
+            let _ = app.clone().oneshot(request).await.unwrap();
+        }
+
+        let other_peer_request = with_fake_peer_at(
+            chat_request_with_token("never-provisioned-token"),
+            [10, 0, 1, 3],
+        );
+        let response = app.oneshot(other_peer_request).await.unwrap();
+
+        assert_eq!(
+            response.status(),
+            StatusCode::UNAUTHORIZED,
+            "a different peer IP must not inherit another IP's failure count — it should \
+             get the ordinary 401 for its own first-ever failure, not 429"
+        );
+    }
+
+    /// Issue #130's core behavioral claim: this counter is FAILURES-only.
+    /// `limit` SUCCESSFUL requests (a real provisioned key) from one peer
+    /// must never trip it — only a subsequent genuine authentication
+    /// failure from that same peer should. Distinguishes this limiter from
+    /// `pre_auth_attempt_limiter_middleware`'s flood limiter, which counts
+    /// every request including successes; this test would fail if the new
+    /// limiter accidentally counted successes the same way.
+    #[tokio::test]
+    #[ignore] // Requires PostgreSQL
+    async fn test_auth_failure_limiter_does_not_count_successful_requests() {
+        let server = create_test_server().await; // provisions admin "test-token"
+        let limit = server.state().config.max_auth_failures_per_minute_per_ip;
+        let app = server.build_router().with_state(server.state().clone());
+
+        for _ in 0..(limit + 5) {
+            let request = with_fake_peer_at(chat_request_with_token("test-token"), [10, 0, 1, 4]);
+            let response = app.clone().oneshot(request).await.unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::OK,
+                "a valid key must keep succeeding regardless of how many times it's used — \
+                 confirms these requests never reach the failure path at all"
+            );
+        }
+
+        let failing_request = with_fake_peer_at(
+            chat_request_with_token("never-provisioned-token"),
+            [10, 0, 1, 4],
+        );
+        let response = app.oneshot(failing_request).await.unwrap();
+
+        assert_eq!(
+            response.status(),
+            StatusCode::UNAUTHORIZED,
+            "more successful requests than `limit` from this peer must not have armed the \
+             failures-only counter — this first real failure should still get the ordinary \
+             401, not 429"
+        );
+    }
 }

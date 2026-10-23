@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.18.4
+
+### Added
+- **Failures-only, strict per-IP brute-force limiter (issue #130).** A second,
+  separate counter from `pre_auth_attempt_limiter_middleware`'s flood limiter
+  (which counts every request, successful or not, and so must stay generous):
+  `auth_middleware` now records a failure (new `auth_failure_counts` table,
+  migration V7) only on a REAL authentication failure — missing/malformed
+  header, or a hash matching no live key, never a 500 or a success — and
+  escalates to `429` once `max_auth_failures_per_minute_per_ip` (default 10/min)
+  is crossed within the window, instead of the ordinary `401`. The security
+  alert hook (`security_event.rs`) now fires from THIS crossing, not the flood
+  limiter's, per the PM's instruction on #127's review ("item 4's alert
+  threshold must key off that, not off this flood limiter, so alerts are not
+  noise") — the flood limiter still 429s on its own threshold but no longer
+  dispatches a `SecurityEvent`. Fails open on a database error recording the
+  failure (returns the ordinary 401): unlike the pre-auth flood limiter, this
+  sits after a real authentication decision has already been made, so a
+  counter-write failure here is an observability gap, not an unmetered-
+  guessing hole. Three new Postgres-gated tests (`#[ignore]`, run by
+  `postgres_integration`): threshold escalation, per-IP keying, and the core
+  claim that successful requests never arm this counter — verified against a
+  real local Postgres container, not just compiled.
+
 ## 0.18.3
 
 ### Changed
