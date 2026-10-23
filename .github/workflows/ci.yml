@@ -175,6 +175,18 @@ jobs:
         with:
           command: check
 
+  # CireSnave 2026-10-23: "Roll out advisory-only, non-blocking CodeRipper
+  # checks everywhere." Reusable workflow from CodeRipper's own repo (public),
+  # pinned by SHA like every other action here. ADVISORY ONLY: not a required
+  # status check, and nothing here silences any CodeRipper rule -- the PM's
+  # branch-protection gate treats this job as informational. The PM separately
+  # tracks baseline findings as one ROADMAP row per failing rule, not CI
+  # failures.
+  portfolio:
+    permissions:
+      contents: read
+    uses: ciresnave/coderipper/.github/workflows/portfolio.yml@c665210ad0972cf3ddb7bc81bdd7800c3248a938
+
   gates:
     # WINDOWS, NOT LINUX. Windows is the platform this project is developed
     # on, targets CUDA on, and is known to build on -- the Linux question is
