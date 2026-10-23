@@ -437,26 +437,74 @@ pub fn new_shared_system_metrics() -> SharedSystemMetrics {
     std::sync::Arc::new(std::sync::Mutex::new(sysinfo::System::new_all()))
 }
 
+/// Same literal-only loopback check as `is_loopback_bind`, applied to a
+/// `postgres://` URL's host instead of a bind address: a hostname that
+/// merely resolves to loopback today is not a safety property. An
+/// unparseable URL is not loopback -- `try_connect_once` fails on it
+/// below anyway, via `connect_with`.
+fn is_loopback_database_url(database_url: &str) -> bool {
+    url::Url::parse(database_url)
+        .ok()
+        .and_then(|u| u.host_str().map(str::to_string))
+        .is_some_and(|host| is_loopback_bind(&host))
+}
+/// Picks the `TlsPolicy` for `connect_with` from `database_url` itself,
+/// so swapping in `connect_with` (whose own default is `Require`) can't
+/// silently weaken a `DATABASE_URL` that already works today.
+///
+/// - Loopback (test/local Postgres, usually started without certs): no
+///   TLS, regardless of any `sslmode` on the URL.
+/// - Non-loopback with an explicit `sslmode=...`: honored as given --
+///   `allow` has no `TlsPolicy` equivalent and maps to the closest one,
+///   `Prefer` (sqlx's own `PgSslMode` docs: "First try an SSL connection;
+///   if that fails, try a non-SSL connection", i.e. the same silent-
+///   downgrade risk `Prefer` itself documents).
+/// - Non-loopback with no `sslmode` at all: `Require`. sqlx's own
+///   implicit default here is `Prefer`; this is the one case where this
+///   function picks something stronger than the URL alone would get
+///   today, never weaker.
+fn tls_policy_for(database_url: &str) -> persistant_sqlx::TlsPolicy {
+    use persistant_sqlx::TlsPolicy;
+
+    if is_loopback_database_url(database_url) {
+        return TlsPolicy::Disable;
+    }
+
+    let sslmode = url::Url::parse(database_url).ok().and_then(|u| {
+        u.query_pairs()
+            .find(|(k, _)| k == "sslmode")
+            .map(|(_, v)| v.into_owned())
+    });
+
+    match sslmode.as_deref().map(str::to_ascii_lowercase).as_deref() {
+        Some("disable") => TlsPolicy::Disable,
+        Some("allow") | Some("prefer") => TlsPolicy::Prefer,
+        Some("verify-ca") => TlsPolicy::VerifyCa { root_cert: None },
+        Some("verify-full") => TlsPolicy::VerifyFull { root_cert: None },
+        Some("require") | None => TlsPolicy::Require,
+        Some(_unrecognized) => TlsPolicy::Require,
+    }
+}
+
 /// One connection attempt, bounded to `timeout` regardless of
-/// `PgBackend::connect`'s own default. `PgBackend::connect` builds its pool
-/// with `sqlx`'s default `acquire_timeout` (30s) and no way to override it
-/// from outside the crate -- a retry loop built directly on `connect()`
-/// would take up to 5 x 30s = ~150s to give up, not the handful of seconds
-/// a "momentary blip" retry is supposed to cost. Building the `sqlx::PgPool`
-/// here with an explicit short `acquire_timeout`, then handing it to
-/// `PgBackend::from_pool` (the same public constructor `connect()` itself
-/// uses internally), keeps the retry loop's total bound small and real.
+/// `PgBackend::connect`'s own default (sqlx's 30s `acquire_timeout`, with
+/// no way to override it from outside the crate) -- a retry loop built
+/// directly on `connect()` would take up to 5 x 30s = ~150s to give up,
+/// not the handful of seconds a "momentary blip" retry is supposed to
+/// cost. `connect_with` takes `acquire_timeout` as one of its
+/// `ConnectOptions`, so no manual pool-building is needed any more; see
+/// `tls_policy_for` for how its `TlsPolicy` is chosen.
 async fn try_connect_once(
     database_url: &str,
     timeout: std::time::Duration,
 ) -> Result<persistant_sqlx::PgBackend, persistant_relational::RelError> {
-    let pool = sqlx::postgres::PgPoolOptions::new()
-        .max_connections(16)
-        .acquire_timeout(timeout)
-        .connect(database_url)
-        .await
-        .map_err(|e| persistant_relational::RelError::Unavailable(e.to_string()))?;
-    persistant_sqlx::PgBackend::from_pool(pool).await
+    let secret = persistant_relational::ConnectionSecret::literal(database_url);
+    let options = persistant_sqlx::ConnectOptions {
+        tls: tls_policy_for(database_url),
+        max_connections: 16,
+        acquire_timeout: timeout,
+    };
+    persistant_sqlx::PgBackend::connect_with(&secret, &options).await
 }
 
 /// Connects to Postgres with a short, bounded retry (5 attempts, each
