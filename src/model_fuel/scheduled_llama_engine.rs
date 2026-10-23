@@ -296,6 +296,14 @@ impl<'m> SchedulerDriver for ServingDriver<'m> {
             ControlMsg::ClearPrefixCache => self.clear_prefix_cache(),
         }
     }
+
+    fn set_priority(&mut self, id: Self::Id, priority: i32) -> Result<(), String> {
+        match &mut self.inner {
+            ServingDriverInner::F32(d) => d.set_priority(id, priority),
+            ServingDriverInner::QuantizedGguf(d) => d.set_priority(id, priority),
+            ServingDriverInner::QuantizedGgufQwen3(d) => d.set_priority(id, priority),
+        }
+    }
 }
 
 /// A generous block size: large enough that `kv_blocks_required`'s ceiling

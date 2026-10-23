@@ -108,15 +108,20 @@ it** — tell the Fuel lane once this is plumbed. Not started: this needs the ad
 above made first
 (there is nothing in Fuel yet to plumb to), then Fuel's crates.io publish.
 
-**Fuel-side hook now exists (2026-10-23, Fuel 0.22.4).** `PagedSessionScheduler::set_priority(id,
-priority: i32)` is published and confirmed directly in `fuel-inference/src/multi_session.rs`.
-`FuelPagedSchedulerDriver::set_priority` (`src/model_fuel/scheduler_driver_paged.rs`, landed as
-part of the paged-scheduler port, ROADMAP research-track item 1 slice 2) exposes it as a
-non-trait method on the driver — but nothing calls it yet: `InferenceJob.priority`/
-`ServingDriver::try_admit` still aren't connected to it. The remaining work is purely on
-lightbulb's side now (thread the already-parsed `Priority` through `try_admit`'s call site and
-invoke `set_priority` right after a successful admission) — no further Fuel-side work or publish
-needed.
+**RESOLVED 2026-10-23.** `PagedSessionScheduler::set_priority(id, priority: i32)` (Fuel 0.22.4,
+confirmed directly in `fuel-inference/src/multi_session.rs`) is now wired end to end:
+`SchedulerDriver` (`src/engine/scheduled_runner.rs`) gained a `set_priority` method (default
+no-op, same pattern as `handle_control`, so drivers with no priority concept need no change);
+`run_scheduled_jobs`'s admission loop reads `job.priority` (`InferenceJob.priority`, from the
+`X-Lightbulb-Priority` header) and calls `driver.set_priority(id, priority as i32)` right after a
+successful `try_admit`, logging (never failing the admission on) an error; `FuelPagedSchedulerDriver`
+is the one real implementor, forwarding to `PagedSessionScheduler::set_priority`; `ServingDriver`
+forwards to whichever of its three concrete arms is active. **Still has no live ordering effect**:
+every `BatchedServeConfig::policy` in `scheduled_llama_engine.rs` defaults to, and nothing yet
+switches to, `PagedSchedulePolicy::Priority` — Fuel's own doc says `set_priority` "is read only
+under `PagedSchedulePolicy::Priority`" and "ignored by the default policy". The value is recorded
+correctly (provable without that policy switch); whether/when to flip the default policy is a
+separate, not-yet-made decision, out of scope for this wiring PR.
 
 ### 3. Dtype selection (f16/bf16) for SafeTensors models
 **What it was:** `ModelRunner::start`'s `dtype` parameter, honored by the

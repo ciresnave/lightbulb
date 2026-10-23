@@ -48,6 +48,33 @@ mod api_tests {
         request
     }
 
+    /// Both rate-limiter tables bucket by `date_trunc('minute', now())`
+    /// (`auth_attempt_counts`/`auth_failure_counts` in
+    /// `api/auth_middleware.rs`) -- a fixed per-minute window, not a
+    /// sliding one. A "saturate then assert 429" loop that happens to start
+    /// late enough in a minute to straddle `:00` resets mid-loop into a
+    /// fresh, near-empty bucket and never reaches the threshold, failing
+    /// with the ordinary 401/403 instead -- a real CI failure
+    /// (`postgres_integration`, 2026-10-23,
+    /// `test_auth_failure_limiter_escalates_to_429_after_threshold`,
+    /// left=401 right=429) that did not reproduce locally and whose own
+    /// logged timestamps straddled a `:00` boundary. Called before such a
+    /// loop starts so the whole thing lands in one bucket; a no-op the
+    /// overwhelming majority of the time (only sleeps in the last 10
+    /// seconds of a minute, and then for at most 10s).
+    async fn wait_for_fresh_minute_window() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let secs_into_minute = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock before UNIX epoch")
+            .as_secs()
+            % 60;
+        if secs_into_minute <= 50 {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(60 - secs_into_minute + 1)).await;
+    }
+
     /// Insert a known API key so the authenticated cases have something real to
     /// present.
     ///
@@ -441,6 +468,7 @@ mod api_tests {
         let server = create_test_server().await;
         let limit = server.state().config.max_auth_attempts_per_minute_per_ip;
         let app = server.build_router().with_state(server.state().clone());
+        wait_for_fresh_minute_window().await;
 
         // `/health` is deliberately registered AFTER every `.layer()` call in
         // `build_router` (so load balancers never need a bearer token), which
@@ -821,6 +849,7 @@ mod api_tests {
         let server = create_test_server().await;
         let limit = server.state().config.max_auth_failures_per_minute_per_ip;
         let app = server.build_router().with_state(server.state().clone());
+        wait_for_fresh_minute_window().await;
 
         let mut last_status = StatusCode::OK;
         for _ in 0..=limit {
