@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.19.4
+
+### Added
+- **`InferenceJob.priority` wired through to Fuel's `set_priority` (M4 slice 5.4c completion).**
+  `SchedulerDriver` (`src/engine/scheduled_runner.rs`) gained a `set_priority(id, priority: i32)`
+  method, default no-op (same pattern as `handle_control`) so every existing implementor needs no
+  change unless it has a real priority concept. `run_scheduled_jobs`'s admission loop now reads
+  `job.priority` (parsed from the `X-Lightbulb-Priority` header) and calls
+  `driver.set_priority(id, priority as i32)` right after a successful `try_admit`, logging (never
+  failing the admission over) an error. `FuelPagedSchedulerDriver` is the one real implementor,
+  forwarding to `PagedSessionScheduler::set_priority`; `ServingDriver` forwards to whichever of its
+  three concrete arms (`F32`/`QuantizedGguf`/`QuantizedGgufQwen3`) is active. Proven by a new test
+  (`FakeDriver` records every `set_priority` call it receives) rather than by compiling alone.
+  **No live ordering effect yet**: every `BatchedServeConfig::policy` still defaults to
+  `PagedSchedulePolicy::AdmissionOrder` -- Fuel's own doc says `set_priority` is read only under
+  `PagedSchedulePolicy::Priority` and otherwise ignored. The value is recorded correctly; switching
+  the default policy is a separate, not-yet-made decision, out of scope here.
+
 ## 0.19.3
 
 ### Changed

@@ -90,15 +90,6 @@ impl<'m, M: PagedDecodeModel> FuelPagedSchedulerDriver<'m, M> {
             errored: HashMap::new(),
         })
     }
-
-    /// Set session `id`'s scheduling priority (read only under
-    /// [`PagedSchedulePolicy::Priority`]). Not part of [`SchedulerDriver`] —
-    /// that trait's `try_admit` carries no priority, so a caller wanting
-    /// priority-ordered admission calls this itself right after `try_admit`
-    /// returns the new session's id.
-    pub(crate) fn set_priority(&mut self, id: SessionId, priority: i32) -> fuel::Result<()> {
-        self.scheduler.set_priority(id, priority)
-    }
 }
 
 impl<'m, M: PagedDecodeModel> SchedulerDriver for FuelPagedSchedulerDriver<'m, M> {
@@ -182,6 +173,18 @@ impl<'m, M: PagedDecodeModel> SchedulerDriver for FuelPagedSchedulerDriver<'m, M
             .session_infos()
             .iter()
             .all(|s| s.phase == SessionPhase::Finished)
+    }
+
+    /// Forwards to `PagedSessionScheduler::set_priority` ("higher goes
+    /// first"; read only under `PagedSchedulePolicy::Priority` -- this
+    /// driver's own `new` still defaults to `AdmissionOrder`, so this call
+    /// is recorded but has no ordering effect until something switches the
+    /// policy). The only `SchedulerDriver` with a real priority concept, as
+    /// of this writing.
+    fn set_priority(&mut self, id: SessionId, priority: i32) -> Result<(), String> {
+        self.scheduler
+            .set_priority(id, priority)
+            .map_err(|e| e.to_string())
     }
 }
 

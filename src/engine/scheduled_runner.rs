@@ -119,6 +119,20 @@ pub(crate) trait SchedulerDriver {
     /// (`src/model_fuel/scheduled_llama_engine.rs`) has a real cache to
     /// clear.
     fn handle_control(&mut self, _msg: ControlMsg) {}
+
+    /// Record `id`'s scheduling priority, called right after `try_admit`
+    /// returns it successfully (see [`run_scheduled_jobs`]'s admission
+    /// loop). `try_admit` itself carries no priority -- this is a separate
+    /// step so a driver with no priority concept (every `SchedulerDriver`
+    /// except the paged Fuel one, as of this writing) can simply not
+    /// override it. Default no-op for that reason, same pattern as
+    /// `handle_control`. A failure here is reported (`run_scheduled_jobs`
+    /// logs it) but never fails the admission that already succeeded --
+    /// priority is a best-effort ordering hint, not a correctness
+    /// requirement.
+    fn set_priority(&mut self, _id: Self::Id, _priority: i32) -> Result<(), String> {
+        Ok(())
+    }
 }
 
 /// Drive `driver` against jobs arriving on `rx`, dispatching results to each
@@ -200,8 +214,22 @@ pub(crate) fn run_scheduled_jobs<D: SchedulerDriver>(
                     continue;
                 }
             };
+            let priority = job.priority;
             match driver.try_admit(&prompt_tokens, job.max_new_tokens, job.temperature) {
                 Ok(id) => {
+                    // M4 slice 5.4c (Option B) wiring: best-effort only --
+                    // a driver with no priority concept returns `Ok(())`
+                    // from the trait's default no-op, and a real failure
+                    // here never un-admits a session that already
+                    // succeeded (see `SchedulerDriver::set_priority`'s doc
+                    // comment).
+                    if let Err(e) = driver.set_priority(id, priority as i32) {
+                        tracing::warn!(
+                            error = %e,
+                            "set_priority failed after admission; session stays admitted \
+                             without priority ordering"
+                        );
+                    }
                     active.insert(
                         id,
                         JobMeta {
@@ -335,6 +363,13 @@ mod tests {
         capacity: usize,
         next_id: u64,
         sessions: HashMap<u64, FakeSession>,
+        /// Every `set_priority` call this driver has received, in order --
+        /// proves `run_scheduled_jobs` actually threads `InferenceJob::priority`
+        /// through, not just that it compiles against the trait's default
+        /// no-op. `Rc<RefCell<_>>`, not a plain field, because
+        /// `run_scheduled_jobs` takes ownership of the driver and never hands
+        /// it back; a clone taken before the call survives to assert on.
+        priority_log: std::rc::Rc<std::cell::RefCell<Vec<(u64, i32)>>>,
     }
 
     impl FakeDriver {
@@ -343,6 +378,7 @@ mod tests {
                 capacity,
                 next_id: 0,
                 sessions: HashMap::new(),
+                priority_log: Default::default(),
             }
         }
     }
@@ -450,6 +486,11 @@ mod tests {
         fn has_active_sessions(&self) -> bool {
             !self.sessions.is_empty()
         }
+
+        fn set_priority(&mut self, id: u64, priority: i32) -> Result<(), String> {
+            self.priority_log.borrow_mut().push((id, priority));
+            Ok(())
+        }
     }
 
     fn complete_job(
@@ -472,6 +513,18 @@ mod tests {
         (job, rx)
     }
 
+    fn complete_job_with_priority(
+        prompt: &str,
+        max_new: usize,
+        priority: crate::engine::Priority,
+    ) -> (
+        InferenceJob,
+        oneshot::Receiver<anyhow::Result<CompletionResult>>,
+    ) {
+        let (job, rx) = complete_job(prompt, max_new);
+        (InferenceJob { priority, ..job }, rx)
+    }
+
     fn streaming_job(
         prompt: &str,
         max_new: usize,
@@ -490,6 +543,27 @@ mod tests {
             response_mode: ResponseMode::Streaming(tx),
         };
         (job, rx)
+    }
+
+    #[test]
+    fn a_jobs_priority_is_set_on_the_driver_right_after_admission() {
+        let (tx, rx) = mpsc::channel();
+        let (job, mut result_rx) =
+            complete_job_with_priority("hello", 3, crate::engine::Priority::High);
+        tx.send(job).unwrap();
+        drop(tx);
+
+        let driver = FakeDriver::new(4);
+        let priority_log = driver.priority_log.clone();
+
+        run_scheduled_jobs(driver, rx, no_control(), fake_encode, fake_decode);
+
+        result_rx.try_recv().unwrap().expect("job should succeed");
+        assert_eq!(
+            *priority_log.borrow(),
+            vec![(0, crate::engine::Priority::High as i32)],
+            "the job's own priority, not Normal, must reach set_priority"
+        );
     }
 
     #[test]
