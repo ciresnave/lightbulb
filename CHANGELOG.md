@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.18.3
+
+### Changed
+- **Paged-scheduler port slice 2 re-sized against Fuel's merged `#456` (PM-tasked, 2026-10-23).**
+  `ROADMAP.md`: slice 1 (`LlamaPagedAdapter`) is moot — Fuel implements `PagedDecodeModel`
+  directly on its own `Llama3Model`/`QuantizedLlama3Model`, confirmed by reading
+  `fuel-model-llama`/`fuel-transformers` at Fuel's merge commit. That same reading narrows slice
+  2's scope: only `ServingDriverInner::QuantizedGguf` can swap (the plain `fuel_model_llama::
+  LlamaModel` the `F32` arm uses never gets the trait). Two blockers found and recorded:
+  `PagedSessionScheduler` has no per-session incremental-token accessor (breaks streaming;
+  Fuel-side fix targeted for 0.22.2, no scope-cut accepted), and its `new()` takes no
+  `SchedulePolicy`, breaking the one-generic-`run_batched`-for-all-three-variants pattern (needs
+  a parallel `run_batched_paged`). `set_priority` already exists on `PagedSessionScheduler`,
+  closing the parked M4 5.4c priority-wiring gap with no further Fuel work once slice 2 lands.
+  No lightbulb code changes — `step()` cannot compile without the missing accessor, and shipping
+  the rest uncompiled/unverified was declined.
+
 ## 0.18.2
 
 ### Changed
