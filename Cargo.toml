@@ -4,7 +4,7 @@
     license     = "MIT OR Apache-2.0"
     name        = "lightbulb"
     repository  = "https://github.com/ciresnave/lightbulb"
-    version     = "0.19.1"
+    version     = "0.19.2"
 
 [features]
     # CUDA, via Fuel only. Was `["candlelight/cuda", "fuel/cuda"]`; candlelight
@@ -139,9 +139,6 @@
 
     # Hugging Face Hub integration for model downloading
     hf-hub             = "0.4"
-
-    # Configuration management
-    distributed-config = "0.1"
 
     # Model Context Protocol implementation
     mocopr = "0.1"

@@ -9,6 +9,30 @@
   direct pin in `Cargo.toml`, so `cargo update -p ctutils` was the whole fix. `cargo test --lib`
   658/658, `cargo fmt --all --check` and `clippy_gate.py` clean.
 
+## 0.19.2
+
+### Fixed
+- **Security: RUSTSEC-2026-0258 (h2 0.3.27, "unbounded empty DATA frames") removed by dropping
+  `distributed-config`.** `cargo tree -i h2@0.3.27` traced the whole chain to one unused direct
+  dependency: `distributed-config = "0.1"` (only version ever published) pulled `reqwest 0.11.27`
+  (`hyper 0.14` -> `h2 0.3.27`) and `jsonschema 0.17.1` transitively, and a repo-wide grep found
+  zero actual uses of `distributed_config` in `src/` or anywhere else -- dropping the dependency
+  removes the whole chain (confirmed: `h2`/`jsonschema`/`reqwest 0.11.x`/`hyper-tls 0.5` are all
+  gone from `Cargo.lock`; only the modern `h2 0.4.20` remains).
+
+### Added
+- **`cargo deny` CI gate** (portfolio rule: CI and branch protection everywhere,
+  CIRESNAVE-EXPECTATIONS.md §6.5), mirroring coderipper's/UniSQL's `deny` job and pinned action
+  version. New `deny.toml`: real vulnerabilities fail the job; `unmaintained = "none"` and
+  `yanked = "warn"` mirror `cargo audit`'s own existing default treatment of this tree's 4
+  current unmaintained crates and one yanked `chacha20` (all pre-existing, not independently
+  actionable from this repo, already non-blocking under `cargo audit`) rather than introducing a
+  stricter failure mode for them on day one. License allow-list adds `MPL-2.0` (file-level/weak
+  copyleft) and `CC0-1.0` (public-domain-equivalent) beyond coderipper's/UniSQL's own list --
+  lightbulb's real tree needs them (`cssparser`/`cssparser-macros`/`dtoa-short`/`option-ext`/
+  `selectors` use MPL-2.0; `tiny-keccak` uses CC0-1.0), confirmed by running `cargo deny check
+  licenses` against this repo, not copied blind.
+
 ## 0.19.0
 
 ### Changed
