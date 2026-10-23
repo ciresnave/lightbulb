@@ -1394,11 +1394,48 @@ slower per token than contiguous on this hardware), not re-discover.
    `BlockPrefixIndex::record` the donor once prefill completes. Test: two requests sharing an
    identical prefix must produce bit-identical completions AND measurably skip prefill for the
    shared portion (inspect `prefill_start`/`session_realize_count`, not just the output text).
-4. **Still open.** `BatchedPagedDecoder` (`batched.rs`) reconciliation — now that slice 2 has
-   landed, decide whether `scheduler_driver_paged.rs`'s per-session stepping or `batched.rs`'s
-   hand-rolled batched loop is the one that survives; they overlap in purpose. Not decided here;
-   flagged so slice 2 doesn't accidentally leave two competing paged-decode implementations both
-   half-wired.
+4. **DECIDED 2026-10-23 (PM-tasked, priority over slice 3): `scheduler_driver_paged.rs` survives;
+   `batched.rs`/`BatchedPagedDecoder` deleted.**
+
+   `BatchedPagedDecoder` had **zero callers anywhere outside its own file and its own tests**
+   (confirmed by `grep -rln "BatchedPagedDecoder\|rope_batched\|batched::" src/`, filtered to
+   outside `batched.rs` → 0 hits) — never wired into `ServingDriverInner`, `ModelRunner::start`,
+   or anything else live. `scheduler_driver_paged.rs`'s `FuelPagedSchedulerDriver` is the one
+   actually driving production serving (slice 2, above) for all three arms.
+
+   The module existed to fill a gap its own doc comment stated plainly: *"There is no batched
+   paged decode in Fuel at the HEAD this was written against... This module is that missing
+   piece."* **Fuel has since closed that gap itself**: `PagedSessionScheduler::step_batched`
+   (Fuel 0.22.4, used by `FuelPagedSchedulerDriver::step` since slice 2) is exactly the upstream
+   batched primitive `batched.rs` was hand-rolling a substitute for. Keeping a parallel,
+   lightbulb-maintained reimplementation of something Fuel itself now provides is duplicate
+   maintenance burden with no production caller to justify it — the same shape of reasoning that
+   deleted `scheduler_driver.rs` once slice 2 superseded it.
+
+   **Its own measurements independently argue against keeping it regardless of the above**: its
+   module doc records a real benchmark (TinyLlama-1.1B, CPU, f32, reproduced twice within 2–3%)
+   showing its hand-rolled batched paged decode is **5.58×–11.11× slower per sequence-token than
+   the contiguous baseline, and does not amortize with batch size** (per-step cost is
+   non-decreasing in `B`; B=2 is *worse* per-row than B=1). Root cause identified in the same doc:
+   `forward_paged_step_batched` mints a fresh graph every call (no plan-once `DecodeSession` for
+   the paged path), so it re-plans on every single token — a cost a proper fix needs solved
+   *upstream in Fuel* (a paged `DecodeSession` with symbolic block-table extents), not by
+   lightbulb maintaining its own hand-rolled batching loop that pays the identical unsolved cost.
+
+   **What is lost, and why it's an acceptable loss**: the file's RoPE-at-per-row-position math
+   (`rope_batched`, with its own bit-identical-at-B=1 parity test and a control proving a shared
+   per-batch position is caught) and its detailed plan/execute cost-decomposition methodology are
+   genuinely good research work with no other home. Full detail is preserved in git history (same
+   precedent as `scheduler_driver.rs`'s own deletion in slice 2) — not reproduced here, since
+   nothing currently depends on reviving it: if Fuel ever ships a `build_decode_attn_batched` or a
+   plan-once paged `DecodeSession` upstream, this module's measurement methodology (the
+   warm-up/steady split, the boundary-step measurement it recommends as the next one to actually
+   run) is the right starting point to re-derive from, read from git history rather than resurrected
+   speculatively now.
+
+   Removed: `src/model_fuel/batched.rs` (2,585 lines) and its `pub mod batched;` declaration in
+   `src/model_fuel/mod.rs`. Verified green before removal (`cargo test --lib model_fuel::batched`,
+   12 passed/0 failed/2 ignored) and after (`cargo test --lib`, full suite).
 5. **DONE as a side effect of slice 1/2** — Qwen3 GGUF (`QuantizedGgufQwen3`) swapped to Paged
    along with the other two arms; no separate Qwen3-specific work was needed once Fuel 0.22.4's
    `PagedDecodeModel` impl for `QuantizedQwen3Model` was confirmed (see slice 1).
