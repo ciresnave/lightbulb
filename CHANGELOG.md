@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.19.1
+
+### Fixed
+- **Security: `ctutils` 0.4.2 -> 0.4.5, fixing RUSTSEC-2026-0385** (non-constant-time mask
+  generation / `u128` comparisons on `ctutils::Choice`, patched >= 0.4.4; verified against the
+  advisory text and crates.io directly, not just the notice). Transitive dependency only -- no
+  direct pin in `Cargo.toml`, so `cargo update -p ctutils` was the whole fix. `cargo test --lib`
+  658/658, `cargo fmt --all --check` and `clippy_gate.py` clean.
+
 ## 0.19.0
 
 ### Changed
