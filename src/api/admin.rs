@@ -185,7 +185,16 @@ async fn cache_clear(
         .unwrap_or_default();
 
     if let Some(ctrl_tx) = &state.cache_control {
-        let _ = ctrl_tx.send(crate::engine::model_runner::ControlMsg::ClearPrefixCache);
+        // The response still reports the pre-clear snapshot either way (same
+        // "best-effort, what existed when you asked" contract as the
+        // `cache_control: None` case below) -- there is no live index left to
+        // clear if the serving thread is gone -- but a failed send is logged
+        // so the silence doesn't hide a dead serving thread from an operator.
+        let _ = ctrl_tx
+            .send(crate::engine::model_runner::ControlMsg::ClearPrefixCache)
+            .map_err(|e| {
+                tracing::warn!(error = %e, "cache_clear: serving thread is gone, clear not delivered")
+            });
     }
 
     let response = ClearCacheResponse {

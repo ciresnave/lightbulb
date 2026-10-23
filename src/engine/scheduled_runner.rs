@@ -700,19 +700,40 @@ mod tests {
 
     #[test]
     fn a_control_message_is_handled_even_with_no_jobs_at_all() {
+        // Sourcery (PR #206) correctly flagged the first version of this test:
+        // dropping `job_tx` up front disconnects the job channel, and a
+        // disconnected mpsc::Receiver::recv() returns immediately whether the
+        // call is blocking or has a timeout -- so that version passed even
+        // against a regression back to a blocking `rx.recv()`, since the
+        // loop would exit the idle wait via the Disconnected arm right away
+        // regardless. To actually exercise the 50ms-timeout idle wait, the
+        // job channel must stay OPEN (sender alive, no job ever sent) while
+        // the control message is observed; only after that does the test
+        // drop the sender to let the loop end.
         let (job_tx, job_rx) = mpsc::channel();
-        drop(job_tx); // disconnects immediately; no job is ever sent
-
         let (ctrl_tx, ctrl_rx) = mpsc::channel();
-        ctrl_tx.send(ControlMsg::ClearPrefixCache).unwrap();
-        drop(ctrl_tx);
 
         let received = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let driver = ControlRecordingDriver {
             received: received.clone(),
         };
 
-        run_scheduled_jobs(driver, job_rx, ctrl_rx, fake_encode, fake_decode);
+        let handle = std::thread::spawn(move || {
+            run_scheduled_jobs(driver, job_rx, ctrl_rx, fake_encode, fake_decode);
+        });
+
+        ctrl_tx.send(ControlMsg::ClearPrefixCache).unwrap();
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while received.lock().unwrap().is_empty() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "control message was not handled within 5s while the job \
+                 channel was still open and no job was ever sent -- a \
+                 blocking rx.recv() would starve it indefinitely"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
 
         assert_eq!(
             received.lock().unwrap().as_slice(),
@@ -720,5 +741,9 @@ mod tests {
             "a queued control message must be handled even when no inference \
              job is ever sent"
         );
+
+        drop(ctrl_tx);
+        drop(job_tx); // disconnect now so the loop can end
+        handle.join().unwrap();
     }
 }
