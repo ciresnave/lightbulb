@@ -82,12 +82,12 @@ mod persistant_migrate_tests {
             .await
             .expect("migrate() must succeed against a database refinery already migrated");
 
-        // All 6 are newly recorded in PersistAnt's own ledger -- refinery's
+        // All 7 are newly recorded in PersistAnt's own ledger -- refinery's
         // prior run left no trace in `_sqlx_migrations`, so none of these
         // were already-applied from PersistAnt's point of view. The claim
         // being tested is specifically that running them anyway doesn't
         // error, not that the ledger considered them pre-satisfied.
-        assert_eq!(report.applied, vec![1, 2, 3, 4, 5, 6]);
+        assert_eq!(report.applied, vec![1, 2, 3, 4, 5, 6, 7]);
         assert!(report.already_applied.is_empty());
     }
 
@@ -214,6 +214,6 @@ mod persistant_migrate_tests {
             second.applied.is_empty(),
             "second run should apply nothing new"
         );
-        assert_eq!(second.already_applied, vec![1, 2, 3, 4, 5, 6]);
+        assert_eq!(second.already_applied, vec![1, 2, 3, 4, 5, 6, 7]);
     }
 }
