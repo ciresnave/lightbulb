@@ -1341,18 +1341,50 @@ slower per token than contiguous on this hardware), not re-discover.
 
 ### Slices
 
-1. **`LlamaPagedAdapter`**: a lightbulb-owned newtype wrapping `fuel_model_llama::LlamaModel`,
-   implementing Fuel's `PagedDecodeModel` by forwarding to the model's existing inherent
-   `forward_paged_step`/`forward_paged_step_batched`. Test: a trivial paged step through the
-   trait must produce output identical to calling the inherent method directly (pure forwarding,
-   provable bit-for-bit). Entirely within lightbulb's scope — no Fuel-side change needed.
+1. **`LlamaPagedAdapter` — MOOT, not needed.** `fuel#456` (merged to Fuel's `origin/main`
+   2026-10-23, Stage 1 of this exact work, PM-tasked on Fuel's side) implements
+   `PagedDecodeModel` directly on Fuel's own `fuel_transformers::models::lazy_llama_full::
+   Llama3Model` and `...::lazy_quantized_llama::QuantizedLlama3Model` — no lightbulb-owned
+   orphan-rule wrapper needed; go straight to slice 2 once Fuel's 0.22.x publishes.
+   **Narrower than originally sized, confirmed by reading `fuel-model-llama/src/lib.rs` and
+   `fuel-transformers/src/models/{lazy_llama_full,lazy_quantized_llama}.rs` at that commit:**
+   `PagedDecodeModel` is implemented ONLY for `Llama3Model`/`QuantizedLlama3Model` (both
+   `fuel_transformers`), NOT for `fuel_model_llama::LlamaModel` — a different type despite the
+   similar name, and the one `ServingDriverInner::F32` (the eager SafeTensors arm) actually
+   uses. So of `scheduled_llama_engine.rs`'s three `ServingDriverInner` variants, only
+   `QuantizedGguf` (`QuantizedLlama3Model`) can swap to Paged under fuel#456 — `F32` and
+   `QuantizedGgufQwen3` stay on `SessionScheduler`. A real scope narrowing, not a blocker: GGUF
+   is lightbulb's primary serving format anyway.
 2. **Swap `scheduler_driver.rs`'s `FuelSchedulerDriver` from `SessionScheduler` to
-   `PagedSessionScheduler<LlamaPagedAdapter>`** for admission and stepping — prefix-sharing still
-   NOT wired yet, this slice only changes which scheduler drives requests. The GPU-execution-path
-   question above is already answered (no re-measurement needed), and the answer is a real cost
-   this slice must budget for, not discover: expect this swap alone to make per-token decode
-   slower on CUDA (paged's measured ~10x penalty applies the moment it's on the hot path), before
-   slice 3's prefix-sharing has any chance to pay that cost back by skipping prefill on a hit.
+   `PagedSessionScheduler<QuantizedLlama3Model>`**, for the `QuantizedGguf` arm only (see slice 1)
+   — prefix-sharing still NOT wired yet, this slice only changes which scheduler drives requests.
+   **Blocked on two things, confirmed 2026-10-23 by reading `fuel-inference/src/multi_session.rs`
+   at fuel#456's merge commit:**
+   - **Fuel-side gap, Fuel lane owns it (PM-tasked, targeting 0.22.2):**
+     `PagedSessionScheduler` has NO accessor equivalent to `SessionScheduler::session_new_tokens`
+     — exhaustively grepped its 21 `pub fn`s; `session_infos()` gives only a `generated: usize`
+     COUNT, `reap_finished()` gives the full `Vec<u32>` only once FINISHED. Lightbulb's
+     `SchedulerDriver::step()` contract needs per-tick new-token VALUES to support streaming
+     responses (today's driver gets them via `session_new_tokens` + a `seen_counts` diff,
+     `scheduler_driver.rs:119-137`) — without this, swapping schedulers would silently turn every
+     streamed response into one all-at-once dump on completion. **No scope cut accepted for
+     this** (PM ruling, 2026-10-23): hold the swap, don't ship non-streaming-only as an interim.
+   - **Also confirmed:** `PagedSessionScheduler::new(model, budget, dtype, device)` takes NO
+     `SchedulePolicy` — `SessionScheduler::new`'s does. `run_batched<M: DecodeModel>`
+     (`scheduled_llama_engine.rs`) is ONE generic function today specifically because every
+     variant's scheduler-construction call is identical; that symmetry breaks for the Paged arm.
+     Needs a parallel `run_batched_paged<M: PagedDecodeModel>`, not a one-line swap inside the
+     existing generic. Flagging as a Fuel-side design question too (no `SchedulePolicy` concept
+     on the paged scheduler at all — is that deliberate, or a gap fuel#456 just didn't need yet?
+     ask the Fuel lane before building around its absence as permanent).
+   Once unblocked: `set_priority(id, priority)` already exists on `PagedSessionScheduler` as of
+   fuel#456 — confirmed reading the same file — so the parked M4 slice 5.4c priority-wiring item
+   (`docs/FUEL-GAPS-FROM-CANDLE-REMOVAL.md` entry #2) needs NO further Fuel-side work, just a new
+   non-trait `set_priority` method on the driver, called by the caller right after a successful
+   `try_admit` returns a `SessionId`. Land that in this slice too, not as a separate one.
+   GPU-execution-path cost is already measured (no re-measurement needed): expect this swap alone
+   to make per-token decode slower on CUDA (paged's measured ~10x penalty applies the moment it's
+   on the hot path), before slice 3's prefix-sharing has any chance to pay that cost back.
    Test: an acceptance comparison against the current `SessionScheduler` path's output (same
    prompt, same seed, same tokens) for correctness — parity is the claim, not merely "it runs" —
    plus a recorded latency measurement so the regression is stated, not discovered later by a
@@ -1376,8 +1408,11 @@ feature, `cargo test --features fuel-engine --tests --no-run` at minimum — no 
 to execute them, same limit `ci.yml` already states) plus its own new test proving the specific
 claim.
 
-**Not started.** This is a sizing document only, per the task that produced it — build begins only
-once the PM confirms priority against the rest of the roadmap.
+**Slice 2 in progress, held on Fuel 0.22.2 (PM-tasked, targeting 0.22.2, 2026-10-23).** Built
+against fuel#456's merged code via a dev-only local path dependency (never committed, PM-acked)
+to confirm the above; no lightbulb code written yet because `step()` cannot compile without the
+missing accessor — writing the rest uncompiled/unverified was explicitly declined (PM ruling,
+2026-10-23: "no uncompiled code"). Resume the moment 0.22.2 publishes to crates.io.
 
 ---
 
