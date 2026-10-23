@@ -38,7 +38,9 @@
 
 use std::sync::mpsc::Receiver;
 
-use super::model_runner::{CompletionResult, FinishReason, InferenceJob, ResponseMode, StreamItem};
+use super::model_runner::{
+    CompletionResult, ControlMsg, FinishReason, InferenceJob, ResponseMode, StreamItem,
+};
 
 /// Why a session stopped generating — the information
 /// [`SchedulerDriver::reap_finished`] must recover and report, since Fuel's
@@ -109,6 +111,14 @@ pub(crate) trait SchedulerDriver {
     /// to decide whether the loop can block on new jobs or must keep
     /// stepping.
     fn has_active_sessions(&self) -> bool;
+
+    /// Handle an administrative [`ControlMsg`] (board PM task, 2026-10-22:
+    /// `cache_clear`'s real implementation). Default no-op so every existing
+    /// implementor (including this file's own `FakeDriver` test fixture)
+    /// stays correct without change -- only `ServingDriver`
+    /// (`src/model_fuel/scheduled_llama_engine.rs`) has a real cache to
+    /// clear.
+    fn handle_control(&mut self, _msg: ControlMsg) {}
 }
 
 /// Drive `driver` against jobs arriving on `rx`, dispatching results to each
@@ -119,6 +129,7 @@ pub(crate) trait SchedulerDriver {
 pub(crate) fn run_scheduled_jobs<D: SchedulerDriver>(
     mut driver: D,
     rx: Receiver<InferenceJob>,
+    ctrl_rx: Receiver<ControlMsg>,
     encode: impl Fn(&str, bool) -> anyhow::Result<Vec<u32>>,
     decode: impl Fn(&[u32], bool) -> anyhow::Result<String>,
 ) {
@@ -145,6 +156,10 @@ pub(crate) fn run_scheduled_jobs<D: SchedulerDriver>(
     let mut channel_open = true;
 
     loop {
+        while let Ok(msg) = ctrl_rx.try_recv() {
+            driver.handle_control(msg);
+        }
+
         while let Ok(job) = rx.try_recv() {
             pending.push_back(job);
         }
@@ -153,9 +168,20 @@ pub(crate) fn run_scheduled_jobs<D: SchedulerDriver>(
             if !channel_open {
                 break;
             }
-            match rx.recv() {
+            // `recv_timeout`, not `recv`: a bare blocking `recv()` here
+            // would starve `ctrl_rx` -- a control message sent while the
+            // loop is idle (no pending jobs, no active sessions) would
+            // never be observed until a NEW inference job arrived to wake
+            // this `recv()` up, which could be arbitrarily long after a
+            // caller asked to clear the cache. The poll interval only
+            // bounds how stale an idle clear can be, not correctness: a
+            // disconnected sender is detected immediately, same as before
+            // (`Err` from `recv()` and `RecvTimeoutError::Disconnected`
+            // both fire without waiting out the duration).
+            match rx.recv_timeout(std::time::Duration::from_millis(50)) {
                 Ok(job) => pending.push_back(job),
-                Err(_) => {
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
                     channel_open = false;
                     continue;
                 }
@@ -278,6 +304,14 @@ mod tests {
     }
     fn fake_decode(toks: &[u32], _skip_special: bool) -> anyhow::Result<String> {
         Ok(toks.iter().map(|&t| t as u8 as char).collect())
+    }
+
+    /// A control channel with nothing on it and its sender already dropped
+    /// -- fine for every test that isn't exercising control messages
+    /// themselves: `ctrl_rx.try_recv()` just reports empty, same as an
+    /// absent control plane would.
+    fn no_control() -> Receiver<ControlMsg> {
+        mpsc::channel().1
     }
 
     /// A fake prompt's first byte selects the fake session's behavior, so
@@ -465,7 +499,13 @@ mod tests {
         tx.send(job).unwrap();
         drop(tx); // closes the channel once drained, so the loop can exit
 
-        run_scheduled_jobs(FakeDriver::new(4), rx, fake_encode, fake_decode);
+        run_scheduled_jobs(
+            FakeDriver::new(4),
+            rx,
+            no_control(),
+            fake_encode,
+            fake_decode,
+        );
 
         let result = result_rx.try_recv().unwrap().expect("job should succeed");
         assert_eq!(result.finish_reason, FinishReason::Length);
@@ -481,7 +521,13 @@ mod tests {
         tx.send(job).unwrap();
         drop(tx);
 
-        run_scheduled_jobs(FakeDriver::new(4), rx, fake_encode, fake_decode);
+        run_scheduled_jobs(
+            FakeDriver::new(4),
+            rx,
+            no_control(),
+            fake_encode,
+            fake_decode,
+        );
 
         let result = result_rx.try_recv().unwrap().expect("job should succeed");
         assert_eq!(result.finish_reason, FinishReason::Stop);
@@ -498,7 +544,13 @@ mod tests {
         tx.send(bad_job).unwrap();
         drop(tx);
 
-        run_scheduled_jobs(FakeDriver::new(4), rx, fake_encode, fake_decode);
+        run_scheduled_jobs(
+            FakeDriver::new(4),
+            rx,
+            no_control(),
+            fake_encode,
+            fake_decode,
+        );
 
         assert!(
             good_rx.try_recv().unwrap().is_ok(),
@@ -514,7 +566,13 @@ mod tests {
         tx.send(job).unwrap();
         drop(tx);
 
-        run_scheduled_jobs(FakeDriver::new(4), rx, fake_encode, fake_decode);
+        run_scheduled_jobs(
+            FakeDriver::new(4),
+            rx,
+            no_control(),
+            fake_encode,
+            fake_decode,
+        );
 
         let mut items = Vec::new();
         while let Ok(item) = stream_rx.try_recv() {
@@ -544,7 +602,13 @@ mod tests {
         // `has_active_sessions` never becomes true), so `rx.recv()` blocks
         // forever and this test hangs instead of failing — the exact bug
         // being guarded against.
-        run_scheduled_jobs(FakeDriver::new(4), rx, fake_encode, fake_decode);
+        run_scheduled_jobs(
+            FakeDriver::new(4),
+            rx,
+            no_control(),
+            fake_encode,
+            fake_decode,
+        );
 
         assert!(
             bad_rx.try_recv().unwrap().is_err(),
@@ -564,7 +628,13 @@ mod tests {
         tx.send(job2).unwrap();
         drop(tx);
 
-        run_scheduled_jobs(FakeDriver::new(1), rx, fake_encode, fake_decode);
+        run_scheduled_jobs(
+            FakeDriver::new(1),
+            rx,
+            no_control(),
+            fake_encode,
+            fake_decode,
+        );
 
         assert!(
             rx1.try_recv().unwrap().is_ok(),
@@ -585,9 +655,70 @@ mod tests {
         tx.send(job2).unwrap();
         drop(tx);
 
-        run_scheduled_jobs(FakeDriver::new(4), rx, fake_encode, fake_decode);
+        run_scheduled_jobs(
+            FakeDriver::new(4),
+            rx,
+            no_control(),
+            fake_encode,
+            fake_decode,
+        );
 
         assert!(rx1.try_recv().unwrap().is_ok());
         assert!(rx2.try_recv().unwrap().is_ok());
+    }
+
+    /// A control message must reach `SchedulerDriver::handle_control` even
+    /// when the loop is otherwise idle -- the whole reason `run_scheduled_jobs`
+    /// polls `ctrl_rx` instead of only ever checking it between job
+    /// admissions. If the mutation under test here (`recv_timeout` reverted
+    /// to a bare blocking `recv()` with the ctrl-check moved inside the
+    /// idle branch instead of the top of the loop) ever regresses, this
+    /// test hangs or fails rather than silently passing.
+    struct ControlRecordingDriver {
+        received: std::sync::Arc<std::sync::Mutex<Vec<ControlMsg>>>,
+    }
+
+    impl SchedulerDriver for ControlRecordingDriver {
+        type Id = u64;
+
+        fn try_admit(&mut self, _: &[u32], _: usize, _: f64) -> Result<u64, AdmitError> {
+            Err(AdmitError::Rejected("not under test here".to_string()))
+        }
+        fn step(&mut self) -> Result<Vec<(u64, u32)>, String> {
+            Ok(Vec::new())
+        }
+        fn reap_finished(&mut self) -> Vec<(u64, FinishOutcome)> {
+            Vec::new()
+        }
+        fn has_active_sessions(&self) -> bool {
+            false
+        }
+        fn handle_control(&mut self, msg: ControlMsg) {
+            self.received.lock().unwrap().push(msg);
+        }
+    }
+
+    #[test]
+    fn a_control_message_is_handled_even_with_no_jobs_at_all() {
+        let (job_tx, job_rx) = mpsc::channel();
+        drop(job_tx); // disconnects immediately; no job is ever sent
+
+        let (ctrl_tx, ctrl_rx) = mpsc::channel();
+        ctrl_tx.send(ControlMsg::ClearPrefixCache).unwrap();
+        drop(ctrl_tx);
+
+        let received = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let driver = ControlRecordingDriver {
+            received: received.clone(),
+        };
+
+        run_scheduled_jobs(driver, job_rx, ctrl_rx, fake_encode, fake_decode);
+
+        assert_eq!(
+            received.lock().unwrap().as_slice(),
+            [ControlMsg::ClearPrefixCache],
+            "a queued control message must be handled even when no inference \
+             job is ever sent"
+        );
     }
 }

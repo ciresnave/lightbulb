@@ -121,7 +121,7 @@ async fn post_raw(path: &str, body: serde_json::Value) -> (StatusCode, Vec<u8>) 
     let scheduler = Arc::new(std::sync::Mutex::new(MemoryAwareScheduler::new(
         MemoryAwareConfig::default(),
     )));
-    let tx = ModelRunner::start(
+    let (tx, ctrl_tx) = ModelRunner::start(
         &dir,
         1,
         512,
@@ -138,6 +138,7 @@ async fn post_raw(path: &str, body: serde_json::Value) -> (StatusCode, Vec<u8>) 
         config: ApiConfig::default(),
         pg_backend: None,
         inference_tx: Some(tx),
+        cache_control: Some(ctrl_tx),
         chat_template: chat_template_for(&dir),
         // Default window (20): these harnesses make a handful of requests, so
         // the monitor never fills it and never logs. It is here because

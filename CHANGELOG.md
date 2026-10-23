@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.18.1
+
+### Changed
+- **`cache_clear` real implementation (board PM task, 2026-10-22).** Was a literal `TODO` stub
+  that always returned `cleared_entries: 0`/`freed_bytes: 0` and touched nothing. Now sends a new
+  `ControlMsg::ClearPrefixCache` to the serving thread over a new administrative control channel
+  (`ControlSender`/`ControlMsg`, `src/engine/model_runner.rs`) -- `ModelRunner::start` now returns
+  `(InferenceRequestSender, ControlSender)` instead of just the inference sender, and
+  `AppState.cache_control: Option<ControlSender>` carries it. `engine::scheduled_runner::
+  run_scheduled_jobs`'s loop polls `ctrl_rx` every iteration (including the idle-wait branch, now
+  `recv_timeout(50ms)` instead of a blocking `recv()`, so a control message reaches the loop even
+  with zero inference jobs in flight) and calls the new `SchedulerDriver::handle_control` (default
+  no-op, so `FakeDriver` and every other existing implementor needed no change).
+  `ServingDriver::handle_control`/`clear_prefix_cache` (`src/model_fuel/scheduled_llama_engine.rs`)
+  rebuilds `BlockPrefixIndexFor` from scratch and zeroes `SharedCacheStats` to match -- the HTTP
+  handler never writes `cache_stats` directly, only the serving thread does, so there is exactly
+  one writer and no race between an admin clear and live detection. The response reports a
+  snapshot taken BEFORE sending the clear signal (the clear itself is necessarily async).
+  `layer_indices`/`older_than_seconds` stay honestly unsupported -- the index has no per-layer or
+  per-age structure to select against.
+
 ## 0.18.0
 
 ### Changed (breaking)

@@ -326,6 +326,7 @@ mod tests {
             config: crate::api::ApiConfig::default(),
             pg_backend: None,
             inference_tx,
+            cache_control: None,
             chat_template: None,
             eos_monitor: std::sync::Arc::new(crate::engine::eos_monitor::EosMonitor::default()),
             security_sinks: Vec::new(),
