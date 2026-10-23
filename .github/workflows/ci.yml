@@ -162,6 +162,19 @@ jobs:
       - name: Build (default features)
         run: cargo build --workspace --verbose
 
+  # Portfolio rule: every repo gets CI checks and branch protection that
+  # requires them (CIRESNAVE-EXPECTATIONS.md §6.5). Mirrors coderipper's/
+  # UniSQL's `deny` job and pinned action version; policy lives in
+  # `deny.toml` at the repo root, not here.
+  deny:
+    name: Dependencies (cargo deny - advisories, licences, bans, sources)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          command: check
+
   gates:
     # WINDOWS, NOT LINUX. Windows is the platform this project is developed
     # on, targets CUDA on, and is known to build on -- the Linux question is

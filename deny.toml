@@ -1,0 +1,58 @@
+# cargo-deny policy (portfolio rule: CI and branch protection everywhere,
+# CIRESNAVE-EXPECTATIONS.md §6.5). Run by CI (`cargo deny check`); mirrors
+# coderipper's/UniSQL's deny.toml shape. Licences are permissive only.
+[graph]
+all-features = true
+
+[advisories]
+version = 2
+# Real vulnerabilities still fail the job (the whole point of this gate).
+#
+# `unmaintained` is NOT a severity in cargo-deny 0.20.2's schema -- it is a
+# `CrateScope` (`all`/`workspace`/`transitive`/`none`, confirmed by trying
+# `"warn"` here: `error[unexpected-value]: expected '["all", "workspace",
+# "transitive", "none"]'`). There is no "report but don't fail" mode for
+# this check in this version; `none` (don't check at all) is the only way
+# not to hard-fail on it. Set to `none` so this job mirrors `cargo audit`'s
+# own existing default treatment of this tree's 4 current unmaintained
+# crates (number_prefix/paste/rustls-pemfile/unsafe-libyaml, all pre-
+# existing and not independently actionable from this repo, 2026-10-23)
+# rather than introducing a stricter new failure mode for them on day one.
+# `yanked = "warn"` is a real severity option and does what it says: warns
+# (on the pre-existing, transitive, Fuel-owned `chacha20 0.10.1`) without
+# failing the job.
+unmaintained = "none"
+yanked = "warn"
+ignore = []
+
+[licenses]
+version = 2
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "ISC",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "Zlib",
+    "Unlicense",
+    "0BSD",
+    "Unicode-3.0",
+    "CDLA-Permissive-2.0",
+    # Not in coderipper's/UniSQL's own allow-list -- added here because
+    # lightbulb's real tree needs them (cssparser/cssparser-macros/
+    # dtoa-short/option-ext/selectors use MPL-2.0; tiny-keccak uses
+    # CC0-1.0), confirmed by `cargo deny check licenses` against this repo,
+    # not copied blind. MPL-2.0 is file-level (weak) copyleft, not whole-
+    # program; CC0-1.0 is public-domain-equivalent. Flagged to the PM as a
+    # policy deviation from the mirrored template, not a silent one.
+    "MPL-2.0",
+    "CC0-1.0",
+]
+
+[bans]
+multiple-versions = "warn"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
