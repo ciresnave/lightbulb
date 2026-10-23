@@ -1341,78 +1341,72 @@ slower per token than contiguous on this hardware), not re-discover.
 
 ### Slices
 
-1. **`LlamaPagedAdapter` — MOOT, not needed.** `fuel#456` (merged to Fuel's `origin/main`
-   2026-10-23, Stage 1 of this exact work, PM-tasked on Fuel's side) implements
-   `PagedDecodeModel` directly on Fuel's own `fuel_transformers::models::lazy_llama_full::
-   Llama3Model` and `...::lazy_quantized_llama::QuantizedLlama3Model` — no lightbulb-owned
-   orphan-rule wrapper needed; go straight to slice 2 once Fuel's 0.22.x publishes.
-   **Narrower than originally sized, confirmed by reading `fuel-model-llama/src/lib.rs` and
-   `fuel-transformers/src/models/{lazy_llama_full,lazy_quantized_llama}.rs` at that commit:**
-   `PagedDecodeModel` is implemented ONLY for `Llama3Model`/`QuantizedLlama3Model` (both
-   `fuel_transformers`), NOT for `fuel_model_llama::LlamaModel` — a different type despite the
-   similar name, and the one `ServingDriverInner::F32` (the eager SafeTensors arm) actually
-   uses. So of `scheduled_llama_engine.rs`'s three `ServingDriverInner` variants, only
-   `QuantizedGguf` (`QuantizedLlama3Model`) can swap to Paged under fuel#456 — `F32` and
-   `QuantizedGgufQwen3` stay on `SessionScheduler`. A real scope narrowing, not a blocker: GGUF
-   is lightbulb's primary serving format anyway.
-2. **Swap `scheduler_driver.rs`'s `FuelSchedulerDriver` from `SessionScheduler` to
-   `PagedSessionScheduler<QuantizedLlama3Model>`**, for the `QuantizedGguf` arm only (see slice 1)
-   — prefix-sharing still NOT wired yet, this slice only changes which scheduler drives requests.
-   **Blocked on two things, confirmed 2026-10-23 by reading `fuel-inference/src/multi_session.rs`
-   at fuel#456's merge commit:**
-   - **Fuel-side gap, Fuel lane owns it (PM-tasked, targeting 0.22.2):**
-     `PagedSessionScheduler` has NO accessor equivalent to `SessionScheduler::session_new_tokens`
-     — exhaustively grepped its 21 `pub fn`s; `session_infos()` gives only a `generated: usize`
-     COUNT, `reap_finished()` gives the full `Vec<u32>` only once FINISHED. Lightbulb's
-     `SchedulerDriver::step()` contract needs per-tick new-token VALUES to support streaming
-     responses (today's driver gets them via `session_new_tokens` + a `seen_counts` diff,
-     `scheduler_driver.rs:119-137`) — without this, swapping schedulers would silently turn every
-     streamed response into one all-at-once dump on completion. **No scope cut accepted for
-     this** (PM ruling, 2026-10-23): hold the swap, don't ship non-streaming-only as an interim.
-   - **Also confirmed:** `PagedSessionScheduler::new(model, budget, dtype, device)` takes NO
-     `SchedulePolicy` — `SessionScheduler::new`'s does. `run_batched<M: DecodeModel>`
-     (`scheduled_llama_engine.rs`) is ONE generic function today specifically because every
-     variant's scheduler-construction call is identical; that symmetry breaks for the Paged arm.
-     Needs a parallel `run_batched_paged<M: PagedDecodeModel>`, not a one-line swap inside the
-     existing generic. Flagging as a Fuel-side design question too (no `SchedulePolicy` concept
-     on the paged scheduler at all — is that deliberate, or a gap fuel#456 just didn't need yet?
-     ask the Fuel lane before building around its absence as permanent).
-   Once unblocked: `set_priority(id, priority)` already exists on `PagedSessionScheduler` as of
-   fuel#456 — confirmed reading the same file — so the parked M4 slice 5.4c priority-wiring item
-   (`docs/FUEL-GAPS-FROM-CANDLE-REMOVAL.md` entry #2) needs NO further Fuel-side work, just a new
-   non-trait `set_priority` method on the driver, called by the caller right after a successful
-   `try_admit` returns a `SessionId`. Land that in this slice too, not as a separate one.
-   GPU-execution-path cost is already measured (no re-measurement needed): expect this swap alone
-   to make per-token decode slower on CUDA (paged's measured ~10x penalty applies the moment it's
-   on the hot path), before slice 3's prefix-sharing has any chance to pay that cost back.
-   Test: an acceptance comparison against the current `SessionScheduler` path's output (same
-   prompt, same seed, same tokens) for correctness — parity is the claim, not merely "it runs" —
-   plus a recorded latency measurement so the regression is stated, not discovered later by a
-   confused caller.
-3. **Wire `BlockPrefixIndex` as the admission-time decision layer**: on each new session,
-   `BlockPrefixIndex::lookup` against recorded donors; on a hit, call
+1. **`LlamaPagedAdapter` — MOOT, not needed (confirmed).** `fuel-inference/src/multi_session.rs`
+   at Fuel 0.22.4 implements `PagedDecodeModel` directly for ALL FIVE model types next to the
+   trait (orphan-rule home, not in the model crates — a grep of `fuel-transformers`'s
+   `lazy_quantized_*.rs` files finds nothing, which is why an earlier read of this ROADMAP
+   wrongly concluded only `QuantizedLlama3Model` had it): `fuel_model_llama::LlamaModel`,
+   `fuel::lazy_llama_full::Llama3Model`, `fuel::lazy_quantized_llama::QuantizedLlama3Model`,
+   `fuel::lazy_qwen3::Qwen3Model`, `fuel::lazy_quantized_qwen3::QuantizedQwen3Model` — i.e. every
+   concrete type any of `scheduled_llama_engine.rs`'s three `ServingDriverInner` variants use
+   (`LlamaModel` for `F32`, `QuantizedLlama3Model` for `QuantizedGguf`, `QuantizedQwen3Model` for
+   `QuantizedGgufQwen3`). No lightbulb-owned orphan-rule wrapper needed, no scope narrowing: all
+   three arms swap, not just `QuantizedGguf`.
+2. **DONE (2026-10-23).** New `src/model_fuel/scheduler_driver_paged.rs::FuelPagedSchedulerDriver`
+   wraps `PagedSessionScheduler` behind the same `SchedulerDriver` trait; `scheduled_llama_engine.rs`
+   builds all three `ServingDriverInner` arms from it. The old `scheduler_driver.rs`
+   (`SessionScheduler`-backed) is deleted — fully superseded, zero remaining callers once the swap
+   landed, so kept out of the tree rather than as dead-code insurance (git history has it if ever
+   needed). Both blockers this entry used to describe are resolved at 0.22.4: `session_new_tokens`
+   exists on `PagedSessionScheduler` (verified directly in `multi_session.rs`, not from a
+   changelog claim) so streaming works with the same dedup/diff `seen_counts` logic the old driver
+   used; `set_priority(id, priority)` is wired as a new non-trait method on
+   `FuelPagedSchedulerDriver`, callable by a caller right after `try_admit` returns a `SessionId`
+   (not yet CALLED anywhere — `InferenceJob`'s priority isn't threaded into `ServingDriver::
+   try_admit` in this slice; that wiring is still open, tracked separately from the scheduler swap
+   itself). `PagedSessionScheduler::new` taking no `SchedulePolicy` turned out not to need a
+   parallel `run_batched_paged`: `set_policy`/`policy()` setters exist, called once right after
+   construction, so `run_batched`'s signature only changed its generic bound
+   (`DecodeModel` -> `PagedDecodeModel`) and its driver-construction call, not its shape.
+   **A real, deliberate behavior change, not hidden in the diff:** `PagedSessionScheduler::
+   add_session` is explicitly "optimistic — no up-front block reservation" (its own doc comment)
+   — there is no `kv_blocks_required` equivalent to pre-check against, so `try_admit` can only
+   ever return `AdmitError::Rejected` (structural: empty prompt / zero budget), never
+   `AdmitError::NoCapacity`. A session that genuinely can't fit is admitted anyway and fails later,
+   isolated, during `step`'s prefill pass (`StepReport::errored`) — surfaced as
+   `FinishOutcome::Failed`, which `run_scheduled_jobs` already handles correctly (reports the
+   request as failed, never retries) but which no driver had exercised before this one (the old
+   driver's pre-check made that arm unreachable in practice). Proven with a real test
+   (`a_session_too_large_for_the_pool_is_admitted_then_fails_at_step_not_at_admission`), not just
+   asserted in a comment. `SchedulePolicy::Batched{max_batch}` (a policy VARIANT on the old
+   scheduler) became `step_batched(max_batch)` (a separate METHOD, called unconditionally every
+   tick — `max_batch=1` degrades to the same serial behavior as plain `step()`, confirmed by a
+   two-concurrent-sessions test). Verified: `cargo test --lib` 658/658 (including the two
+   pre-existing `scheduled_llama_engine` tests, now exercising the Paged path, still green), 5 new
+   tests in `scheduler_driver_paged.rs`, `cargo fmt --all --check` and `clippy_gate.py` clean.
+   GPU-execution-path cost is still not independently re-measured on this box (one GPU, see the
+   "Multi-GPU" section below for why that limit is structural, not an oversight here) — the
+   ~10x CPU-measured paged penalty from the original sizing presumably still applies; no new
+   number is claimed.
+3. **Still open.** Wire `BlockPrefixIndex` as the admission-time decision layer: on each new
+   session, `BlockPrefixIndex::lookup` against recorded donors; on a hit, call
    `PagedSessionScheduler::add_session_sharing_prefix` instead of plain `add_session`;
    `BlockPrefixIndex::record` the donor once prefill completes. Test: two requests sharing an
    identical prefix must produce bit-identical completions AND measurably skip prefill for the
    shared portion (inspect `prefill_start`/`session_realize_count`, not just the output text).
-4. **`BatchedPagedDecoder` (`batched.rs`) reconciliation** — once slice 2 lands, decide whether
-   `scheduler_driver.rs`'s per-session stepping or `batched.rs`'s hand-rolled batched loop is the
-   one that survives; they overlap in purpose. Not decided here; flagged so slice 2 doesn't
-   accidentally leave two competing paged-decode implementations both half-wired.
-5. **Qwen3 support** — blocked on Fuel shipping a `forward_paged_step` for a Qwen3 model type.
-   Cross-repo; message the fuel lane before scheduling, don't build a wrapper for a method that
-   doesn't exist yet.
+4. **Still open.** `BatchedPagedDecoder` (`batched.rs`) reconciliation — now that slice 2 has
+   landed, decide whether `scheduler_driver_paged.rs`'s per-session stepping or `batched.rs`'s
+   hand-rolled batched loop is the one that survives; they overlap in purpose. Not decided here;
+   flagged so slice 2 doesn't accidentally leave two competing paged-decode implementations both
+   half-wired.
+5. **DONE as a side effect of slice 1/2** — Qwen3 GGUF (`QuantizedGgufQwen3`) swapped to Paged
+   along with the other two arms; no separate Qwen3-specific work was needed once Fuel 0.22.4's
+   `PagedDecodeModel` impl for `QuantizedQwen3Model` was confirmed (see slice 1).
 
 Each slice must land green on `cargo test --lib` (and, for slices touching the `fuel-engine`
 feature, `cargo test --features fuel-engine --tests --no-run` at minimum — no GPU runner exists
 to execute them, same limit `ci.yml` already states) plus its own new test proving the specific
 claim.
-
-**Slice 2 in progress, held on Fuel 0.22.2 (PM-tasked, targeting 0.22.2, 2026-10-23).** Built
-against fuel#456's merged code via a dev-only local path dependency (never committed, PM-acked)
-to confirm the above; no lightbulb code written yet because `step()` cannot compile without the
-missing accessor — writing the rest uncompiled/unverified was explicitly declined (PM ruling,
-2026-10-23: "no uncompiled code"). Resume the moment 0.22.2 publishes to crates.io.
 
 ---
 

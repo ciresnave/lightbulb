@@ -194,11 +194,12 @@ pub const SCHEDULER_METRICS_LIVE: bool = true;
 /// (no live `KvBlockPool` session to key by) can share it.
 ///
 /// **This is detection only, not exploitation.** A detected hit is NOT
-/// spliced into the donor's KV blocks and does NOT skip prefill — the
-/// currently-wired `fuel_inference::multi_session::SessionScheduler` has no
-/// splice concept; that needs `PagedSessionScheduler`
-/// (`add_session_sharing_prefix`/`register_prefix`), a different scheduler,
-/// out of scope for this slice. `CacheStatsResponse` never surfaces a
+/// spliced into the donor's KV blocks and does NOT skip prefill. The
+/// currently-wired `fuel_inference::multi_session::PagedSessionScheduler`
+/// (as of the paged-scheduler port, 2026-10-23) DOES expose a splice
+/// concept (`add_session_sharing_prefix`/`register_prefix`) — wiring a
+/// detected hit into an actual splice is a separate, not-yet-done step, not
+/// a scheduler-capability gap any more. `CacheStatsResponse` never surfaces a
 /// "tokens saved" figure, so nothing here claims one — reporting a real hit
 /// rate without a real compute saving is an honest "we see the repeat but
 /// don't yet act on it," not the "never-written zero/fabricated non-zero
