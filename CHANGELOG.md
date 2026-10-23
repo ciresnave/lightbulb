@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.19.3
+
+### Changed
+- **`try_connect_once` now uses `PgBackend::connect_with` with an explicit `TlsPolicy`**, instead
+  of hand-building a `sqlx::PgPoolOptions` pool. `connect_with`'s own default (`TlsPolicy::Require`)
+  overrides whatever `sslmode` a `DATABASE_URL` carries, so swapping it in with defaults could have
+  silently broken any currently-working non-`Require` connection -- a new `tls_policy_for` picks the
+  policy from `DATABASE_URL` itself instead: loopback host (test/local Postgres, usually started
+  without certs) -> `TlsPolicy::Disable`, regardless of any `sslmode` on the URL; non-loopback with
+  an explicit `sslmode=...` -> honored as given (`allow` maps to the closest equivalent, `Prefer`);
+  non-loopback with no `sslmode` at all -> `Require` (the one case this picks something stronger
+  than sqlx's own implicit `Prefer` default -- a tightening, never a weakening). Checked against a
+  local docker Postgres container over loopback (`Disable` path; the full Postgres-gated
+  `persistant_migrate_tests`/`api_integration_tests` suites, 16/16 + 3/3, pass against it with a
+  fresh, `initdb`-created container) and against a `sslmode`-free non-loopback URL by code
+  inspection (not independently checked against a live non-loopback Postgres in this session).
+  Direct `sqlx` dependency removed (unused after this change); new direct `url = "2.5"` dependency
+  added to parse `sslmode` and the loopback host from `DATABASE_URL`.
+
+### Fixed
+- **Security: `tokio` 1.53.2 -> 1.54.1, fixing RUSTSEC-2026-0386** (`AsyncFd::new` and related safe
+  constructors violate I/O safety, patched >=1.51.6,<1.52.0 or >=1.53.3; verified against the
+  advisory text and crates.io directly). Found via this repo's own `cargo deny` gate (added in
+  0.19.2) while finishing this PR -- `cargo update -p tokio` was the whole fix.
+
 ## 0.19.1
 
 ### Fixed

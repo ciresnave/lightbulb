@@ -4,7 +4,7 @@
     license     = "MIT OR Apache-2.0"
     name        = "lightbulb"
     repository  = "https://github.com/ciresnave/lightbulb"
-    version     = "0.19.2"
+    version     = "0.19.3"
 
 [features]
     # CUDA, via Fuel only. Was `["candlelight/cuda", "fuel/cuda"]`; candlelight
@@ -114,13 +114,12 @@
     reqwest            = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls-manual-roots"] }
     persistant-sqlx       = "0.9.24"
     persistant-relational = "0.9.24"
-    # Only to build a Postgres pool with an explicit short acquire_timeout
-    # for ApiServer::new's bounded connect retry -- PgBackend::connect's own
-    # pool always uses sqlx's 30s default with no way to override it from
-    # outside persistant-sqlx. Not a return to deadpool_postgres/
-    # tokio_postgres: PersistAnt already depends on this exact sqlx, this
-    # just needs it in scope to call PgPoolOptions directly.
-    sqlx               = { version = "0.9", default-features = false, features = ["runtime-tokio", "postgres"] }
+    # Only to pick a `TlsPolicy` for `PgBackend::connect_with` from
+    # `DATABASE_URL`'s own `sslmode` (and to recognize a loopback host) --
+    # see `tls_policy_for` in `api/mod.rs`. `connect_with`'s pool bounds
+    # (max_connections/acquire_timeout) are `persistant_sqlx::ConnectOptions`
+    # fields, so no direct `sqlx` dependency is needed any more.
+    url                = "2.5"
     tower-http         = { version = "0.6", features = ["cors", "trace"] }
 
     # TLS/Certificate dependencies
