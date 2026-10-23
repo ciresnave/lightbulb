@@ -104,7 +104,17 @@ const V6_ADD_API_KEY_REVOCATION: &str = "DO $$ BEGIN \
  END $$;\
  CREATE INDEX IF NOT EXISTS idx_api_keys_revoked_at ON api_keys(revoked_at);";
 
-/// The 6 migrations, ported. Versions and descriptions match the original
+/// Issue #130: a SEPARATE table from `auth_attempt_counts` (V5) -- see
+/// `migrations/V7__create_auth_failure_counts.sql`'s own comment for why.
+const V7_CREATE_AUTH_FAILURE_COUNTS: &str = "CREATE TABLE IF NOT EXISTS auth_failure_counts (\
+    client_ip INET NOT NULL,\
+    window_start TIMESTAMP NOT NULL,\
+    failure_count INTEGER NOT NULL DEFAULT 0,\
+    PRIMARY KEY (client_ip, window_start)\
+ );\
+ CREATE INDEX IF NOT EXISTS idx_auth_failure_counts_window_start ON auth_failure_counts(window_start);";
+
+/// The 7 migrations, ported. Versions and descriptions match the original
 /// `V{n}__{description}.sql` filenames; each migration's SQL text lives in
 /// its own module-level const above (kept out of this function so its own
 /// line count stays short -- the SQL itself, not the wiring, is what's long).
@@ -120,6 +130,11 @@ pub fn migrations() -> Vec<Migration> {
             V5_CREATE_AUTH_ATTEMPT_COUNTS,
         ),
         Migration::new(6, "add_api_key_revocation", V6_ADD_API_KEY_REVOCATION),
+        Migration::new(
+            7,
+            "create_auth_failure_counts",
+            V7_CREATE_AUTH_FAILURE_COUNTS,
+        ),
     ]
 }
 
@@ -149,9 +164,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn migrations_are_versioned_1_through_6_in_order() {
+    fn migrations_are_versioned_1_through_7_in_order() {
         let versions: Vec<i64> = migrations().iter().map(|m| m.version).collect();
-        assert_eq!(versions, vec![1, 2, 3, 4, 5, 6]);
+        assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7]);
     }
 
     #[test]

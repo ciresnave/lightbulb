@@ -1,11 +1,18 @@
 //! Security alerting hook (security audit item 4).
 //!
-//! Fired from `auth_middleware::pre_auth_attempt_limiter_middleware` the
-//! moment a client IP CROSSES `max_auth_attempts_per_minute_per_ip` — not
-//! on every request after it, which would spam a sink once per second for
-//! the rest of a sustained attack and bury the one event that actually
-//! matters. [`just_crossed_threshold`] is the pure rule for "this is the
-//! crossing, not a repeat."
+//! Fired from `auth_middleware::auth_failure_response` the moment a client
+//! IP CROSSES `max_auth_failures_per_minute_per_ip` — not on every request
+//! after it, which would spam a sink once per second for the rest of a
+//! sustained attack and bury the one event that actually matters.
+//! [`just_crossed_threshold`] is the pure rule for "this is the crossing,
+//! not a repeat."
+//!
+//! **Not** fired from `pre_auth_attempt_limiter_middleware` (issue #130):
+//! that limiter counts EVERY request, successful or not, so its
+//! threshold-crossing is routine traffic shape under load, not evidence of
+//! a guessing campaign — alerting from it would be noise. This counter
+//! (issue #130's failures-only limiter) counts ONLY real authentication
+//! failures, which is what makes its crossing an actual signal.
 //!
 //! # What this is NOT
 //!
