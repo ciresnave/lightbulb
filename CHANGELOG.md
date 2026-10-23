@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.18.5
+
+### Changed
+- **Dependencies: `persistant` 0.4.1 -> 0.9.24, `persistant-sqlx`/`persistant-relational` 0.7.4 ->
+  0.9.24 (CireSnave's standing newest-deps rule).** No lightbulb code changes needed: `cargo check
+  --tests` and `cargo test --lib` (657/657) pass unmodified, and the full Postgres-gated suite
+  (`persistant_migrate_tests` + `api_integration_tests`, 19/19) passes against a real local
+  Postgres container, so the three-crate API lightbulb actually touches (`PgBackend`,
+  `RelationalBackend`/`RelationalTx`, `Value`/`Row`/`RelError`, `persistant::blocking::Store`)
+  held stable across the jump.
+
 ## 0.18.4
 
 ### Added

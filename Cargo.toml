@@ -4,7 +4,7 @@
     license     = "MIT OR Apache-2.0"
     name        = "lightbulb"
     repository  = "https://github.com/ciresnave/lightbulb"
-    version     = "0.18.4"
+    version     = "0.18.5"
 
 [features]
     # CUDA, via Fuel only. Was `["candlelight/cuda", "fuel/cuda"]`; candlelight
@@ -88,7 +88,7 @@
     # Thin persistence layer over OpenDAL (crates.io, not git/path — CIRESNAVE-EXPECTATIONS §6.8).
     # Backs `cache::tiered_storage::FileDiskStore`'s disk tier; declares the needs it uses
     # (read/write/delete/atomic-replace) and is refused at open if the backend can't give them.
-    persistant         = "0.4.1"
+    persistant         = "0.9.24"
     rand               = "0.9"
     rayon              = "1.10"
     regex              = "1"
@@ -112,8 +112,8 @@
     futures-util       = "0.3"
     hex                = "0.4"
     reqwest            = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls-manual-roots"] }
-    persistant-sqlx       = "0.7.4"
-    persistant-relational = "0.7.4"
+    persistant-sqlx       = "0.9.24"
+    persistant-relational = "0.9.24"
     # Only to build a Postgres pool with an explicit short acquire_timeout
     # for ApiServer::new's bounded connect retry -- PgBackend::connect's own
     # pool always uses sqlx's 30s default with no way to override it from

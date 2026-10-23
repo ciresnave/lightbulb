@@ -2309,9 +2309,9 @@ dependencies = [
 
 [[package]]
 name = "futures-channel"
-version = "0.3.33"
+version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "262590f4fe6afeb0bc83be1daa64e52657fe185690a958af7f3ad0e92085c5ae"
+checksum = "b1f9e3d69d39e4862ffed03ed071a76f9a13ba1d9109d355b0f0aa6b15e393c4"
 dependencies = [
  "futures-core",
  "futures-sink",
@@ -2319,9 +2319,9 @@ dependencies = [
 
 [[package]]
 name = "futures-core"
-version = "0.3.33"
+version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2cd50c473c80f6d7c3670a752354b8e569b1a7cbfdc0419ec88e5edad85e0dc7"
+checksum = "92d699e522242e69e3003b94ecc1f960f3a5e015aa7c5d7486e65ad01dd94f5e"
 
 [[package]]
 name = "futures-executor"
@@ -2347,38 +2347,38 @@ dependencies = [
 
 [[package]]
 name = "futures-io"
-version = "0.3.33"
+version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4577ecaa3c4f96589d473f679a71b596316f6641bc350038b962a5daf0085d7a"
+checksum = "53c0fa8157de1303bfffdaa1cc2a673bfffb60102f76b0ef4441659124373fed"
 
 [[package]]
 name = "futures-macro"
-version = "0.3.33"
+version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2d6d3cde68c518367be28956066ddfef33813991b77a55005a69dae04bf3b10b"
+checksum = "9fb9654ba8355388abeb8dcb4fc62f511300867002afc858860463bdd9fe0c44"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.119",
+ "syn 3.0.3",
 ]
 
 [[package]]
 name = "futures-sink"
-version = "0.3.33"
+version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e34418ac499d6305c2fb5ad0ed2f6ac998c5f8ca209b4510f7f94242c647e307"
+checksum = "1944426bf7d03f1d14f708785e4b33efd750b36d48a157b836b3efc15ede8e1d"
 
 [[package]]
 name = "futures-task"
-version = "0.3.33"
+version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b231ed28831efb4a61a08580c4bc233ec56bc009f4cd8f52da2c3cb97df0c109"
+checksum = "cd417de3d1d015fc3bfd2b1ea46dfc7bab72ef86f1cc7cc9c78e728b34a6d1fd"
 
 [[package]]
 name = "futures-util"
-version = "0.3.33"
+version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a77a90a256fce34da66415271e30f94ee91c57b04b8a2c042d9cf3220179deaa"
+checksum = "0d50a92467f8ba5dd6e3ee5d4bd04d73ab2e4e1c44474a0674821dfce14b79bc"
 dependencies = [
  "futures-channel",
  "futures-core",
@@ -3572,7 +3572,7 @@ dependencies = [
 
 [[package]]
 name = "lightbulb"
-version = "0.18.4"
+version = "0.18.5"
 dependencies = [
  "ahash",
  "anyhow",
@@ -4587,10 +4587,11 @@ checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 
 [[package]]
 name = "persistant"
-version = "0.4.1"
+version = "0.9.24"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ee7d20c2db338778835a844a2558ae456529ac105e0101785a9224d733097bde"
+checksum = "b85ec72740426fb5670d54ea3d950022fdc71f8a9e75230c577e79f0a935f7c4"
 dependencies = [
+ "futures-util",
  "opendal",
  "serde",
  "serde_json",
@@ -4599,28 +4600,30 @@ dependencies = [
 
 [[package]]
 name = "persistant-core"
-version = "0.7.4"
+version = "0.9.24"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5be3e5851c62b5435654846ef07046d02efccf50f17654561326852d697b88f1"
+checksum = "7fc0416f5502583b7fd0b6c57817bb7d2f2441fdf9caddbdc2da48456db0735a"
 
 [[package]]
 name = "persistant-relational"
-version = "0.7.4"
+version = "0.9.24"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "48d612360651e52af7996271271e930c40f344b181e4b53b58b5fea2c69d2cd6"
+checksum = "65a2493296b714be07b22dfda08ad343454e214e5890ec14fb68f9362dda0835"
 dependencies = [
  "persistant-core",
+ "unisql-core",
 ]
 
 [[package]]
 name = "persistant-sqlx"
-version = "0.7.4"
+version = "0.9.24"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6fca1ab0fef6241ce5d921d6870b73759bfd1d62e2008c4823c7c689eddbfb68"
+checksum = "a305a4190f6d8378eacf4f788f1dd8b6a9375ae88386d2f0608b4435489e09fa"
 dependencies = [
  "persistant-core",
  "persistant-relational",
  "sqlx",
+ "tokio",
 ]
 
 [[package]]
@@ -6062,6 +6065,7 @@ dependencies = [
  "sha2 0.10.9",
  "smallvec",
  "thiserror 2.0.19",
+ "time",
  "tokio",
  "tokio-stream",
  "tracing",
@@ -6099,7 +6103,9 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "sqlx-core",
+ "sqlx-mysql",
  "sqlx-postgres",
+ "sqlx-sqlite",
  "syn 2.0.119",
  "tokio",
  "url",
@@ -6123,10 +6129,12 @@ dependencies = [
  "generic-array",
  "log",
  "percent-encoding",
+ "serde",
  "sha1 0.11.0",
  "sha2 0.11.0",
  "sqlx-core",
  "thiserror 2.0.19",
+ "time",
  "tracing",
 ]
 
@@ -6161,6 +6169,7 @@ dependencies = [
  "sqlx-core",
  "stringprep",
  "thiserror 2.0.19",
+ "time",
  "tracing",
  "whoami",
 ]
@@ -6182,8 +6191,10 @@ dependencies = [
  "libsqlite3-sys",
  "log",
  "percent-encoding",
+ "serde",
  "sqlx-core",
  "thiserror 2.0.19",
+ "time",
  "tracing",
  "url",
 ]
@@ -7085,6 +7096,16 @@ name = "unicode_categories"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39ec24b3121d976906ece63c9daad25b85969647682eee313cb5779fdd69e14e"
+
+[[package]]
+name = "unisql-core"
+version = "0.25.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b70d7ebec6bdf5a46aa8af9e708fcf34e9437df648801f3335ce5052d82bc25f"
+dependencies = [
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "unit-prefix"
