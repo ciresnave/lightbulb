@@ -1460,6 +1460,32 @@ passes, not ground truth.
 
 ---
 
+## Auth rate-limiter window is a FIXED minute bucket, not sliding — decide on purpose (added 2026-10-23, PM-tasked)
+
+Found while diagnosing a `postgres_integration` CI flake on lightbulb#215 (unrelated to that PR's
+own diff — a test-timing artifact, fixed in `c1fbeef`). Both `auth_attempt_counts` (PR #127's flood
+limiter) and `auth_failure_counts` (PR #209, issue #130's failures-only limiter) key their window
+by `date_trunc('minute', now())` in `src/api/auth_middleware.rs` — a **fixed** calendar-minute
+bucket (`:00`–`:59`), not a sliding one.
+
+**The security consequence, not just a test-flakiness one**: a real attacker who times requests
+can get up to `2 * limit - 1` attempts across one `:00` boundary (e.g. `limit` attempts at
+`:58`–`:59`, then `limit` more at `:01`–`:02`) before either bucket escalates to 429 — effectively
+doubling the allowed attempt budget near every minute mark, for both the flood limiter and the
+brute-force failure limiter. Not evaluated here for how exploitable that actually is (a real
+attacker also needs to land requests precisely enough to exploit the timing, and the window is
+still bounded, just not as tightly as `limit`-per-minute implies) — flagging the design choice for
+a decision, not claiming it is currently being exploited.
+
+**No work scheduled here.** Fixed vs. sliding is a real tradeoff (sliding needs either a rolling
+log per IP or a two-bucket "current + previous, weighted" approximation — more storage/query cost
+per request than a single `date_trunc` upsert) — not this lane's call to make unprompted. Decide
+on purpose, then implement to that decision; `src/api/auth_middleware.rs`'s `INSERT INTO
+auth_attempt_counts`/`auth_failure_counts` (around lines 126 and 378 as of 2026-10-23) is where
+both windows are computed.
+
+---
+
 ## Pipeline execution driver — module deleted, not built (resolved 2026-10-17)
 
 `src/engine/pipeline.rs` (`Pipeline`/`PipelineBuilder`/`PipelineConfig`, a synchronous DAG
