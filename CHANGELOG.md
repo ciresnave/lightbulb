@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.19.5
+
+### Removed
+- **`BatchedPagedDecoder`/`src/model_fuel/batched.rs` (2,585 lines), ROADMAP "research track item
+  1" slice 4 reconciliation (PM-tasked, priority over slice 3).** Zero callers anywhere outside
+  its own file and its own tests -- never wired into `ServingDriverInner`, `ModelRunner::start`,
+  or anything else live; `scheduler_driver_paged.rs`'s `FuelPagedSchedulerDriver` is the one
+  actually driving production serving. Built to fill a gap its own doc comment named directly
+  ("there is no batched paged decode in Fuel at the HEAD this was written against"), which Fuel
+  has since closed itself: `PagedSessionScheduler::step_batched` (Fuel 0.22.4, already used by
+  `FuelPagedSchedulerDriver::step`) is exactly that missing upstream primitive. Its own
+  measurements independently argued against keeping it regardless: a real benchmark recorded in
+  its module doc showed its hand-rolled batched paged decode (fresh graph every call, no
+  plan-once `DecodeSession`) running 5.58x-11.11x slower per sequence-token than the contiguous
+  baseline, non-amortizing with batch size. Full decision and evidence: `ROADMAP.md`'s slice 4
+  entry; full removed content in git history (same precedent as `scheduler_driver.rs`'s own
+  deletion in 0.19.0). Verified green before removal (`cargo test --lib model_fuel::batched`,
+  12 passed/0 failed/2 ignored) and after (`cargo test --lib` 647/647).
+
 ## 0.19.4
 
 ### Added
