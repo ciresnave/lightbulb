@@ -97,7 +97,7 @@ version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "40c48f72fd53cd289104fc64099abca73db4166ad86ea0b4341abe65af83dadc"
 dependencies = [
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -108,7 +108,7 @@ checksum = "291e6a250ff86cd4a820112fb8898808a366d8f9f58ce16d1f538353ad55747d"
 dependencies = [
  "anstyle",
  "once_cell_polyfill",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -346,26 +346,26 @@ dependencies = [
 
 [[package]]
 name = "baracuda-build"
-version = "0.0.1-alpha.147"
+version = "0.0.1-alpha.158"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5dd937a926b77f7d7c2120f05ef7083315f483e08556db1f1f2085d15a55a225"
+checksum = "e6a7a4a145a7adfc2697114e0a5e46626c7e554a294b0dba15fb336412cbceaa"
 
 [[package]]
 name = "baracuda-core"
-version = "0.0.1-alpha.147"
+version = "0.0.1-alpha.158"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "acb6ea7376a741d431f1e5fccc289e97682d26939ebf294512466c9ac799baa7"
+checksum = "15f7f65296b49cdc236475a2b36e2cd4a940940b0ef313f86cb075b10acd4ed8"
 dependencies = [
  "baracuda-types",
- "libloading 0.8.9",
+ "libloading 0.9.0",
  "thiserror 2.0.19",
 ]
 
 [[package]]
 name = "baracuda-cublas"
-version = "0.0.1-alpha.147"
+version = "0.0.1-alpha.158"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e7d0611ffe86b79ebb2e7c389b04e3cd08e3be79e70030f4b1437d4bc0e3293b"
+checksum = "6454ef7d904a26105c29faf6eef05934104b92e92cdaffe59e068f62faf2bdd6"
 dependencies = [
  "baracuda-core",
  "baracuda-cublas-sys",
@@ -377,27 +377,25 @@ dependencies = [
 
 [[package]]
 name = "baracuda-cublas-sys"
-version = "0.0.1-alpha.147"
+version = "0.0.1-alpha.158"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dcae760749e2c14aa0a6469bff014337283dbe32bdc103f8fd0926bae86d5d0c"
+checksum = "7d4aa7e222661b380c14745db53bc4a70070c603cb765d87985a11929c08647f"
 dependencies = [
  "baracuda-build",
  "baracuda-core",
  "baracuda-cuda-sys",
  "baracuda-types",
- "libloading 0.8.9",
 ]
 
 [[package]]
 name = "baracuda-cuda-sys"
-version = "0.0.1-alpha.147"
+version = "0.0.1-alpha.158"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "32c9ca9b049f3f13c8a935625babea83986a0670b896807ef9323ee08570ccd2"
+checksum = "aab1134fed9247d48cf7be488ba9bc99849246d18f1adda238d7acda92b27bc7"
 dependencies = [
  "baracuda-build",
  "baracuda-core",
  "baracuda-types",
- "libloading 0.8.9",
 ]
 
 [[package]]
@@ -429,9 +427,9 @@ dependencies = [
 
 [[package]]
 name = "baracuda-cutlass"
-version = "0.0.1-alpha.147"
+version = "0.0.1-alpha.158"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f92c450745d45f3fdd89b040ade243c3b7c5b771db9f148ed567a3a74c0be52c"
+checksum = "952df1b16a61a3560cb14d4e7db9ab47380387a97187e876f1e0421e116d37d8"
 dependencies = [
  "baracuda-cublas",
  "baracuda-cublas-sys",
@@ -445,9 +443,9 @@ dependencies = [
 
 [[package]]
 name = "baracuda-cutlass-kernels-sys"
-version = "0.0.1-alpha.147"
+version = "0.0.1-alpha.158"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "356f9030947df04df1aeed049a441c08e1fc3fcfa44106e993b2be6462fdcee6"
+checksum = "d2995c730d2e6b7b60b1a4c7e9372ef82f580cb63dab0570c75277eea6d5f43b"
 dependencies = [
  "baracuda-cutlass-sys",
  "baracuda-forge",
@@ -455,18 +453,18 @@ dependencies = [
 
 [[package]]
 name = "baracuda-cutlass-sys"
-version = "0.0.1-alpha.147"
+version = "0.0.1-alpha.158"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "96c4a63f67fc529cf0c7a0e75617b23a623b52cc82400f62c98a8adb95968652"
+checksum = "08a226bd256ea373977711a7f529b3a1453d3d6211b471b3fc2339d523e70dd7"
 dependencies = [
  "fs2",
 ]
 
 [[package]]
 name = "baracuda-driver"
-version = "0.0.1-alpha.147"
+version = "0.0.1-alpha.158"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1e366efc499478e38c18b0e7a2b01aa66c2dec471671e591b0edae87fedb4da7"
+checksum = "abdddf4a19a4998badfb60eace67ea73005b1dbf7e2472ccf0df9fe65d3e84f3"
 dependencies = [
  "baracuda-core",
  "baracuda-cuda-sys",
@@ -476,9 +474,9 @@ dependencies = [
 
 [[package]]
 name = "baracuda-forge"
-version = "0.0.1-alpha.147"
+version = "0.0.1-alpha.158"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7b4c4f1f71d403dbafca66be58ef0f23d3230b9dcdf1fe9791cc3b6a852f8fd0"
+checksum = "75743337366f6f18fedca4c6d9fbeb88ee1f2a8365c0a8ef16264b9328f60ab5"
 dependencies = [
  "baracuda-build",
  "fs2",
@@ -494,9 +492,9 @@ dependencies = [
 
 [[package]]
 name = "baracuda-kernels-sys"
-version = "0.0.1-alpha.147"
+version = "0.0.1-alpha.158"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ecfb7ef557d3045bdb1de56cc3eda42eebd72b7bad87220040b4d21b1b8497dc"
+checksum = "40c2e2c01cc506d282e927899ffc5c6b6d836b8c12830d81335d8943bd3b7863"
 dependencies = [
  "baracuda-cutlass-kernels-sys",
  "baracuda-cutlass-sys",
@@ -505,9 +503,9 @@ dependencies = [
 
 [[package]]
 name = "baracuda-kernels-types"
-version = "0.0.1-alpha.147"
+version = "0.0.1-alpha.158"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5931411804c4f214a996526584d2d3b4e0938bd072fa4304386301256e88371f"
+checksum = "864ca0a19748f3deb2f4b2cdfd8e020ca225135961cbd27c04a5adb454b6a748"
 dependencies = [
  "baracuda-driver",
  "baracuda-types",
@@ -518,9 +516,9 @@ dependencies = [
 
 [[package]]
 name = "baracuda-nvrtc"
-version = "0.0.1-alpha.147"
+version = "0.0.1-alpha.153"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "eac45183ed8430706d0bf0a2f99249bb4aa9705f6e17afc6de765ce09f563580"
+checksum = "6d101976c20bc1cbe77c2d6526e4744f79fb0e03bab3094f658be0d74743bb4c"
 dependencies = [
  "baracuda-core",
  "baracuda-nvrtc-sys",
@@ -530,9 +528,9 @@ dependencies = [
 
 [[package]]
 name = "baracuda-nvrtc-sys"
-version = "0.0.1-alpha.147"
+version = "0.0.1-alpha.153"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d57d15b4e3bb804faed5b1996172c1071ded4d3f84e5bc79fb7efa8d33c8163c"
+checksum = "ac3f1ca503c1bca172570031f635a71c063a4e919107b0a846fb9496ed54199b"
 dependencies = [
  "baracuda-build",
  "baracuda-core",
@@ -542,9 +540,9 @@ dependencies = [
 
 [[package]]
 name = "baracuda-types"
-version = "0.0.1-alpha.147"
+version = "0.0.1-alpha.158"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9e5294abde9fc0ad69b524772173c0731ff3975b3b9aae8f357d96b624b749e9"
+checksum = "03e92c813d4080f969e90ba58f20455f4d57c04a264cfd869a9a5bf52c02a379"
 dependencies = [
  "float8",
  "half",
@@ -1150,7 +1148,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d045de693cb712d0b22c6a64be5b953f67b3ce00ab5ad3dd5d8b441886ab8e1a"
 dependencies = [
  "quote",
- "syn 2.0.119",
+ "syn 3.0.3",
 ]
 
 [[package]]
@@ -1164,9 +1162,9 @@ dependencies = [
 
 [[package]]
 name = "daachorse"
-version = "1.0.1"
+version = "3.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6f55d7153ba3b507595872a3874803f07a8a81d1e888abed8e5db7da0597d6e2"
+checksum = "5614204febbc33cc07a2806aa6440b904ac012b68eecc37f4493ea4a76455a3d"
 
 [[package]]
 name = "darling"
@@ -1410,7 +1408,7 @@ dependencies = [
  "libc",
  "option-ext",
  "redox_users",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1574,7 +1572,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1750,9 +1748,9 @@ checksum = "42703706b716c37f96a77aea830392ad231f44c9e9a67872fa5548707e11b11c"
 
 [[package]]
 name = "fuel"
-version = "0.22.4"
+version = "0.24.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7a5a3fd393c00c2417c7cb7ca3fbbdbb380541c1d755b6fff55fb554f3d6a6cf"
+checksum = "82a87451687703962d2e1b466371ae26ca7be898f6667aabe9e33289456b48b9"
 dependencies = [
  "fuel-backend-contract",
  "fuel-cpu-backend",
@@ -1767,27 +1765,27 @@ dependencies = [
 
 [[package]]
 name = "fuel-backend-contract"
-version = "0.22.4"
+version = "0.24.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a469ddb8e4219842eea1229257220f91a4de7a2ce2cd01d3fd1a1f09e58d84a6"
+checksum = "0d9aa2515335a5aeec8df4d935b014aa44f99c19b1725973190082e23959904d"
 dependencies = [
  "fuel-ir",
 ]
 
 [[package]]
 name = "fuel-conv"
-version = "0.22.4"
+version = "0.24.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2060d3e4c175c3587eb6fcec8a04f1ef3b6a84d56017936a87c5317887f4a5ce"
+checksum = "fb8f2356a5a8cd6109b5c0667f893c8289f569528aac7acd206f6af84ff9372c"
 dependencies = [
  "num-traits",
 ]
 
 [[package]]
 name = "fuel-correctness-fixtures"
-version = "0.22.4"
+version = "0.24.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "697cd0e15b2d84fa433b0c14e3c7ab642ffb2d9a4e7f3963878f10cb3daf3641"
+checksum = "f84b153417301c961ddca0c22b4e18fdb0a9772bfb5808c8e4b4ddaa6b337b38"
 dependencies = [
  "bytemuck",
  "fuel-ir",
@@ -1797,9 +1795,9 @@ dependencies = [
 
 [[package]]
 name = "fuel-cpu-backend"
-version = "0.22.4"
+version = "0.24.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7460322d039c9a3d7c03d7e3d079cc70e83b0aae715ae8100cccac3878c9b48c"
+checksum = "bfa7b96a24385790e17f535b228b8ec9c77989a27a75274c972dd3d2b4cc0832"
 dependencies = [
  "bytemuck",
  "float8",
@@ -1821,9 +1819,9 @@ dependencies = [
 
 [[package]]
 name = "fuel-cpu-kernels"
-version = "0.22.4"
+version = "0.24.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dd6d8c6690675883efd5ec56de9f2a3db32352462c8ea5379b9e5d917950e130"
+checksum = "7b7703ba6d3aeb4bbb211f3fe6e0b8ae79a3aa4a14ee5284039d6f0a90f07654"
 dependencies = [
  "float8",
  "half",
@@ -1833,9 +1831,9 @@ dependencies = [
 
 [[package]]
 name = "fuel-cuda-backend"
-version = "0.22.4"
+version = "0.24.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f1e15b41e9cca7b2e440f610539a8ef881cf29cb89a5f5f0881dbf531d1bc21e"
+checksum = "45051e2ebcc8aa2eef3f195480fa606cf063ced191d3317b635ed2b2e5d71dff"
 dependencies = [
  "baracuda-core",
  "baracuda-cublas",
@@ -1864,9 +1862,9 @@ dependencies = [
 
 [[package]]
 name = "fuel-dispatch"
-version = "0.22.4"
+version = "0.24.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "395ef1cab01d3e9b35d8c717091a1d37c2f8749d8907718c984e760c065bedc1"
+checksum = "5ebe7f4c1e7c97e6b3ecb6dd6e0c6ebf7114339d71ee6197bf8a7fc498b192ab"
 dependencies = [
  "baracuda-kernels-types",
  "baracuda-nvrtc",
@@ -1893,9 +1891,9 @@ dependencies = [
 
 [[package]]
 name = "fuel-formats"
-version = "0.22.4"
+version = "0.24.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0e76b914de1fbb860e38990e68fa6474c71c960f23c09f2439d10471eb309931"
+checksum = "639f7a7d5778f3b36f6d2fed506d1276c41c1570a019119ada0fc5f6c43d8a6c"
 dependencies = [
  "bytemuck",
  "byteorder",
@@ -1912,9 +1910,9 @@ dependencies = [
 
 [[package]]
 name = "fuel-graph"
-version = "0.22.4"
+version = "0.24.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "45e2195d01984f5e34c12085e7888c26a3a726de81a6455deed5dacbea5300c6"
+checksum = "77e0fe190d0657543524e2d276d2a3a1c3e13aac5550f40781ce9a26745133eb"
 dependencies = [
  "float8",
  "fuel-backend-contract",
@@ -1925,9 +1923,9 @@ dependencies = [
 
 [[package]]
 name = "fuel-hardware"
-version = "0.22.4"
+version = "0.24.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f8a5cd7550c2614b71eee80c225f6df0937a0a886496e60b35f3e1bac7d27645"
+checksum = "7837147dc2986b3feece388eea47b01d26260651b6aa4f11c5e291cfac680994"
 dependencies = [
  "fuel-cpu-backend",
  "fuel-cuda-backend",
@@ -1940,9 +1938,9 @@ dependencies = [
 
 [[package]]
 name = "fuel-inference"
-version = "0.22.4"
+version = "0.24.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ad45c0270b0434b43b6a6ab2374cc7dbe7215903910ac2ebdca75e02d2f77302"
+checksum = "f6559dddd342dc01fbbcb9901df44c59d2523d7b18c302f4d8841e1af0ec4883"
 dependencies = [
  "fuel",
  "fuel-backend-contract",
@@ -1958,9 +1956,9 @@ dependencies = [
 
 [[package]]
 name = "fuel-ir"
-version = "0.22.4"
+version = "0.24.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3fd05c17ba3a3980f772ffea4e3d2bb91dda664ff3826527056aa4da4efbf443"
+checksum = "1e7cebb00da292adf4bb7d2be09a1008d6396e710d22cc2171148af7f981612c"
 dependencies = [
  "float8",
  "half",
@@ -1976,15 +1974,15 @@ dependencies = [
 
 [[package]]
 name = "fuel-kernel-seam-types"
-version = "0.22.4"
+version = "0.24.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0b1f4b921d04b9a8f07eb5ec775e936511b579c2b79ff936cc9c7eb72517a1eb"
+checksum = "710c820a3d6b4ee96da6f203a1131947ee14d58e6da1855c170622e955ee0173"
 
 [[package]]
 name = "fuel-kiss-ref-backend"
-version = "0.22.4"
+version = "0.24.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b124588d87d738cd56e78d734cbb47bd40a34935b0193c2e9a66943f958bb3cc"
+checksum = "060b7f4e2a99d388fb3ad562727b3f092ca37a3f325350bb17f2ae2abc2490fe"
 dependencies = [
  "fuel-ir",
  "fuel-kernel-seam-types",
@@ -1996,15 +1994,15 @@ dependencies = [
 
 [[package]]
 name = "fuel-kv-pool"
-version = "0.22.4"
+version = "0.24.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4d2028e83ba1142b68f5b9157c9711726a939fec6697af8fa7c3d6cf24f314eb"
+checksum = "2ef46ac05c54c183e282eac7a9f5333d4a39d1aa98016b40c627d412cfc84e07"
 
 [[package]]
 name = "fuel-loaders"
-version = "0.22.4"
+version = "0.24.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "49bf7b40290e8b3de6779d8c6a9f7bf10035234e8f9a177cf24b55cdbe007ed1"
+checksum = "8e00c0db9f522ebde1b56c03adf164e2191499d1533f6f52bda5fd825644846d"
 dependencies = [
  "fuel-backend-contract",
  "fuel-formats",
@@ -2015,15 +2013,15 @@ dependencies = [
  "mlmf-gguf",
  "mlmf-source-file",
  "safetensors",
- "tokenizers 0.23.1",
+ "tokenizers 0.23.2",
  "yoke",
 ]
 
 [[package]]
 name = "fuel-memory"
-version = "0.22.4"
+version = "0.24.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "60ca31369b749c35c80fcee50f407db4da0603ff211d7db81fc6332cc59d23fb"
+checksum = "968f4f8081c6a4285210fa7e4c13a6748df3eebbddc939f96873b433bc21c2a9"
 dependencies = [
  "bytemuck",
  "fuel-cpu-backend",
@@ -2038,9 +2036,9 @@ dependencies = [
 
 [[package]]
 name = "fuel-model-llama"
-version = "0.22.4"
+version = "0.24.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d6387d7c478e5fa1bdd3dbf78110fe1ea939562d9f44b33e5869f57fc2266c2d"
+checksum = "c81f8a999112a4aba488234283c444d33bd42052348ccf3d96b26b8907659df7"
 dependencies = [
  "fuel-dispatch",
  "fuel-graph",
@@ -2052,14 +2050,14 @@ dependencies = [
  "hf-hub 0.5.0",
  "serde",
  "serde_json",
- "tokenizers 0.23.1",
+ "tokenizers 0.23.2",
 ]
 
 [[package]]
 name = "fuel-model-phi"
-version = "0.22.4"
+version = "0.24.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "37e51ba28aa25f95c6c1e8d4d978a1a7af8ccae66e80549c0dd429b2ee421136"
+checksum = "d8ba70855d5e97c4b00b068e44aeef0bf5a9c9996aec9ba478446ec806d3a678"
 dependencies = [
  "fuel-graph",
  "fuel-ir",
@@ -2074,9 +2072,9 @@ dependencies = [
 
 [[package]]
 name = "fuel-quantized"
-version = "0.22.4"
+version = "0.24.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "93e8eb17489435bedc33933d45dcae8dc9256a826d317f34f50acd8caf285bb4"
+checksum = "14b5e14fe16cdec493f4f72d500844a6646f06080afb4a6e415a08cd948216b5"
 dependencies = [
  "bytemuck",
  "byteorder",
@@ -2089,9 +2087,9 @@ dependencies = [
 
 [[package]]
 name = "fuel-tensor"
-version = "0.22.4"
+version = "0.24.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ddc198bdee5e14e569b07c0c45897289c390d9895ae297b97119021198a8d193"
+checksum = "af94d3bbb4341e5744062d605dc2271180e8d768970558f890cad74ba2f3511f"
 dependencies = [
  "baracuda-core",
  "baracuda-driver",
@@ -2130,16 +2128,16 @@ dependencies = [
  "serde_json",
  "smallvec",
  "thiserror 2.0.19",
- "tokenizers 0.23.1",
+ "tokenizers 0.23.2",
  "yoke",
  "zip",
 ]
 
 [[package]]
 name = "fuel-transformers"
-version = "0.22.4"
+version = "0.24.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a3b29e66424e9730d04b2f3be476ebe6cea3da91b732ed6077d1fcc5b61d5e84"
+checksum = "458346bc463798b1fccb6ec9f22cf24a8403e3cdc7cf14cb8f21737df56ccdc0"
 dependencies = [
  "byteorder",
  "fancy-regex 0.19.2",
@@ -2164,15 +2162,15 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_plain",
- "tokenizers 0.23.1",
+ "tokenizers 0.23.2",
  "tracing",
 ]
 
 [[package]]
 name = "fuel-vulkan-backend"
-version = "0.22.4"
+version = "0.24.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f09204ec4a2870fca8523431cde28f6cbb7751698e1dbb9a42edfaf5ddcf7885"
+checksum = "a9f2b48e10711e41ab58bb4af63628d36b541426824d08c002d38ff2b1668739"
 dependencies = [
  "bytemuck",
  "fuel-backend-contract",
@@ -2188,9 +2186,9 @@ dependencies = [
 
 [[package]]
 name = "fuel-vulkan-kernels"
-version = "0.22.4"
+version = "0.24.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "be152c509b186a64d00ea203ce293cd2d92392ddfd83d33834f29fffeb7ea6a5"
+checksum = "953d14fef752c65d2d01b6579b37c977da292345583b2657e2f83715acdbb3cf"
 
 [[package]]
 name = "futures"
@@ -3051,7 +3049,7 @@ checksum = "3640c1c38b8e4e43584d8df18be5fc6b0aa314ce6ebf51b53313d4306cca8e46"
 dependencies = [
  "hermit-abi",
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3315,7 +3313,7 @@ dependencies = [
 
 [[package]]
 name = "lightbulb"
-version = "0.19.10"
+version = "0.19.11"
 dependencies = [
  "ahash",
  "anyhow",
@@ -3860,7 +3858,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4627,7 +4625,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5112,7 +5110,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5180,7 +5178,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5568,7 +5566,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c3d1e2c7f27f8d4cb10542a02c49005dbd6e93095799d6f3be745fae9f8fedd4"
 dependencies = [
  "libc",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5966,7 +5964,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -6145,9 +6143,9 @@ dependencies = [
 
 [[package]]
 name = "tokenizers"
-version = "0.23.1"
+version = "0.23.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "44e5bea67576e04b6ff8564c5d9e09c2ef0cf476502245f2f120e497769d3112"
+checksum = "7afbf6e88718afcc138bad01d6ccc3051dbbc3b2ce9793d8b8a3aeb610969cfc"
 dependencies = [
  "ahash",
  "compact_str",
@@ -6626,9 +6624,9 @@ checksum = "81e544489bf3d8ef66c953931f56617f423cd4b5494be343d9b9d3dda037b9a3"
 
 [[package]]
 name = "unpopped-vocab"
-version = "0.20.13"
+version = "0.22.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "37175b3095d5406144ee33e51c09a38df1d4509f01374688e5111581868d5e0d"
+checksum = "41d04aa4fe5380b397fa1a0a419bcdb581c65349da27f782468a636340c932c3"
 dependencies = [
  "float8",
  "half",
@@ -7008,7 +7006,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.19.11
+
+### Changed
+- Deps: `fuel`/`fuel-*` 0.22.4 -> 0.24.0 (all eight crates; latest on crates.io per the standing dependencies rule). No source changes needed: `cargo check --all-targets --features fuel-engine` is clean.
+
 ## 0.19.10
 
 ### Changed
