@@ -94,6 +94,11 @@ async fn main() -> Result<()> {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(32);
+    // Off unless explicitly enabled: not default-on until a measured
+    // benchmark shows the win (ROADMAP research-track item 1, slice 3).
+    let model_prefix_sharing = env::var("LIGHTBULB_PREFIX_SHARING")
+        .map(|v| parse_flag(&v))
+        .unwrap_or(false);
 
     // Create API configuration
     let config = ApiConfig {
@@ -110,6 +115,7 @@ async fn main() -> Result<()> {
         model_max_batch_size,
         model_context_length,
         model_max_queue_depth,
+        model_prefix_sharing,
         request_timeout_ms,
         enable_audit_log: database_url.is_some(), // Disable audit logging without database
         tls: Default::default(),                  // TLS disabled by default
@@ -163,4 +169,28 @@ async fn main() -> Result<()> {
     server.serve().await?;
 
     Ok(())
+}
+
+/// `1`/`true`/`yes`/`on` (any case, surrounding whitespace ignored) enable a
+/// flag; anything else -- including an empty or misspelt value -- leaves it off.
+fn parse_flag(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on"
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_flag;
+
+    #[test]
+    fn parse_flag_enables_only_on_explicit_truthy_values() {
+        for on in ["1", "true", "TRUE", " yes ", "On"] {
+            assert!(parse_flag(on), "{on:?} must enable");
+        }
+        for off in ["", "0", "false", "off", "ture", "2"] {
+            assert!(!parse_flag(off), "{off:?} must not enable");
+        }
+    }
 }

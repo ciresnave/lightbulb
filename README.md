@@ -66,6 +66,12 @@ projects:
 2. `$MODELS_DIR`
 3. `C:\Models`
 
+## Experimental switches
+
+| Variable | Default | Effect |
+|---|---|---|
+| `LIGHTBULB_PREFIX_SHARING` | off | `1`/`true`/`yes`/`on` lets a request splice a live donor's KV blocks for a shared block-aligned prompt prefix instead of prefilling it again. Experimental: no benchmark yet shows a win (Fuel's paged attention has no fused CUDA kernel), so it stays off by default. Prefix-hit *detection* (the `cache_stats` counters) runs either way. Library users set `ApiConfig::model_prefix_sharing` or pass `EngineOptions` to `ModelRunner::start_with_options`; only the binary reads the variable. |
+
 Pin checkpoint fixtures by revision. A plain `git clone` of a Hugging Face repo
 tracks its default branch and moves under you on `git pull`, which silently
 invalidates recorded measurements.

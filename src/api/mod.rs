@@ -50,7 +50,7 @@ use tokio::net::TcpListener;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 
-use crate::engine::model_runner::{ModelRunner, SharedScheduler};
+use crate::engine::model_runner::{EngineOptions, ModelRunner, SharedScheduler};
 use persistant_relational::RelationalBackend;
 use std::path::Path;
 
@@ -111,6 +111,13 @@ pub struct ApiConfig {
     /// fails with [`crate::engine::model_runner::QueueFullError`] (surfaced
     /// to the client as HTTP 503) instead of queuing without bound.
     pub model_max_queue_depth: usize,
+
+    /// Let a new request splice a live donor's KV blocks for a shared
+    /// block-aligned prompt prefix instead of re-prefilling it
+    /// ([`crate::engine::model_runner::EngineOptions::prefix_sharing`]).
+    /// Default `false`: not enabled until a measured benchmark shows a win.
+    /// `main.rs` sets it from `LIGHTBULB_PREFIX_SHARING`.
+    pub model_prefix_sharing: bool,
 
     /// How long an inference job may sit between being enqueued and the
     /// model runner thread finishing it, before the HTTP handler gives up
@@ -211,6 +218,7 @@ impl Default for ApiConfig {
             model_max_batch_size: 8,
             model_context_length: 2048,
             model_max_queue_depth: 32,
+            model_prefix_sharing: false,
             request_timeout_ms: 300_000,
             tls: crate::tls::TlsConfig::default(),
             no_auth: false,
@@ -640,7 +648,7 @@ fn try_start_model_runner(state: &mut AppState) {
         return;
     }
 
-    match ModelRunner::start(
+    match ModelRunner::start_with_options(
         &model_path,
         state.config.model_max_batch_size,
         state.config.model_context_length,
@@ -648,6 +656,9 @@ fn try_start_model_runner(state: &mut AppState) {
         state.config.model_max_queue_depth,
         state.cache_stats.clone(),
         state.scheduler.clone(),
+        EngineOptions {
+            prefix_sharing: state.config.model_prefix_sharing,
+        },
     ) {
         Ok((sender, ctrl_sender)) => {
             state.inference_tx = Some(sender);
