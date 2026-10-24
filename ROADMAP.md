@@ -1963,7 +1963,47 @@ M1.5 — Hardware Adaptivity (0.2+)
 
 M2 — Performance enablers (0.3)
 
-- ✅ **StreamingLLM-style policy COMPLETE**
+### M2's cache-management and FlashAttention COMPLETE claims are contradicted by the Candle removal
+
+**Audited 2026-10-24.** This file's own top-of-document retraction banner already says
+claims predating the Candle→Fuel port (PR #195, 2026-10-22) "have not been re-validated...
+treat those specific claims as unverified rather than as findings." The block below goes
+past "unverified" to **contradicted**, with evidence, for every "✅ COMPLETE" claim in this
+M2 section:
+
+- **The cited integration point is deleted.** Every "Integrated with/Integration:
+  `ParallelCacheBuilder`" line below cites a struct that no longer exists —
+  `src/engine/mod.rs:329`'s own comment reads "`ParallelCacheBuilder`/`ParallelKvCache`/
+  `IndicesAndMask` removed 2026-10-22."
+- **The cited demo files are deleted.** `examples/streaming_llm_demo.rs`,
+  `examples/h2o_integration_demo.rs`, and `examples/span_management_demo.rs` are all absent
+  from the current tree (`git cat-file -e origin/main:<path>` fails for each).
+- **The underlying modules survive, but the Fuel-era code built to replace their
+  integration point has zero callers.** `src/cache/{streaming_policy,h2o_policy,
+  eviction_policy,cache_span}.rs` still exist and are referenced from `src/model_fuel/
+  policies.rs`'s `SpanBlockMap`/`EvictionPlan`/`EvictionOutcome` (spans → Fuel block
+  indices) — but `git grep -ln "SpanBlockMap\|EvictionPlan\|EvictionOutcome" -- src/` finds
+  no caller outside `policies.rs` itself. `scheduled_llama_engine.rs`, the one file that
+  drives the live `ServingDriver`, imports only `BlockPrefixIndexFor` from `policies.rs` —
+  nothing span- or eviction-related. Same "built, never wired into the live driver" pattern
+  already established for `batched.rs` (ROADMAP's own slice 4 entry) and for
+  `BlockPrefixIndex` pre-slice-3.
+- **"Hash-and-reuse prefill KV ... TTFT reduction >15% ... measured" is specifically
+  false**, not just unverified: the mechanism this claims (`BlockPrefixIndex`) has been
+  detection-only to date — recording a hit for `cache_stats` without ever exploiting it to
+  skip prefill. Real wiring is a separate, in-flight ROADMAP slice ("Research track item
+  1", tracked in this same file), not yet merged as of this correction; no TTFT measurement
+  under this claim's own
+  description could have been taken against code that never skipped any prefill tokens.
+- **FlashAttention is a feature-gated no-op stub, and the `flash-attn` Cargo feature it
+  depends on does not exist.** `src/kernels.rs`'s entire `#[cfg(feature = "flash-attn")]
+  pub mod flash_attn` body is `pub fn available() -> bool { true }` — no kernel, no
+  tensor-layout conversion, no causal-masking logic, nothing the claim below describes.
+  `grep -i flash-attn Cargo.toml` finds no such feature, so the module is also unreachable
+  dead code. `examples/benchmark_flashattention.rs` and `tests/flash_attention_tests.rs`,
+  the claim's own cited evidence, are both absent from the tree.
+
+- ✅ **StreamingLLM-style policy COMPLETE** ⚠️ **CONTRADICTED — see above**
   - Attention sinks + sliding window KV retention for long streams
   - Implementation: src/cache/streaming_policy.rs with compute_streaming_index()
   - Integrated with ParallelCacheBuilder for automatic eviction
@@ -1971,11 +2011,11 @@ M2 — Performance enablers (0.3)
   - Demo: examples/streaming_llm_demo.rs showing 44% memory savings
   - Acceptance: ✅ constant KV memory beyond window; 6/6 tests passing; demo verified
 - Prefix KV caching (from Socratic prompting insight)
-  - ✅ **COMPLETE**: Hash-and-reuse prefill KV for common system prompts/instruction prefixes across requests
+  - ✅ **COMPLETE**: Hash-and-reuse prefill KV for common system prompts/instruction prefixes across requests ⚠️ **CONTRADICTED — see above**
   - Acceptance: ✅ TTFT reduction >15% on workloads with repeated prefixes; correctness parity ensured by cache invalidation on any mismatch
 - **Intelligent Cache Management** (NEW - Multi-phase)
   - Advanced eviction system combining multiple policies with voting
-  - Phase 1: Multi-Policy Eviction ✅ COMPLETE
+  - Phase 1: Multi-Policy Eviction ✅ COMPLETE ⚠️ **CONTRADICTED — see above**
     - ✅ H2O (Heavy Hitters Oracle): Track cumulative attention scores, evict low-attention tokens
       * Implementation: src/cache/h2o_policy.rs (375 lines with Debug/Clone)
       * Features: Per-token cumulative attention tracking, temporal decay, recent token protection
@@ -1998,8 +2038,8 @@ M2 — Performance enablers (0.3)
       * Attention weight exposure from custom_attention.rs still needed for production use
       * Architecture supports future explicit eviction scenarios (prefix caching, long-context)
     - Acceptance: ✅ Infrastructure complete; awaiting attention weight exposure for production use
-  - Phase 2: Tool-Integrated KV Management ✅ COMPLETE
-    - **Cache Span Tagging System** ✅ COMPLETE
+  - Phase 2: Tool-Integrated KV Management ✅ COMPLETE ⚠️ **CONTRADICTED — see above**
+    - **Cache Span Tagging System** ✅ COMPLETE ⚠️ **CONTRADICTED — see above**
       * ✅ CacheSpan = metadata only (NO token storage - caller's responsibility)
       * ✅ SpanId (u64) primary identity starting at 1, optional unique names for human reference
       * ✅ CacheTag enum for semantic grouping (SystemPrompt, ToolOutput, UserInput, LongTermMemory, ModelGeneration, Custom)
@@ -2046,7 +2086,7 @@ M2 — Performance enablers (0.3)
     - Feature-gated, research-oriented
   - References: docs/INTELLIGENT_CACHE_MANAGEMENT.md, docs/KV_CACHE_INSERTION.md (to be created), docs/ASYNC_MEMORY_CONTROLLER.md (to be created)
 
-- ✅ **M3.4 COMPLETE**: FlashAttention integration
+- ✅ **M3.4 COMPLETE**: FlashAttention integration ⚠️ **CONTRADICTED — see above**
   - **Status**: Fully integrated, now included by default with CUDA feature
   - **Implementation**: FlashAttention-2 automatically enabled when compiled with `--features cuda`
   - **Conditions for activation**: CUDA device + no complex masks + GQA pre-expanded
