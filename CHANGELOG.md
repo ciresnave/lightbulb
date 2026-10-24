@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.19.10
+
+### Changed
+- CI: re-pinned the advisory CodeRipper portfolio check to coderipper `d14a22b` (installs 0.9.14; the old pin installed 0.9.6), per the coderipper lane's repin notice.
+
 ## 0.19.9
 
 ### Fixed

@@ -4,7 +4,7 @@
     license     = "MIT OR Apache-2.0"
     name        = "lightbulb"
     repository  = "https://github.com/ciresnave/lightbulb"
-    version     = "0.19.9"
+    version     = "0.19.10"
 
 [features]
     # CUDA, via Fuel only. Was `["candlelight/cuda", "fuel/cuda"]`; candlelight
