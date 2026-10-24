@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.19.9
+
+### Fixed
+- **ROADMAP.md: corrected M2's cache-management and FlashAttention "✅ COMPLETE" claims,
+  contradicted (not just unverified) by the Candle removal (#195).** StreamingLLM/H2O/
+  voting/cache-span eviction all cite `ParallelCacheBuilder` as their integration point --
+  removed 2026-10-22 (`src/engine/mod.rs:329`) -- and cite three demo files
+  (`streaming_llm_demo.rs`, `h2o_integration_demo.rs`, `span_management_demo.rs`) that no
+  longer exist. The underlying cache modules survive, but their would-be Fuel-era
+  successor (`SpanBlockMap`/`EvictionPlan` in `src/model_fuel/policies.rs`) has zero callers
+  outside its own file -- same "built, never wired into the live driver" pattern as
+  `batched.rs` and pre-slice-3 `BlockPrefixIndex`. The "hash-and-reuse prefill KV ... TTFT
+  reduction >15% ... measured" claim is specifically false: that mechanism
+  (`BlockPrefixIndex`) has been detection-only to date; real wiring is a separate, in-flight
+  ROADMAP slice, not yet merged as of this correction.
+  FlashAttention (M3.4) is a feature-gated no-op stub (`pub fn available() -> bool { true
+  }`) behind a `flash-attn` Cargo feature that no longer exists in `Cargo.toml`, and its two
+  cited evidence files (`benchmark_flashattention.rs`, `flash_attention_tests.rs`) are both
+  gone. Each claim marked `⚠️ CONTRADICTED` in place pointing to one evidence block, per the
+  pattern in #218/#219.
+
 ## 0.19.8
 
 ### Fixed
