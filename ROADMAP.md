@@ -2635,7 +2635,16 @@ M4 — Advanced scheduling (0.5)
    - Mitigation: Model pipeline DAG explicitly with cycle detection; dry-run pipeline validation before execution; implement stage timeout and failure recovery; extensive testing with complex pipeline graphs
 
 - Memory-aware, priority scheduler
-  - ✅ **INTEGRATED**: `distributed-config` crate - Dynamic scheduling configuration management
+  - ⚠️ **CONTRADICTED 2026-10-24.** Was marked ✅ INTEGRATED: `distributed-config` crate -
+    Dynamic scheduling configuration management. `distributed-config` was a direct
+    dependency from the initial commit until lightbulb#213 (2026-10-23), but
+    `git log --all -S"distributed_config" -- src/` finds zero commits ever touching that
+    identifier under `src/` — it was never called from any code, scheduler or otherwise,
+    at any point in the project's history. lightbulb#213 removed it as "unused", which was
+    the first accurate description of its status. See the `auto-discovery`/`coalescent`/
+    `mocopr-server`/`web-server-abstraction`/etc. "INTEGRATED" bullets throughout this
+    document's far-future milestones: none of those crates have ever appeared in
+    `Cargo.toml` either, so each is the same claim pattern, unverified here.
   - ✅ **INTEGRATED**: `mocopr-server` - Expose scheduler metrics and control tools via MCP protocol
   - ✅ **INTEGRATED**: `web-server-abstraction` - REST API for inference requests, metrics dashboard, and WebSocket streaming
   - Request classes, preemption, dynamic batch sizing
@@ -4453,7 +4462,10 @@ M7 — Sentience Infrastructure (0.8+)
   - References: docs/AUTONOMOUS_REWARDS.md (to be created)
 
 - Capability gating and resource control
-  - ✅ **INTEGRATED**: `distributed-config` crate - Feature flags and versioned capability configuration
+  - ⚠️ **CONTRADICTED 2026-10-24** (same finding as the "Memory-aware, priority scheduler"
+    entry above). Was marked ✅ INTEGRATED: `distributed-config` crate - Feature flags and
+    versioned capability configuration. Never referenced from `src/`; removed as unused
+    in lightbulb#213.
   - ✅ **INTEGRATED**: `mocopr-server` - Expose sentience state, introspection tools via MCP protocol
   - ✅ **INTEGRATED**: `mocopr-client` - Access external knowledge sources (email, calendar, filesystem)
   - ✅ **INTEGRATED**: `web-server-abstraction` - Web-based partnership interfaces, introspection API, capability management UI
@@ -5200,7 +5212,10 @@ M8 — Modular Training Infrastructure (0.9+)
   - References: docs/NUMERICAL_ACCURACY_GUARDIAN.md (to be created)
 
 - Hardware-aware training optimization
-  - ✅ **INTEGRATED**: `distributed-config` crate - Training hyperparameter and configuration management
+  - ⚠️ **CONTRADICTED 2026-10-24** (same finding as the "Memory-aware, priority scheduler"
+    entry above). Was marked ✅ INTEGRATED: `distributed-config` crate - Training
+    hyperparameter and configuration management. Never referenced from `src/`; removed as
+    unused in lightbulb#213.
   - QLoRA/4-bit quantization for memory-efficient training (75% memory reduction)
   - LoRA configuration optimization (rank, alpha, target modules)
   - CPU offloading for optimizer states (DeepSpeed ZeRO Stage 2)
