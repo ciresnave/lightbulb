@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.19.13
+
+### Added
+- ROADMAP research-track item 1, slice 3: `ServingDriver` can now EXPLOIT a `BlockPrefixIndex` hit -- register the donor's blocks as a Fuel `PrefixId` and admit via `PagedSessionScheduler::add_session_sharing_prefix` -- instead of only detecting it. Off by default, so serving behavior is unchanged. Toggle: `ApiConfig::model_prefix_sharing` / `EngineOptions::prefix_sharing` (new `ModelRunner::start_with_options`; `start` is unchanged and uses the defaults), set from the `LIGHTBULB_PREFIX_SHARING` env var read only in `main.rs` (documented in README). Not to be enabled by default until a measured benchmark shows a win (ROADMAP row). A full-block-aligned repeat shares one block fewer (Fuel rejects a share with no suffix); registrations are keyed by exact `(donor, blocks)`; any Fuel refusal falls back to a cold admission.
+
 ## 0.19.12
 
 ### Fixed

@@ -129,6 +129,37 @@ struct ServingDriver<'m> {
     sessions: std::collections::HashMap<fuel_inference::multi_session::SessionId, String>,
     prefix_index: BlockPrefixIndexFor<fuel_inference::multi_session::SessionId>,
     cache_stats: SharedCacheStats,
+    /// ROADMAP research-track item 1, slice 3: off-by-default switch for
+    /// actually exploiting a `prefix_index` hit (splice + skip prefill),
+    /// rather than only detecting it (`hits`/`misses` in `cache_stats`,
+    /// which run regardless of this flag). `false` for every construction
+    /// site today -- no operator-facing toggle exists yet; exposing one
+    /// (env var/CLI) is a follow-up once this is trusted, not this slice's
+    /// scope. Exists so `try_admit`'s off path and on path share one
+    /// function instead of diverging into two.
+    prefix_sharing_enabled: bool,
+    /// Donors already registered as a shared [`fuel::kv_block_pool::PrefixId`]
+    /// with the live `PagedSessionScheduler`, and how many blocks each
+    /// registration covers -- a SEPARATE lifetime mechanism from
+    /// `prefix_index`'s own `donor_refs` (that one is lightbulb's own
+    /// bookkeeping for the old, never-live `KvBlockPool`/`splice_prefix`
+    /// path; this one is the pool's real refcount on the paged path).
+    /// Released when the donor departs (`mirror_departure`), which is safe
+    /// even if a live sharer still references the blocks independently
+    /// (`PagedSessionScheduler::release_prefix`'s own doc comment).
+    ///
+    /// Keyed by `(donor, blocks)` EXACTLY: a `PrefixId` splices every block
+    /// it was registered over, so reusing a registration that covers MORE
+    /// blocks than the current lookup matched would graft KV of tokens the
+    /// new prompt does not contain.
+    registered_prefixes: std::collections::HashMap<
+        (fuel_inference::multi_session::SessionId, usize),
+        fuel::kv_block_pool::PrefixId,
+    >,
+    /// Admissions that actually went through `add_session_sharing_prefix`
+    /// (not the cold fallback). Lets a test tell a real splice from a
+    /// silent fallback, which `registered_prefixes` alone cannot.
+    prefix_shared_admissions: u64,
 }
 
 impl<'m> ServingDriver<'m> {
@@ -175,6 +206,22 @@ impl<'m> ServingDriver<'m> {
             stats.evictions += 1;
             stats.entries = entries;
         }
+        // Release this donor's pool-level prefix registration, if it had
+        // one -- safe even while a live sharer still references the blocks
+        // (see `registered_prefixes`'s own doc comment). A no-op whenever
+        // `prefix_sharing_enabled` is false: nothing is ever inserted into
+        // `registered_prefixes` on that path.
+        let owned: Vec<(fuel_inference::multi_session::SessionId, usize)> = self
+            .registered_prefixes
+            .keys()
+            .filter(|(donor, _)| *donor == id)
+            .copied()
+            .collect();
+        for key in owned {
+            if let Some(prefix) = self.registered_prefixes.remove(&key) {
+                let _ = self.release_prefix_inner(prefix);
+            }
+        }
         let Some(request_id) = self.sessions.remove(&id) else {
             return;
         };
@@ -187,19 +234,16 @@ impl<'m> ServingDriver<'m> {
         }
     }
 
-    /// Detect whether `prompt` repeats an already-admitted prefix (real
-    /// chain-hash lookup, not exploited — see this struct's doc comment),
-    /// then index `prompt` itself under `id` so a LATER admission can be
-    /// detected against it. Mirrors the real `BlockPrefixStats` into
-    /// `SharedCacheStats` every time so `cache_stats` always reads the
-    /// latest real counts, the same immediate-write pattern
-    /// `mirror_admission`/`mirror_departure` already use for the scheduler.
-    fn detect_and_record_prefix(
-        &mut self,
-        id: fuel_inference::multi_session::SessionId,
-        prompt: &[u32],
-    ) {
-        let _hit = self.prefix_index.lookup(prompt);
+    /// Index `prompt` itself under `id` (a just-admitted session) so a
+    /// LATER admission can be detected against it, then mirror the real
+    /// `BlockPrefixStats` into `SharedCacheStats` — the same immediate-write
+    /// pattern `mirror_admission`/`mirror_departure` already use for the
+    /// scheduler. The matching *lookup* for `prompt` itself happens earlier,
+    /// in `try_admit`, before admission is even decided (needed there to
+    /// pick the admission path when `prefix_sharing_enabled`); this is only
+    /// the record-and-mirror tail, run unconditionally and identically on
+    /// both the exploited and detection-only paths.
+    fn record_prefix(&mut self, id: fuel_inference::multi_session::SessionId, prompt: &[u32]) {
         self.prefix_index.record(prompt, id);
         let block_stats = self.prefix_index.stats();
         let entries = self.prefix_index.len();
@@ -208,6 +252,106 @@ impl<'m> ServingDriver<'m> {
         stats.misses = block_stats.misses;
         stats.insertions = block_stats.blocks_indexed;
         stats.entries = entries;
+    }
+
+    /// The `prefix_sharing_enabled == false` admission path — unchanged
+    /// from before slice 3: every arm's own cold `try_admit`, nothing else.
+    fn plain_admit(
+        &mut self,
+        prompt: &[u32],
+        max_new: usize,
+        temperature: f64,
+    ) -> Result<fuel_inference::multi_session::SessionId, AdmitError> {
+        match &mut self.inner {
+            ServingDriverInner::F32(d) => d.try_admit(prompt, max_new, temperature),
+            ServingDriverInner::QuantizedGguf(d) => d.try_admit(prompt, max_new, temperature),
+            ServingDriverInner::QuantizedGgufQwen3(d) => d.try_admit(prompt, max_new, temperature),
+        }
+    }
+
+    /// On a lookup `hit`, try to actually splice the shared prefix instead
+    /// of a cold prefill (`prefix_sharing_enabled`'s real exploitation).
+    /// Falls back to [`Self::plain_admit`] -- never fails the request just
+    /// because sharing didn't pan out -- on a miss, on a donor whose blocks
+    /// are not (or no longer) fully resident up to the matched length (e.g.
+    /// still mid-prefill, or reaped since the match was computed), or on any
+    /// other Fuel-side refusal of the splice.
+    fn try_admit_sharing_or_fallback(
+        &mut self,
+        hit: Option<super::policies::PrefixMatchFor<fuel_inference::multi_session::SessionId>>,
+        prompt: &[u32],
+        max_new: usize,
+        temperature: f64,
+    ) -> Result<fuel_inference::multi_session::SessionId, AdmitError> {
+        let Some(hit) = hit else {
+            return self.plain_admit(prompt, max_new, temperature);
+        };
+        // Fuel rejects a share that leaves no suffix (`prompt.len() <=
+        // shared_tokens`): the first generated token needs logits from at
+        // least one prefilled prompt token. A full-prompt match (the common
+        // repeat-request case) therefore shares one block fewer.
+        let blocks = hit
+            .blocks
+            .min(prompt.len().saturating_sub(1) / self.prefix_index.block_size());
+        if blocks == 0 {
+            return self.plain_admit(prompt, max_new, temperature);
+        }
+        let Some(prefix) = self.ensure_prefix_registered(hit.donor, blocks) else {
+            return self.plain_admit(prompt, max_new, temperature);
+        };
+        let shared = match &mut self.inner {
+            ServingDriverInner::F32(d) => {
+                d.try_admit_sharing_prefix(prefix, prompt, max_new, temperature)
+            }
+            ServingDriverInner::QuantizedGguf(d) => {
+                d.try_admit_sharing_prefix(prefix, prompt, max_new, temperature)
+            }
+            ServingDriverInner::QuantizedGgufQwen3(d) => {
+                d.try_admit_sharing_prefix(prefix, prompt, max_new, temperature)
+            }
+        };
+        match shared {
+            Ok(id) => {
+                self.prefix_shared_admissions += 1;
+                Ok(id)
+            }
+            Err(_) => self.plain_admit(prompt, max_new, temperature),
+        }
+    }
+
+    /// Register `donor`'s first `blocks` filled blocks as a shared prefix
+    /// with the live `PagedSessionScheduler`, reusing a registration only
+    /// if it covers EXACTLY this many blocks (see `registered_prefixes`).
+    /// `None` on any Fuel-side refusal (e.g. the donor's blocks are not all
+    /// filled yet).
+    fn ensure_prefix_registered(
+        &mut self,
+        donor: fuel_inference::multi_session::SessionId,
+        blocks: usize,
+    ) -> Option<fuel::kv_block_pool::PrefixId> {
+        if let Some(&prefix) = self.registered_prefixes.get(&(donor, blocks)) {
+            return Some(prefix);
+        }
+        let registered = match &mut self.inner {
+            ServingDriverInner::F32(d) => d.register_prefix(donor, blocks),
+            ServingDriverInner::QuantizedGguf(d) => d.register_prefix(donor, blocks),
+            ServingDriverInner::QuantizedGgufQwen3(d) => d.register_prefix(donor, blocks),
+        };
+        match registered {
+            Ok(prefix) => {
+                self.registered_prefixes.insert((donor, blocks), prefix);
+                Some(prefix)
+            }
+            Err(_) => None,
+        }
+    }
+
+    fn release_prefix_inner(&mut self, prefix: fuel::kv_block_pool::PrefixId) -> fuel::Result<()> {
+        match &mut self.inner {
+            ServingDriverInner::F32(d) => d.release_prefix(prefix),
+            ServingDriverInner::QuantizedGguf(d) => d.release_prefix(prefix),
+            ServingDriverInner::QuantizedGgufQwen3(d) => d.release_prefix(prefix),
+        }
     }
 
     /// The real `cache_clear` admin endpoint's implementation (board PM
@@ -247,18 +391,23 @@ impl<'m> SchedulerDriver for ServingDriver<'m> {
                  generate instead of erroring mid-decode"
             );
         }
-        let admitted = match &mut self.inner {
-            ServingDriverInner::F32(d) => d.try_admit(prompt, effective_max_new, temperature),
-            ServingDriverInner::QuantizedGguf(d) => {
-                d.try_admit(prompt, effective_max_new, temperature)
-            }
-            ServingDriverInner::QuantizedGgufQwen3(d) => {
-                d.try_admit(prompt, effective_max_new, temperature)
-            }
+        // Always run, regardless of `prefix_sharing_enabled` -- same
+        // lookup `detect_and_record_prefix` used to do here directly,
+        // giving `hits`/`misses` byte-identical behavior on both paths.
+        // Doing it before deciding the admission path (rather than after,
+        // as before) is required so the `true` path can act on the result;
+        // the `false` path simply never looks at `hit`, which is the whole
+        // reason the off path stays byte-identical to pre-slice-3 behavior.
+        let hit = self.prefix_index.lookup(prompt);
+
+        let admitted = if self.prefix_sharing_enabled {
+            self.try_admit_sharing_or_fallback(hit, prompt, effective_max_new, temperature)
+        } else {
+            self.plain_admit(prompt, effective_max_new, temperature)
         };
         if let Ok(id) = admitted {
             self.mirror_admission(id, prompt, effective_max_new, temperature);
-            self.detect_and_record_prefix(id, prompt);
+            self.record_prefix(id, prompt);
         }
         admitted
     }
@@ -332,6 +481,11 @@ struct BatchedServeConfig {
     scheduler: SharedScheduler,
     cache_stats: SharedCacheStats,
     ctrl_rx: Receiver<ControlMsg>,
+    /// ROADMAP research-track item 1, slice 3's off-by-default switch --
+    /// see `ServingDriver::prefix_sharing_enabled`'s own doc comment.
+    /// `false` from `new`; `run_fuel_engine` sets it from
+    /// `EngineOptions::prefix_sharing`.
+    prefix_sharing_enabled: bool,
 }
 
 impl BatchedServeConfig {
@@ -354,6 +508,7 @@ impl BatchedServeConfig {
             scheduler,
             cache_stats,
             ctrl_rx,
+            prefix_sharing_enabled: false,
         }
     }
 }
@@ -392,6 +547,9 @@ fn run_batched<'m, M: fuel_inference::multi_session::PagedDecodeModel>(
         sessions: std::collections::HashMap::new(),
         prefix_index: BlockPrefixIndexFor::new(KV_BLOCK_SIZE),
         cache_stats: config.cache_stats,
+        prefix_sharing_enabled: config.prefix_sharing_enabled,
+        registered_prefixes: std::collections::HashMap::new(),
+        prefix_shared_admissions: 0,
     };
     // `tokenizer.encode`/`.decode` each need their own `move` closure below,
     // and `Tokenizer` is not `Copy` — an `Arc` is what lets both closures
@@ -434,6 +592,7 @@ fn run_batched<'m, M: fuel_inference::multi_session::PagedDecodeModel>(
 /// start` already use) — matching the old call site's own two-level match
 /// exactly, since `rx` is consumed by whichever path runs and cannot be
 /// handed back to a caller to drain a second time.
+#[allow(clippy::too_many_arguments)] // `ModelRunner::start`'s seven plus `options`
 pub(crate) fn run_fuel_engine(
     model_path: &Path,
     max_batch_size: usize,
@@ -442,14 +601,16 @@ pub(crate) fn run_fuel_engine(
     ctrl_rx: Receiver<ControlMsg>,
     scheduler: SharedScheduler,
     cache_stats: SharedCacheStats,
+    options: crate::engine::model_runner::EngineOptions,
 ) {
-    let config = BatchedServeConfig::new(
+    let mut config = BatchedServeConfig::new(
         max_batch_size,
         context_length,
         scheduler,
         cache_stats,
         ctrl_rx,
     );
+    config.prefix_sharing_enabled = options.prefix_sharing;
     let is_gguf = model_path
         .extension()
         .is_some_and(|ext| ext.eq_ignore_ascii_case("gguf"));
@@ -659,7 +820,7 @@ mod tests {
     /// short prompts -- the point is `try_admit`'s prefix-detection wiring,
     /// not capacity edge cases (those belong to `scheduler_driver_paged.rs`'s
     /// own tests).
-    fn serving_driver(model: &LlamaModel) -> ServingDriver<'_> {
+    fn serving_driver(model: &LlamaModel, prefix_sharing_enabled: bool) -> ServingDriver<'_> {
         let fuel_scheduler = FuelPagedSchedulerDriver::new(
             model,
             KvBudget {
@@ -682,6 +843,9 @@ mod tests {
             sessions: std::collections::HashMap::new(),
             prefix_index: BlockPrefixIndexFor::new(2),
             cache_stats: Arc::new(Mutex::new(crate::cache::PrefixCacheStats::default())),
+            prefix_sharing_enabled,
+            registered_prefixes: std::collections::HashMap::new(),
+            prefix_shared_admissions: 0,
         }
     }
 
@@ -695,7 +859,7 @@ mod tests {
     #[test]
     fn repeated_prefix_is_detected_as_a_real_hit_distinct_prompt_is_a_real_miss() {
         let model = tiny_model(1);
-        let mut d = serving_driver(&model);
+        let mut d = serving_driver(&model, false);
 
         // Two whole blocks (block_size 2): long enough to be indexed.
         let shared_prompt = [1u32, 2, 3, 4];
@@ -746,7 +910,7 @@ mod tests {
     #[test]
     fn handle_control_clear_prefix_cache_makes_the_next_identical_prefix_a_real_miss() {
         let model = tiny_model(1);
-        let mut d = serving_driver(&model);
+        let mut d = serving_driver(&model, false);
 
         let prompt = [1u32, 2, 3, 4];
         d.try_admit(&prompt, 1, 0.0)
@@ -782,6 +946,196 @@ mod tests {
             stats_after_repeat.misses, 1,
             "the post-clear admission must register as a genuine miss: \
              {stats_after_repeat:?}"
+        );
+    }
+
+    /// Drives `id` to completion, returning its generated tokens in order.
+    /// `step`/`reap_finished` are called on `d` directly -- the same
+    /// `SchedulerDriver` trait methods `run_scheduled_jobs` itself uses --
+    /// so this exercises the real admission-to-completion path, not a
+    /// shortcut around it.
+    fn drive_to_completion(
+        d: &mut ServingDriver<'_>,
+        id: fuel_inference::multi_session::SessionId,
+    ) -> Vec<u32> {
+        let mut tokens = Vec::new();
+        loop {
+            for (tok_id, tok) in d.step().expect("step must not error") {
+                if tok_id == id {
+                    tokens.push(tok);
+                }
+            }
+            if d.reap_finished()
+                .into_iter()
+                .any(|(fin_id, _)| fin_id == id)
+            {
+                return tokens;
+            }
+        }
+    }
+
+    /// Greedy completion of `prompt` on a driver that never shared anything:
+    /// the cold reference every shared completion below is compared to.
+    fn cold_completion(model: &LlamaModel, prompt: &[u32], max_new: usize) -> Vec<u32> {
+        let mut d = serving_driver(model, false);
+        let id = d
+            .try_admit(prompt, max_new, 0.0)
+            .expect("cold admission must succeed");
+        drive_to_completion(&mut d, id)
+    }
+
+    /// A donor (`donor_prompt`) admitted and prefilled on a sharing-enabled
+    /// driver, kept alive (large `max_new`) so later admissions can splice
+    /// from it. Block size is 2 (`serving_driver`).
+    fn driver_with_live_donor<'m>(
+        model: &'m LlamaModel,
+        donor_prompt: &[u32],
+    ) -> (ServingDriver<'m>, fuel_inference::multi_session::SessionId) {
+        let mut d = serving_driver(model, true);
+        let donor = d
+            .try_admit(donor_prompt, 32, 0.0)
+            .expect("donor must admit");
+        // `prefill_pass` feeds a session's whole prompt in one `step()`.
+        let _ = d.step().expect("donor's prefill tick must not error");
+        (d, donor)
+    }
+
+    /// ROADMAP research-track item 1, slice 3's required test: a request
+    /// sharing a prefix with a live donor produces the SAME completion as a
+    /// cold admission AND really went through `add_session_sharing_prefix`.
+    ///
+    /// The second half is `prefix_shared_admissions`, not
+    /// `registered_prefixes`: registration happens BEFORE Fuel decides
+    /// whether to accept the share, so a registration alone cannot tell a
+    /// splice from a silent cold fallback (which would also match the cold
+    /// completion trivially). Prefill skipping itself is Fuel's contract
+    /// (`add_session_sharing_prefix` prefills only `prompt[shared..]`);
+    /// timing it would be flaky on CI.
+    #[test]
+    fn a_prefix_sharing_admission_really_splices_and_matches_the_cold_completion() {
+        let model = tiny_model(1);
+        // 5 tokens, block size 2: two whole blocks (4 tokens) shared, one
+        // suffix token left to prefill.
+        let prompt = [1u32, 2, 3, 4, 5];
+        let (mut d, donor) = driver_with_live_donor(&model, &prompt);
+        assert!(d.registered_prefixes.is_empty() && d.prefix_shared_admissions == 0);
+
+        let sharer = d.try_admit(&prompt, 3, 0.0).expect("sharer must admit");
+        assert_eq!(d.prefix_shared_admissions, 1, "must be a real splice");
+        assert!(d.registered_prefixes.contains_key(&(donor, 2)));
+        assert_eq!(
+            drive_to_completion(&mut d, sharer),
+            cold_completion(&model, &prompt, 3),
+            "shared completion must be bit-identical to a cold admission"
+        );
+    }
+
+    /// A repeat of a prompt that is exactly block-aligned would match ALL
+    /// its blocks, which Fuel refuses (no suffix left to sample from). The
+    /// driver must share one block fewer rather than fall back cold.
+    #[test]
+    fn a_fully_block_aligned_repeat_shares_one_block_fewer_instead_of_falling_back() {
+        let model = tiny_model(1);
+        let prompt = [1u32, 2, 3, 4];
+        let (mut d, donor) = driver_with_live_donor(&model, &prompt);
+
+        let sharer = d.try_admit(&prompt, 3, 0.0).expect("sharer must admit");
+        assert_eq!(d.prefix_shared_admissions, 1, "must be a real splice");
+        assert!(d.registered_prefixes.contains_key(&(donor, 1)));
+        assert!(!d.registered_prefixes.contains_key(&(donor, 2)));
+        assert_eq!(
+            drive_to_completion(&mut d, sharer),
+            cold_completion(&model, &prompt, 3)
+        );
+    }
+
+    /// A donor's longer registration must never be reused for a request that
+    /// matched fewer blocks: the splice would graft KV for tokens that
+    /// request does not contain. `BlockPrefixIndexFor::record` is
+    /// last-writer-wins, so a live index rarely leaves ONE donor holding both
+    /// lengths -- the registration table is driven directly here to put the
+    /// donor in exactly that state, then the real fallback path is run with
+    /// a 2-block hit.
+    #[test]
+    fn a_shorter_match_never_reuses_the_donors_longer_registration() {
+        let model = tiny_model(1);
+        let donor_prompt = [1u32, 2, 3, 4, 5, 6];
+        let (mut d, donor) = driver_with_live_donor(&model, &donor_prompt);
+
+        let long = d
+            .ensure_prefix_registered(donor, 3)
+            .expect("donor holds 3 whole blocks");
+        let hit = super::super::policies::PrefixMatchFor {
+            donor,
+            blocks: 2,
+            shared_tokens: 4,
+            remainder_tokens: 3,
+        };
+        let short_prompt = [1u32, 2, 3, 4, 9, 9, 9];
+        let id = d
+            .try_admit_sharing_or_fallback(Some(hit), &short_prompt, 3, 0.0)
+            .expect("short sharer must admit");
+
+        assert_eq!(d.prefix_shared_admissions, 1, "must be a real splice");
+        assert_eq!(d.registered_prefixes.len(), 2);
+        assert_ne!(
+            d.registered_prefixes[&(donor, 2)],
+            long,
+            "the 2-block match needs its own registration, not the 3-block one"
+        );
+        assert_eq!(
+            drive_to_completion(&mut d, id),
+            cold_completion(&model, &short_prompt, 3),
+            "the short sharer must see only its own 2 matched blocks"
+        );
+    }
+
+    /// The companion half of the slice 3 requirement: with the switch OFF
+    /// (the default for every construction site today), behavior must be
+    /// byte-identical to before slice 3 existed. Runs the EXACT scenario
+    /// that would trigger sharing if the flag were on (a donor, then an
+    /// identical-prompt second admission) and asserts two things the
+    /// on-path test above does NOT need to: `registered_prefixes` never
+    /// gains an entry (the new pool-level machinery is never touched at
+    /// all when the flag is off, not merely "touched but declines to
+    /// share"), and the second admission's completion is identical to an
+    /// admission of that prompt on a driver that never saw the donor at
+    /// all -- proving the mere PRESENCE of a detected hit changes nothing
+    /// observable when `prefix_sharing_enabled` is false.
+    #[test]
+    fn prefix_sharing_disabled_is_byte_identical_to_detection_only_behavior() {
+        let model = tiny_model(1);
+        let prompt = [1u32, 2, 3, 4];
+        let max_new = 3;
+
+        let mut off_driver = serving_driver(&model, false);
+        let _donor_id = off_driver
+            .try_admit(&prompt, max_new, 0.0)
+            .expect("donor must admit");
+        let _ = off_driver
+            .step()
+            .expect("donor's prefill tick must not error");
+
+        let repeat_id = off_driver
+            .try_admit(&prompt, max_new, 0.0)
+            .expect("identical-prompt admission must still succeed");
+        assert!(
+            off_driver.registered_prefixes.is_empty(),
+            "the off path must never call register_prefix at all, not even once -- the \
+             pool-level machinery this slice added must stay completely untouched"
+        );
+        let repeat_tokens = drive_to_completion(&mut off_driver, repeat_id);
+
+        let mut fresh_driver = serving_driver(&model, false);
+        let fresh_id = fresh_driver
+            .try_admit(&prompt, max_new, 0.0)
+            .expect("a driver with no donor at all must admit the same prompt identically");
+        let fresh_tokens = drive_to_completion(&mut fresh_driver, fresh_id);
+
+        assert_eq!(
+            repeat_tokens, fresh_tokens,
+            "a detected-but-unexploited hit must not change the completion at all when \
+             prefix sharing is disabled"
         );
     }
 }

@@ -278,6 +278,17 @@ impl std::error::Error for RequestTimeoutError {}
 /// Already batch-shaped, so adding real batching changes the job-draining loop
 /// and the implementations, not this trait.
 
+/// Opt-in engine behaviours for [`ModelRunner::start_with_options`]. Every
+/// field defaults to OFF; [`ModelRunner::start`] uses the defaults.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct EngineOptions {
+    /// Splice a live donor's KV blocks into a new request that shares a
+    /// block-aligned prompt prefix with it, instead of prefilling the prefix
+    /// again (ROADMAP research-track item 1, slice 3). Off until a measured
+    /// benchmark shows it wins; hit DETECTION (`cache_stats`) runs either way.
+    pub prefix_sharing: bool,
+}
+
 /// Lightweight model runner that owns the Fuel-backed model on a dedicated thread
 /// and services incoming inference jobs.
 ///
@@ -320,6 +331,31 @@ impl ModelRunner {
         max_queue_depth: usize,
         cache_stats: SharedCacheStats,
         scheduler: SharedScheduler,
+    ) -> Result<(InferenceRequestSender, ControlSender)> {
+        Self::start_with_options(
+            model_path,
+            max_batch_size,
+            context_length,
+            dtype,
+            max_queue_depth,
+            cache_stats,
+            scheduler,
+            EngineOptions::default(),
+        )
+    }
+
+    /// [`Self::start`] plus [`EngineOptions`]. `start` is this with the
+    /// defaults (every option off), so existing callers are unchanged.
+    #[allow(clippy::too_many_arguments)] // `start`'s seven plus `options`
+    pub fn start_with_options(
+        model_path: impl Into<PathBuf>,
+        max_batch_size: usize,
+        context_length: usize,
+        dtype: Option<String>,
+        max_queue_depth: usize,
+        cache_stats: SharedCacheStats,
+        scheduler: SharedScheduler,
+        options: EngineOptions,
     ) -> Result<(InferenceRequestSender, ControlSender)> {
         let model_path = model_path.into();
         let (tx, rx): (SyncSender<InferenceJob>, Receiver<InferenceJob>) =
@@ -370,6 +406,7 @@ impl ModelRunner {
                 ctrl_rx,
                 scheduler,
                 cache_stats,
+                options,
             );
         });
 

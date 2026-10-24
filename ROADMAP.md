@@ -1422,7 +1422,7 @@ slower per token than contiguous on this hardware), not re-discover.
    "Multi-GPU" section below for why that limit is structural, not an oversight here) — the
    ~10x CPU-measured paged penalty from the original sizing presumably still applies; no new
    number is claimed.
-3. **Still open.** Wire `BlockPrefixIndex` as the admission-time decision layer: on each new
+3. **WIRED, OFF BY DEFAULT (PR #224, 2026-10-24).** Enable with `LIGHTBULB_PREFIX_SHARING=1` (see README). Original plan: wire `BlockPrefixIndex` as the admission-time decision layer: on each new
    session, `BlockPrefixIndex::lookup` against recorded donors; on a hit, call
    `PagedSessionScheduler::add_session_sharing_prefix` instead of plain `add_session`;
    `BlockPrefixIndex::record` the donor once prefill completes. Test: two requests sharing an
@@ -1473,6 +1473,12 @@ slower per token than contiguous on this hardware), not re-discover.
 5. **DONE as a side effect of slice 1/2** — Qwen3 GGUF (`QuantizedGgufQwen3`) swapped to Paged
    along with the other two arms; no separate Qwen3-specific work was needed once Fuel 0.22.4's
    `PagedDecodeModel` impl for `QuantizedQwen3Model` was confirmed (see slice 1).
+
+6. **OPEN (PM ruling 2026-10-24): measure before enabling by default.** Slice 3 ships behind
+   `LIGHTBULB_PREFIX_SHARING` (default off). Benchmark requests with a long shared prompt prefix
+   with the switch off vs on (TTFT and tokens/s, CPU and the one local GPU), accounting for
+   Fuel's PagedAttn having no fused CUDA kernel (~10x per token measured). Only a measured win
+   moves the default; record the numbers with their commit and Fuel version.
 
 Each slice must land green on `cargo test --lib` (and, for slices touching the `fuel-engine`
 feature, `cargo test --features fuel-engine --tests --no-run` at minimum — no GPU runner exists

@@ -15,6 +15,7 @@
 use std::collections::HashMap;
 
 use fuel::Device;
+use fuel::kv_block_pool::PrefixId;
 use fuel::lazy::SamplingStrategy;
 use fuel_inference::multi_session::{
     KvBudget, PagedDecodeModel, PagedSchedulePolicy, PagedSessionScheduler, SessionId, SessionPhase,
@@ -89,6 +90,59 @@ impl<'m, M: PagedDecodeModel> FuelPagedSchedulerDriver<'m, M> {
             seen_counts: HashMap::new(),
             errored: HashMap::new(),
         })
+    }
+
+    /// Register donor `id`'s first `blocks` fully-filled blocks as a shared
+    /// prefix other sessions can later splice from — the pool-level
+    /// counterpart to `BlockPrefixIndexFor::lookup` already having decided
+    /// WHICH donor and how many blocks (`src/model_fuel/policies.rs`). `Err`
+    /// if `id` is unknown, or if its blocks aren't all filled yet (e.g. still
+    /// mid-prefill) — never a panic. The caller (`ServingDriver::try_admit`)
+    /// falls back to an ordinary admission on any `Err` here; sharing is a
+    /// speed optimization, never a correctness requirement.
+    pub(crate) fn register_prefix(
+        &mut self,
+        id: SessionId,
+        blocks: usize,
+    ) -> fuel::Result<PrefixId> {
+        self.scheduler.register_prefix(id, blocks)
+    }
+
+    /// Release a previously registered prefix. Safe even while live sharers
+    /// still reference its blocks: `PagedSessionScheduler::release_prefix`'s
+    /// own doc comment says a sharer's splice already bumped an independent
+    /// refcount, so releasing the original registration only frees blocks no
+    /// live sharer still needs.
+    pub(crate) fn release_prefix(&mut self, prefix: PrefixId) -> fuel::Result<()> {
+        self.scheduler.release_prefix(prefix)
+    }
+
+    /// Admit a session that reuses `prefix`'s KV instead of a cold prefill —
+    /// same sampling-strategy construction as `try_admit` above, the
+    /// prefix-sharing counterpart. Every rejection here (empty prompt, zero
+    /// budget, an unknown/refused prefix, or a prompt no longer than the
+    /// shared prefix) is structural, exactly like `try_admit`'s own —
+    /// `AdmitError::Rejected`, never `NoCapacity`.
+    pub(crate) fn try_admit_sharing_prefix(
+        &mut self,
+        prefix: PrefixId,
+        prompt: &[u32],
+        max_new: usize,
+        temperature: f64,
+    ) -> Result<SessionId, AdmitError> {
+        let seed = self.next_seed;
+        self.next_seed = self.next_seed.wrapping_add(1);
+        let strategy = if temperature <= 0.0 {
+            SamplingStrategy::Greedy
+        } else {
+            SamplingStrategy::Temperature {
+                temp: temperature as f32,
+                seed,
+            }
+        };
+        self.scheduler
+            .add_session_sharing_prefix(prefix, prompt, strategy, self.eos_ids.clone(), max_new)
+            .map_err(|e| AdmitError::Rejected(e.to_string()))
     }
 }
 
