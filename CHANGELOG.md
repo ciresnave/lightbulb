@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.19.12
+
+### Fixed
+- `src/quantization/mod.rs` module doctest imported the removed `candlelight` crate and the deleted Norm Tweaking types, so `cargo test --doc` failed to compile it. Example trimmed to the dequantize/requantize calls that still exist.
+
 ## 0.19.11
 
 ### Changed
