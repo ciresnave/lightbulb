@@ -1481,6 +1481,23 @@ slower per token than contiguous on this hardware), not re-discover.
    with the switch off vs on (TTFT and tokens/s, CPU and the one local GPU), accounting for
    Fuel's PagedAttn having no fused CUDA kernel (~10x per token measured). Only a measured win
    moves the default; record the numbers with their commit and Fuel version.
+   **CPU measurement 2026-10-24** (origin/main `949e808`, Fuel 0.24.0, CPU build, SmolLM2-135M-Instruct
+   Q8_0, ~145-token shared prefix, live donor, greedy; `examples/prefix_sharing_bench.rs`; 2 reps x (1
+   no-share control + 2 sharers); host NOT quiet: cpu 39%/8.3 GiB free at start, 17%/24.8 GiB at end):
+   OFF vs ON completions **bit-identical** (all 6 + donor stream); no-share control TTFT 135.6 s OFF vs
+   131.4 s ON (ratio 0.969, no regression); first sharer TTFT 136.7/138.3 s OFF vs 22.9/22.3 s ON (~6x);
+   second sharer 134-144 s in BOTH arms with `cache_stats.hits` 2 of 4: **defect found** --
+   `BlockPrefixIndexFor::record` was last-writer-wins, so the first sharer's finish (`forget_donor`)
+   orphaned the live donor. Fixed first-writer-wins in 0.19.16 (`a_finished_sharer_does_not_orphan_the_live_donor`;
+   mutation drill: guard off -> only that test red). **Open:** rerun CPU + GPU after the fix before any
+   default flip (default stays OFF); TTFT of ~135 s for 145 tokens on a 135M model is anomalous (decode
+   7.8 tok/s) and unexplained -- suspect per-shape graph build, unconfirmed.
+   GPU caveat (Fuel lane, static grep at fuel `ac29b53c`, 2026-10-24, nothing run): the fused `PagedAttn` kernel
+   exists on CPU only; CUDA runs the decomposed primitive recipe, whose last missing primitive is now registered,
+   so the "~10x/token" figure is a Fuel 0.24.0 number to re-measure on 0.25.x (`tests/gpu_paged_vs_contiguous.rs`)
+   before reuse. Fused FLASH attention (contiguous K/V) exists on CUDA and Vulkan; none reads K/V through a block
+   table (gather-then-flash is the cheap route; unbuilt, unmeasured). Unpopped cannot translate a kernel that has no
+   source (and accepts 0 of 147 Fuel .slang kernels today).
 
 Each slice must land green on `cargo test --lib` (and, for slices touching the `fuel-engine`
 feature, `cargo test --features fuel-engine --tests --no-run` at minimum — no GPU runner exists
