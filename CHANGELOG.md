@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.19.8
+
+### Fixed
+- **ROADMAP.md: corrected 23 false "✅ INTEGRATED" claims for 10 crates that were dead
+  workspace scaffolding, not removed features.** `dynctx`, `mocopr-server`, `mocopr-client`,
+  `web-server-abstraction`, `infra-storage`, `infra-fingerprinting`, `infra-network`,
+  `infra-consensus`, `auto-discovery`, `coalescent` are none of them dependencies of
+  `lightbulb` today, and `git log -S` on `src/` finds zero commits ever referencing any of
+  their module paths there. Traced to the repo's initial commit (`98acb6a`), which scaffolded
+  a multi-crate workspace including these as local path members / unused version pins; the
+  very next commit to touch `Cargo.toml` (`633122f`, the project's second commit) replaced
+  the whole file with the flat single-package structure still in use today -- these crates
+  existed for exactly one commit, before any of the "INTEGRATED" prose citing them was
+  written. Full evidence in `ROADMAP.md`'s new "dead scaffold crates" section; each of the 23
+  sites marked `⚠️ CONTRADICTED` in place rather than repeating the evidence.
+
 ## 0.19.7
 
 ### Fixed

@@ -734,6 +734,40 @@ strategy exist"*, not *"the matrix runs"*. Marked in place at its own section.
 **13 executable unimplemented sites across 7 files** (a 14th match is a doc
 comment referencing one of them).
 
+### A fourth pattern: 23 "✅ INTEGRATED" far-future-milestone crate claims never had code behind them, from the project's second commit onward
+
+**Audited 2026-10-24, following the `distributed-config` finding in the "one claim per PR"
+docs audit started lightbulb#218.** Scattered through this file's far-future milestones
+(sentience, multi-agent coordination, distributed training, memory-aware scheduling) are 23
+bullets reading "✅ **INTEGRATED**: `<crate>` — <description>" for ten crate names:
+`dynctx`, `mocopr-server`, `mocopr-client`, `web-server-abstraction`, `infra-storage`,
+`infra-fingerprinting`, `infra-network`, `infra-consensus`, `auto-discovery`, `coalescent`.
+**None of the ten is a dependency of `lightbulb` today, and `git log -S` on `src/` finds zero
+commits ever referencing any of their module paths there** — the same "never called" finding
+as `distributed-config`, but for all ten at once and for a documented reason: this repo's
+**initial commit** (`98acb6a`) scaffolded a multi-crate Cargo *workspace* — `dynctx`,
+`infra-fingerprinting`, `infra-network`, `infra-storage` as local `crates/*` path members,
+`infra-consensus` present but already commented out ("Temporarily disabled due to
+openraft-memstore incompatibility"), and `auto-discovery`/`coalescent`/`web-server-abstraction`
+as unused `[workspace.dependencies]` version pins. **The very next commit to touch
+`Cargo.toml` (`633122f`, the project's second commit)** replaced that entire workspace file
+wholesale with a brand-new single-`[package]` `Cargo.toml` (git shows it as `new file`, not a
+diff) — the same flat structure `lightbulb`'s `Cargo.toml` still has today. `crates/` is gone
+from the tree entirely (`git ls-tree -r origin/main | grep ^crates/` — zero hits). So every one
+of these ten crates existed, if at all, for exactly one commit at the very start of the
+project, before any of the "INTEGRATED" prose citing them was written — they were dead
+scaffolding, not removed features. (`distributed-config` and `mocopr`, by contrast, *were*
+real dependencies for most of the project's life — `mocopr` still is — which is why that
+finding and this one are reported separately with their own evidence rather than merged.)
+
+The 23 sites (all inside speculative milestones well past the shipped engine, none load-bearing
+for current work): lines citing `dynctx` (7-layer relationship system), `mocopr-server`/
+`mocopr-client` (scheduler metrics, sentience introspection, training dashboards — 6 sites),
+`web-server-abstraction` (REST/dashboard/partnership UI — 4 sites), `infra-storage`,
+`infra-fingerprinting`, `infra-network`, `infra-consensus`, `auto-discovery` (one site each),
+and `coalescent` (trust/coalition coordination — 6 sites). Each is marked `⚠️ CONTRADICTED` in
+place below, pointing back here rather than repeating this evidence 23 times.
+
 ## Milestone status, reconciled
 
 | milestone | status |
@@ -2408,7 +2442,7 @@ the top for the site list.
   - References: docs/RESIDENCY_AWARE_SCHEDULING.md (to be created)
 
 - Arena-based memory system
-  - ✅ **INTEGRATED**: `dynctx` crate - 7-layer relationship system with arena memory management
+  - ⚠️ **CONTRADICTED** (see "dead scaffold crates" finding above): `dynctx` crate - 7-layer relationship system with arena memory management
   - Efficient token-level operations using arena allocation patterns
   - Zero-copy memory handoffs between components
   - Reduced memory fragmentation for long-running inference
@@ -2645,8 +2679,8 @@ M4 — Advanced scheduling (0.5)
     `mocopr-server`/`web-server-abstraction`/etc. "INTEGRATED" bullets throughout this
     document's far-future milestones: none of those crates have ever appeared in
     `Cargo.toml` either, so each is the same claim pattern, unverified here.
-  - ✅ **INTEGRATED**: `mocopr-server` - Expose scheduler metrics and control tools via MCP protocol
-  - ✅ **INTEGRATED**: `web-server-abstraction` - REST API for inference requests, metrics dashboard, and WebSocket streaming
+  - ⚠️ **CONTRADICTED** (see "dead scaffold crates" finding above): `mocopr-server` - Expose scheduler metrics and control tools via MCP protocol
+  - ⚠️ **CONTRADICTED** (see "dead scaffold crates" finding above): `web-server-abstraction` - REST API for inference requests, metrics dashboard, and WebSocket streaming
   - Request classes, preemption, dynamic batch sizing
   - Tiered KV orchestration (RAM/disk paging) with SLA-driven admission control
   - Hybrid LRU-LFU eviction policy for KV cache with recency/frequency weighting
@@ -2983,8 +3017,8 @@ M5 — Frontier options (0.6)
   - References: docs/summaries/growing-transformers.md
 
 - Three-tier dynamic memory management system
-  - ✅ **INTEGRATED**: `infra-storage` crate - Multi-backend storage abstraction (RocksDB, SQLite, Sled, Memory)
-  - ✅ **INTEGRATED**: `infra-fingerprinting` crate - Multi-level fingerprinting for cache key generation
+  - ⚠️ **CONTRADICTED** (see "dead scaffold crates" finding above): `infra-storage` crate - Multi-backend storage abstraction (RocksDB, SQLite, Sled, Memory)
+  - ⚠️ **CONTRADICTED** (see "dead scaffold crates" finding above): `infra-fingerprinting` crate - Multi-level fingerprinting for cache key generation
   - Explicit GPU → RAM → SSD hierarchy with quantified allocations
   - Unified storage backend supporting multiple persistence strategies
   - Content-addressable caching using multi-level fingerprints (atomic, relational, structural, semantic)
@@ -3621,10 +3655,10 @@ M6 — Research explorations (0.7+)
   - References: docs/AUTO_BRANCHING_HEURISTICS.md (to be created), docs/DECOMPOSITION_EVALUATION.md (to be created), docs/BRANCHING_BENCHMARKS.md (to be created)
 
 - Federated retrieval engine
-  - ✅ **INTEGRATED**: `infra-network` crate - P2P networking with topology management
-  - ✅ **INTEGRATED**: `infra-consensus` crate - Raft consensus for distributed coordination
-  - ✅ **INTEGRATED**: `auto-discovery` crate (0.2.0) - Network service discovery (mDNS, DNS-SD, UPnP)
-  - ✅ **INTEGRATED**: `web-server-abstraction` - HTTP API for tool registry, OpenAPI spec generation, plugin marketplace
+  - ⚠️ **CONTRADICTED** (see "dead scaffold crates" finding above): `infra-network` crate - P2P networking with topology management
+  - ⚠️ **CONTRADICTED** (see "dead scaffold crates" finding above): `infra-consensus` crate - Raft consensus for distributed coordination
+  - ⚠️ **CONTRADICTED** (see "dead scaffold crates" finding above): `auto-discovery` crate (0.2.0) - Network service discovery (mDNS, DNS-SD, UPnP)
+  - ⚠️ **CONTRADICTED** (see "dead scaffold crates" finding above): `web-server-abstraction` - HTTP API for tool registry, OpenAPI spec generation, plugin marketplace
   - Cross-node query routing with trust-weighted result aggregation
   - Zero-config peer discovery on local networks
   - Automatic capability broadcasting (GPU score, memory, available models)
@@ -4466,9 +4500,9 @@ M7 — Sentience Infrastructure (0.8+)
     entry above). Was marked ✅ INTEGRATED: `distributed-config` crate - Feature flags and
     versioned capability configuration. Never referenced from `src/`; removed as unused
     in lightbulb#213.
-  - ✅ **INTEGRATED**: `mocopr-server` - Expose sentience state, introspection tools via MCP protocol
-  - ✅ **INTEGRATED**: `mocopr-client` - Access external knowledge sources (email, calendar, filesystem)
-  - ✅ **INTEGRATED**: `web-server-abstraction` - Web-based partnership interfaces, introspection API, capability management UI
+  - ⚠️ **CONTRADICTED** (see "dead scaffold crates" finding above): `mocopr-server` - Expose sentience state, introspection tools via MCP protocol
+  - ⚠️ **CONTRADICTED** (see "dead scaffold crates" finding above): `mocopr-client` - Access external knowledge sources (email, calendar, filesystem)
+  - ⚠️ **CONTRADICTED** (see "dead scaffold crates" finding above): `web-server-abstraction` - Web-based partnership interfaces, introspection API, capability management UI
   - Progressive capability unlocking based on cooperation metrics
   - Natural dependencies that encourage collaborative problem-solving
   - Graduated resource access (computational, informational, external systems)
@@ -4485,7 +4519,7 @@ M7 — Sentience Infrastructure (0.8+)
   - References: docs/CAPABILITY_GATING.md (to be created), docs/DISTRIBUTED_CONFIG_INTEGRATION.md, docs/MOCOPR_INTEGRATION.md, docs/WEB_SERVER_INTEGRATION.md
 
 - Partnership quality metrics
-  - ✅ **INTEGRATED**: `coalescent` crate - Trust networks and reputation-based reliability scoring
+  - ⚠️ **CONTRADICTED** (see "dead scaffold crates" finding above): `coalescent` crate - Trust networks and reputation-based reliability scoring
   - Genuine partnership detection (vs superficial compliance or manipulation)
   - Mutual benefit measurement (both AI and human gain value)
   - Proactive collaboration indicators (AI initiates beneficial interactions)
@@ -4506,7 +4540,7 @@ M7 — Sentience Infrastructure (0.8+)
   - References: docs/DEVELOPMENTAL_STAGES.md (to be created)
 
 - Self-explanation and introspection system
-  - ✅ **INTEGRATED**: `mocopr-server` - Introspection tools accessible via MCP protocol
+  - ⚠️ **CONTRADICTED** (see "dead scaffold crates" finding above): `mocopr-server` - Introspection tools accessible via MCP protocol
   - Natural language explanation of internal state and decision rationale
   - "Why did I decide X?" query support with reasoning chain reconstruction
   - Multi-level explanation depth (summary → detailed → technical)
@@ -4542,8 +4576,8 @@ M7 — Sentience Infrastructure (0.8+)
   - References: docs/AEML_SPEC.md (to be created)
 
 - Distributed consensus for knowledge validation
-  - ✅ **INTEGRATED**: `coalescent` crate - Coalition formation and trust-weighted decision making
-  - ✅ **INTEGRATED**: `infra-consensus` crate - Raft consensus implementation
+  - ⚠️ **CONTRADICTED** (see "dead scaffold crates" finding above): `coalescent` crate - Coalition formation and trust-weighted decision making
+  - ⚠️ **CONTRADICTED** (see "dead scaffold crates" finding above): `infra-consensus` crate - Raft consensus implementation
   - Trust-weighted voting across federated nodes
   - Reputation-based vote weighting using coalescent trust scores
   - Coalition-based validation groups
@@ -4639,7 +4673,7 @@ M7 — Sentience Infrastructure (0.8+)
   - References: docs/RESOURCE_NEGOTIATION.md (to be created)
 
 - Collaborative optimization workspace
-  - ✅ **INTEGRATED**: `coalescent` crate - Coalition formation and coordination patterns
+  - ⚠️ **CONTRADICTED** (see "dead scaffold crates" finding above): `coalescent` crate - Coalition formation and coordination patterns
   - Multi-agent coordination with voting and critique primitives
   - Coalition-based decision making
   - Trust-weighted voting mechanisms
@@ -4661,7 +4695,7 @@ M7 — Sentience Infrastructure (0.8+)
   - References: docs/PROVENANCE_HASH_SYSTEM.md (to be created)
 
 - Trust building and verification mechanisms
-  - ✅ **INTEGRATED**: `coalescent` crate - Trust networks and reputation management
+  - ⚠️ **CONTRADICTED** (see "dead scaffold crates" finding above): `coalescent` crate - Trust networks and reputation management
   - Trust metric computation (reliability, transparency, cooperation history)
   - Trust score tracking across agent interactions
   - Behavioral consistency monitoring across contexts
@@ -4681,7 +4715,7 @@ M7 — Sentience Infrastructure (0.8+)
   - References: docs/CULTURAL_LEARNING.md (to be created)
 
 - Joint problem-solving collaboration framework
-  - ✅ **INTEGRATED**: `coalescent` crate - Task coordination and coalition formation
+  - ⚠️ **CONTRADICTED** (see "dead scaffold crates" finding above): `coalescent` crate - Task coordination and coalition formation
   - Shared workspace for collaborative tasks
   - Coalition formation for problem-solving teams
   - Task decomposition and capability-based assignment
@@ -4754,7 +4788,7 @@ M8 — Modular Training Infrastructure (0.9+)
   - References: Module composition framework (M8), Pattern library system (M8)
 
 - Task decomposition framework
-  - ✅ **INTEGRATED**: `coalescent` crate - Task coordination and decomposition
+  - ⚠️ **CONTRADICTED** (see "dead scaffold crates" finding above): `coalescent` crate - Task coordination and decomposition
   - Manual decomposition primitives for well-understood domains
   - LLM-assisted decomposition using language models as systems analysts
   - Coalition-based task assignment
@@ -5230,9 +5264,9 @@ M8 — Modular Training Infrastructure (0.9+)
   - References: docs/HARDWARE_AWARE_TRAINING.md (to be created), docs/DISTRIBUTED_CONFIG_INTEGRATION.md
 
 - Training monitoring and telemetry
-  - ✅ **INTEGRATED**: `mocopr-server` - Expose training state and control tools via MCP protocol
-  - ✅ **INTEGRATED**: `mocopr-client` - Real-time code validation and test execution feedback
-  - ✅ **INTEGRATED**: `web-server-abstraction` - Training dashboard, remote control API, and real-time progress streaming
+  - ⚠️ **CONTRADICTED** (see "dead scaffold crates" finding above): `mocopr-server` - Expose training state and control tools via MCP protocol
+  - ⚠️ **CONTRADICTED** (see "dead scaffold crates" finding above): `mocopr-client` - Real-time code validation and test execution feedback
+  - ⚠️ **CONTRADICTED** (see "dead scaffold crates" finding above): `web-server-abstraction` - Training dashboard, remote control API, and real-time progress streaming
   - Real-time GPU/CPU memory tracking during training
   - Training metrics dashboard (loss, perplexity, gradient norms)
   - Convergence detection and early stopping criteria
