@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.19.7
+
+### Fixed
+- **ROADMAP.md: corrected 3 false "✅ INTEGRATED: `distributed-config` crate" claims.** The crate
+  was a direct dependency from the initial commit until #213 (2026-10-23) dropped it as unused,
+  but `git log --all -S"distributed_config" -- src/` finds zero commits ever referencing that
+  identifier under `src/` -- it was never actually called from any code, at any point in the
+  project's history, not just stale after removal. Flagged (not fixed) the same claim pattern for
+  several other never-dependency crates (`mocopr-server`, `web-server-abstraction`, `infra-*`,
+  `coalescent`, `dynctx`, `candle-cuda-vmm`) elsewhere in the document's far-future milestones, for
+  a follow-up docs-only audit PR.
+
+### Changed
+- **Repin the advisory CodeRipper `portfolio` CI job** (`.github/workflows/ci.yml`) to
+  `ciresnave/coderipper/.github/workflows/portfolio.yml@30e012b7d400b10d88c1e294bd485e49975afc1e`
+  (PM notice, 2026-10-24: fixes the default-branch ratchet red and a concurrent-run install
+  failure in that upstream workflow). Verified the SHA and the workflow file both exist at it
+  via `gh api` before applying. CI-only; no code behavior changes.
+
 ## 0.19.6
 
 ### Added
