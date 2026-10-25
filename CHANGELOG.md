@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.19.18
+
+### Changed
+- `ModelRunner::start`/`start_with_options` no longer ignore `dtype`: anything other than unset or `f32` (also `float32`/`fp32`) returns the typed `UnsupportedDtype` error (recover with `downcast_ref`) naming the request and why, instead of a log warning and silent f32. All in-repo callers already pass `"f32"`. BF16/F16 weights remain unwired (needs fuel#489, Fuel 0.25.13+, not yet on crates.io).
+
 ## 0.19.17
 
 ### Changed
