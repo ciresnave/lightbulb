@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.19.23
+
+### Changed
+- Serving now runs Fuel's `PagedSchedulePolicy::Priority` (was `AdmissionOrder`), so the `X-Lightbulb-Priority` header decides the ORDER sessions are served within each scheduler tick (prefill, then decode) and who gets pool blocks first under pressure; it was recorded and ignored before. It does not cap how many sessions advance per tick (`max_batch` only chunks the batched forward), so the effect under light load is small. Ties keep admission order, so equal-priority traffic is unchanged. New test `serving_policy_serves_a_later_higher_priority_session_first_within_a_tick` (with an `AdmissionOrder` contrast arm). PM ruling 2026-10-25 (ROADMAP audit B4).
+
 ## 0.19.22
 
 ### Fixed
