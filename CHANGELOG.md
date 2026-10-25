@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.19.19
+
+### Added
+- `docs/THIRD_PARTY_NOTICES.md`: credits `src/backend/marlin_ffi.rs`'s origin (`guoqingbao/attention.rs`, MIT; CireSnave's 2026-08-20 interface ruling unchanged), records removed third-party material, and says plainly that a per-dependency licence list is not yet generated.
+
+### Fixed
+- README no longer says the licence files and third-party notices are missing (they exist / now exist). `PROVENANCE.md` notes `parallel_cache_builder.rs` is gone.
+
 ## 0.19.18
 
 ### Changed

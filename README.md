@@ -112,11 +112,9 @@ This project is dual-licensed under either of:
 
 The dual license is declared in `Cargo.toml` (`license = "MIT OR Apache-2.0"`).
 
-> ⚠️ **The license files are missing.** This section referenced `LICENSE-MIT`
-> and `LICENSE-APACHE` at the repository root and `docs/THIRD_PARTY_NOTICES.md`;
-> none of the three exists (checked 2026-08-15). The dual-license *intent* is
-> corroborated by `Cargo.toml`, but the texts themselves need to be added before
-> any release, and third-party attributions have not been collected.
+The license texts are `LICENSE-MIT` and `LICENSE-APACHE` at the repository root. Third-party
+attributions are in [`docs/THIRD_PARTY_NOTICES.md`](docs/THIRD_PARTY_NOTICES.md) (provenance method and
+evidence: [`PROVENANCE.md`](PROVENANCE.md)).
 
 ## Offline, CPU-only quickstart
 
