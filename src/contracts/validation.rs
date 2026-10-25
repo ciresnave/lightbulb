@@ -153,30 +153,31 @@ pub fn try_parse(text: &str, spec: &OutputContractSpec) -> Option<ContractOutput
 /// text, so prose containing a stray number is not a JSON answer.
 fn parse_json(text: &str) -> Option<serde_json::Value> {
     let trimmed = text.trim();
-    if let Ok(v) = serde_json::from_str(trimmed) {
-        return Some(v);
-    }
-    if let Some(start) = trimmed.find("```") {
-        let after = &trimmed[start + 3..];
-        // Drop the optional info string ("json") up to the first newline.
-        let body = after.split_once('\n').map_or(after, |(_, rest)| rest);
-        if let Some(end) = body.find("```") {
-            if let Ok(v) = serde_json::from_str(body[..end].trim()) {
-                return Some(v);
-            }
-        }
-    }
-    // First `{` or `[` that begins a value serde can read to completion.
-    for (i, c) in trimmed.char_indices() {
-        if c == '{' || c == '[' {
-            let mut de =
-                serde_json::Deserializer::from_str(&trimmed[i..]).into_iter::<serde_json::Value>();
-            if let Some(Ok(v)) = de.next() {
-                return Some(v);
-            }
-        }
-    }
-    None
+    serde_json::from_str(trimmed)
+        .ok()
+        .or_else(|| json_in_code_fence(trimmed))
+        .or_else(|| first_json_span(trimmed))
+}
+
+/// The JSON value in the first Markdown code fence of `text`, if its body parses.
+fn json_in_code_fence(text: &str) -> Option<serde_json::Value> {
+    let after = &text[text.find("```")? + 3..];
+    // Drop the optional info string ("json") up to the first newline.
+    let body = after.split_once('\n').map_or(after, |(_, rest)| rest);
+    let end = body.find("```")?;
+    serde_json::from_str(body[..end].trim()).ok()
+}
+
+/// The first `{` or `[` in `text` that begins a value serde can read to completion.
+fn first_json_span(text: &str) -> Option<serde_json::Value> {
+    text.char_indices()
+        .filter(|&(_, c)| c == '{' || c == '[')
+        .find_map(|(i, _)| {
+            serde_json::Deserializer::from_str(&text[i..])
+                .into_iter::<serde_json::Value>()
+                .next()?
+                .ok()
+        })
 }
 
 /// Returns `true` when the parsed output is considered *sufficient* given the
