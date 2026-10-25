@@ -26,7 +26,8 @@
 //!
 //! Knobs (env): `LB_GGUF` (required), `LB_PREFIX_PARAS` (default 30),
 //! `LB_SHARERS` (4), `LB_SHARER_NEW` (16), `LB_DONOR_NEW` (400),
-//! `LB_REPS` (3), `LB_CTX` (2048), `LB_GATE=1` (+ `LB_GATE_MAX_S`).
+//! `LB_REPS` (3), `LB_CTX` (2048), `LB_GATE=1` (+ `LB_GATE_MAX_S`),
+//! `LB_ON_FIRST=1` (run the sharing arm first so a capped run still yields it).
 
 use lightbulb::engine::model_runner::{
     EngineOptions, InferenceJob, ModelRunner, ResponseMode, StreamItem,
@@ -423,7 +424,14 @@ fn main() {
     gate();
     report_load("start");
     let mut arms = Vec::new();
-    for sharing in [false, true] {
+    // `LB_ON_FIRST=1` runs the sharing arm first so a capped run still yields
+    // the arm under test; `arms` is put back in OFF, ON order below.
+    let on_first = std::env::var("LB_ON_FIRST").as_deref() == Ok("1");
+    for sharing in if on_first {
+        [true, false]
+    } else {
+        [false, true]
+    } {
         println!(
             "
 === arm: prefix_sharing = {sharing} ==="
@@ -433,6 +441,9 @@ fn main() {
         report_load("arm end");
         print_arm(&r);
         arms.push(r);
+    }
+    if on_first {
+        arms.reverse();
     }
     compare_arms(&arms[0], &arms[1]);
     report_load("end");

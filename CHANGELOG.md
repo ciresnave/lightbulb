@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.19.28
+
+### Added
+- `examples/prefix_sharing_bench.rs`: `LB_ON_FIRST=1` runs the prefix-sharing arm before the baseline arm, so a time-capped benchmark window still yields the arm under test. Output and the OFF/ON comparison are unchanged.
+
 ## 0.19.27
 
 ### Added
