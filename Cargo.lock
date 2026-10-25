@@ -3265,7 +3265,7 @@ dependencies = [
 
 [[package]]
 name = "lightbulb"
-version = "0.19.28"
+version = "0.19.29"
 dependencies = [
  "ahash",
  "anyhow",
@@ -6362,6 +6362,7 @@ dependencies = [
  "tower-service",
  "tracing",
  "url",
+ "uuid",
 ]
 
 [[package]]
