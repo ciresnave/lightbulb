@@ -1,5 +1,14 @@
 # Multi-GPU Integration Guide (M3.6)
 
+> ## ⚠️ SUPERSEDED — describes code that no longer exists
+>
+> This document describes `lightbulb::model::BatchedTransformer` and `src/multi_gpu/{distributed_cache,pipeline_parallel,tensor_parallel}.rs`, which is not in the tree
+> (removed with the candlelight migration, PRs #195/#196, 2026-10-22; checked
+> against `origin/main` 2026-10-25). Any "complete" or "in progress" status
+> below is historical and has **not** been re-validated. Current status is
+> `ROADMAP.md`. Kept as provenance; deleting it is a separate decision.
+
+
 ## Overview
 
 Lightbulb's multi-GPU support enables distributed inference across multiple GPUs using:

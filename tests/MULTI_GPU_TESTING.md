@@ -1,5 +1,14 @@
 # Multi-GPU Testing Guide
 
+> ## ⚠️ SUPERSEDED — describes code that no longer exists
+>
+> This document describes `tests/multi_gpu_validation.rs`, which is not in the tree
+> (removed with the candlelight migration, PRs #195/#196, 2026-10-22; checked
+> against `origin/main` 2026-10-25). Any "complete" or "in progress" status
+> below is historical and has **not** been re-validated. Current status is
+> `ROADMAP.md`. Kept as provenance; deleting it is a separate decision.
+
+
 ## Overview
 
 The multi-GPU test suite validates Lightbulb's distributed inference capabilities across tensor parallelism, pipeline parallelism, and hybrid configurations.

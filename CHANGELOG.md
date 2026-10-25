@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.19.31
+
+### Changed
+- Docs: superseded banner on 12 docs describing code removed in #195/#196 (`src/model/`, `kv_compression`, `multi_gpu` parallel modules, `tests/multi_gpu_validation.rs`). ROADMAP D4 partly done.
+
 ## 0.19.30
 
 ### Fixed

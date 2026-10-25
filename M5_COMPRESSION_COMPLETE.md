@@ -1,5 +1,14 @@
 # M5 KV Cache Compression - Integration Complete
 
+> ## ⚠️ SUPERSEDED — describes code that no longer exists
+>
+> This document describes `src/cache/kv_compression.rs`, which is not in the tree
+> (removed with the candlelight migration, PRs #195/#196, 2026-10-22; checked
+> against `origin/main` 2026-10-25). Any "complete" or "in progress" status
+> below is historical and has **not** been re-validated. Current status is
+> `ROADMAP.md`. Kept as provenance; deleting it is a separate decision.
+
+
 ## Status: ✅ COMPLETE (External Integration Pattern)
 
 **Date**: December 2024  

@@ -1,5 +1,14 @@
 # M3.4 FlashAttention Integration
 
+> ## ⚠️ SUPERSEDED — describes code that no longer exists
+>
+> This document describes `src/model/custom_attention.rs`, which is not in the tree
+> (removed with the candlelight migration, PRs #195/#196, 2026-10-22; checked
+> against `origin/main` 2026-10-25). Any "complete" or "in progress" status
+> below is historical and has **not** been re-validated. Current status is
+> `ROADMAP.md`. Kept as provenance; deleting it is a separate decision.
+
+
 ## Overview
 
 FlashAttention-2 is now integrated into Lightbulb's `BatchedAttention` layer, providing significant speedups for attention computation on NVIDIA GPUs with CUDA support.

@@ -1,5 +1,14 @@
 # M3.1 Speculative Decoding - COMPLETE ✅
 
+> ## ⚠️ SUPERSEDED — describes code that no longer exists
+>
+> This document describes `src/model/speculative_adapters.rs`, which is not in the tree
+> (removed with the candlelight migration, PRs #195/#196, 2026-10-22; checked
+> against `origin/main` 2026-10-25). Any "complete" or "in progress" status
+> below is historical and has **not** been re-validated. Current status is
+> `ROADMAP.md`. Kept as provenance; deleting it is a separate decision.
+
+
 ## Summary
 
 M3.1 Speculative Decoding MVP is **production-ready** with 5/6 tasks complete. Task 6 (real model benchmarking) remains for future work with actual model weights.

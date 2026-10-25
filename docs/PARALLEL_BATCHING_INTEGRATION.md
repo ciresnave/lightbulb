@@ -1,5 +1,14 @@
 # Parallel Batching Integration Guide
 
+> ## ⚠️ SUPERSEDED — describes code that no longer exists
+>
+> This document describes `BatchedTransformer` (`src/model/`), which is not in the tree
+> (removed with the candlelight migration, PRs #195/#196, 2026-10-22; checked
+> against `origin/main` 2026-10-25). Any "complete" or "in progress" status
+> below is historical and has **not** been re-validated. Current status is
+> `ROADMAP.md`. Kept as provenance; deleting it is a separate decision.
+
+
 ## Overview
 
 This document explains how the parallel batching code integrates with the current `BatchManager` design.
