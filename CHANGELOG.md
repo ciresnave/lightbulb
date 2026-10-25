@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.19.24
+
+### Removed
+- `src/hub.rs` and the `hf-hub` dependency. The file was not declared in `lib.rs` (never compiled) and had no callers; the server takes local model paths only. Network fetch is a future `mlmf-source-hf` crate (PM ruling 2026-10-25, ROADMAP audit B13).
+
 ## 0.19.23
 
 ### Changed
