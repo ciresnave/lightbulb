@@ -1491,6 +1491,27 @@ slower per token than contiguous on this hardware), not re-discover.
    orphaned the live donor. Fixed first-writer-wins in 0.19.16 (`a_finished_sharer_does_not_orphan_the_live_donor`;
    mutation drill: guard off -> only that test red). **Open:** rerun CPU after the fix before any
    default flip (default stays OFF).
+   **CPU re-measure 2026-10-25 (quiet window 3, PM-scheduled)** -- build = lightbulb origin/main `a8dcf11` + a LOCAL,
+   uncommitted `[patch.crates-io]` to Fuel main `ab97c5c21` (0.26.13; plan-once prefill, last-position head, gemm), so call it
+   "local fuel main ab97c5c21", NOT a published Fuel. SmolLM2-135M-Instruct Q8_0, CPU build, **~1149-token** shared prefix
+   (`LB_PREFIX_PARAS=30`, the default; the 10-24 run used ~145 tokens, so TTFTs are not comparable), 2 live-donor sharers,
+   `LB_DONOR_NEW=100`, **1 rep**, host cpu 8-26% (no builds). Two runs of the same binary on the same box:
+   run 1 sharers TTFT 60.4 s OFF -> 2.3 s ON (ratio 0.038), control 64.3 s OFF / 60.0 s ON (0.934); run 2 63.1 s -> 2.3 s
+   (0.037), control 60.0 s / 59.7 s (0.995). OFF vs ON completions and donor stream **bit-identical** in both
+   (3 rows + donor), `cache_stats.hits` = 2. The two runs share a method, so they show repeatability, not independence.
+   **n = 1 rep per run, so no median.** The 10-24 defect (second sharer cold, `hits` 2 of 4) did not recur: both sharers
+   hit (2.3 s each) in both runs, consistent with the 0.19.16 first-writer-wins fix; it is 1 rep, so a multi-rep run
+   (`LB_REPS` >= 2) is the stronger check. Logs: `run_cpu_rep1_run{1,2}.log` (local, not committed).
+   **Still no default flip: the GPU arm is unmeasured.**
+   **GPU, 2026-10-25 windows 3 and 3-retry** (same local-patch build, `fuel-cuda`, RTX 4070 Laptop, idle box): NO numbers.
+   TinyLlama Q4_0 ~1226 tokens: no request finished in 11 min (Q4_0 `QMatMul` has no CUDA kernel, CPU fallback, per the
+   Fuel lane); SmolLM2 Q8_0 ~1149 tokens: not even the first cold control (`rep0 control done`) finished in 12 min at ~43% GPU
+   util. So a 1149-token cold prefill on the paged-CUDA path takes more than 12 min. Fuel lane's own figure for the CUDA
+   path, to be cited as theirs: "Fuel main + #493 (plan-once prefill) on CUDA, SmolLM2-135M Q8_0, 145 tokens,
+   PagedSessionScheduler, RTX 4070 Laptop 8GB, idle box: 14.2 s TTFT" (build origin/main `991b93702` + phi cuda fix,
+   WITHOUT #492 and #496; Q4_0 28.2 s, TinyLlama Q4_0 90.6 s; paged ~11.5x slower than contiguous, cause "~124 Copy items
+   per token", not proven; Fuel ROADMAP rows 105/106). Next GPU run: `LB_PREFIX_PARAS=4 LB_DONOR_NEW=30 LB_REPS=1`
+   (~150 tokens, the Fuel figure's shape), Q8_0 only.
    **GPU attempt 2026-10-25** (main `8f53879`, Fuel 0.25.10, `fuel-cuda`, RTX 4070 Laptop, window 2; host
    cpu 24-72%, free RAM 4-16 GiB, OneDrive + other jobs running): OFF arm only, SmolLM2-135M Q8_0, ~145-token
    prefix: TTFT 264 s (cold control), 298 s (sharer0); TinyLlama Q4_0 ~1226-token prefix: one warm-up request
@@ -5495,7 +5516,7 @@ it is not).
 | B1 | Honour `dtype`: non-f32 is now a typed `UnsupportedDtype` (PR #229). BF16/F16 weights need Fuel #489 (0.25.13+, not on crates.io at 0.25.10); `[BF16,BF16,BF16]` is a separate key. | `model_runner.rs` | open (blocked on Fuel release) |
 | B2 | Architectures beyond Llama and Qwen3 (Fuel's model zoo); only `require_llama_architecture` / `require_qwen3_architecture` exist. | `gguf/mod.rs:1693`, `loader_gguf_qwen3.rs:65` | open |
 | B3 | Multi-GPU on Fuel (`fuel-parallel`, TP/PP, sharded KV): `src/multi_gpu/` is config+topology only, no caller. M3.6 rows are deleted-code history. | `git ls-tree src/multi_gpu`; 0 `fuel_parallel` hits | **PM ruling 2026-10-25: drop the M3.6 rows until a second GPU exists** |
-| B4 | `PagedSchedulePolicy::Priority` so `X-Lightbulb-Priority` orders service within a scheduler tick (all call sites used `AdmissionOrder`). Fuel's `max_batch` only chunks the batched forward, so every ready session still advances every tick: the effect is ordering and who gets pool blocks first under pressure, not queueing. In PR #234. | `scheduled_llama_engine.rs:503,832` | **PM ruling 2026-10-25: yes, flip to Priority**; add a test that the header changes admission order. open |
+| B4 | `PagedSchedulePolicy::Priority` so `X-Lightbulb-Priority` orders service within a scheduler tick (all call sites used `AdmissionOrder`). Fuel's `max_batch` only chunks the batched forward, so every ready session still advances every tick: the effect is ordering and who gets pool blocks first under pressure, not queueing. **Done: #234 merged 2026-10-25 (0.19.23).** | `scheduled_llama_engine.rs:503,832` | **PM ruling 2026-10-25: yes, flip to Priority**; add a test that the header changes admission order. done |
 | B5 | Sharded checkpoints: the safetensors loader bails "sharded checkpoints are not handled yet"; sharded GGUF has no support. | `model_fuel/loader.rs:165` | open |
 | B6 | Speculative decoding on Fuel (config built, nothing consumes it), pruning, tiered/disk KV on the Fuel path (FUEL-GAPS #5, #6, #9). `FileDiskStore` exists, unwired. | `engine/speculative.rs:121`; `cache/tiered_storage.rs:33` | open (research) |
 | B7 | H2O/R-KV need per-key attention column sums that fused FlashAttn cannot give: arm selection (C-5), decomposed-vs-fused benchmark, second output slot ask to Fuel. Eviction policies stay built-never-wired. | capability-regression-audit; `update_attention_scores` callers are tests/cache only | open (research) |
