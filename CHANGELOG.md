@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.19.29
+
+### Added
+- `LIGHTBULB_CORS_ORIGINS` (comma-separated) restricts CORS to the listed origins; unset keeps allow-any. Responses now carry `x-request-id` (the caller's, else a minted UUID), exposed to browsers via CORS. ROADMAP A7 partly closed; audit-log retention remains open.
+
 ## 0.19.28
 
 ### Added

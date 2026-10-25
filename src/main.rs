@@ -100,6 +100,15 @@ async fn main() -> Result<()> {
         .map(|v| parse_flag(&v))
         .unwrap_or(false);
 
+    let cors_allowed_origins: Vec<String> = env::var("LIGHTBULB_CORS_ORIGINS")
+        .map(|v| {
+            v.split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+
     // Create API configuration
     let config = ApiConfig {
         database_url: database_url.clone(),
@@ -124,6 +133,7 @@ async fn main() -> Result<()> {
         max_auth_attempts_per_minute_per_ip,
         max_auth_failures_per_minute_per_ip,
         security_alert_email,
+        cors_allowed_origins,
     };
 
     tracing::info!("Starting Lightbulb API server");

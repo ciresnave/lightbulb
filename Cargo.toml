@@ -4,7 +4,7 @@
     license     = "MIT OR Apache-2.0"
     name        = "lightbulb"
     repository  = "https://github.com/ciresnave/lightbulb"
-    version     = "0.19.28"
+    version     = "0.19.29"
 
 [features]
     # CUDA, via Fuel only. Was `["candlelight/cuda", "fuel/cuda"]`; candlelight
@@ -120,7 +120,7 @@
     # (max_connections/acquire_timeout) are `persistant_sqlx::ConnectOptions`
     # fields, so no direct `sqlx` dependency is needed any more.
     url                = "2.5"
-    tower-http         = { version = "0.6", features = ["cors", "trace"] }
+    tower-http         = { version = "0.6", features = ["cors", "trace", "request-id"] }
 
     # TLS/Certificate dependencies
     tokio-rustls       = { version = "0.26", default-features = false, features = ["ring", "logging", "tls12"] }

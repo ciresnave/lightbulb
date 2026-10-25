@@ -46,7 +46,8 @@ use serde::Serialize;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::TcpListener;
-use tower_http::cors::{Any, CorsLayer};
+use tower_http::cors::{AllowOrigin, Any, CorsLayer};
+use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer};
 use tower_http::trace::TraceLayer;
 
 use crate::engine::model_runner::{EngineOptions, ModelRunner, SharedScheduler};
@@ -198,6 +199,12 @@ pub struct ApiConfig {
     /// `security_event.rs`'s module doc. Do not treat a non-`None` value
     /// here as "someone gets paged."
     pub security_alert_email: Option<String>,
+
+    /// Origins a browser may call this API from (CORS `Access-Control-Allow-Origin`).
+    /// Empty (the default) keeps the historical behaviour of allowing any
+    /// origin; a non-empty list allows exactly those origins. `main.rs` sets
+    /// it from the comma-separated `LIGHTBULB_CORS_ORIGINS`.
+    pub cors_allowed_origins: Vec<String>,
 }
 
 impl Default for ApiConfig {
@@ -225,6 +232,7 @@ impl Default for ApiConfig {
             max_auth_attempts_per_minute_per_ip: 300,
             max_auth_failures_per_minute_per_ip: 10,
             security_alert_email: None,
+            cors_allowed_origins: Vec::new(),
         }
     }
 }
@@ -301,6 +309,50 @@ pub(crate) fn validate_auth_policy(config: &ApiConfig) -> Result<()> {
 /// `Bytes` / `String` extractors; naming it here makes the limit a decision
 /// in our code rather than an inherited default that an `axum` bump or a
 /// stray `DefaultBodyLimit::disable()` could silently remove.
+const X_REQUEST_ID: axum::http::HeaderName = axum::http::HeaderName::from_static("x-request-id");
+
+/// CORS origin policy: empty list = any origin (historical default), else
+/// exactly the listed origins. Entries that are not valid header values are
+/// dropped with a warning rather than silently widening to "any".
+fn cors_allow_origin(origins: &[String]) -> AllowOrigin {
+    if origins.is_empty() {
+        return AllowOrigin::from(Any);
+    }
+    let parsed: Vec<axum::http::HeaderValue> = origins
+        .iter()
+        .filter_map(|o| match o.parse() {
+            Ok(v) => Some(v),
+            Err(_) => {
+                tracing::warn!(origin = %o, "ignoring invalid CORS origin");
+                None
+            }
+        })
+        .collect();
+    AllowOrigin::list(parsed)
+}
+
+/// CORS, tracing and `x-request-id`, in the order `build_router` needs
+/// (later `.layer()` = outer): CORS innermost, then tracing, then the id is
+/// echoed on the response and minted/kept on the request. Shared with the
+/// tests so they exercise the production stack.
+pub(crate) fn with_cors_trace_request_id<S: Clone + Send + Sync + 'static>(
+    router: axum::Router<S>,
+    origins: &[String],
+) -> axum::Router<S> {
+    router
+        .layer(
+            CorsLayer::new()
+                .allow_origin(cors_allow_origin(origins))
+                .allow_methods(Any)
+                .allow_headers(Any)
+                .expose_headers([X_REQUEST_ID]),
+        )
+        .layer(TraceLayer::new_for_http())
+        // Keep a caller-sent id, else mint a UUID, and echo it back.
+        .layer(PropagateRequestIdLayer::new(X_REQUEST_ID))
+        .layer(SetRequestIdLayer::new(X_REQUEST_ID, MakeRequestUuid))
+}
+
 pub(crate) const MAX_REQUEST_BODY_BYTES: usize = 2 * 1024 * 1024;
 
 /// Sourcery review of #155: `tokio::time::timeout` with a zero duration
@@ -835,7 +887,7 @@ impl ApiServer {
         // against the bearer-token space produced zero audit rows. The
         // comments below used to claim the opposite of what the code did;
         // they now describe what it actually does.
-        router
+        let router = router
             // Rate limiting — innermost of the four. Reads the
             // `ApiKeyInfo` extension `auth_middleware` inserts, so it must
             // run strictly AFTER auth, which means added BEFORE it here.
@@ -885,14 +937,10 @@ impl ApiServer {
             .merge(unauthenticated_router)
             // Explicit request-body cap (see `MAX_REQUEST_BODY_BYTES`).
             .layer(axum::extract::DefaultBodyLimit::max(MAX_REQUEST_BODY_BYTES))
-            // CORS and tracing
-            .layer(
-                CorsLayer::new()
-                    .allow_origin(Any)
-                    .allow_methods(Any)
-                    .allow_headers(Any),
-            )
-            .layer(TraceLayer::new_for_http())
+            // CORS, tracing, request id: see with_cors_trace_request_id
+            ;
+        let router = with_cors_trace_request_id(router, &self.state.config.cors_allowed_origins);
+        router
             // Request-duration histogram + request-count counter, added
             // LAST so it is the truly outermost layer and times EVERY
             // request this server serves -- `/health`/`/health/ready`/
@@ -1961,6 +2009,72 @@ mod tests {
     /// If that property ever changed (or `build_router`'s call order
     /// regressed back to audit-innermost), this fails independently of
     /// whether a database happens to be reachable.
+    mod cors_and_request_id {
+        use super::super::with_cors_trace_request_id;
+        use axum::body::Body;
+        use axum::http::{Request, Response};
+        use axum::routing::get;
+        use tower::ServiceExt;
+
+        fn app(origins: &[&str]) -> axum::Router {
+            let origins: Vec<String> = origins.iter().map(|s| s.to_string()).collect();
+            with_cors_trace_request_id(
+                axum::Router::new().route("/t", get(|| async { "ok" })),
+                &origins,
+            )
+        }
+
+        async fn get_with(app: axum::Router, hdrs: &[(&str, &str)]) -> Response<Body> {
+            let mut b = Request::builder().uri("/t");
+            for (k, v) in hdrs {
+                b = b.header(*k, *v);
+            }
+            app.oneshot(b.body(Body::empty()).unwrap()).await.unwrap()
+        }
+
+        #[tokio::test]
+        async fn empty_list_allows_any_origin() {
+            let r = get_with(app(&[]), &[("origin", "https://a.example")]).await;
+            assert_eq!(r.headers()["access-control-allow-origin"], "*");
+        }
+
+        #[tokio::test]
+        async fn listed_origin_is_echoed_and_others_are_not() {
+            let ok = get_with(
+                app(&["https://a.example"]),
+                &[("origin", "https://a.example")],
+            )
+            .await;
+            assert_eq!(
+                ok.headers()["access-control-allow-origin"],
+                "https://a.example"
+            );
+            let bad = get_with(
+                app(&["https://a.example"]),
+                &[("origin", "https://evil.example")],
+            )
+            .await;
+            assert!(bad.headers().get("access-control-allow-origin").is_none());
+        }
+
+        #[tokio::test]
+        async fn request_id_is_minted_or_echoed_and_exposed() {
+            let minted = get_with(app(&[]), &[]).await;
+            let id = minted.headers()["x-request-id"]
+                .to_str()
+                .unwrap()
+                .to_string();
+            assert!(uuid::Uuid::parse_str(&id).is_ok(), "minted id {id:?}");
+            let echoed = get_with(app(&[]), &[("x-request-id", "abc-123")]).await;
+            assert_eq!(echoed.headers()["x-request-id"], "abc-123");
+            let exposed = get_with(app(&[]), &[("origin", "https://a.example")]).await;
+            assert_eq!(
+                exposed.headers()["access-control-expose-headers"],
+                "x-request-id"
+            );
+        }
+    }
+
     mod body_limit {
         use super::super::MAX_REQUEST_BODY_BYTES;
         use axum::body::Body;
