@@ -5504,7 +5504,7 @@ it is not).
 | B10 | State persistence: `CheckpointManager` always writes `kv_cache_state: None` / `pipeline_state: None`; no caller outside `decomposition.rs` (no graceful-shutdown save). | `state_persistence.rs:509-511` | open |
 | B11 | Prefix sharing rung 2 (position-shifted/mid-prompt donation, RoPE delta-rotation); plan-once prefill (Fuel root cause in slice 6: prefill re-plans per token, fixed in Fuel 0.26.2). | engine-wiring design; #227 | open (after Fuel 0.26.2) |
 | B12 | `Q8_1` GGUF tensors are a typed error on Fuel (GAP-125); not re-verified on 0.25.x. | `model_runner.rs` comment | open (verify) |
-| B13 | Adopt mlmf and retire `src/gguf/`; settle `hub.rs` placement (portfolio decision). | `src/gguf/{mod,parser}.rs`, `hub.rs` | held ([ASK] pending; PM: MLMF does model file I/O per decision 282 item 69, adoption is the direction) |
+| B13 | Adopt mlmf and retire `src/gguf/`; settle `hub.rs` placement (portfolio decision). | `src/gguf/{mod,parser}.rs`, `hub.rs` | **PM ruling 2026-10-25: (a) delete the dead `src/hub.rs`** (not in `lib.rs`, zero callers); network fetch becomes a future `mlmf-source-hf` crate, a row for mlmf's lane (via PM), not built here. mlmf adoption/retiring `src/gguf/` stays the direction. open (hub.rs delete) |
 | B14 | Dead debug surface: nine `debug-*` features and eight macros in `src/debug.rs` have zero call sites. Re-wire or delete. | `Cargo.toml:31-41` | open |
 
 ### C. Tests and verification
@@ -5521,7 +5521,7 @@ it is not).
 
 | # | Item | Status |
 |---|---|---|
-| D1 | **In PR #231** (notices file + README fix). `docs/THIRD_PARTY_NOTICES.md` did not exist but `README.md:116` links it; `src/backend/marlin_ffi.rs` still carries Marlin-derived material. CireSnave's provenance rule makes this the first docs row. | open (first) |
+| D1 | **Done: #231 merged 2026-10-25** (notices file + README fix; per-dependency list is D6). `docs/THIRD_PARTY_NOTICES.md` did not exist but `README.md:116` links it; `src/backend/marlin_ffi.rs` still carries Marlin-derived material. CireSnave's provenance rule makes this the first docs row. | done |
 | D2 | Deployment, performance-tuning, troubleshooting, architecture and v0.x to v1.0 migration guides; document the ~17 `LIGHTBULB_*` env vars (README lists 2). | open |
 | D3 | Fix stale user-facing docs: README (Fuel pin `0.20.61`, offline CPU quickstart subcommand, M3.6 multi-GPU section), QUICKSTART (`--config`, GET `/v1/models`), DEMO (`sessions` table). | open |
 | D4 | About 25 docs describe deleted code (candlelight, `src/model/`, `kv_compression`, `multi_gpu`, AWQ loaders) as COMPLETE or in progress (BATCHING_STATUS, FLASHATTENTION_INTEGRATION, M2/M3_1/M5_COMPRESSION/OPTION_C_COMPLETE, PRUNING_IMPLEMENTATION, GLOSSARY, KV_COMPRESSION_INTEGRATION, MULTI_GPU_INTEGRATION, M3_6, M3_SPECULATIVE, ...). Add a superseded banner to each (docs only); deleting them is a decision. | **PM ruling 2026-10-25: banner now, delete later.** open |
