@@ -187,7 +187,13 @@ struct ArmResult {
     prompt_tokens: usize,
 }
 
-fn run_arm(path: &str, sharing: bool, cfg: &Cfg) -> ArmResult {
+type Sender = lightbulb::engine::model_runner::InferenceRequestSender;
+
+fn start_runner(
+    path: &str,
+    sharing: bool,
+    cfg: &Cfg,
+) -> (Sender, Arc<Mutex<lightbulb::cache::PrefixCacheStats>>) {
     let scheduler = Arc::new(Mutex::new(MemoryAwareScheduler::new(
         MemoryAwareConfig::default(),
     )));
@@ -205,12 +211,13 @@ fn run_arm(path: &str, sharing: bool, cfg: &Cfg) -> ArmResult {
         },
     )
     .expect("starting runner");
+    (tx, stats)
+}
 
-    let prefix = paragraphs(cfg.paras, 0);
-    let unrelated = paragraphs(cfg.paras, 7);
-
-    // Token count of the prefix, and a warm-up (kernel/JIT/page-in) that is
-    // not part of any timed row. Complete mode, two new tokens (1 is refused: max_new must be > 0).
+/// Token count of the prefix, via a warm-up (kernel/JIT/page-in) that is not
+/// part of any timed row. Complete mode, two new tokens (1 is refused:
+/// max_new must be > 0).
+fn warm_up(tx: &Sender, prefix: &str) -> usize {
     let (otx, orx) = oneshot::channel();
     tx.send(InferenceJob {
         id: "warm".into(),
@@ -222,62 +229,75 @@ fn run_arm(path: &str, sharing: bool, cfg: &Cfg) -> ArmResult {
         response_mode: ResponseMode::Complete(otx),
     })
     .unwrap();
-    let warm = orx.blocking_recv().unwrap().expect("warm-up failed");
-    let mut res = ArmResult {
-        prompt_tokens: warm.prompt_tokens,
-        ..Default::default()
-    };
+    orx.blocking_recv()
+        .unwrap()
+        .expect("warm-up failed")
+        .prompt_tokens
+}
 
-    for rep in 0..cfg.reps {
-        // Unrelated control FIRST, with no donor live: a cold request of the
-        // same length. Its TTFT is the cold baseline within this arm.
-        let c = drain(submit(
-            &tx,
-            "ctl",
-            format!("{unrelated}control {rep}"),
+/// One repetition: an unrelated cold control, then a donor and its sharers.
+fn run_rep(tx: &Sender, cfg: &Cfg, rep: usize, prefix: &str, unrelated: &str, res: &mut ArmResult) {
+    // Unrelated control FIRST, with no donor live: a cold request of the
+    // same length. Its TTFT is the cold baseline within this arm.
+    let c = drain(submit(
+        tx,
+        "ctl",
+        format!("{unrelated}control {rep}"),
+        cfg.sharer_new,
+    ));
+    eprintln!(
+        "  .. rep{rep} control done ttft {:.0} ms",
+        c.ttft.as_secs_f64() * 1e3
+    );
+    res.rows.push((format!("rep{rep} control(cold)"), false, c));
+
+    let donor = submit(
+        tx,
+        "donor",
+        format!("{prefix}donor tail {rep}"),
+        cfg.donor_new,
+    );
+    let (mut donor, first) = await_first_token(donor);
+    res.donor_text = first;
+
+    for k in 0..cfg.sharers {
+        // `try_recv` Err(Empty) = donor still decoding; a `Done` item (or
+        // closed channel) = it finished and this sharer is cold.
+        let mut live = true;
+        while let Ok(item) = donor.rx.try_recv() {
+            match item {
+                Ok(StreamItem::Token(t)) => res.donor_text.push_str(&t),
+                _ => live = false,
+            }
+        }
+        let o = drain(submit(
+            tx,
+            "sharer",
+            format!("{prefix}sharer {k} of rep {rep}, answer briefly"),
             cfg.sharer_new,
         ));
         eprintln!(
-            "  .. rep{rep} control done ttft {:.0} ms",
-            c.ttft.as_secs_f64() * 1e3
+            "  .. rep{rep} sharer{k} live={live} ttft {:.0} ms",
+            o.ttft.as_secs_f64() * 1e3
         );
-        res.rows.push((format!("rep{rep} control(cold)"), false, c));
+        res.rows.push((format!("rep{rep} sharer{k}"), live, o));
+    }
+    // Let the donor finish so the next rep starts with an idle engine.
+    while let Some(Ok(StreamItem::Token(t))) = donor.rx.blocking_recv() {
+        res.donor_text.push_str(&t);
+    }
+}
 
-        let donor = submit(
-            &tx,
-            "donor",
-            format!("{prefix}donor tail {rep}"),
-            cfg.donor_new,
-        );
-        let (mut donor, first) = await_first_token(donor);
-        res.donor_text = first;
-
-        for k in 0..cfg.sharers {
-            // `try_recv` Err(Empty) = donor still decoding; a `Done` item (or
-            // closed channel) = it finished and this sharer is cold.
-            let mut live = true;
-            while let Ok(item) = donor.rx.try_recv() {
-                match item {
-                    Ok(StreamItem::Token(t)) => res.donor_text.push_str(&t),
-                    _ => live = false,
-                }
-            }
-            let o = drain(submit(
-                &tx,
-                "sharer",
-                format!("{prefix}sharer {k} of rep {rep}, answer briefly"),
-                cfg.sharer_new,
-            ));
-            eprintln!(
-                "  .. rep{rep} sharer{k} live={live} ttft {:.0} ms",
-                o.ttft.as_secs_f64() * 1e3
-            );
-            res.rows.push((format!("rep{rep} sharer{k}"), live, o));
-        }
-        // Let the donor finish so the next rep starts with an idle engine.
-        while let Some(Ok(StreamItem::Token(t))) = donor.rx.blocking_recv() {
-            res.donor_text.push_str(&t);
-        }
+fn run_arm(path: &str, sharing: bool, cfg: &Cfg) -> ArmResult {
+    let (tx, stats) = start_runner(path, sharing, cfg);
+    let prefix = paragraphs(cfg.paras, 0);
+    let unrelated = paragraphs(cfg.paras, 7);
+    let mut res = ArmResult {
+        prompt_tokens: warm_up(&tx, &prefix),
+        ..Default::default()
+    };
+    for rep in 0..cfg.reps {
+        run_rep(&tx, cfg, rep, &prefix, &unrelated, &mut res);
     }
     res.hits = stats.lock().unwrap().hits;
     res
@@ -320,16 +340,76 @@ fn summarise(label: &str, r: &ArmResult, pick: impl Fn(&str, bool) -> bool) -> (
     (ttft, tps, sel.len())
 }
 
+impl Cfg {
+    fn from_env() -> Self {
+        Cfg {
+            paras: env_usize("LB_PREFIX_PARAS", 30),
+            sharers: env_usize("LB_SHARERS", 4),
+            sharer_new: env_usize("LB_SHARER_NEW", 16),
+            donor_new: env_usize("LB_DONOR_NEW", 400),
+            reps: env_usize("LB_REPS", 3),
+            ctx: env_usize("LB_CTX", 2048),
+        }
+    }
+}
+
+fn print_arm(r: &ArmResult) {
+    println!(
+        "  prefix prompt ~{} tokens; cache_stats.hits = {}",
+        r.prompt_tokens, r.hits
+    );
+    for (l, live, o) in &r.rows {
+        println!(
+            "    {l:<22} donor_live={live:<5} ttft {:>9.1} ms  decode {:>7.2} tok/s",
+            o.ttft.as_secs_f64() * 1e3,
+            o.decode_tps
+        );
+    }
+    summarise("control (cold, unrelated)", r, |l, _| l.contains("control"));
+    summarise("sharers, donor live", r, |l, live| {
+        l.contains("sharer") && live
+    });
+    summarise("sharers, donor gone (cold)", r, |l, live| {
+        l.contains("sharer") && !live
+    });
+}
+
+fn compare_arms(off: &ArmResult, on: &ArmResult) {
+    println!(
+        "
+=== bit-identity, OFF vs ON (greedy) ==="
+    );
+    let mut all_same = off.rows.len() == on.rows.len();
+    for ((l, _, a), (_, _, b)) in off.rows.iter().zip(on.rows.iter()) {
+        let same = a.text == b.text;
+        all_same &= same;
+        if !same {
+            println!(
+                "  DIFFERS {l}:
+    off: {:?}
+    on : {:?}",
+                a.text, b.text
+            );
+        }
+    }
+    println!(
+        "  rows compared: {}; donor stream equal: {}",
+        off.rows.len(),
+        off.donor_text == on.donor_text
+    );
+    println!("  ALL SHARER/CONTROL COMPLETIONS BIT-IDENTICAL: {all_same}");
+    let live = |l: &str, live: bool| l.contains("sharer") && live;
+    let (o, _, _) = summarise("OFF sharers, donor live", off, live);
+    let (o2, _, _) = summarise("ON  sharers, donor live", on, live);
+    println!("  TTFT ON/OFF for live-donor sharers: {:.3}", o2 / o);
+    let (c0, _, _) = summarise("OFF control", off, |l, _| l.contains("control"));
+    let (c1, _, _) = summarise("ON  control", on, |l, _| l.contains("control"));
+    println!("  TTFT ON/OFF for no-share control: {:.3}", c1 / c0);
+}
+
 fn main() {
     let path = std::env::var("LB_GGUF").expect("set LB_GGUF to a .gguf file");
-    let cfg = Cfg {
-        paras: env_usize("LB_PREFIX_PARAS", 30),
-        sharers: env_usize("LB_SHARERS", 4),
-        sharer_new: env_usize("LB_SHARER_NEW", 16),
-        donor_new: env_usize("LB_DONOR_NEW", 400),
-        reps: env_usize("LB_REPS", 3),
-        ctx: env_usize("LB_CTX", 2048),
-    };
+    let cfg = Cfg::from_env();
     println!("model: {path}");
     println!(
         "device build: {}",
@@ -344,62 +424,16 @@ fn main() {
     report_load("start");
     let mut arms = Vec::new();
     for sharing in [false, true] {
-        println!("\n=== arm: prefix_sharing = {sharing} ===");
+        println!(
+            "
+=== arm: prefix_sharing = {sharing} ==="
+        );
         report_load("arm start");
         let r = run_arm(&path, sharing, &cfg);
         report_load("arm end");
-        println!(
-            "  prefix prompt ~{} tokens; cache_stats.hits = {}",
-            r.prompt_tokens, r.hits
-        );
-        for (l, live, o) in &r.rows {
-            println!(
-                "    {l:<22} donor_live={live:<5} ttft {:>9.1} ms  decode {:>7.2} tok/s",
-                o.ttft.as_secs_f64() * 1e3,
-                o.decode_tps
-            );
-        }
-        summarise("control (cold, unrelated)", &r, |l, _| {
-            l.contains("control")
-        });
-        summarise("sharers, donor live", &r, |l, live| {
-            l.contains("sharer") && live
-        });
-        summarise("sharers, donor gone (cold)", &r, |l, live| {
-            l.contains("sharer") && !live
-        });
+        print_arm(&r);
         arms.push(r);
     }
-
-    println!("\n=== bit-identity, OFF vs ON (greedy) ===");
-    let (off, on) = (&arms[0], &arms[1]);
-    let mut all_same = off.rows.len() == on.rows.len();
-    for ((l, _, a), (_, _, b)) in off.rows.iter().zip(on.rows.iter()) {
-        let same = a.text == b.text;
-        all_same &= same;
-        if !same {
-            println!(
-                "  DIFFERS {l}:\n    off: {:?}\n    on : {:?}",
-                a.text, b.text
-            );
-        }
-    }
-    println!(
-        "  rows compared: {}; donor stream equal: {}",
-        off.rows.len(),
-        off.donor_text == on.donor_text
-    );
-    println!("  ALL SHARER/CONTROL COMPLETIONS BIT-IDENTICAL: {all_same}");
-    let (o, n, _) = summarise("OFF sharers, donor live", off, |l, live| {
-        l.contains("sharer") && live
-    });
-    let (o2, n2, _) = summarise("ON  sharers, donor live", on, |l, live| {
-        l.contains("sharer") && live
-    });
-    let _ = (n, n2);
-    println!("  TTFT ON/OFF for live-donor sharers: {:.3}", o2 / o);
-    let (c0, _, _) = summarise("OFF control", off, |l, _| l.contains("control"));
-    let (c1, _, _) = summarise("ON  control", on, |l, _| l.contains("control"));
-    println!("  TTFT ON/OFF for no-share control: {:.3}", c1 / c0);
+    compare_arms(&arms[0], &arms[1]);
     report_load("end");
 }
