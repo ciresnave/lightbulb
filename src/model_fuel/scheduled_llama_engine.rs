@@ -50,7 +50,7 @@ use fuel_inference::multi_session::{KvBudget, PagedSchedulePolicy};
 
 use super::engine_model::effective_generation_budget;
 use super::policies::BlockPrefixIndexFor;
-use super::scheduler_driver_paged::FuelPagedSchedulerDriver;
+use super::scheduler_driver_paged::{FuelPagedSchedulerDriver, SERVING_SCHEDULE_POLICY};
 use crate::engine::model_runner::{
     ControlMsg, InferenceJob, SharedCacheStats, SharedScheduler, drain_with_error,
 };
@@ -500,7 +500,7 @@ impl BatchedServeConfig {
         Self {
             device: super::device::select(),
             max_batch: max_batch_size,
-            policy: PagedSchedulePolicy::AdmissionOrder,
+            policy: SERVING_SCHEDULE_POLICY,
             budget: KvBudget {
                 block_size: KV_BLOCK_SIZE,
                 num_blocks: max_batch_size * context_length.div_ceil(KV_BLOCK_SIZE),

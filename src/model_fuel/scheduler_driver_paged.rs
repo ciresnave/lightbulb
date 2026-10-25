@@ -23,6 +23,19 @@ use fuel_inference::multi_session::{
 
 use crate::engine::scheduled_runner::{AdmitError, FinishOutcome, SchedulerDriver, StopReason};
 
+/// The scheduling policy the serving path runs with. `Priority` makes the
+/// request's `X-Lightbulb-Priority` header (delivered to
+/// [`SchedulerDriver::set_priority`] right after admission) decide the ORDER in
+/// which live sessions are served within each scheduler tick -- prefill first,
+/// then decode -- and so who finds free pool blocks first when the pool is
+/// tight. It does not limit how many sessions advance per tick (`max_batch`
+/// only chunks the batched forward), so under light load every session still
+/// advances every tick and the effect is small. Under `AdmissionOrder` the
+/// priority was recorded and ignored. Ties keep admission order, so with every
+/// request at the default priority behaviour is unchanged. PM ruling
+/// 2026-10-25 (ROADMAP audit B4). The test below pins this constant.
+pub(crate) const SERVING_SCHEDULE_POLICY: PagedSchedulePolicy = PagedSchedulePolicy::Priority;
+
 /// Adapts a Fuel [`PagedSessionScheduler`] to [`SchedulerDriver`].
 ///
 /// # Admission is optimistic, not pre-checked
@@ -230,11 +243,10 @@ impl<'m, M: PagedDecodeModel> SchedulerDriver for FuelPagedSchedulerDriver<'m, M
     }
 
     /// Forwards to `PagedSessionScheduler::set_priority` ("higher goes
-    /// first"; read only under `PagedSchedulePolicy::Priority` -- this
-    /// driver's own `new` still defaults to `AdmissionOrder`, so this call
-    /// is recorded but has no ordering effect until something switches the
-    /// policy). The only `SchedulerDriver` with a real priority concept, as
-    /// of this writing.
+    /// first"; read only under `PagedSchedulePolicy::Priority`, which the
+    /// serving path now runs: [`SERVING_SCHEDULE_POLICY`]. A driver built
+    /// with `AdmissionOrder` records the value and ignores it). The only
+    /// `SchedulerDriver` with a real priority concept, as of this writing.
     fn set_priority(&mut self, id: SessionId, priority: i32) -> Result<(), String> {
         self.scheduler
             .set_priority(id, priority)
@@ -483,6 +495,45 @@ mod tests {
     /// identically to serial decode for TWO concurrent sessions sharing the
     /// same position — the real throughput path this driver exists to use,
     /// not just the single-session case every other test here exercises.
+    /// Within a tick the scheduler serves the higher-priority session first
+    /// even though it was admitted second, under the serving policy; under
+    /// `AdmissionOrder` (contrast arm, the old production setting) the earlier
+    /// admission is first and the priority is ignored. Reads the scheduler's
+    /// own `advanced` order (the driver's `step` re-sorts by id, which would
+    /// hide it). Pins [`SERVING_SCHEDULE_POLICY`] to behaviour, not to a name.
+    #[test]
+    fn serving_policy_serves_a_later_higher_priority_session_first_within_a_tick() {
+        let first_served = |policy: PagedSchedulePolicy| {
+            let model = tiny_model(7);
+            let mut d = FuelPagedSchedulerDriver::new(
+                &model,
+                generous_budget(),
+                fuel::DType::F32,
+                &Device::cpu(),
+                policy,
+                1,
+                None,
+            )
+            .expect("tiny model must build");
+            let low = d.try_admit(&[1, 2, 3], 4, 0.0).expect("low admits");
+            let high = d.try_admit(&[4, 5, 6], 4, 0.0).expect("high admits");
+            d.set_priority(low, 0).unwrap();
+            d.set_priority(high, 10).unwrap();
+            let report = d.scheduler.step_batched(1);
+            let who = *report
+                .advanced
+                .first()
+                .expect("the first tick must advance a session");
+            (who, low, high)
+        };
+
+        let (who, _low, high) = first_served(SERVING_SCHEDULE_POLICY);
+        assert_eq!(who, high, "serving policy must honour priority");
+
+        let (who, low, _high) = first_served(PagedSchedulePolicy::AdmissionOrder);
+        assert_eq!(who, low, "contrast arm: admission order ignores priority");
+    }
+
     #[test]
     fn two_concurrent_sessions_each_emit_their_own_tokens_under_batching() {
         let model = tiny_model(5);
