@@ -291,9 +291,8 @@ impl Content {
         // So a refusal here is recorded, not propagated. Metadata comes from
         // our own parser; only tensor LOADING still requires candle, and a file
         // it cannot type is a file whose tensors it could not have loaded.
-        let mut file = File::open(path)?;
         let (candle_content, candle_refusal) =
-            match fuel_loaders::quantized::gguf_file::Content::read(&mut file) {
+            match fuel_loaders::quantized::gguf_file::Content::open(path) {
                 Ok(c) => (Some(c), None),
                 Err(e) => (None, Some(e.to_string())),
             };

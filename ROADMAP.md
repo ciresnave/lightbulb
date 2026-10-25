@@ -998,7 +998,9 @@ must go green before this is closed.
    row (this is a report, not a decision). `KNOWN_FAILURES` in the test was
    updated to the new cause rather than removed — the both-arms guard it's
    built on caught the cause change immediately (red until updated), exactly
-   as designed.
+   as designed. **CLOSED 2026-10-24 by the Fuel 0.25.10 bump (0.19.15):** both
+   `stories15M` files load end to end (census: 11 loaded, 0 failed, run with
+   `LIGHTBULB_GGUF_CORPUS=C:/Models/gguf-corpus -- --ignored`); `KNOWN_FAILURES` is now empty.
 2. **3 tokenizer-model types are never constructed at all** (`bert`/`t5`/
    `gemma`-family tokenizers) — a larger, separate undertaking: building new
    tokenizer-construction paths from scratch, not implementing a pre-tokenizer

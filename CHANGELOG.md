@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.19.15
+
+### Changed
+- Deps: `fuel`/`fuel-*` 0.24.0 -> 0.25.10 (all eight crates; latest on crates.io). Breaking in Fuel 0.25.0 (#477): `fuel_loaders::quantized::gguf_file::Content::read(&mut File)` is gone; the three call sites (`src/gguf/mod.rs`, `loader_gguf.rs`, `loader_gguf_qwen3.rs`) now use `Content::open(&Path)`. Fuel documents four malformed-input-only metadata differences vs `read` (duplicate keys first-wins, no trailing-NUL strip, non-0/1 Bool bytes accepted, non-UTF-8 keys rejected); Lightbulb uses Fuel's `Content` only to derive numeric config, strings come from its own parser.
+
+### Fixed
+- `tests/gguf_e2e_weight_load_census.rs`: `stories15M-q4_0`/`q8_0` now load (the `freq_base` gap is closed in Fuel), so `KNOWN_FAILURES` is empty and ROADMAP's GGUF corpus section says so.
+
 ## 0.19.13
 
 ### Added
