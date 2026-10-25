@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.19.27
+
+### Added
+- ROADMAP slice 6: CPU re-measure with prefix sharing off vs on against local Fuel main `ab97c5c21` (sharer TTFT ~60 s -> 2.3 s, bit-identical, n=1 rep, two runs), the GPU windows that produced no numbers and why, and the Fuel lane's CUDA TTFT figure cited as theirs. Audit row B4 marked done (#234).
+
 ## 0.19.26
 
 ### Changed
