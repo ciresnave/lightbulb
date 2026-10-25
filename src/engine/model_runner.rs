@@ -296,17 +296,42 @@ pub struct EngineOptions {
 /// auto-detected from the model path. The candlelight-backed implementation
 /// (`ParallelModelManager`, `run_jobs`) was removed 2026-10-22; see
 /// `docs/FUEL-GAPS-FROM-CANDLE-REMOVAL.md` for what that cost.
+/// `dtype` asked of [`ModelRunner::start`] that the Fuel serving path cannot
+/// honour. Returned (wrapped in `anyhow`) instead of silently serving f32
+/// (CireSnave, 2026-10-24: "dtype selection should not be ignored"); recover
+/// it with `err.downcast_ref::<UnsupportedDtype>()`.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error(
+    "dtype {requested:?} is not supported by the Fuel serving path, which runs f32      activations with f32 weights; accepted: \"f32\" (or unset). A BF16/F16-weight      path needs Fuel's F32-activation x BF16/F16-weight CPU matmul (fuel#489, 0.25.13+)      and is not wired; BF16/F16 activations are not supported at all"
+)]
+pub struct UnsupportedDtype {
+    /// The string the caller passed, verbatim.
+    pub requested: String,
+}
+
+/// `Ok` for the one combination served today: unset or `f32` (case-insensitive,
+/// also `float32`/`fp32`). Anything else is an [`UnsupportedDtype`].
+fn check_dtype(dtype: Option<&str>) -> Result<(), UnsupportedDtype> {
+    match dtype {
+        None => Ok(()),
+        Some(d) if matches!(d.to_ascii_lowercase().as_str(), "f32" | "float32" | "fp32") => Ok(()),
+        Some(d) => Err(UnsupportedDtype {
+            requested: d.to_string(),
+        }),
+    }
+}
+
 pub struct ModelRunner;
 
 impl ModelRunner {
     /// Start the model runner thread, serving through the Fuel path.
     ///
-    /// `dtype` is accepted and IGNORED: this path loads all weights as f32 by
-    /// construction. Fuel's CPU backend has no `[F32, BF16, F32]` matmul
-    /// kernel, and while the optimizer will insert a promoting cast, that cast
-    /// is value-lossless but NOT accumulation-preserving. Silently honouring a
-    /// "bf16" request would change numerics against every golden captured on
-    /// the f32 path. The parameter stays for signature compatibility.
+    /// `dtype` must be unset or `f32`: this path serves f32 activations with
+    /// f32 weights by construction. Any other value returns an
+    /// [`UnsupportedDtype`] error (nothing is spawned) rather than being
+    /// ignored. Silently serving f32 for a "bf16" request would be a lie
+    /// about numerics; honouring it needs Fuel's F32-activation x BF16/F16
+    /// weight matmul (fuel#489, 0.25.13+), which is not wired here yet.
     ///
     /// `scheduler` is mirrored by `ServingDriver`'s real admission/departure
     /// (`src/model_fuel/scheduled_llama_engine.rs`, `SCHEDULER_METRICS_LIVE`).
@@ -362,14 +387,7 @@ impl ModelRunner {
             std::sync::mpsc::sync_channel(max_queue_depth);
         let (ctrl_tx, ctrl_rx) = std::sync::mpsc::channel::<ControlMsg>();
 
-        if let Some(d) = dtype.as_deref() {
-            if d != "f32" {
-                tracing::warn!(
-                    "fuel-engine ignores dtype={d:?} and loads f32; see the module docs on \
-                     accumulation-preserving casts"
-                );
-            }
-        }
+        check_dtype(dtype.as_deref())?;
 
         std::thread::spawn(move || {
             // `scheduled_llama_engine::run_fuel_engine` (board item 97) loads
@@ -436,6 +454,52 @@ pub(crate) fn drain_with_error(rx: Receiver<InferenceJob>, msg: &str) {
 mod tests {
     use super::*;
     use crate::engine::{Request, RequestContext};
+
+    #[test]
+    fn check_dtype_accepts_unset_and_f32_spellings() {
+        for ok in [
+            None,
+            Some("f32"),
+            Some("F32"),
+            Some("float32"),
+            Some("fp32"),
+        ] {
+            assert_eq!(check_dtype(ok), Ok(()), "{ok:?}");
+        }
+    }
+
+    #[test]
+    fn check_dtype_rejects_everything_else_naming_the_request() {
+        for bad in ["bf16", "f16", "f64", "q4_0", "", "auto"] {
+            let e = check_dtype(Some(bad)).unwrap_err();
+            assert_eq!(e.requested, bad);
+            assert!(e.to_string().contains(&format!("{bad:?}")), "{e}");
+        }
+    }
+
+    #[test]
+    fn start_refuses_a_non_f32_dtype_with_a_typed_error() {
+        let stats = std::sync::Arc::new(std::sync::Mutex::new(
+            crate::cache::PrefixCacheStats::default(),
+        ));
+        let sched = std::sync::Arc::new(std::sync::Mutex::new(
+            crate::engine::MemoryAwareScheduler::new(Default::default()),
+        ));
+        // The model path is never touched: the check runs before the thread spawns.
+        let err = ModelRunner::start(
+            "does-not-exist.gguf",
+            1,
+            16,
+            Some("bf16".into()),
+            1,
+            stats,
+            sched,
+        )
+        .map(|_| ())
+        .unwrap_err();
+        let u = err.downcast_ref::<UnsupportedDtype>().expect("typed error");
+        assert_eq!(u.requested, "bf16");
+    }
 
     #[test]
     fn queue_depth_guard_increments_on_construction_and_decrements_on_drop() {
