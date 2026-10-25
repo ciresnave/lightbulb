@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.19.21
+
+### Fixed
+- The twelve `/v1/lightbulb/{knowledge,reasoning,state,tools}/*` routes now answer `501 Not Implemented` with a typed error instead of a success body that did nothing (`knowledge/add` returned `success: true` and a random UUID and stored nothing). The ~300 lines of unused request/response types are gone. PM ruling 2026-10-25 (ROADMAP audit A2).
+- `src/api/mod.rs` module doc no longer claims auth "via auth-framework" (not a dependency; auth is the `api_keys` table with SHA-256 hashes) or lists the reserved routes as working features (A10 doc line).
+
 ## 0.19.20
 
 ### Added

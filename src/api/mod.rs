@@ -6,13 +6,12 @@
 //!
 //! - **OpenAI-Compatible Base**: `/v1/chat/completions`, `/v1/completions`, `/v1/models`
 //! - **Admin API**: `/v1/lightbulb/admin/*` for system management
-//! - **Knowledge Base**: `/v1/lightbulb/knowledge/*` for KB operations
-//! - **Reasoning Controls**: `/v1/lightbulb/reasoning/*` for advanced reasoning
-//! - **State Management**: `/v1/lightbulb/state/*` for persistence/branching
+//! - **Reserved, not implemented (501)**: `/v1/lightbulb/{knowledge,reasoning,state,tools}/*`
 //!
 //! # Security
 //!
-//! - Bearer token authentication via auth-framework
+//! - Bearer API-key authentication (the `api_keys` table, keys stored as SHA-256 hashes; not
+//!   the auth-framework crate, which is not a dependency)
 //! - Role-based access control (user, admin, llm)
 //! - Rate limiting per API key
 //! - Audit logging for all requests
