@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.19.22
+
+### Fixed
+- `GET /v1/models` now works (it was registered POST-only, so every OpenAI client got 405) and lists what is actually loaded: the runner's model (`default_model`) while one is loaded, an empty list otherwise. The hardcoded `lightbulb-default`/`lightbulb-7b`/`lightbulb-13b` roster is gone. `POST /v1/models` still answers the same way.
+
+### Added
+- `GET /v1/models/{model}`: the model object, or an OpenAI-shaped 404 (`model_not_found`). ROADMAP audit row A1.
+
 ## 0.19.21
 
 ### Fixed
