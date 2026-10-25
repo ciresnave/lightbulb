@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.19.26
+
+### Changed
+- The request-body cap is now explicit: `MAX_REQUEST_BODY_BYTES` (2 MiB) applied with `DefaultBodyLimit::max` in `build_router`. This is the same figure axum 0.8 already applied to `Json`/`Bytes`/`String` extractors, so behaviour is unchanged; ROADMAP audit row A7 was wrong that there was "no limit". Tests pin both the cap and the axum default it matches.
+
 ## 0.19.25
 
 ### Fixed

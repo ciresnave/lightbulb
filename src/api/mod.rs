@@ -296,6 +296,13 @@ pub(crate) fn validate_auth_policy(config: &ApiConfig) -> Result<()> {
     Ok(())
 }
 
+/// Largest request body any route will buffer (2 MiB, roughly 500k tokens of
+/// prompt text). axum 0.8 already applies this same figure to its `Json` /
+/// `Bytes` / `String` extractors; naming it here makes the limit a decision
+/// in our code rather than an inherited default that an `axum` bump or a
+/// stray `DefaultBodyLimit::disable()` could silently remove.
+pub(crate) const MAX_REQUEST_BODY_BYTES: usize = 2 * 1024 * 1024;
+
 /// Sourcery review of #155: `tokio::time::timeout` with a zero duration
 /// expires immediately, so `request_timeout_ms: 0` (e.g. a typo'd
 /// `LIGHTBULB_REQUEST_TIMEOUT_MS=0`) would reject every inference request
@@ -876,6 +883,8 @@ impl ApiServer {
             // `metrics_endpoint`'s own doc comment). CORS and tracing below
             // still apply to all three.
             .merge(unauthenticated_router)
+            // Explicit request-body cap (see `MAX_REQUEST_BODY_BYTES`).
+            .layer(axum::extract::DefaultBodyLimit::max(MAX_REQUEST_BODY_BYTES))
             // CORS and tracing
             .layer(
                 CorsLayer::new()
@@ -1952,6 +1961,69 @@ mod tests {
     /// If that property ever changed (or `build_router`'s call order
     /// regressed back to audit-innermost), this fails independently of
     /// whether a database happens to be reachable.
+    mod body_limit {
+        use super::super::MAX_REQUEST_BODY_BYTES;
+        use axum::body::Body;
+        use axum::extract::DefaultBodyLimit;
+        use axum::http::{Request, StatusCode};
+        use axum::routing::post;
+        use tower::ServiceExt;
+
+        async fn echo_len(axum::Json(v): axum::Json<serde_json::Value>) -> String {
+            v.to_string().len().to_string()
+        }
+
+        async fn status_for(app: axum::Router, payload_bytes: usize) -> StatusCode {
+            // `{"p":"xxx..."}` -- valid JSON, so only the size can reject it.
+            let body = format!(r#"{{"p":"{}"}}"#, "x".repeat(payload_bytes));
+            app.oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/t")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .status()
+        }
+
+        fn app() -> axum::Router {
+            axum::Router::new()
+                .route("/t", post(echo_len))
+                .layer(DefaultBodyLimit::max(MAX_REQUEST_BODY_BYTES))
+        }
+
+        /// Over the cap is 413; under it passes (the positive control: the
+        /// same route and body shape succeed when small).
+        #[tokio::test]
+        async fn explicit_cap_rejects_oversize_and_admits_normal() {
+            assert_eq!(status_for(app(), 1024).await, StatusCode::OK);
+            assert_eq!(
+                status_for(app(), MAX_REQUEST_BODY_BYTES + 1024).await,
+                StatusCode::PAYLOAD_TOO_LARGE
+            );
+        }
+
+        /// Records the evidence behind the constant's doc comment: with no
+        /// layer at all axum 0.8 still caps `Json` at the same figure (the
+        /// ROADMAP audit row A7 said "none"). If axum changes this the doc
+        /// comment is stale and this fails.
+        #[tokio::test]
+        async fn axum_default_matches_the_named_constant() {
+            let bare = axum::Router::new().route("/t", post(echo_len));
+            assert_eq!(
+                status_for(bare.clone(), MAX_REQUEST_BODY_BYTES - 1024).await,
+                StatusCode::OK
+            );
+            assert_eq!(
+                status_for(bare, MAX_REQUEST_BODY_BYTES + 1024).await,
+                StatusCode::PAYLOAD_TOO_LARGE
+            );
+        }
+    }
+
     mod layer_ordering {
         use axum::body::Body;
         use axum::extract::{Extension, Request};
