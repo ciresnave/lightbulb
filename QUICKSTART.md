@@ -59,11 +59,8 @@ VALUES ('abc123def456...', 'admin');
 ## Step 5: Start the API Server
 
 ```bash
-# With default config
+# Configuration is read from environment variables (see "Configuration" below)
 cargo run --release
-
-# With custom config (create config.toml)
-cargo run --release -- --config config.toml
 ```
 
 The server will start on `http://localhost:8080` by default.
@@ -150,25 +147,18 @@ curl -X POST http://localhost:8080/v1/chat/completions \
 
 ## Configuration
 
-Create a `config.toml` file:
+The server reads environment variables; there is no config file or `--config` flag (the only CLI flag is `--no-auth`). Names as read in `src/main.rs`:
 
-```toml
-[api]
-host = "0.0.0.0"
-port = 8080
-rate_limit_per_minute = 60
-
-models_dir = "/path/to/models"
-default_model = "llama-2-7b"
-model_max_batch_size = 8
-model_context_length = 4096
-
-[database]
-url = "postgresql://user:password@localhost/lightbulb"
-max_connections = 10
-
-[logging]
-level = "info"
+```bash
+DATABASE_URL=postgresql://user:password@localhost/lightbulb
+LIGHTBULB_BIND_ADDRESS=0.0.0.0:8080
+LIGHTBULB_MODELS_DIR=/path/to/models
+LIGHTBULB_DEFAULT_MODEL=llama-2-7b
+LIGHTBULB_RATE_LIMIT_PER_MINUTE=60
+LIGHTBULB_MODEL_MAX_BATCH_SIZE=8
+LIGHTBULB_MODEL_CONTEXT_LENGTH=4096
+LIGHTBULB_REQUEST_TIMEOUT_MS=300000
+LIGHTBULB_CORS_ORIGINS=https://app.example   # unset = any origin
 ```
 
 ## Troubleshooting

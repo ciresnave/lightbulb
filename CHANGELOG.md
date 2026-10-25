@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.19.30
+
+### Fixed
+- README/QUICKSTART/DEMO: Fuel pin updated to 0.25.10, the removed `local-llama-gen` quickstart replaced with the server flow, the multi-GPU section replaced with what actually exists, QUICKSTART `--config`/`config.toml` replaced with the real env vars, DEMO `sessions` table name corrected to `user_sessions`. ROADMAP D3.
+
 ## 0.19.29
 
 ### Added

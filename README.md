@@ -23,8 +23,8 @@ ordinary `cargo build` gives you Fuel regardless of whether it's passed.
 
 `fuel` and its sibling crates (`fuel-cpu-backend`, `fuel-transformers`,
 `fuel-loaders`, `fuel-ir`, `fuel-inference`, `fuel-cuda-backend`) are
-unconditional dependencies, pinned by version on crates.io (`0.20.61` as of
-the 2026-10-22 migration off the git source, PR #196) — see the comments
+unconditional dependencies, pinned by version on crates.io (`0.25.10` at
+this writing, see `Cargo.toml`; first moved off the git source 2026-10-22, PR #196) — see the comments
 around the dependency in `Cargo.toml` for the history.
 
 Removing candlelight opened two real, tracked capability gaps (the
@@ -118,16 +118,14 @@ evidence: [`PROVENANCE.md`](PROVENANCE.md)).
 
 ## Offline, CPU-only quickstart
 
-Run a local LLaMA-family model entirely offline on CPU. Prepare a folder with `config.json`, `tokenizer.json`, `tokenizer_config.json`, and one or more `model.safetensors` files. Then run:
+Run a local model entirely offline on CPU through the API server. Put the model in a subdirectory of a models folder (GGUF is the primary format), then start the server bound to loopback without authentication (`--no-auth` is only accepted on loopback when no database is configured):
 
-<!-- Previously pointed at `docs/Local model setup.md`, which does not exist
-     (checked 2026-08-15). `tokenizer_config.json` added to the list above: it
-     carries the chat template, and a checkpoint without it falls back to a
-     family guess rather than the template the model was trained on. -->
+```bash
+LIGHTBULB_MODELS_DIR=./models LIGHTBULB_DEFAULT_MODEL=llama-3b LIGHTBULB_BIND_ADDRESS=127.0.0.1:8080 cargo run --release -- --no-auth
+curl http://127.0.0.1:8080/v1/models
+```
 
-
-- Windows cmd:
-  - cargo run -p lightbulb -- local-llama-gen --model-dir models\llama-3b --prompt "Hello" --sample-len 16
+The earlier `local-llama-gen` subcommand was removed with the candlelight path; `QUICKSTART.md` has the full request examples.
 
 This path avoids any network calls and doesn't require GPU drivers, which is ideal for CI and deterministic tests.
 
@@ -378,103 +376,6 @@ openssl s_client -connect localhost:8443 -showcerts
 **Issue:** Browser security warning with self-signed certificates
 - **Solution:** This is expected behavior. For development, add exception in browser. For production, use certificates from a trusted CA.
 
-## Multi-GPU Inference (M3.6)
+## Multi-GPU Inference
 
-Lightbulb supports distributed inference across multiple GPUs using tensor parallelism, pipeline parallelism, or hybrid strategies. All model architectures (`BatchedTransformer`) benefit from multi-GPU support transparently.
-
-### Quick Start: 2-GPU Tensor Parallelism
-
-```rust
-use lightbulb::model::{BatchedTransformer, BatchedTransformerConfig};
-use lightbulb::multi_gpu::config::{MultiGPUConfig, ParallelismMode};
-
-// Create config with multi-GPU enabled
-let mut config = BatchedTransformerConfig::llama_7b();
-
-// Enable 2-GPU tensor parallelism
-let multi_gpu = MultiGPUConfig::manual(
-    ParallelismMode::TensorParallel { world_size: 2 },
-    2,
-)?;
-config.multi_gpu = Some(multi_gpu);
-
-// Load model (weights sharded automatically)
-let mut model = BatchedTransformer::new(config, vb)?;
-
-// Initialize distributed cache
-model.enable_distributed_cache(4, 2048)?;
-
-// Use normally - multi-GPU is transparent!
-let logits = model.forward(&input_ids, &mut cache_builder, &mut caches, &metadata)?;
-```
-
-### Supported Strategies
-
-| Strategy          | GPUs | Use Case                                 | Target Speedup |
-| ----------------- | ---- | ---------------------------------------- | -------------- |
-| Tensor Parallel   | 2-4  | High throughput, model fits when sharded | 1.7-3.2×       |
-| Pipeline Parallel | 2-8  | Very large models, memory-bound          | 3.5-6.5×       |
-| Hybrid (2×4)      | 8    | Maximum scalability                      | ~6×            |
-
-### Pipeline Parallelism Example (4 GPUs)
-
-```rust
-let multi_gpu = MultiGPUConfig::manual(
-    ParallelismMode::PipelineParallel {
-        num_stages: 4,
-        micro_batch_size: 2,
-    },
-    4,
-)?;
-```
-
-Pipeline parallelism distributes transformer layers across GPUs (e.g., 40 layers → 4 GPUs = 10 layers/GPU). The `forward_layers()` method enables explicit layer-range processing:
-
-```rust
-// GPU 0: Process layers 0-9
-let hidden = model.forward_layers(&hidden_states, 0, 10, index_pos, 
-                                   &mut cache_builder, &mut caches, &metadata)?;
-
-// Transfer to GPU 1 and continue...
-```
-
-### Hybrid Parallelism (8+ GPUs)
-
-Combine tensor and pipeline parallelism for maximum scalability:
-
-```rust
-let multi_gpu = MultiGPUConfig::manual(
-    ParallelismMode::Hybrid {
-        tensor_world_size: 2,  // 2-way tensor parallel per stage
-        pipeline_stages: 4,     // 4 pipeline stages
-        micro_batch_size: 2,
-    },
-    8, // total: 2 × 4 = 8 GPUs
-)?;
-```
-
-### Architecture Support
-
-Multi-GPU works with **all** `BatchedTransformer` architectures:
-- Llama, Llama2, Llama3 (`BatchedLlama`)
-- Mistral (`BatchedMistral`)
-- Gemma (`BatchedGemma`)
-- Phi, Qwen (via `BatchedTransformerConfig`)
-
-Configuration is architecture-agnostic - just set `config.multi_gpu` before model creation.
-
-### Testing
-
-Multi-GPU requires hardware. Tests are gated with `#[ignore]`:
-
-```bash
-# Requires 2+ GPUs
-cargo test --test multi_gpu_validation -- --ignored --test-threads=1
-```
-
-### Documentation
-
-- **Integration Guide:** `docs/MULTI_GPU_INTEGRATION.md` - Complete API reference and examples
-- **Testing Guide:** `tests/MULTI_GPU_TESTING.md` - Hardware requirements and test categories
-- **Architecture:** `docs/M3_6_MULTI_GPU_ARCHITECTURE.md` - Design and implementation details
-- **ROADMAP:** See M3.6 milestone for performance targets and future work
+**Not available.** The tensor/pipeline/hybrid parallel code (`distributed_cache`, `pipeline_parallel`, `tensor_parallel`) was deleted with the candlelight removal (PR #195) and has not been rebuilt on Fuel. Only the plain `multi_gpu::{config, topology}` types remain (configuration and device-topology discovery); nothing serves a request across several GPUs. The history is in `ROADMAP.md` (M3.6, marked superseded) and `docs/FUEL-GAPS-FROM-CANDLE-REMOVAL.md`; `docs/MULTI_GPU_INTEGRATION.md` and `docs/M3_6_MULTI_GPU_ARCHITECTURE.md` describe the removed design.
