@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.19.20
+
+### Added
+- ROADMAP: spec-to-roadmap audit section (rows A1-A12 serving/API, B1-B14 engine/Fuel, C1-C5 tests, D1-D5 docs/provenance, plus the existing ROADMAP lines that contradict the code). Docs only.
+
 ## 0.19.19
 
 ### Added
