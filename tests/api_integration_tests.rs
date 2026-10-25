@@ -407,7 +407,8 @@ mod api_tests {
             .await
             .unwrap();
 
-        assert_eq!(response.status(), StatusCode::OK);
+        // Reserved route: 501 until the knowledge base exists (ROADMAP A2).
+        assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
     }
 
     #[tokio::test]
