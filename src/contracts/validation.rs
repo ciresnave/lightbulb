@@ -143,9 +143,40 @@ pub fn try_parse(text: &str, spec: &OutputContractSpec) -> Option<ContractOutput
             must_be_last,
         } => super::commit_block::parse(text, block_type, *must_be_last)
             .map(|block_text| ContractOutput::CommitBlock { block_text }),
-        // Json is not yet implemented; fall through to None.
-        OutputContractSpec::Json => None,
+        OutputContractSpec::Json => parse_json(text).map(|value| ContractOutput::Json { value }),
     }
+}
+
+/// Extract the first complete JSON value from `text`: the whole trimmed text,
+/// else the body of a Markdown code fence, else the first balanced `{..}` or
+/// `[..]` span that parses.  Bare scalars only count when they are the whole
+/// text, so prose containing a stray number is not a JSON answer.
+fn parse_json(text: &str) -> Option<serde_json::Value> {
+    let trimmed = text.trim();
+    if let Ok(v) = serde_json::from_str(trimmed) {
+        return Some(v);
+    }
+    if let Some(start) = trimmed.find("```") {
+        let after = &trimmed[start + 3..];
+        // Drop the optional info string ("json") up to the first newline.
+        let body = after.split_once('\n').map_or(after, |(_, rest)| rest);
+        if let Some(end) = body.find("```") {
+            if let Ok(v) = serde_json::from_str(body[..end].trim()) {
+                return Some(v);
+            }
+        }
+    }
+    // First `{` or `[` that begins a value serde can read to completion.
+    for (i, c) in trimmed.char_indices() {
+        if c == '{' || c == '[' {
+            let mut de =
+                serde_json::Deserializer::from_str(&trimmed[i..]).into_iter::<serde_json::Value>();
+            if let Some(Ok(v)) = de.next() {
+                return Some(v);
+            }
+        }
+    }
+    None
 }
 
 /// Returns `true` when the parsed output is considered *sufficient* given the
@@ -251,6 +282,29 @@ mod tests {
         };
         let out = try_parse("My answer is yes.", &spec);
         assert!(matches!(out, Some(ContractOutput::EnumChoice { choice }) if choice == "yes"));
+    }
+
+    #[test]
+    fn try_parse_json_forms() {
+        let spec = OutputContractSpec::Json;
+        let v = |t: &str| match try_parse(t, &spec) {
+            Some(ContractOutput::Json { value }) => Some(value),
+            _ => None,
+        };
+        assert_eq!(v(r#" {"a": 1} "#), Some(serde_json::json!({"a": 1})));
+        assert_eq!(
+            v("```json\n{\"a\": [1, 2]}\n```"),
+            Some(serde_json::json!({"a": [1, 2]}))
+        );
+        assert_eq!(
+            v("Sure! Here: {\"a\": \"x}\"} Hope that helps."),
+            Some(serde_json::json!({"a": "x}"}))
+        );
+        assert_eq!(v("result [1,2,3] done"), Some(serde_json::json!([1, 2, 3])));
+        assert_eq!(v("42"), Some(serde_json::json!(42)));
+        assert_eq!(v("about 42 items"), None);
+        assert_eq!(v("{\"a\": "), None);
+        assert_eq!(v(""), None);
     }
 
     #[test]

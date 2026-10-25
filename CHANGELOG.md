@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.19.25
+
+### Fixed
+- `OutputContractSpec::Json` now parses: `try_parse` returned `None` for every input, so a Json contract could never succeed. It accepts the whole text, a Markdown code fence body, or the first parseable `{..}`/`[..]` span, and yields `ContractOutput::Json { value }`. Bare scalars count only as the whole text. (ROADMAP A3)
+
 ## 0.19.24
 
 ### Removed

@@ -118,7 +118,8 @@ pub enum OutputContractSpec {
         must_be_last: bool,
     },
 
-    /// Reserved — not yet active.
+    /// Model must emit a single JSON value (object, array or scalar),
+    /// optionally wrapped in a Markdown code fence or surrounded by prose.
     Json,
 }
 
@@ -149,6 +150,9 @@ pub enum ContractOutput {
 
     /// The text extracted from a sentinel-delimited commit block.
     CommitBlock { block_text: String },
+
+    /// The JSON value extracted from the model's text.
+    Json { value: serde_json::Value },
 
     /// Raw model text returned when every parse attempt failed.
     Raw { text: String },
