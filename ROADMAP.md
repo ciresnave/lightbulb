@@ -5457,3 +5457,87 @@ Getting involved
 
 - Good-first issues: tests for scheduler edge cases, metrics wiring, docs
 - Call out: model zoo curation for small, redistributable demos to exercise features
+
+---
+
+## Spec-to-roadmap audit rows (added 2026-10-25, origin/main `baa2f63`)
+
+Source: every `.md` spec/design/status doc tracked in the repo (75 files; `git ls-files '*.md'` minus
+CHANGELOG/ROADMAP) was read by Sonnet reader agents against this file, then a sample of the load-bearing
+claims (A1, A2, A3, A5, A7, B4, B6, B8, B10, D1, the `kv_compression` deletion, the README pin) was re-checked by
+hand against `origin/main`; the other rows rest on the readers' own greps and are model-derived (one disputed
+claim was settled by hand: `n > 1` is rejected with a 400 by `validate_n`, `chat.rs:824`). Readers could not
+run the last greps of some runs (tooling outage); anything they marked UNVERIFIED is not a row. Status values: **open** (build
+it), **held** (needs a CireSnave/PM call first, `[ASK]` sent), **stale** (a row above or a doc claims it done,
+it is not).
+
+### A. Serving API and product gaps
+
+| # | Item | Evidence (`origin/main`) | Status |
+|---|---|---|---|
+| A1 | `GET /v1/models` with the real loaded roster. Registered POST-only with a hardcoded list (`lightbulb-7b`). Blocks Cherry AI Studio and any OpenAI client. | `src/api/openai/mod.rs:19`, `models.rs:41` TODO | open (first) |
+| A2 | `/v1/lightbulb/{knowledge,reasoning,state,tools}/*`: 12 handlers all end in `// TODO`; `kb_add` returns `success:true` and stores nothing. Wire to the engine or remove; reporting success for a no-op is the defect. | `src/api/lightbulb.rs:76,108,145,180,196,217,253,281,308,335,362,391` | held (wire vs delete) |
+| A3 | `OutputContractSpec::Json` is declared but `try_parse` returns `None` ("not yet implemented"). | `src/contracts/validation.rs:147` | open |
+| A4 | Tool calling remainder: render `tools` through the chat template (`render` has no tools parameter), per-family output parsers (Llama-3.1 python_tag, Mistral TOOL_CALLS), streaming tool-call deltas (400 today), `tool_choice` required/forced function (400 today). | `chat_template.rs:152-163,194`; `chat.rs:415,800,858` | open |
+| A5 | OpenAI parameter gaps: `n>1` (400), `top_p != 1` (400), `stream_options.include_usage`, `logprobs` (always `None`) / `best_of`, `logit_bias`, presence/frequency penalty, `seed`, standard `response_format`; retire the `lightbulb_result` extension field. | `chat.rs:824,255`; `completions.rs:78,219,280` | open |
+| A6 | Further OpenAI routes (embeddings, responses, ...): only `/v1/chat/completions`, `/v1/completions`, `/v1/models` exist. Sequencing is CireSnave's call per the gap analysis. | `src/api/openai/mod.rs` | held |
+| A7 | Hardening: request body size limit (none), configurable CORS (`allow_origin(Any)`), audit-log retention/purge, client-visible `x-request-id`. | `src/api/mod.rs:883`; no `DefaultBodyLimit` hit | open |
+| A8 | TLS ACME: "for now, fall back to self-signed". | `src/tls.rs:293` | open |
+| A9 | Drop the dead `user_sessions` table (PersistAnt design step 6, "its own later PR"). | `migrations/V3__create_sessions.sql`; DDL only in `persistant_migrate.rs` | open |
+| A10 | auth-framework adoption (portfolio rule); `src/api/mod.rs:15` doc says "via auth-framework" but no such dependency exists (auth is bespoke api_keys + SHA-256). Fix the doc line now; adoption is a decision. | `Cargo.toml` has none | held (doc line open) |
+| A11 | Admin/introspection endpoints planned by API_EXPOSURE_ANALYSIS (`/system/info`, `/model/info`, `/config/*`, `/cache/policy`) and an OpenAPI spec. | 0 route hits | open (low) |
+| A12 | Multimodal input (`image_url`), CLI multi-model and conversation export/import, WebSocket alternative to SSE. | 0 hits in `src/api` | held (priority) |
+
+### B. Engine, model and Fuel seam
+
+| # | Item | Evidence | Status |
+|---|---|---|---|
+| B1 | Honour `dtype`: non-f32 is now a typed `UnsupportedDtype` (PR #229). BF16/F16 weights need Fuel #489 (0.25.13+, not on crates.io at 0.25.10); `[BF16,BF16,BF16]` is a separate key. | `model_runner.rs` | open (blocked on Fuel release) |
+| B2 | Architectures beyond Llama and Qwen3 (Fuel's model zoo); only `require_llama_architecture` / `require_qwen3_architecture` exist. | `gguf/mod.rs:1693`, `loader_gguf_qwen3.rs:65` | open |
+| B3 | Multi-GPU on Fuel (`fuel-parallel`, TP/PP, sharded KV): `src/multi_gpu/` is config+topology only, no caller. M3.6 rows are deleted-code history. | `git ls-tree src/multi_gpu`; 0 `fuel_parallel` hits | held (build or drop) |
+| B4 | `PagedSchedulePolicy::Priority` so `X-Lightbulb-Priority` orders admission (all call sites use `AdmissionOrder`). | `scheduled_llama_engine.rs:503,832` | held (FUEL-GAPS #2 decision) |
+| B5 | Sharded checkpoints: the safetensors loader bails "sharded checkpoints are not handled yet"; sharded GGUF has no support. | `model_fuel/loader.rs:165` | open |
+| B6 | Speculative decoding on Fuel (config built, nothing consumes it), pruning, tiered/disk KV on the Fuel path (FUEL-GAPS #5, #6, #9). `FileDiskStore` exists, unwired. | `engine/speculative.rs:121`; `cache/tiered_storage.rs:33` | open (research) |
+| B7 | H2O/R-KV need per-key attention column sums that fused FlashAttn cannot give: arm selection (C-5), decomposed-vs-fused benchmark, second output slot ask to Fuel. Eviction policies stay built-never-wired. | capability-regression-audit; `update_attention_scores` callers are tests/cache only | open (research) |
+| B8 | Wire `SystemConfig::auto_detect` and `SlotPoolMonitor` into serving (callers are examples/tests only); `chunk_size` has no consumer outside `init.rs`. | `init.rs`, `engine/slot_monitor.rs` | open |
+| B9 | Wire `MemoryEstimate` into the load path (pre-load OOM check) and report memory in `/v1/models`. | `src/memory/` | open |
+| B10 | State persistence: `CheckpointManager` always writes `kv_cache_state: None` / `pipeline_state: None`; no caller outside `decomposition.rs` (no graceful-shutdown save). | `state_persistence.rs:509-511` | open |
+| B11 | Prefix sharing rung 2 (position-shifted/mid-prompt donation, RoPE delta-rotation); plan-once prefill (Fuel root cause in slice 6: prefill re-plans per token, fixed in Fuel 0.26.2). | engine-wiring design; #227 | open (after Fuel 0.26.2) |
+| B12 | `Q8_1` GGUF tensors are a typed error on Fuel (GAP-125); not re-verified on 0.25.x. | `model_runner.rs` comment | open (verify) |
+| B13 | Adopt mlmf and retire `src/gguf/`; settle `hub.rs` placement (portfolio decision). | `src/gguf/{mod,parser}.rs`, `hub.rs` | held |
+| B14 | Dead debug surface: nine `debug-*` features and eight macros in `src/debug.rs` have zero call sites. Re-wire or delete. | `Cargo.toml:31-41` | open |
+
+### C. Tests and verification
+
+| # | Item | Status |
+|---|---|---|
+| C1 | Wire the ~43 "PLUMBING" `#[ignore]` tests to the synthetic checkpoint/GGUF generator (`src/test_models.rs`); 60+ ignores still gated on a real checkpoint. | open |
+| C2 | Re-derive the deleted batch-correctness and FlashAttention parity tests on Fuel (FUEL-GAPS #11). | open |
+| C3 | Missing coverage: API-key expiry, SSE framing / streaming error frame, MemoryLeakDetector on non-Linux, `load_stress_tests` still simulates requests. | open |
+| C4 | M3.5 validation framework (cross-feature matrix, determinism, `lightbulb::set_seed`, perplexity/MMLU, benchmark DB) has rows but no code. | open |
+| C5 | `tests/gpu_paged_vs_contiguous.rs`: blocked on Fuel (`fuel-model-llama/cuda` does not build on 0.25.10, `host_buffer_to_bytes` is `pub(crate)`). | held (Fuel) |
+
+### D. Provenance and documentation
+
+| # | Item | Status |
+|---|---|---|
+| D1 | `docs/THIRD_PARTY_NOTICES.md` does not exist but `README.md:116` links it; `src/backend/marlin_ffi.rs` still carries Marlin-derived material. CireSnave's provenance rule makes this the first docs row. | open (first) |
+| D2 | Deployment, performance-tuning, troubleshooting, architecture and v0.x to v1.0 migration guides; document the ~17 `LIGHTBULB_*` env vars (README lists 2). | open |
+| D3 | Fix stale user-facing docs: README (Fuel pin `0.20.61`, offline CPU quickstart subcommand, M3.6 multi-GPU section), QUICKSTART (`--config`, GET `/v1/models`), DEMO (`sessions` table). | open |
+| D4 | About 25 docs describe deleted code (candlelight, `src/model/`, `kv_compression`, `multi_gpu`, AWQ loaders) as COMPLETE or in progress (BATCHING_STATUS, FLASHATTENTION_INTEGRATION, M2/M3_1/M5_COMPRESSION/OPTION_C_COMPLETE, PRUNING_IMPLEMENTATION, GLOSSARY, KV_COMPRESSION_INTEGRATION, MULTI_GPU_INTEGRATION, M3_6, M3_SPECULATIVE, ...). Add a superseded banner to each (docs only); deleting them is a decision. | open (banners) / held (delete) |
+| D5 | Research-track rows missing: SCS future enhancements; TACQ / QuIP / Reff-valence / module distillation (ADVANCED_QUANTIZATION_RESEARCH); GPTQ-format loading and Marlin deliverables (conversion scripts, QUANTIZATION_GUIDE). | open (low) |
+
+### E. Existing ROADMAP lines that the code contradicts (repair, do not trust)
+
+As of `baa2f63`: 653 and 1653 ("M5 KV cache compression COMPLETE": `kv_compression.rs` was deleted in
+#195); 780 and 2256 (M3.3 fused kernels "done": `src/model/` is gone); 828
+(`enhanced_correctness_tests.rs` listed as live debt: file absent); 1279 (PersistAnt `0.7.4`, now
+`0.9.24`); 1399-1403 (`set_priority` "not yet CALLED"); 1984 (chunk sizing COMPLETE: example and
+`ChunkedPrefill` absent); 2103 (cache control tools `get_cache_usage` / `tag_region` / `evict_tagged`: 0
+hits); 2199 (speculative MVP; `SpeculativeDecoder` removed); 2205-2210 ("AWQ Phase 2 COMPLETE":
+`marlin.rs` and `kernels/` gone); 2665-2674 (M4.1 name mapping COMPLETE in `src/loaders.rs`: file absent,
+Fuel loaders hard-gate to Llama); 2798 (checkpoint captures KV cache: it writes `None`); 3326 (Prometheus
+"planned": `/metrics` exists); M6.5 criteria ticked with 0 hits for `VirtualMemoryPool` /
+`ElasticCache`; 4157 (`src/loaders.rs`); CR.1.1 "Infrastructure exists: ParallelKvCache +
+ParallelCacheBuilder" (both removed). Repair status: **open** (one docs PR per cluster; each repair
+re-checks its line against `origin/main` first, since line numbers drift).

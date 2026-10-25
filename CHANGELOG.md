@@ -3,6 +3,8 @@
 ## 0.19.19
 
 ### Added
+- ROADMAP: spec-to-roadmap audit section (rows A1-A12 serving/API, B1-B14 engine/Fuel, C1-C5 tests, D1-D5 docs/provenance, plus the existing ROADMAP lines that contradict the code). Docs only.
+
 - `docs/THIRD_PARTY_NOTICES.md`: credits `src/backend/marlin_ffi.rs`'s origin (`guoqingbao/attention.rs`, MIT; CireSnave's 2026-08-20 interface ruling unchanged), records removed third-party material, and says plainly that a per-dependency licence list is not yet generated.
 
 ### Fixed
