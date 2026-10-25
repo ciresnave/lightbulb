@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.19.16
+
+### Fixed
+- `BlockPrefixIndexFor::record` is now first-writer-wins. It used to re-point an already-indexed chain at the newest prompt's session, so when that session finished `forget_donor` dropped the chain and the still-live original donor was no longer found: with prefix sharing on, a live donor served exactly ONE sharer and every later request ran cold (measured 2026-10-24, CPU, `cache_stats.hits` 2 of 4). New test `a_finished_sharer_does_not_orphan_the_live_donor`.
+
+### Added
+- `examples/prefix_sharing_bench.rs`: prefix sharing OFF vs ON through the real `ModelRunner` (TTFT, decode tok/s, no-share control, greedy bit-identity OFF vs ON, host load at start/end). ROADMAP slice 6.
+
+### Changed
+- CI: re-pinned the advisory CodeRipper portfolio check to coderipper `ee9c395` (0.9.24).
+
 ## 0.19.15
 
 ### Changed

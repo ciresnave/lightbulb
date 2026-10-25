@@ -506,8 +506,7 @@ impl<D: Copy + Eq + std::hash::Hash + std::fmt::Debug> BlockPrefixIndexFor<D> {
 
     /// Entries currently held — distinct from `stats().blocks_indexed`, which
     /// is a cumulative counter of every `record` addition ever made and never
-    /// decreases. This is the live size: both a re-pointed chain (`record`'s
-    /// own `release_donor` path) and a `forget_donor` call remove from it.
+    /// decreases. This is the live size: a `forget_donor` call removes from it.
     pub fn len(&self) -> usize {
         self.by_hash.len()
     }
@@ -546,17 +545,25 @@ impl<D: Copy + Eq + std::hash::Hash + std::fmt::Debug> BlockPrefixIndexFor<D> {
         let hashes = self.chain_hashes(tokens);
         let mut added = 0;
         for (i, h) in hashes.into_iter().enumerate() {
-            let entry = PrefixEntry {
-                donor,
-                blocks: i + 1,
-            };
-            if let Some(prev) = self.by_hash.insert(h, entry) {
-                // Re-pointing an existing chain at a new donor: release the old.
-                self.release_donor(prev.donor);
-            } else {
-                added += 1;
+            // First writer wins. Re-pointing an existing chain at the new
+            // prompt's session (the old behavior) lost the original donor as
+            // soon as that session finished -- `forget_donor` drops every
+            // entry it owns -- so a long-lived donor served exactly ONE
+            // sharer and every later one went cold (measured 2026-10-24,
+            // ROADMAP slice 6). A still-indexed chain is already backed by a
+            // donor that holds identical KV for these blocks.
+            if self.by_hash.contains_key(&h) {
+                continue;
             }
+            self.by_hash.insert(
+                h,
+                PrefixEntry {
+                    donor,
+                    blocks: i + 1,
+                },
+            );
             *self.donor_refs.entry(donor).or_insert(0) += 1;
+            added += 1;
         }
         self.stats.blocks_indexed += added;
         added
@@ -627,12 +634,6 @@ impl<D: Copy + Eq + std::hash::Hash + std::fmt::Debug> BlockPrefixIndexFor<D> {
         self.by_hash.retain(|_, e| e.donor != donor);
         self.donor_refs.remove(&donor);
         before - self.by_hash.len()
-    }
-
-    fn release_donor(&mut self, donor: D) {
-        if let Some(n) = self.donor_refs.get_mut(&donor) {
-            *n = n.saturating_sub(1);
-        }
     }
 }
 
@@ -2020,6 +2021,37 @@ mod tests {
         );
         assert_eq!(idx.stats().hits, 1);
         assert_eq!(idx.stats().tokens_shared, 8);
+    }
+
+    /// ROADMAP slice 6 regression: a live donor must keep serving sharers
+    /// after an earlier sharer finishes. `record` used to re-point the shared
+    /// chain at the sharer, so `forget_donor(sharer)` orphaned the still-live
+    /// donor and every later request went cold.
+    #[test]
+    fn a_finished_sharer_does_not_orphan_the_live_donor() {
+        let mut idx = BlockPrefixIndex::new(4);
+        let mut p = pool(32, 4);
+        let (donor, sharer) = (p.open(), p.open());
+        let prefix: Vec<u32> = (0..8).collect(); // 2 whole blocks
+        let with_tail = |t: u32| -> Vec<u32> { prefix.iter().copied().chain([t; 5]).collect() };
+
+        idx.record(&with_tail(100), donor);
+        assert!(
+            idx.lookup(&with_tail(101))
+                .is_some_and(|m| m.donor == donor)
+        );
+        idx.record(&with_tail(101), sharer);
+        // The sharer only adds the blocks the donor did not already hold.
+        assert_eq!(
+            idx.lookup(&prefix).expect("prefix still indexed").donor,
+            donor
+        );
+        idx.forget_donor(sharer);
+        let m = idx
+            .lookup(&with_tail(102))
+            .expect("the live donor must still be found after the sharer finished");
+        assert_eq!((m.donor, m.blocks), (donor, 2));
+        assert!(idx.is_donor(donor) && !idx.is_donor(sharer));
     }
 
     #[test]
