@@ -1489,9 +1489,21 @@ slower per token than contiguous on this hardware), not re-discover.
    second sharer 134-144 s in BOTH arms with `cache_stats.hits` 2 of 4: **defect found** --
    `BlockPrefixIndexFor::record` was last-writer-wins, so the first sharer's finish (`forget_donor`)
    orphaned the live donor. Fixed first-writer-wins in 0.19.16 (`a_finished_sharer_does_not_orphan_the_live_donor`;
-   mutation drill: guard off -> only that test red). **Open:** rerun CPU + GPU after the fix before any
-   default flip (default stays OFF); TTFT of ~135 s for 145 tokens on a 135M model is anomalous (decode
-   7.8 tok/s) and unexplained -- suspect per-shape graph build, unconfirmed.
+   mutation drill: guard off -> only that test red). **Open:** rerun CPU after the fix before any
+   default flip (default stays OFF).
+   **GPU attempt 2026-10-25** (main `8f53879`, Fuel 0.25.10, `fuel-cuda`, RTX 4070 Laptop, window 2; host
+   cpu 24-72%, free RAM 4-16 GiB, OneDrive + other jobs running): OFF arm only, SmolLM2-135M Q8_0, ~145-token
+   prefix: TTFT 264 s (cold control), 298 s (sharer0); TinyLlama Q4_0 ~1226-token prefix: one warm-up request
+   unfinished after ~25 min at 24% GPU util. The ON arm never ran, so **no GPU verdict**. TTFT (135 s CPU,
+   264-298 s GPU, for 145 tokens on a 135M model, decode 4-8 tok/s) is NOT per-shape graph build. Fuel lane root cause
+   (fuel `c39b9e53`, CPU, SmolLM2-135M Q8_0, 145 tokens): `PagedSessionScheduler::prefill_pass` calls
+   `forward_paged_step` for EVERY prompt token (a full graph re-plan each, 146 optimizer calls) although the default plan
+   is PlanOnce, which only `decode_one` uses; routing prefill through `forward_paged_step_persistent` took TTFT
+   159.5 s -> 27.0 s (same tokens). Fix is in a Fuel PR, needs no Lightbulb change -- re-measure after the Fuel release
+   (then native Q8_0 QMatMul). GPU 264-298 s is probably the same cause, unconfirmed; tracked in #227. Blocks a flip decision on any device. `tests/gpu_paged_vs_contiguous.rs` no longer compiles on Fuel
+   0.25.10 under `--features fuel-cuda`: `LlamaModel::forward_with_kv_context_captured` is gated on `fuel-model-llama/cuda`, and
+   that crate itself fails to build with it (E0603 `fuel_tensor::pipelined_bridge::host_buffer_to_bytes` is `pub(crate)`);
+   blocked on Fuel, so the old "~10x" CUDA figure cannot be re-measured yet.
    GPU caveat (Fuel lane, static grep at fuel `ac29b53c`, 2026-10-24, nothing run): the fused `PagedAttn` kernel
    exists on CPU only; CUDA runs the decomposed primitive recipe, whose last missing primitive is now registered,
    so the "~10x/token" figure is a Fuel 0.24.0 number to re-measure on 0.25.x (`tests/gpu_paged_vs_contiguous.rs`)

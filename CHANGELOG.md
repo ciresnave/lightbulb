@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.19.17
+
+### Changed
+- ROADMAP slice 6: Fuel-lane root cause of the TTFT (prefill re-plans per token; fix in Fuel, #227) and the GPU attempt 2026-10-25 (OFF arm only, no verdict).
+
 ## 0.19.16
 
 ### Fixed
