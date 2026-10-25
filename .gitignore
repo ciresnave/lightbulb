@@ -37,3 +37,7 @@ supertool
 # leaves scripts/__pycache__/ behind as untracked noise.
 __pycache__/
 *.pyc
+
+# scripts/awq_reference/reproduce-reference.sh's own venv (WSL2-only; see its
+# README.md) -- the committed fixture is the deliverable, not this venv.
+scripts/awq_reference/.venv/
