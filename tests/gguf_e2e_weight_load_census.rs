@@ -207,10 +207,12 @@ impl Census {
 /// this test went red against 0.20.71 until `KNOWN_FAILURES` below was
 /// updated to the new cause, not just left alone because the file count
 /// didn't change.
-const KNOWN_FAILURES: &[(&str, &str)] = &[
-    ("stories15M-q4_0.gguf", "freq_base"),
-    ("stories15M-q8_0.gguf", "freq_base"),
-];
+///
+/// **Empty since the Fuel 0.25.10 bump (2026-10-24):** both `stories15M` files, the
+/// last two entries (`freq_base` not defaulted), now load end to end, so the
+/// census reports 11 loaded and 0 failed. The guard stays: a file that starts
+/// failing again is an UNKNOWN cause until it is listed here with its substring.
+const KNOWN_FAILURES: &[(&str, &str)] = &[];
 
 /// The two assertion passes `KNOWN_FAILURES` needs: every actual failure is
 /// accounted for, and every expected failure actually happened. Split out of

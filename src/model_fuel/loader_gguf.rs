@@ -50,14 +50,8 @@ fn derive_llama_full_config(
     // `derive_config` takes fuel's OWN GGUF reader, not `crate::gguf::Content`
     // — a second, metadata-only parse of the same file (not a second mmap of
     // the weights; `Content::read` reads only the header + tensor-info table).
-    let mut file = std::fs::File::open(path).with_context(|| {
-        format!(
-            "opening {} for fuel's own GGUF metadata read",
-            path.display()
-        )
-    })?;
-    let fuel_content = fuel_loaders::quantized::gguf_file::Content::read(&mut file)
-        .map_err(|e| anyhow::anyhow!("fuel gguf_file::Content::read({}): {e:?}", path.display()))?;
+    let fuel_content = fuel_loaders::quantized::gguf_file::Content::open(path)
+        .map_err(|e| anyhow::anyhow!("fuel gguf_file::Content::open({}): {e:?}", path.display()))?;
     let derived = fuel_loaders::quantized::config_from_gguf::derive_config(
         &fuel_content,
         fuel_loaders::quantized::arch::Architecture::Llama,

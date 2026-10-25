@@ -92,14 +92,8 @@ fn require_qwen3_architecture(
 /// keep that function's own cyclomatic complexity down, same reasoning as
 /// `derive_llama_full_config`'s own separation from its caller.
 fn derive_qwen3_config(path: &Path) -> Result<Qwen3Config> {
-    let mut file = std::fs::File::open(path).with_context(|| {
-        format!(
-            "opening {} for fuel's own GGUF metadata read",
-            path.display()
-        )
-    })?;
-    let fuel_content = fuel_loaders::quantized::gguf_file::Content::read(&mut file)
-        .map_err(|e| anyhow::anyhow!("fuel gguf_file::Content::read({}): {e:?}", path.display()))?;
+    let fuel_content = fuel_loaders::quantized::gguf_file::Content::open(path)
+        .map_err(|e| anyhow::anyhow!("fuel gguf_file::Content::open({}): {e:?}", path.display()))?;
     qwen3_config_from_gguf_content(&fuel_content).map_err(|e| {
         anyhow::anyhow!(
             "fuel qwen3_config_from_gguf_content({}): {e}",
