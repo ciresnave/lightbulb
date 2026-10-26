@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.19.32
+
+### Added
+- `docs/PATENT-SWEEP.md`: in-progress patent sweep record (idea list, two Nvidia claim reads). Explicitly not a clearance; searches still to run.
+
 ## 0.19.31
 
 ### Changed
