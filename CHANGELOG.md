@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.19.33
+
+### Changed
+- `docs/PATENT-SWEEP.md`: searches for ideas 4, 5, 7, 8 recorded, three more patents read (US12198030B1, US20250322047A1, CN120952055B), cross-reference to the Fuel lane for ideas 1-2, search-surface weakness stated. Still incomplete.
+
 ## 0.19.32
 
 ### Added
