@@ -96,6 +96,7 @@ cache mechanics and OverMind on orchestration policy, with Lightbulb owning the 
    this search yet. **Do not commit engineering budget beyond early prototyping without a professional
    patent search first** — this is the one technique in the whole brief where "nothing found" is weak
    evidence of safety, not strong evidence.
+   Added 2026-10-27 (CireSnave: "Add it to what Lightbulb will look into when that point comes."): the closest KV-cache-transfer-across-model-families prior art is Cache-to-Cache (Fu et al., Tsinghua, arXiv:2510.03215 v2 2026-03-02), which fuses a Sharer's KV cache into a Receiver's with a small trained per-pair fuser (both LLMs frozen), reporting +6.4-14.2% accuracy over the single model and ~2.5x lower latency than text on Qwen/Llama/Gemma pairs of 0.6B-14B, limited by per-pair training, white-box access to both models, and a weak Sharer hurting; read its claims-side/patent status together with Interlat and LatentMAS when the track opens.
 
 ---
 

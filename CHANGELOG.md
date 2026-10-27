@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.19.34
+
+### Changed
+- `ROADMAP.md` research track item 3: Cache-to-Cache (arXiv:2510.03215) added as prior art to read when the track opens.
+
 ## 0.19.33
 
 ### Changed
