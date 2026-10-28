@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Lightbulb API Server
 //!
 //! Provides OpenAI-compatible API with Lightbulb-specific extensions.
@@ -1698,8 +1697,15 @@ mod tests {
             real_config.get_hosts().first().map_or_else(
                 || "127.0.0.1".to_string(),
                 |h| {
-                    let tokio_postgres::config::Host::Tcp(s) = h;
-                    s.clone()
+                    match h {
+                        tokio_postgres::config::Host::Tcp(s) => s.clone(),
+                        // `Host` has a `Unix` variant only on cfg(unix); on Windows this arm is unreachable.
+                        #[allow(
+                            unreachable_patterns,
+                            reason = "Host::Unix exists only on cfg(unix)"
+                        )]
+                        _ => panic!("tcp host expected"),
+                    }
                 }
             ),
             real_config.get_ports().first().copied().unwrap_or(5432)
