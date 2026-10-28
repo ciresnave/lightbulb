@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Lightbulb API Server
 //!
 //! Provides OpenAI-compatible API with Lightbulb-specific extensions.
