@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 // M5.B: Multi-Turn Context Management
 //
 // Efficient conversation history storage with semantic search, context window budgeting,

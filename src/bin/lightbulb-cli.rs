@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Lightbulb CLI - Chat with models running on Lightbulb server
 //!
 //! Usage:

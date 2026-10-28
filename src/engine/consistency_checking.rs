@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Consistency Checking for Knowledge Base
 //!
 //! NLI-based validator preventing contradictions in the knowledge base.

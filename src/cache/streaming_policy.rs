@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! StreamingLLM-style KV cache eviction policy
 //!
 //! Implements the StreamingLLM approach for constant-memory long-context generation:

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 // M5.D: Adaptive Context Selection
 //
 // Dynamic provider selection based on query analysis. Routes to the best

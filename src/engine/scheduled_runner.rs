@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Tick-based, multi-session job loop for a batched scheduler (board item 97:
 //! "get Candle out of Lightbulb" — the integration half of wiring
 //! `fuel_inference::multi_session::SessionScheduler`'s already-proven batched

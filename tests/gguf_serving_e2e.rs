@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Serving a real GGUF end to end.
 //!
 //! Known-red baseline, measured 2026-08-14 BEFORE this work, on

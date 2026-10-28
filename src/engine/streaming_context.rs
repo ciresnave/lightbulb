@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 // M5.A: Streaming Context Injection
 //
 // Real-time context updates during generation. Allows providers to push context

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Memory Utility Functions
 //!
 //! Helper functions for memory estimation and formatting.

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Quantization utilities for GGUF models and post-quantization optimizations
 //!
 //! This module provides tools for working with quantized weights in GGUF format,

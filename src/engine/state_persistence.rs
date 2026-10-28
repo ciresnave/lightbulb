@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! State Persistence and Recovery
 //!
 //! Checkpoint/restore infrastructure for full inference state:

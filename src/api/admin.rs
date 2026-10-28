@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Admin API Module
 //!
 //! Provides administrative endpoints for system management, cache control,

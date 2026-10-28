@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Wires `FuelPagedSchedulerDriver` (`super::scheduler_driver_paged`) into
 //! `ModelRunner::start`'s `fuel-engine` arm (board item 97's actual remaining
 //! deliverable: everything before this file only unblocked it). All three

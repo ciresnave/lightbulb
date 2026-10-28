@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! The corpus README states measured figures. This re-derives them.
 //!
 //! # Why a test in lightbulb gates a file outside lightbulb

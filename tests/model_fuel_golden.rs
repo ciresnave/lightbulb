@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! # Tier 3: golden-vector regression fixtures for `model_fuel`.
 //!
 //! ## READ THIS FIRST — what tier 3 is, and what it is not

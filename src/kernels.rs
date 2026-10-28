@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Feature-gated kernels backends (CUDA/Metal/Flash-Attn)
 
 #[cfg(feature = "cuda")]

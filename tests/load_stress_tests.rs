@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 // M3.5 Load and Stress Testing Infrastructure
 //
 // This module provides comprehensive load and stress testing for Lightbulb:

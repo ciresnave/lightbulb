@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Memory-Aware Priority Scheduler
 //!
 //! Extends SlotPool with memory budgeting, priority-based admission control,

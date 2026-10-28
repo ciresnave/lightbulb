@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Tests for the knowledge-aware decomposition system
 
 use lightbulb::engine::{

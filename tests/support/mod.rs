@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 // Shared test support: a tiny synthetic Llama-shaped checkpoint.
 //
 // # Why this exists

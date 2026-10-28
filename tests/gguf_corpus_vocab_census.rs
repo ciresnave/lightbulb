@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! How many VOCABULARIES is the GGUF corpus, as distinct from how many FILES?
 //!
 //! The corpus size is quoted in ROADMAP.md and in this repo's tokenizer claims

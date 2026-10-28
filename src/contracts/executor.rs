@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Generic contract executor — the retry/fallback loop.
 //!
 //! This module contains `execute_contract`, which drives the full

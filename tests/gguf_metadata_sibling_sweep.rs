@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Does any key lightbulb reads have SIBLINGS in a real GGUF that a single-key
 //! read would silently discard?
 //!

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! How many corpus checkpoints Fuel's own loader can SERVE end-to-end --
 //! constructing a real model with real decoded weights, not just reading
 //! metadata.

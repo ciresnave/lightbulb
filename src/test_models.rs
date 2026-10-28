@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Locating the TinyLlama checkpoint the test suite uses, in one place.
 //!
 //! # Why this exists

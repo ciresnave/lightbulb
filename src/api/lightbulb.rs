@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Lightbulb Extensions API Module
 //!
 //! The `/v1/lightbulb/{knowledge,reasoning,state,tools}/*` routes are

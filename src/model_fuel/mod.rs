@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! The Fuel-backed model path — Lightbulb's tensor core, ported off Candle.
 //!
 //! **This module is under construction and coexists with `crate::model`**, which

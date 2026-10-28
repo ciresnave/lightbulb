@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Production-ready context providers with real implementations.
 //!
 //! This module provides production-quality implementations of context providers:

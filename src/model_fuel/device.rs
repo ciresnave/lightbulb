@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Where the Fuel path's device is chosen — and the only place it is.
 //!
 //! `generate.rs` originally hardcoded `Device::cpu()`. Spreading that choice

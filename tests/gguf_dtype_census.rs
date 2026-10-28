@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Which tensor dtypes each corpus checkpoint actually uses, and which of them
 //! this build cannot represent.
 //!

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Shared tracing-subscriber initialization for every binary in this crate.
 //!
 //! Extracted from `main.rs` after Sourcery's review of the JSON-logging PR

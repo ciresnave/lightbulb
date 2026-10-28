@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 // Doc-link lints live HERE, as crate-level attributes, NOT in RUSTDOCFLAGS.
 //
 // `RUSTDOCFLAGS=-D rustdoc::broken_intra_doc_links` applies to EVERY rustdoc

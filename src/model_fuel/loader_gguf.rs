@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Loading a GGUF-quantized Llama-shape checkpoint into Fuel.
 //!
 //! # Provenance — read before touching this file

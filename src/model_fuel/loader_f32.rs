@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! All-f32 weight loading — the parity oracle's dtype.
 //!
 //! # Why this exists separately

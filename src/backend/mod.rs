@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 // Backend module for hardware-specific implementations
 //
 // This module contains FFI bindings and custom operations for

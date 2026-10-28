@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.19.35
+
+### Changed
+- Every tracked `.rs` file (136) now starts with `// SPDX-License-Identifier: MIT OR Apache-2.0` (prepend only, no existing line changed). Licence files unchanged.
+
 ## 0.19.34
 
 ### Changed

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Inference Engine Components
 //!
 //! This module contains the core scheduling and execution infrastructure

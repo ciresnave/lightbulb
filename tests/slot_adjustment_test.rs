@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Integration tests for runtime slot adjustment
 //!
 //! Tests the complete flow: monitoring → decision → adjustment

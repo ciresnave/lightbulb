@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 // Rust FFI bindings for Marlin CUDA kernels (AWQ quantization)
 //
 // PROVENANCE RESOLVED 2026-08-20 — ruled by CireSnave. Do not delete this
