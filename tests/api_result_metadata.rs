@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! The API must report what the runner observed, not plausible constants.
 //!
 //! Goes through the real router and handler via `ServiceExt::oneshot`, so

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 /// Benchmark Lightning GGUF vs Candle GGUF loading
 ///
 /// This benchmark:

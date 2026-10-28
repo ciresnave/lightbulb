@@ -5,6 +5,16 @@
 ### Added
 - `.coderipper.toml`: SEC-002 waivers (reason, owner, removal condition) for 9 files whose commits hold placeholder tokens or SQL column names that gitleaks reads as keys; each hit read at its commit, none is a credential.
 
+## 0.19.36
+
+### Fixed
+- `src/api/mod.rs` test helper: matching `tokio_postgres::config::Host` is refutable on cfg(unix) (E0005 under CodeRipper on Linux); now a `match` with a panic arm.
+
+## 0.19.35
+
+### Changed
+- Every tracked `.rs` file (136) now starts with `// SPDX-License-Identifier: MIT OR Apache-2.0` (prepend only, no existing line changed). Licence files unchanged.
+
 ## 0.19.34
 
 ### Changed

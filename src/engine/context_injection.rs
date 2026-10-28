@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 // M4.F: Context Injection API
 //
 // Provides external context providers for dynamic prompt enrichment.

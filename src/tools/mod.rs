@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Tool Registry with Architecture-Aware Capability Detection
 //!
 //! This module provides automatic detection of model capabilities (text, vision,

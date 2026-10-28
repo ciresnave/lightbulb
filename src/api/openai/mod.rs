@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! OpenAI-Compatible API Endpoints
 //!
 //! Implements OpenAI API v1 specification for drop-in compatibility

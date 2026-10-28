@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 // M4 Integration Tests: End-to-End Pipeline
 //
 // Tests the complete M4 query analysis and context pipeline:

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Middleware Module
 //!
 //! Provides authentication, rate limiting, and audit logging middleware.

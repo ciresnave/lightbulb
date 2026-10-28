@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 // M4.E: Relevance-Aware Search
 //
 // Provides intelligent search strategies beyond simple similarity matching.

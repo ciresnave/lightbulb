@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Slot Pool for Continuous Batching
 //!
 //! This module implements a dynamic slot allocation system that enables continuous

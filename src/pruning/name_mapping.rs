@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Dynamic tensor name mapping for GGUF models
 //!
 //! This module provides intelligent mapping between abstract layer identifiers

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Determine a checkpoint's chat template by generating under each candidate.
 //!
 //! Tier 4 of `api::chat_template`'s resolution order, and the only tier that is

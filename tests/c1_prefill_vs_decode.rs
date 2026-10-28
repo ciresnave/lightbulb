@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! C1 — does a single-pass PREFILL of N tokens agree with a PREFILL of N-1
 //! followed by one DECODE step?
 //!

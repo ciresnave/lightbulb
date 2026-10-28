@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! The acceptance gate for the Fuel-backed runner.
 //!
 //! Asserts the completion is COHERENT ENGLISH CONTINUING THE PROMPT, not merely

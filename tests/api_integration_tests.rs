@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Integration tests for the API server
 //!
 //! Tests OpenAI compatibility and Lightbulb-specific features.

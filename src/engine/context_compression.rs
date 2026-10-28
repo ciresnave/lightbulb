@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 // M5.C: Context Compression System
 //
 // Text-level compression strategies for reducing context size while preserving

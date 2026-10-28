@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Model pruning utilities (M5)
 //!
 //! `PruningPolicy`/`StructuredPattern`/`PruningMask`/`WandaScorer`/

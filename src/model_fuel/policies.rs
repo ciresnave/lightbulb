@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Policy → allocator adapter: Lightbulb **decides**, Fuel **executes**.
 //!
 //! This module is the seam between Lightbulb's cache *policies* (which span is

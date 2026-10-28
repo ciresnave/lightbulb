@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Policy shared between Fuel serving paths.
 //!
 //! Everything above the realize boundary is Lightbulb's: which token to pick,

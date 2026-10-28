@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! The `FuelPagedSchedulerDriver` adapter: wraps
 //! `fuel_inference::multi_session::PagedSessionScheduler` so
 //! `crate::engine::scheduled_runner::run_scheduled_jobs` can drive any

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Loading a GGUF-quantized Qwen3-shape checkpoint into Fuel.
 //!
 //! The Llama loader (`loader_gguf.rs`) needs `fuel_loaders::quantized::

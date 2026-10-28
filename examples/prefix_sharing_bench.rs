@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! ROADMAP research-track item 1, slice 6: prefix sharing OFF vs ON.
 //!
 //! Serves one GGUF through the real `ModelRunner` twice -- once per arm,

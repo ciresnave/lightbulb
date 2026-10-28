@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Dynamic batch size calculation based on hardware resources
 //!
 //! This module implements adaptive batch sizing that automatically scales

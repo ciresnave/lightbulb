@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Chat Completions Endpoint
 //!
 //! OpenAI-compatible `/v1/chat/completions` endpoint with streaming support

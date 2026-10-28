@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Loud, machine-detectable test skips — and a way to make a skip a failure
 //! where the precondition was supposed to be provisioned.
 //!

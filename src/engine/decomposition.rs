@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Knowledge-Aware Iterative Decomposition
 //!
 //! This module implements a decomposition system that adapts based on the current

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Mixture-of-Experts (MoE) Routing Infrastructure
 //!
 //! Implements efficient routing-friendly batching for MoE models (e.g., Mixtral).

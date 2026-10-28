@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! The decode loop — Lightbulb driving Fuel, one token at a time.
 //!
 //! # Why Lightbulb owns this loop

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Tier-2 oracle: differential tests against kiss-ref.
 //!
 //! kiss-ref is a **spec-exact reference implementation** of the KISS base-op

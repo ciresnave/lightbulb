@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Hardware-aware initialization example
 //!
 //! Demonstrates automatic configuration of inference engine based on

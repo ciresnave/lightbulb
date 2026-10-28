@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Configuration for segmented KV cache with attention-driven eviction
 //!
 //! Controls all aspects of the segmented cache system:

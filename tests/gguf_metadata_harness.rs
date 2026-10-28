@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Lightbulb's half of a cross-implementation disagreement harness for GGUF
 //! metadata, plus the comparator that reads two halves.
 //!

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! GGUF weight extraction and manipulation utilities
 //!
 //! This module provides low-level operations for reading and writing tensor weights

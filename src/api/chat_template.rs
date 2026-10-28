@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Resolve and render a model's chat template.
 //!
 //! `/v1/chat/completions` used to build its prompt as

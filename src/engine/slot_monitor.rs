@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Runtime monitoring and dynamic adjustment for SlotPool
 //!
 //! This module adds adaptive slot pool sizing based on actual resource usage.

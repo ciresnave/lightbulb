@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! No document may assert a LIVE panic macro at a path where none is live.
 //!
 //! A correction can outlive the defect it corrects, and then it is a defect. This

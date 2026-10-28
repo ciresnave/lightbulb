@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Shared contract helpers: prompt injection, parsing dispatch, retry policy.
 //!
 //! This module is **pure** — no async, no AppState.  All network/model I/O lives

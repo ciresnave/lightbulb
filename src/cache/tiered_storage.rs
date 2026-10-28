@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Synchronous disk storage for the tiered KV cache demotion path.
 //!
 //! `TieredStorageManager`/`DemotedSegment`/`StorageTier` (the actual

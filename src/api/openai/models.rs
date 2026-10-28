@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Models Endpoint
 //!
 //! OpenAI-compatible `/v1/models` (list) and `/v1/models/{model}` (retrieve).

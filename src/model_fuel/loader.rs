@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Loading a Llama-shape checkpoint into Fuel, from a local directory.
 //!
 //! Fuel's own `Llama2cModel::from_hub` goes through `hf_hub`. Lightbulb needs to

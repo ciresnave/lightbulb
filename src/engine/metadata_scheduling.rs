@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 // M4.A: Metadata-Driven Scheduling
 //
 // Provides intelligent request routing based on query metadata.

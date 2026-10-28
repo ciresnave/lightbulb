@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! A byte-level BPE (`gpt2`) GGUF's rebuilt tokenizer must be byte-identical to
 //! the checkpoint's own.
 //!

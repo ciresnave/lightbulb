@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! PersistAnt adoption: the 6 `migrations/V{n}__*.sql` files ported to
 //! `persistant_relational::Migration`, run via `persistant_sqlx::PgBackend`.
 //! Step 1 proved this path non-destructive alongside the (then still

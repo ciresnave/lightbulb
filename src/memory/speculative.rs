@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Speculative Decoding Memory Estimation
 //!
 //! Memory accounting for dual-model (draft + target) speculative decoding scenarios.
