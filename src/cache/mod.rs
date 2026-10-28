@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! KV Cache implementations for parallel batching
 //!
 //! This module itself contains no third-party code. The fork it used to

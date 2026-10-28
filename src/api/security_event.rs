@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Security alerting hook (security audit item 4).
 //!
 //! Fired from `auth_middleware::auth_failure_response` the moment a client

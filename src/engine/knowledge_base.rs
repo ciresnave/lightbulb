@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Knowledge Base Construction and Management
 //!
 //! Implements a knowledge base that integrates with KV cache eviction to extend

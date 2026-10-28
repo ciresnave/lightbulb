@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Adaptive Mixed-Precision Inference
 //!
 //! Dynamic per-layer precision selection based on activation statistics and

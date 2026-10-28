@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Which Fuel model type decodes — abstracted, so a second one can arrive.
 //!
 //! # Why a trait for a single implementor

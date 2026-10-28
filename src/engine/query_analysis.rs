@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Query Analysis and Intent Classification
 //!
 //! Fast preprocessing to understand query intent before routing to retrieval or LLM.

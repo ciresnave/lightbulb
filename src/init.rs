@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Hardware-aware system initialization
 //!
 //! This module provides automatic configuration of batch size, chunk size,

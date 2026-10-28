@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Cache Span Tagging System
 //!
 //! Provides semantic metadata tracking for regions of the KV cache without storing

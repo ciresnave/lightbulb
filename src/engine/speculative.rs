@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Speculative Decoding
 //!
 //! This module implements speculative decoding, where a small "draft" model

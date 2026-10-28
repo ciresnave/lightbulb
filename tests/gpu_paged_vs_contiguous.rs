@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! **GPU paged decode vs GPU contiguous decode — the placement question, measured.**
 //!
 //! # Why this exists

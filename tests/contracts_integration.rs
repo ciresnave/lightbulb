@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Integration tests for the Output Contracts system.
 //!
 //! These tests exercise `execute_contract` end-to-end — prompt injection,

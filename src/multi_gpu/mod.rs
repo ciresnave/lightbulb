@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 pub mod config;
 /// Multi-GPU inference support (M3.6)
 ///

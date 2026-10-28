@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Behavioural: a chat model prompted with its own template answers and stops.
 //!
 //! Run: `cargo test --release --features fuel-engine --test chat_template_e2e -- --ignored --nocapture --test-threads=1`

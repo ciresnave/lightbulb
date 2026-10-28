@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Lightning GGUF loader with memory-mapped tensor access
 //!
 //! This module provides fast GGUF file loading using memory mapping for 2-10x speedup

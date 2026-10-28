@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Performance optimizations for M4 components.
 //!
 //! This module provides performance enhancements:

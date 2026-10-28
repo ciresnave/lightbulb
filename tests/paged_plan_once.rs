@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! **Plan-once paged decode: the A/B.**
 //!
 //! Fuel landed plan-once paged decode at `7ed43541`, flag-gated and default off

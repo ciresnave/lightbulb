@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 /// Generic eviction policy trait for KV cache management.
 ///
 /// Different policies can be combined using a voting system to make

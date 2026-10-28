@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Segment-aware eviction policy with attention-driven relevance scoring
 //!
 //! This policy uses the model's own attention weights to determine which segments

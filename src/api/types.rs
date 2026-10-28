@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Shared type definitions for API
 
 pub use crate::api::openai::chat::{

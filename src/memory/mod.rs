@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Memory Estimation
 //!
 //! Unified memory accounting for models, KV caches, and activations.

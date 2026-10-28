@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! A reference `tokenizer.json` is only admissible if its vocabulary matches the
 //! GGUF's. That rule is stated in `gguf_bpe_tokenizer_fidelity.rs` and was, until
 //! now, enforced by nothing.

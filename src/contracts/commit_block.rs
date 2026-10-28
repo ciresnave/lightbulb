@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Contract C — CommitBlock
 //!
 //! The model is asked to wrap its committed output inside a unique pair of

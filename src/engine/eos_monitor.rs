@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Rolling EOS-fire rate, as a signal that a heuristically-chosen chat
 //! template is wrong.
 //!

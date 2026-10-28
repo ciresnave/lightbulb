@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Core Memory Estimation Types
 //!
 //! Provides structs for calculating memory usage of models, caches, and activations.

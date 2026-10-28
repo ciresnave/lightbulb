@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Every GGUF in a local corpus either rebuilds a tokenizer or refuses clearly.
 //!
 //! # Why this exists

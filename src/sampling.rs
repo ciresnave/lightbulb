@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Sampling strategies (top-k, temperature) and utilities
 
 use rand::distr::Distribution;

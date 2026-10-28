@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Makes the loud-skip convention discoverable by FAILING when it is not used.
 //!
 //! A convention nobody can find is a convention nobody follows. `src/

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Completions Endpoint
 //!
 //! OpenAI-compatible `/v1/completions` endpoint for raw text completion

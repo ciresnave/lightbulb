@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Contract A — EnumChoice
 //!
 //! The most reliable structured-output contract for small LLMs.

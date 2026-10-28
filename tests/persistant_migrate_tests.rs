@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Proves PersistAnt adoption Step 1's non-destructiveness claim
 //! (docs/PERSISTANT_ADOPTION_DESIGN.md §7 Q1): that
 //! `persistant_sqlx::PgBackend::migrate` with the ported, idempotency-fixed

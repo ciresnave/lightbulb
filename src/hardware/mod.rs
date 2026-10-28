@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Hardware detection and adaptive configuration
 //!
 //! This module provides hardware capability detection and automatic configuration

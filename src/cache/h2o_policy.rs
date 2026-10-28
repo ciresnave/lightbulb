@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 use super::eviction_policy::EvictionPolicy;
 /// H2O (Heavy Hitters Oracle) eviction policy.
 ///

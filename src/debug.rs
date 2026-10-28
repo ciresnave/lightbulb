@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Conditional debug output system
 //!
 //! Enable specific debug categories via feature flags:

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! TLS Certificate Management
 //!
 //! Provides flexible certificate management for different deployment scenarios:

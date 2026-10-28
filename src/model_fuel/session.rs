@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! One sequence's decode state — and the reason it is a type rather than three
 //! locals.
 //!

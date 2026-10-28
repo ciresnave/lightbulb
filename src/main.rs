@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Lightbulb API Server
 //!
 //! Main entry point for the Lightbulb inference server.

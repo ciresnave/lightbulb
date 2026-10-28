@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Reasoning Efficiency Controls
 //!
 //! Budget-aware decoding with chain-of-thought management, overthinking detection,

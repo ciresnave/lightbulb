@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Prefix KV Cache
 //!
 //! Implements hash-and-reuse caching for common prompt prefixes.

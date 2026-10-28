@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Rendering is asserted against literal expected output, never "contains".
 //! A template that emitted the right markers in the wrong order would pass a
 //! `contains` check while prompting the model incorrectly — which is the exact

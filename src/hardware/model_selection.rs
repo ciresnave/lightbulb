@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Adaptive model selection based on hardware capabilities
 //!
 //! This module maps hardware profiles to optimal model choices, automatically

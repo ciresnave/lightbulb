@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! A GGUF's rebuilt tokenizer must be byte-identical to the checkpoint's own.
 //!
 //! # Why this exists

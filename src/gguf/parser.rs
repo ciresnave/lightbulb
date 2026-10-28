@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Low-level GGUF format parsing from memory-mapped bytes
 //!
 //! This module implements direct parsing of GGUF v3 file format according to:

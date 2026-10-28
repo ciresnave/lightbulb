@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Contract B — TaggedFields
 //!
 //! The second most reliable structured-output contract.  The model is asked to
