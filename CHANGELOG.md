@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.19.37
+
+### Added
+- `.coderipper.toml`: SEC-002 waivers (reason, owner, removal condition) for 9 files whose commits hold placeholder tokens or SQL column names that gitleaks reads as keys; each hit read at its commit, none is a credential.
+
 ## 0.19.34
 
 ### Changed
