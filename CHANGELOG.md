@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.19.42
+## 0.20.0
 
 ### Fixed
 - CodeRipper OPS-011 `cli-basics`: `lightbulb`, `lightbulb-cli` and `lightbulb-probe` answer `--version`/`-V`/`--help`/`-h` with exit 0 and output before any logging, configuration or database access; an unknown flag exits 2. The server now parses flags with clap (it scanned `env::args()` for `--no-auth` before). Log output carries no ANSI escapes unless stdout is a terminal and `NO_COLOR` is unset. Flags are parsed in a synchronous `main`, before the tokio runtime (and, for the probe, before the tracing subscriber) exists. New `tests/cli_basics.rs` runs all three binaries.
