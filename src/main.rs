@@ -24,12 +24,15 @@ struct Cli {
     no_auth: bool,
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    // Flags first: `--help`/`--version` (and a rejected flag) must exit before
-    // logging, configuration or any database access (CodeRipper OPS-011).
-    let cli = Cli::parse();
+fn main() -> Result<()> {
+    // Flags first, in a synchronous entrypoint: `--help`/`--version` (and a
+    // rejected flag) must exit before the async runtime, logging,
+    // configuration or any database access exist (CodeRipper OPS-011).
+    run(Cli::parse())
+}
 
+#[tokio::main]
+async fn run(cli: Cli) -> Result<()> {
     lightbulb::logging::init_tracing("info,lightbulb=debug");
 
     // Load configuration from environment

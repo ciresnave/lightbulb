@@ -60,6 +60,13 @@ fn version_and_help_exit_zero_with_output_and_no_ansi() {
             let out = run(exe, &[flag]);
             assert_eq!(out.status.code(), Some(0), "{name} {flag}: {out:?}");
             assert!(!out.stdout.is_empty(), "{name} {flag}: empty stdout");
+            let text = String::from_utf8_lossy(&out.stdout);
+            if flag == "--help" || flag == "-h" {
+                assert!(
+                    text.contains("Usage:") && text.contains(name),
+                    "{name} {flag}: not a usage text: {text:?}"
+                );
+            }
             assert_no_ansi(name, &[flag], &out);
         }
     }
@@ -91,10 +98,15 @@ fn unknown_flag_exits_two() {
 #[test]
 fn server_startup_refusal_writes_no_ansi_to_a_pipe() {
     let out = run(BINS[0].1, &[]);
-    assert_ne!(out.status.code(), Some(0), "{out:?}");
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
     assert_no_ansi("lightbulb", &[], &out);
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert!(
-        !out.stdout.is_empty() || !out.stderr.is_empty(),
-        "expected a refusal message"
+        combined.contains("refusing to start"),
+        "expected the no-database refusal, got: {combined:?}"
     );
 }

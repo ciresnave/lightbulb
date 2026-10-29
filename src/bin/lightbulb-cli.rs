@@ -110,10 +110,13 @@ struct ErrorDetail {
     error_type: String,
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    let args = Args::parse();
+fn main() -> anyhow::Result<()> {
+    // Parsed before the async runtime exists (CodeRipper OPS-011).
+    run(Args::parse())
+}
 
+#[tokio::main]
+async fn run(args: Args) -> anyhow::Result<()> {
     // Get API key from arg or environment
     let api_key = args
         .api_key
