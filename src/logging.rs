@@ -7,6 +7,7 @@
 //! logic is a second thing to drift, which is exactly what happened the
 //! first time there were two.
 
+use std::io::IsTerminal;
 use tracing_subscriber::{Layer, layer::SubscriberExt, util::SubscriberInitExt};
 
 /// Initialize the global tracing subscriber. Plain-text by default
@@ -41,7 +42,11 @@ pub fn init_tracing(default_env_filter: &str) {
     > = if json_logs {
         Box::new(tracing_subscriber::fmt::layer().json())
     } else {
-        Box::new(tracing_subscriber::fmt::layer())
+        // ANSI colour only when the log stream is a terminal and `NO_COLOR` is
+        // unset: piped or captured output must not carry escape codes
+        // (CodeRipper OPS-011). The fmt layer writes to stdout.
+        let ansi = std::io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none();
+        Box::new(tracing_subscriber::fmt::layer().with_ansi(ansi))
     };
 
     registry.with(fmt_layer).init();

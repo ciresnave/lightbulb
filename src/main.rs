@@ -4,13 +4,35 @@
 //! Main entry point for the Lightbulb inference server.
 
 use anyhow::Result;
+use clap::Parser;
 use lightbulb::api::{ApiConfig, ApiServer};
 use lightbulb::engine::{MemoryAwareScheduler, memory_aware_scheduler::MemoryAwareConfig};
 use std::env;
 use std::sync::Arc;
 
+/// Lightbulb inference server. Configuration is by environment variable
+/// (`DATABASE_URL`, `LIGHTBULB_BIND_ADDRESS`, `LIGHTBULB_MODELS_DIR`, ...; see
+/// QUICKSTART.md); the only flag is `--no-auth`.
+#[derive(Parser, Debug)]
+#[command(name = "lightbulb", version)]
+struct Cli {
+    /// Run without authentication, for this one invocation. Deliberately a
+    /// flag and not an env var: it must be a choice made per start, not
+    /// something that can sit in a deployment's environment and silently
+    /// apply to every future start. See `lightbulb::api::validate_auth_policy`.
+    #[arg(long)]
+    no_auth: bool,
+}
+
+fn main() -> Result<()> {
+    // Flags first, in a synchronous entrypoint: `--help`/`--version` (and a
+    // rejected flag) must exit before the async runtime, logging,
+    // configuration or any database access exist (CodeRipper OPS-011).
+    run(Cli::parse())
+}
+
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn run(cli: Cli) -> Result<()> {
     lightbulb::logging::init_tracing("info,lightbulb=debug");
 
     // Load configuration from environment
@@ -31,12 +53,8 @@ async fn main() -> Result<()> {
     // a weaker default now that nothing reads this value yet anyway.
     let jwt_secret = env::var("LIGHTBULB_JWT_SECRET").ok();
 
-    // `--no-auth` is a CLI flag, deliberately NOT an env var: running
-    // without authentication must be a choice made for this one invocation,
-    // not something that can end up sitting in a deployment's environment
-    // and silently apply to every future start. See
-    // `lightbulb::api::validate_auth_policy`.
-    let no_auth = env::args().any(|arg| arg == "--no-auth");
+    // `--no-auth`: see `Cli::no_auth` for why this is a flag and not an env var.
+    let no_auth = cli.no_auth;
 
     // Only a peer IP listed here may supply `X-Forwarded-For` to the
     // pre-auth attempt limiter (security audit item 3) — see
@@ -144,10 +162,25 @@ async fn main() -> Result<()> {
     }
     tracing::info!("Listening on: {}", config.bind_address);
 
-    // Create memory-aware scheduler. Phase 4 config-management item:
-    // these five had no env override and no startup validation at all
-    // before this -- see MemoryAwareConfig::validate's own doc comment.
-    let scheduler_config = MemoryAwareConfig {
+    let scheduler_config = scheduler_config_from_env();
+    scheduler_config.validate()?;
+
+    let scheduler = Arc::new(std::sync::Mutex::new(MemoryAwareScheduler::new(
+        scheduler_config,
+    )));
+
+    // Create and start server
+    let server = ApiServer::new(config, scheduler).await?;
+    server.serve().await?;
+
+    Ok(())
+}
+
+/// Create memory-aware scheduler. Phase 4 config-management item:
+/// these five had no env override and no startup validation at all
+/// before this -- see MemoryAwareConfig::validate's own doc comment.
+fn scheduler_config_from_env() -> MemoryAwareConfig {
+    MemoryAwareConfig {
         max_memory_bytes: env::var("LIGHTBULB_MAX_MEMORY_BYTES")
             .ok()
             .and_then(|v| v.parse().ok())
@@ -168,18 +201,7 @@ async fn main() -> Result<()> {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(0.1),
-    };
-    scheduler_config.validate()?;
-
-    let scheduler = Arc::new(std::sync::Mutex::new(MemoryAwareScheduler::new(
-        scheduler_config,
-    )));
-
-    // Create and start server
-    let server = ApiServer::new(config, scheduler).await?;
-    server.serve().await?;
-
-    Ok(())
+    }
 }
 
 /// `1`/`true`/`yes`/`on` (any case, surrounding whitespace ignored) enable a

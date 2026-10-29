@@ -159,7 +159,7 @@ const CONVERSATION: [(&str, &str); 3] = [
 const MAX_NEW_TOKENS: usize = 48;
 
 #[derive(Parser, Debug)]
-#[command(name = "lightbulb-probe")]
+#[command(name = "lightbulb-probe", version)]
 #[command(about = "Determine a checkpoint's chat template by generating under each candidate")]
 struct Args {
     /// Checkpoint directory, or a single .gguf file.
@@ -186,8 +186,15 @@ struct Args {
     force: bool,
 }
 
+fn main() -> anyhow::Result<()> {
+    // Parsed before the async runtime and before the tracing subscriber exist,
+    // so `--help`/`--version`/a bad flag have no side effects (CodeRipper
+    // OPS-011).
+    run(Args::parse())
+}
+
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
+async fn run(args: Args) -> anyhow::Result<()> {
     // Before anything that might log. Without a global subscriber every
     // `tracing::warn!` in the library is a no-op — including the one in
     // `special_tokens` saying a checkpoint declares no BOS/EOS. `ModelRunner`'s
@@ -199,7 +206,6 @@ async fn main() -> anyhow::Result<()> {
     // choice.
     lightbulb::logging::init_tracing("info,lightbulb=debug");
 
-    let args = Args::parse();
     probe(
         &args.model_dir,
         args.yes,
