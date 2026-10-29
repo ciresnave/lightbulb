@@ -56,7 +56,7 @@ use persistant_relational::RelationalBackend;
 use std::path::Path;
 
 /// API server configuration
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ApiConfig {
     /// PostgreSQL connection string (optional — when None, auth/audit/rate-limiting are disabled)
     pub database_url: Option<String>,
@@ -515,6 +515,30 @@ fn is_loopback_database_url(database_url: &str) -> bool {
         .and_then(|u| u.host_str().map(str::to_string))
         .is_some_and(|host| is_loopback_bind(&host))
 }
+/// Hand-written so a `{:?}` of the config can never print `database_url`
+/// (it carries the password) or `jwt_secret`: the URL is redacted, secrets show
+/// only whether they are set, and the remaining fields are elided.
+impl std::fmt::Debug for ApiConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ApiConfig")
+            .field(
+                "database_url",
+                &self
+                    .database_url
+                    .as_deref()
+                    .map(crate::logging::redact_database_url),
+            )
+            .field("bind_address", &self.bind_address)
+            .field("jwt_secret", &self.jwt_secret.as_ref().map(|_| "<set>"))
+            .field(
+                "security_alert_email",
+                &self.security_alert_email.as_ref().map(|_| "<set>"),
+            )
+            .field("no_auth", &self.no_auth)
+            .finish_non_exhaustive()
+    }
+}
+
 /// Picks the `TlsPolicy` for `connect_with` from `database_url` itself,
 /// so swapping in `connect_with` (whose own default is `Require`) can't
 /// silently weaken a `DATABASE_URL` that already works today.
@@ -1426,6 +1450,27 @@ mod tests {
     #[test]
     fn is_loopback_bind_refuses_a_non_localhost_hostname() {
         assert!(!is_loopback_bind("mybox.lan:8080"));
+    }
+
+    #[test]
+    fn api_config_debug_never_prints_the_database_password_or_jwt_secret() {
+        let mut config = config_with(
+            Some("postgres://app:hunter2@db.internal:5432/lightbulb?sslpassword=hunter3"),
+            "127.0.0.1:8080",
+            false,
+        );
+        config.jwt_secret = Some("jwt-s3cret".to_string());
+        config.security_alert_email = Some("ops@example.com".to_string());
+        for text in [format!("{config:?}"), format!("{config:#?}")] {
+            for secret in ["hunter2", "hunter3", "jwt-s3cret", "ops@example.com"] {
+                assert!(!text.contains(secret), "{secret} leaked: {text}");
+            }
+            assert!(
+                text.contains("postgres://db.internal:5432/lightbulb"),
+                "{text}"
+            );
+            assert!(text.contains("127.0.0.1:8080"), "{text}");
+        }
     }
 
     fn config_with(database_url: Option<&str>, bind_address: &str, no_auth: bool) -> ApiConfig {

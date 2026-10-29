@@ -157,7 +157,8 @@ async fn run(cli: Cli) -> Result<()> {
 
     tracing::info!("Starting Lightbulb API server");
     match &database_url {
-        Some(url) => tracing::info!("Database: {}", url),
+        // Never the raw URL: it carries the password (userinfo or `?password=`).
+        Some(url) => tracing::info!("Database: {}", lightbulb::logging::redact_database_url(url)),
         None => tracing::info!("Database: none (auth/audit disabled)"),
     }
     tracing::info!("Listening on: {}", config.bind_address);

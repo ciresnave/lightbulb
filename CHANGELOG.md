@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.20.1
+
+### Security
+- The startup log line `Database: <url>` printed the whole `DATABASE_URL`, including the password. It now logs only `scheme://host:port/dbname` via `lightbulb::logging::redact_database_url` (userinfo, query string and fragment dropped; an unparseable value becomes `<redacted>`). `ApiConfig`'s `Debug` is now hand-written and redacts `database_url`, `jwt_secret` and `security_alert_email` (no call site printed it, but the derived `Debug` would have). Nothing was published: crates.io has only the `lightbulb 0.0.0` placeholder. To be handed to RedactAnt when it exists (ROADMAP B16).
+
 ## 0.20.0
 
 ### Fixed
