@@ -1,0 +1,48 @@
+# CodeRipper SEC-002 reads git history (gitleaks over every commit), so a placeholder stays reported after HEAD stops holding it.
+# Each entry below was read at its commit on 2026-10-28 (gitleaks 8.30.1, 15 findings in 9 files, 824 commits): none is a credential.
+# Owner: the lightbulb lane. Remove when the history is rewritten or the commit ages out of the scanned window.
+
+[[allow]]
+check = "SEC-002"
+file = "CLI.md"
+reason = "history only or placeholder: commit 2050a020 holds a curl example with a placeholder bearer token (YOUR-ADMIN-KEY), not a credential. Owner: lightbulb lane. Remove when history is rewritten or the commit ages out."
+
+[[allow]]
+check = "SEC-002"
+file = "QUICKSTART.md"
+reason = "history only or placeholder: commit 2050a020 holds curl examples with placeholder bearer tokens (lb-a1b2c3d4e5f6..., lb-xyz789..., lb-your-key), not credentials. Owner: lightbulb lane. Remove when history is rewritten or the commit ages out."
+
+[[allow]]
+check = "SEC-002"
+file = "IMPLEMENTATION_SUMMARY.md"
+reason = "history only or placeholder: commit 2050a020 holds a placeholder key (lb-a1b2c3d4e5f6...) and a curl example with a placeholder bearer token (bootstrap-key), not credentials. Owner: lightbulb lane. Remove when history is rewritten or the commit ages out."
+
+[[allow]]
+check = "SEC-002"
+file = "DEMO.md"
+reason = "history only or placeholder: commit 2050a020 holds a placeholder admin key (lb-a1b2c3d4e5f6...), not a credential. Owner: lightbulb lane. Remove when history is rewritten or the commit ages out."
+
+[[allow]]
+check = "SEC-002"
+file = "DEMO_SCRIPTS.md"
+reason = "history only or placeholder: commit 2050a020 holds placeholder keys (lb-64-hex-chars...), not credentials. Owner: lightbulb lane. Remove when history is rewritten or the commit ages out."
+
+[[allow]]
+check = "SEC-002"
+file = "docs/M3_5_CORRECTNESS_VALIDATION_FRAMEWORK.md"
+reason = "history only or placeholder: commit c5b7d804 holds the SQL column name throughput_tokens_per_sec, which the generic-api-key rule takes for a key. Owner: lightbulb lane. Remove when history is rewritten or the commit ages out."
+
+[[allow]]
+check = "SEC-002"
+file = "docs/M3_5_TESTING_HARDENING.md"
+reason = "history only or placeholder: commit c5b7d804 holds the SQL column name throughput_tokens_per_sec, which the generic-api-key rule takes for a key. Owner: lightbulb lane. Remove when history is rewritten or the commit ages out."
+
+[[allow]]
+check = "SEC-002"
+file = "docs/diff-filtered-candle_vs_candle-vllm.patch"
+reason = "history only or placeholder: history only (deleted at HEAD): commit 98acb6ae holds a diff of upstream docs with curl examples using a placeholder bearer token (YOUR_API_KEY), not a credential. Owner: lightbulb lane. Remove when history is rewritten or the commit ages out."
+
+[[allow]]
+check = "SEC-002"
+file = "docs/papers/markdown/reassessinglayerpruninginllmsnewinsightsandmethods.md"
+reason = "history only or placeholder: history only (deleted at HEAD): commit 98acb6ae holds a paper's table of numbers (0.2940 +- 0.0204) that the generic-api-key rule takes for a key. Owner: lightbulb lane. Remove when history is rewritten or the commit ages out."
