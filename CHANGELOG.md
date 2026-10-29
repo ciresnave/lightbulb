@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.19.39
+
+### Changed
+- `docs/PATENT-SWEEP.md`: read in full the independents of CN120144300A, CN113383346A, US20220318633A1 and the previously partly read US8838659B2, US11132610B2, US20250061316A1, US20240370699A1, US12362764B2 (rows 8-15); all clear on Google text. Still INCOMPLETE: search coverage for ideas 1-2, 6, 11, 12.
+
 ## 0.19.38
 
 ### Changed
