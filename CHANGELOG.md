@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.19.39
+
+### Removed
+- **Breaking (schema):** migration V8 drops the unused `user_sessions` table and its four indexes (ROADMAP A9; nothing in `src/` ever read or wrote it). Irreversible; V3 is unchanged so existing databases converge.
+
 ## 0.19.38
 
 ### Changed

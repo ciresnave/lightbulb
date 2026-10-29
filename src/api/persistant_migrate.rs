@@ -115,7 +115,12 @@ const V7_CREATE_AUTH_FAILURE_COUNTS: &str = "CREATE TABLE IF NOT EXISTS auth_fai
  );\
  CREATE INDEX IF NOT EXISTS idx_auth_failure_counts_window_start ON auth_failure_counts(window_start);";
 
-/// The 7 migrations, ported. Versions and descriptions match the original
+/// ROADMAP A9: `user_sessions` (V3) was dead schema -- no reader or writer in
+/// `src/`. Dropping it also drops its indexes. Irreversible; see
+/// `migrations/V8__drop_user_sessions.sql`.
+const V8_DROP_USER_SESSIONS: &str = "DROP TABLE IF EXISTS user_sessions;";
+
+/// The 8 migrations, ported (V1-V7) plus V8, which is new. Versions and descriptions match the original
 /// `V{n}__{description}.sql` filenames; each migration's SQL text lives in
 /// its own module-level const above (kept out of this function so its own
 /// line count stays short -- the SQL itself, not the wiring, is what's long).
@@ -136,6 +141,7 @@ pub fn migrations() -> Vec<Migration> {
             "create_auth_failure_counts",
             V7_CREATE_AUTH_FAILURE_COUNTS,
         ),
+        Migration::new(8, "drop_user_sessions", V8_DROP_USER_SESSIONS),
     ]
 }
 
