@@ -1,5 +1,14 @@
 # Glossary
 
+> ## ⚠️ PARTLY SUPERSEDED — some of it describes code that no longer exists
+>
+> Some entries refer to `src/cache/kv_compression.rs` and `src/model/chunked_prefill.rs`, which are not in
+> the tree (removed with the candlelight migration, PRs #195/#196, 2026-10-22) (checked
+> against `origin/main` 526d800 on 2026-10-29). Any "complete" or "in progress" status
+> below is historical and has **not** been re-validated. Current status is
+> `ROADMAP.md`. Kept as provenance; deleting it is a separate decision.
+
+
 Domain terms used across this repo's docs. **A term appearing here does not mean the feature it
 names is wired into the serving path** — `ROADMAP.md` repeatedly distinguishes "implemented" from
 "implemented and exercised," and this glossary preserves that distinction per-term rather than
@@ -7,11 +16,11 @@ flattening it.
 
 ## Backends and formats
 
-- **candlelight** — Lightbulb's in-tree fork of Hugging Face Candle; the default, shipping
-  inference backend (`cargo build` with no features).
-- **Fuel** (`fuel-engine` feature, `src/model_fuel/`) — The second, opt-in inference backend
-  Lightbulb is being ported to. Not yet at parity with candlelight, which is still what actually
-  serves requests by default.
+- **candlelight** — *Historical.* Lightbulb's former in-tree fork of Hugging Face Candle. Removed
+  entirely (PR #195, 0.16.0, 2026-10-22); nothing in the tree depends on it.
+- **Fuel** (`src/model_fuel/`) — The inference backend: Lightbulb serves requests through Fuel
+  (Cargo features `cuda`/`vulkan` select its GPU backends). The `fuel-engine` feature is an empty
+  legacy flag, formerly the opt-in switch from candlelight to Fuel.
 - **GGUF** — The quantized checkpoint file format that bundles tensors plus tokenizer metadata in
   one file. Lightbulb has its own zero-copy/mmap reader (`src/gguf/parser.rs`), separate from
   candle's loader. "Our reader can open it" (metadata-only) is a different claim from "the library

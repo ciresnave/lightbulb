@@ -1,5 +1,16 @@
 # Pruning Implementation Summary
 
+> ## ⚠️ SUPERSEDED — describes code that no longer exists
+>
+> This document describes `src/pruning/mod.rs` as 1270 lines holding `WandaScorer`, `PruningMask`,
+> `PruningManifest`, `TailPruner` and the rest; that code was removed 2026-10-22 (#195) and `mod.rs` is now
+> a 19-line stub that exports only `name_mapping`. A mask-zeroing helper survives as
+> `quantization::gguf_ops::apply_mask_inplace`, called only from its own tests (checked
+> against `origin/main` 526d800 on 2026-10-29). Any "complete" or "in progress" status
+> below is historical and has **not** been re-validated. Current status is
+> `ROADMAP.md`. Kept as provenance; deleting it is a separate decision.
+
+
 ## Overview
 Implemented comprehensive model pruning functionality including Wanda importance scoring, structured/unstructured pruning, tail pruning utilities, and manifest management.
 
