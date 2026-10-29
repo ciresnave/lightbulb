@@ -175,6 +175,41 @@ jobs:
         with:
           command: check
 
+  # ROADMAP D6: `docs/THIRD_PARTY_LICENSES.tsv` is the per-dependency licence
+  # list, generated from `Cargo.lock` by `cargo deny list` (same `deny.toml`
+  # graph as the `deny` job). This job regenerates it and fails on any byte of
+  # difference, so a dependency bump that changes a licence cannot merge with a
+  # stale list. Regenerate with:
+  #   cargo deny --locked list -f tsv -l crate | grep -v '^lightbulb@' > docs/THIRD_PARTY_LICENSES.tsv
+  # (the workspace crate's own row is excluded: it changes with every version bump).
+  # `cargo-deny` is installed rather than run through `cargo-deny-action`,
+  # which cannot write the listing to a file. Pinned to the version `deny.toml`
+  # was written against.
+  licence-list:
+    name: Dependencies (licence list is current)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      - name: Install cargo-deny
+        run: cargo install cargo-deny --version 0.20.2 --locked
+
+      - name: Fetch dependencies (cargo deny reads the licence files from the sources)
+        run: cargo fetch --locked
+
+      - name: Regenerate and compare
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo deny --locked list -f tsv -l crate | grep -v '^lightbulb@' > "$RUNNER_TEMP/licences.tsv"
+          test "$(wc -l < "$RUNNER_TEMP/licences.tsv")" -gt 300
+          diff -u docs/THIRD_PARTY_LICENSES.tsv "$RUNNER_TEMP/licences.tsv"
+
   # CireSnave 2026-10-23: "Roll out advisory-only, non-blocking CodeRipper
   # checks everywhere." Reusable workflow from CodeRipper's own repo (public),
   # pinned by SHA like every other action here. ADVISORY ONLY: not a required

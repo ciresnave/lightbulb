@@ -30,10 +30,14 @@ bind are **not** in this repository and nothing in the tree provides them (see `
 
 Lightbulb depends on crates from crates.io; each keeps its own licence and copyright notice, which ships in
 the crate's published source. This repository does **not** vendor any dependency (no `vendor/` directory).
-This file does not reproduce a per-dependency licence list: a generated list would have to be produced from
-`Cargo.lock` by a tool (`cargo about`, or `cargo deny list`, given the repository's `deny.toml`) and checked
-in CI, and doing it by hand would invent facts. That is tracked as a ROADMAP row; until it lands, run
-`cargo deny list` for the current set.
+The per-dependency licence list is [`THIRD_PARTY_LICENSES.tsv`](THIRD_PARTY_LICENSES.tsv): one row per
+`crate@version` and one column per SPDX licence found, an `X` marking each licence that crate carries. It is
+**generated, not hand-written**, by `cargo deny --locked list -f tsv -l crate | grep -v '^lightbulb@'` from
+`Cargo.lock` under the repository's `deny.toml` (the workspace crate's own row is excluded, since it changes with
+every version bump), and the CI job `licence-list` regenerates it and fails on any difference. To refresh it
+after a dependency change, run that command and redirect it to the file. It lists licences as `cargo deny`
+detects them from each crate's published source; it does not reproduce the licence texts or copyright notices,
+which ship in each crate's source.
 
 ## 4. Models and data
 
