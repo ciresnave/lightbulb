@@ -162,10 +162,25 @@ async fn run(cli: Cli) -> Result<()> {
     }
     tracing::info!("Listening on: {}", config.bind_address);
 
-    // Create memory-aware scheduler. Phase 4 config-management item:
-    // these five had no env override and no startup validation at all
-    // before this -- see MemoryAwareConfig::validate's own doc comment.
-    let scheduler_config = MemoryAwareConfig {
+    let scheduler_config = scheduler_config_from_env();
+    scheduler_config.validate()?;
+
+    let scheduler = Arc::new(std::sync::Mutex::new(MemoryAwareScheduler::new(
+        scheduler_config,
+    )));
+
+    // Create and start server
+    let server = ApiServer::new(config, scheduler).await?;
+    server.serve().await?;
+
+    Ok(())
+}
+
+/// Create memory-aware scheduler. Phase 4 config-management item:
+/// these five had no env override and no startup validation at all
+/// before this -- see MemoryAwareConfig::validate's own doc comment.
+fn scheduler_config_from_env() -> MemoryAwareConfig {
+    MemoryAwareConfig {
         max_memory_bytes: env::var("LIGHTBULB_MAX_MEMORY_BYTES")
             .ok()
             .and_then(|v| v.parse().ok())
@@ -186,18 +201,7 @@ async fn run(cli: Cli) -> Result<()> {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(0.1),
-    };
-    scheduler_config.validate()?;
-
-    let scheduler = Arc::new(std::sync::Mutex::new(MemoryAwareScheduler::new(
-        scheduler_config,
-    )));
-
-    // Create and start server
-    let server = ApiServer::new(config, scheduler).await?;
-    server.serve().await?;
-
-    Ok(())
+    }
 }
 
 /// `1`/`true`/`yes`/`on` (any case, surrounding whitespace ignored) enable a
