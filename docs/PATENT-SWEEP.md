@@ -19,7 +19,7 @@ Process: `C:\Projects\PATENT-SWEEP-PROCESS.md`. Manifest line covered: **0.19.x*
 11. Capacity-aware Mixture-of-Experts routing with token-drop and expanded-drop policies. [`engine::moe_router`]
 12. Speculative decoding with a draft model and memory estimation that accounts for it. [`engine::speculative`, `memory::speculative`]
 13. Estimating model plus KV memory from quantized sizes to choose batch size and slot count. [`memory::estimate`, `hardware::batch_sizing`]
-14. Weight pruning by mask applied to GGUF tensors. [`quantization::gguf_ops::apply_mask_inplace` only: zeroes F32 weights by a boolean mask, no caller outside its own tests at 526d800. **Corrected 2026-10-29:** this line and rows 12, 14 and 15 formerly named a `pruning` module that applies masks; the Wanda/mask/loader code in `src/pruning` was removed 2026-10-22 (#195) and `pruning` now holds only `name_mapping`]
+14. Weight pruning by mask applied to GGUF tensors. **Not currently a lightbulb capability; kept so the 2026-10-28 search stays traceable.** All that exists is `quantization::gguf_ops::apply_mask_inplace`, a helper that zeroes an already-materialised F32 slice by a boolean mask, with no caller outside its own tests at 526d800. **Corrected 2026-10-29:** this line and the "our difference" cells of rows 12 and 14 formerly named a `pruning` module that applies masks to GGUF tensors; the Wanda/mask/loader code in `src/pruning` was removed 2026-10-22 (#195) and `pruning` now holds only `name_mapping`.
 
 Not swept as lightbulb ideas: the attention, quantized-matmul and KV-block-pool kernels, which run in Fuel (Fuel lane's own sweep).
 

@@ -16,11 +16,11 @@ flattening it.
 
 ## Backends and formats
 
-- **candlelight** — Lightbulb's in-tree fork of Hugging Face Candle; the default, shipping
-  inference backend (`cargo build` with no features).
-- **Fuel** (`fuel-engine` feature, `src/model_fuel/`) — The second, opt-in inference backend
-  Lightbulb is being ported to. Not yet at parity with candlelight, which is still what actually
-  serves requests by default.
+- **candlelight** — *Historical.* Lightbulb's former in-tree fork of Hugging Face Candle. Removed
+  entirely (PR #195, 0.16.0, 2026-10-22); nothing in the tree depends on it.
+- **Fuel** (`src/model_fuel/`) — The inference backend: Lightbulb serves requests through Fuel
+  (Cargo features `cuda`/`vulkan` select its GPU backends). The `fuel-engine` feature is an empty
+  legacy flag, formerly the opt-in switch from candlelight to Fuel.
 - **GGUF** — The quantized checkpoint file format that bundles tensors plus tokenizer metadata in
   one file. Lightbulb has its own zero-copy/mmap reader (`src/gguf/parser.rs`), separate from
   candle's loader. "Our reader can open it" (metadata-only) is a different claim from "the library
