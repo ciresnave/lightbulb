@@ -1,5 +1,15 @@
 # AWQ Phase 1 Implementation Summary
 
+> ## ⚠️ SUPERSEDED — describes code that no longer exists
+>
+> This document describes a root `kernels/` directory (no tracked files), `src/backend/marlin.rs`,
+> `src/backend/marlin_repack.rs`, `src/loaders.rs` and `src/model/llama.rs`, none of which is in the tree
+> (only `src/backend/marlin_ffi.rs` of the files it names survives) (checked
+> against `origin/main` 526d800 on 2026-10-29). Any "complete" or "in progress" status
+> below is historical and has **not** been re-validated. Current status is
+> `ROADMAP.md`. Kept as provenance; deleting it is a separate decision.
+
+
 **Date**: November 6, 2025  
 **Status**: ✅ COMPLETE  
 **Duration**: ~30 minutes

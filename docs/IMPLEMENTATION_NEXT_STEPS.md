@@ -1,5 +1,14 @@
 # Quick Start: Implementing AWQ and Speculative Decoding
 
+> ## ⚠️ SUPERSEDED — describes code that no longer exists
+>
+> This document describes `kernels/build.rs`, `kernels/src/marlin_ffi.rs` and `src/loaders/speculative.rs`,
+> none of which is in the tree (checked
+> against `origin/main` 526d800 on 2026-10-29). Any "complete" or "in progress" status
+> below is historical and has **not** been re-validated. Current status is
+> `ROADMAP.md`. Kept as provenance; deleting it is a separate decision.
+
+
 ## Current Status
 
 ✅ **Task 1 Complete**: Unified memory estimation design created

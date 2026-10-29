@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.19.41
+
+### Changed
+- Docs only: superseded banners on AWQ_PHASE_1_SUMMARY, PROGRESS_SUMMARY, IMPLEMENTATION_NEXT_STEPS, AWQ_KERNEL_SETUP, GLOSSARY and PRUNING_IMPLEMENTATION (ROADMAP D4); `docs/PATENT-SWEEP.md` corrected: it named a `pruning` module that applies masks, but that code was removed 2026-10-22 (idea 14, rows 12 and 14; verdicts unchanged).
+
 ## 0.19.40
 
 ### Removed

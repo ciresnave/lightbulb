@@ -1,5 +1,13 @@
 # AWQ/Marlin Kernel Setup Script
 
+> ## ⚠️ SUPERSEDED — describes code that no longer exists
+>
+> This document describes setting up `kernels/marlin/` and `kernels/src/`, which have no tracked files (checked
+> against `origin/main` 526d800 on 2026-10-29). Any "complete" or "in progress" status
+> below is historical and has **not** been re-validated. Current status is
+> `ROADMAP.md`. Kept as provenance; deleting it is a separate decision.
+
+
 This script helps you set up the Marlin CUDA kernels from candle-vllm for AWQ quantization support.
 
 ## Prerequisites

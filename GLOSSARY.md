@@ -1,5 +1,14 @@
 # Glossary
 
+> ## ⚠️ PARTLY SUPERSEDED — some of it describes code that no longer exists
+>
+> Some entries refer to `src/cache/kv_compression.rs` and `src/model/chunked_prefill.rs`, which are not in
+> the tree (removed with the candlelight migration, PRs #195/#196, 2026-10-22) (checked
+> against `origin/main` 526d800 on 2026-10-29). Any "complete" or "in progress" status
+> below is historical and has **not** been re-validated. Current status is
+> `ROADMAP.md`. Kept as provenance; deleting it is a separate decision.
+
+
 Domain terms used across this repo's docs. **A term appearing here does not mean the feature it
 names is wired into the serving path** — `ROADMAP.md` repeatedly distinguishes "implemented" from
 "implemented and exercised," and this glossary preserves that distinction per-term rather than

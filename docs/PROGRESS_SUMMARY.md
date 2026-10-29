@@ -1,5 +1,14 @@
 # Implementation Progress Summary
 
+> ## ⚠️ PARTLY SUPERSEDED — some of it describes code that no longer exists
+>
+> Its AWQ/Marlin section tells you to copy kernels into a root `kernels/` directory, which has no tracked
+> files; its `src/memory/*` material (`estimate.rs`, `speculative.rs`, `utils.rs`) does exist (checked
+> against `origin/main` 526d800 on 2026-10-29). Any "complete" or "in progress" status
+> below is historical and has **not** been re-validated. Current status is
+> `ROADMAP.md`. Kept as provenance; deleting it is a separate decision.
+
+
 **Date**: November 5, 2025  
 **Status**: Foundation Complete ✅
 
