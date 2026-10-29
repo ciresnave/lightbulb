@@ -100,7 +100,6 @@ The automated demo setup:
 - **Database Tables**:
   - `api_keys` - API key hashes and metadata
   - `audit_logs` - Request audit trail
-  - `user_sessions` - Session management
   - `api_key_usage` - Rate limiting counters
 
 - **Bootstrap Admin Key**:
@@ -457,7 +456,7 @@ rm .demo-secrets.env
 **Keep container, reset data:**
 ```bash
 docker exec lightbulb-postgres-demo psql -U lightbulb -d lightbulb \
-  -c "TRUNCATE api_keys, audit_logs, user_sessions, api_key_usage CASCADE;"
+  -c "TRUNCATE api_keys, audit_logs, api_key_usage CASCADE;"
 
 # Re-run migrations
 sqlx migrate run

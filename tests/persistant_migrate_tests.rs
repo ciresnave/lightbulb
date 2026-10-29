@@ -83,12 +83,12 @@ mod persistant_migrate_tests {
             .await
             .expect("migrate() must succeed against a database refinery already migrated");
 
-        // All 7 are newly recorded in PersistAnt's own ledger -- refinery's
+        // All 8 are newly recorded in PersistAnt's own ledger -- refinery's
         // prior run left no trace in `_sqlx_migrations`, so none of these
         // were already-applied from PersistAnt's point of view. The claim
         // being tested is specifically that running them anyway doesn't
         // error, not that the ledger considered them pre-satisfied.
-        assert_eq!(report.applied, vec![1, 2, 3, 4, 5, 6, 7]);
+        assert_eq!(report.applied, vec![1, 2, 3, 4, 5, 6, 7, 8]);
         assert!(report.already_applied.is_empty());
     }
 
@@ -104,6 +104,21 @@ mod persistant_migrate_tests {
                 .unwrap_or_else(|e| panic!("checking table {table}: {e}"))
                 .get(0);
             assert!(exists, "table {table} should exist after the port");
+        }
+    }
+
+    async fn assert_tables_absent(client: &tokio_postgres::Client, tables: &[&str]) {
+        for table in tables {
+            let exists: bool = client
+                .query_one(
+                    "SELECT EXISTS (SELECT 1 FROM information_schema.tables \
+                     WHERE table_name = $1)",
+                    &[table],
+                )
+                .await
+                .unwrap_or_else(|e| panic!("checking table {table}: {e}"))
+                .get(0);
+            assert!(!exists, "table {table} should be gone after V8");
         }
     }
 
@@ -166,12 +181,14 @@ mod persistant_migrate_tests {
             &[
                 "api_keys",
                 "audit_logs",
-                "user_sessions",
                 "api_key_usage",
                 "auth_attempt_counts",
             ],
         )
         .await;
+
+        // V8 dropped the dead table and, with it, its indexes.
+        assert_tables_absent(&client, &["user_sessions"]).await;
 
         assert_column_exists(&client, "api_keys", "revoked_at").await;
 
@@ -180,7 +197,6 @@ mod persistant_migrate_tests {
             &[
                 "idx_api_keys_key_hash",
                 "idx_audit_logs_endpoint",
-                "idx_user_sessions_session_token",
                 "idx_api_key_usage_window_start",
                 "idx_auth_attempt_counts_window_start",
                 "idx_api_keys_revoked_at",
@@ -215,6 +231,6 @@ mod persistant_migrate_tests {
             second.applied.is_empty(),
             "second run should apply nothing new"
         );
-        assert_eq!(second.already_applied, vec![1, 2, 3, 4, 5, 6, 7]);
+        assert_eq!(second.already_applied, vec![1, 2, 3, 4, 5, 6, 7, 8]);
     }
 }

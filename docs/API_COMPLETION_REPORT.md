@@ -196,7 +196,6 @@ src/api/
 **Tables:**
 - `api_keys` - API key storage with roles
 - `audit_logs` - Request audit trail
-- `user_sessions` - Session management
 
 **Migrations:**
 - `001_create_api_keys.sql`
