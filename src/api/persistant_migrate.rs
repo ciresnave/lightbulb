@@ -171,9 +171,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn migrations_are_versioned_1_through_7_in_order() {
+    fn migrations_are_versioned_1_through_8_in_order() {
         let versions: Vec<i64> = migrations().iter().map(|m| m.version).collect();
-        assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7]);
+        assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8]);
     }
 
     #[test]
