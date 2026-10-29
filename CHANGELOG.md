@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.19.38
+
+### Changed
+- `docs/PATENT-SWEEP.md`: ideas 3, 6, 9-14 searched and recorded; more patents read (US11544597B2, US9098492B2, US20250061316A1, US20240370699A1, US12362764B2, Amazon family partly); source of each read and unreproducible queries stated. Still INCOMPLETE.
+
 ## 0.19.37
 
 ### Added
