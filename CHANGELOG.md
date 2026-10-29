@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.20.2
+
+### Added
+- `docs/THIRD_PARTY_LICENSES.tsv`: the per-dependency licence list, generated from `Cargo.lock` by `cargo deny list` (ROADMAP D6), and a CI job `licence-list` that regenerates it and fails on any difference. `docs/THIRD_PARTY_NOTICES.md` section 3 describes it.
+
 ## 0.20.1
 
 ### Security
