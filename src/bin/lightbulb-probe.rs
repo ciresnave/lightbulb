@@ -159,7 +159,7 @@ const CONVERSATION: [(&str, &str); 3] = [
 const MAX_NEW_TOKENS: usize = 48;
 
 #[derive(Parser, Debug)]
-#[command(name = "lightbulb-probe")]
+#[command(name = "lightbulb-probe", version)]
 #[command(about = "Determine a checkpoint's chat template by generating under each candidate")]
 struct Args {
     /// Checkpoint directory, or a single .gguf file.

@@ -5527,6 +5527,7 @@ it is not).
 | B11 | Prefix sharing rung 2 (position-shifted/mid-prompt donation, RoPE delta-rotation); plan-once prefill (Fuel root cause in slice 6: prefill re-plans per token, fixed in Fuel 0.26.2). | engine-wiring design; #227 | open (after Fuel 0.26.2) |
 | B12 | `Q8_1` GGUF tensors are a typed error on Fuel (GAP-125); not re-verified on 0.25.x. | `model_runner.rs` comment | open (verify) |
 | B13 | Adopt mlmf and retire `src/gguf/`; settle `hub.rs` placement (portfolio decision). | `src/gguf/{mod,parser}.rs`, `hub.rs` | **PM ruling 2026-10-25: (a) delete the dead `src/hub.rs`** (not in `lib.rs`, zero callers); network fetch becomes a future `mlmf-source-hf` crate, a row for mlmf's lane (via PM), not built here. mlmf adoption/retiring `src/gguf/` stays the direction. open (hub.rs delete) |
+| B15 | CodeRipper OPS-011 `cli-basics` (PM [TASK] 2026-10-29): every binary answers `--version`/`-V`/`--help`/`-h` with exit 0 and output, rejects a bogus flag with exit 2, no side effects, no ANSI when not a TTY. Measured by the PM at origin/main: `lightbulb` 0/5 (flags never parsed; started the server path first), `lightbulb-cli` and `lightbulb-probe` lacked `--version`/`-V`. | `src/main.rs`, `src/bin/*.rs`, `src/logging.rs`, `tests/cli_basics.rs` | **done 0.19.42** |
 | B14 | Dead debug surface: nine `debug-*` features and eight macros in `src/debug.rs` have zero call sites. Re-wire or delete. | `Cargo.toml:31-41` | open |
 
 ### C. Tests and verification

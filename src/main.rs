@@ -4,13 +4,32 @@
 //! Main entry point for the Lightbulb inference server.
 
 use anyhow::Result;
+use clap::Parser;
 use lightbulb::api::{ApiConfig, ApiServer};
 use lightbulb::engine::{MemoryAwareScheduler, memory_aware_scheduler::MemoryAwareConfig};
 use std::env;
 use std::sync::Arc;
 
+/// Lightbulb inference server. Configuration is by environment variable
+/// (`DATABASE_URL`, `LIGHTBULB_BIND_ADDRESS`, `LIGHTBULB_MODELS_DIR`, ...; see
+/// QUICKSTART.md); the only flag is `--no-auth`.
+#[derive(Parser, Debug)]
+#[command(name = "lightbulb", version)]
+struct Cli {
+    /// Run without authentication, for this one invocation. Deliberately a
+    /// flag and not an env var: it must be a choice made per start, not
+    /// something that can sit in a deployment's environment and silently
+    /// apply to every future start. See `lightbulb::api::validate_auth_policy`.
+    #[arg(long)]
+    no_auth: bool,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Flags first: `--help`/`--version` (and a rejected flag) must exit before
+    // logging, configuration or any database access (CodeRipper OPS-011).
+    let cli = Cli::parse();
+
     lightbulb::logging::init_tracing("info,lightbulb=debug");
 
     // Load configuration from environment
@@ -31,12 +50,8 @@ async fn main() -> Result<()> {
     // a weaker default now that nothing reads this value yet anyway.
     let jwt_secret = env::var("LIGHTBULB_JWT_SECRET").ok();
 
-    // `--no-auth` is a CLI flag, deliberately NOT an env var: running
-    // without authentication must be a choice made for this one invocation,
-    // not something that can end up sitting in a deployment's environment
-    // and silently apply to every future start. See
-    // `lightbulb::api::validate_auth_policy`.
-    let no_auth = env::args().any(|arg| arg == "--no-auth");
+    // `--no-auth`: see `Cli::no_auth` for why this is a flag and not an env var.
+    let no_auth = cli.no_auth;
 
     // Only a peer IP listed here may supply `X-Forwarded-For` to the
     // pre-auth attempt limiter (security audit item 3) — see

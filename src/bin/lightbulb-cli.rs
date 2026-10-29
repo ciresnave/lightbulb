@@ -11,7 +11,7 @@ use std::io::{self, Write};
 
 /// Lightbulb CLI for interacting with the API server
 #[derive(Parser, Debug)]
-#[command(name = "lightbulb-cli")]
+#[command(name = "lightbulb-cli", version)]
 #[command(about = "Chat with models running on Lightbulb", long_about = None)]
 struct Args {
     /// API key for authentication
