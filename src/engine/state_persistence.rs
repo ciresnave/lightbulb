@@ -43,13 +43,23 @@ pub struct InferenceCheckpoint {
     /// Timestamp of checkpoint creation
     pub timestamp: u64,
 
-    /// KV cache state (serialized)
+    /// KV cache state (serialized).
+    ///
+    /// Always `None` today: the KV cache lives inside the Fuel decode model and
+    /// Fuel exports no way to read it out or restore it, and nothing in
+    /// `src/engine` owns a live cache. Checkpoints written by
+    /// [`create_checkpoint`] therefore carry the knowledge base, decomposition
+    /// history and problems only. The field stays so the on-disk format does
+    /// not change when Fuel gains an export API.
     pub kv_cache_state: Option<KvCacheSnapshot>,
 
     /// Knowledge Base snapshot
     pub kb_snapshot: KnowledgeBaseSnapshot,
 
-    /// Pipeline execution state
+    /// Pipeline execution state.
+    ///
+    /// Always `None` today: lightbulb has no pipeline whose stage state could
+    /// be captured, so [`create_checkpoint`] has nothing to put here.
     pub pipeline_state: Option<PipelineSnapshot>,
 
     /// Decomposition history
@@ -507,9 +517,9 @@ pub fn create_checkpoint(
     InferenceCheckpoint {
         id,
         timestamp,
-        kv_cache_state: None, // TODO: Implement KV cache serialization
+        kv_cache_state: None, // no Fuel export API; see the field docs
         kb_snapshot,
-        pipeline_state: None, // TODO: Implement pipeline state serialization
+        pipeline_state: None, // no pipeline to capture; see the field docs
         decomposition_history,
         active_decompositions,
         active_problems,
@@ -596,6 +606,28 @@ mod tests {
 
         assert_eq!(manager.max_checkpoints, 5);
         assert_eq!(manager.checkpoint_metadata.len(), 0);
+    }
+
+    #[test]
+    fn checkpoint_records_that_kv_and_pipeline_state_are_not_captured() {
+        let temp_dir = TempDir::new().unwrap();
+        let mut manager = CheckpointManager::new(temp_dir.path(), 5).unwrap();
+
+        let checkpoint = create_checkpoint(
+            &KnowledgeBase::new(),
+            vec![],
+            HashMap::new(),
+            HashMap::new(),
+        );
+        manager.save(&checkpoint).unwrap();
+
+        let loaded = manager.load(&checkpoint.id).unwrap();
+        assert!(loaded.kv_cache_state.is_none());
+        assert!(loaded.pipeline_state.is_none());
+        let meta = manager.list_checkpoints();
+        assert_eq!(meta.len(), 1);
+        assert!(!meta[0].has_kv_cache);
+        assert!(!meta[0].has_pipeline_state);
     }
 
     #[test]

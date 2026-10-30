@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.23.13
+
+### Changed
+- B10: `InferenceCheckpoint::kv_cache_state` and `pipeline_state` are documented as always `None` today, with the reason (the KV cache lives inside Fuel, which exports no read/restore API; lightbulb has no pipeline state to capture) in place of the misleading `TODO: Implement` comments. A test pins that a saved checkpoint reports `has_kv_cache = false` and `has_pipeline_state = false`. ROADMAP B10 is marked blocked on a Fuel KV export API. No behaviour change.
+
 ## 0.23.12
 
 ### Added
