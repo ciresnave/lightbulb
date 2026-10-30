@@ -43,7 +43,7 @@ Status: draft for PM review, 2026-10-30. Read at `origin/main` f04cf26b (0.23.5)
 
 ## Measured 2026-10-30: dropping a runner does not return its VRAM
 
-Probe: `examples/vram_return_probe.rs` (this branch's PR). It starts a runner, serves one tiny job so weights and KV pool really exist, reads device-wide used memory from `nvidia-smi`, drops **both** senders (the runner thread then sees `Disconnected` and exits), and polls up to 30 s for memory to fall back to the pre-load level. **Positive control** in every trial: the same load with a clone of the job sender deliberately retained must stay up; it did, in all trials, so the probe can tell "returned" from "never allocated". GPU: RTX 4070 Laptop, 8188 MiB. Under the machine GPU lock, `pwsh -File`. Build: lightbulb a8dcf11 plus the local Fuel patch (`lightbulb-wt-bench`), `fuel-cuda`, release. Model SmolLM2-135M-Instruct.
+Probe: `examples/vram_return_probe.rs` (this PR). It starts a runner, serves one tiny job so weights and KV pool really exist, reads device-wide used memory from `nvidia-smi`, drops **both** senders (the runner thread then sees `Disconnected` and exits), and polls up to 30 s for memory to fall back to the pre-load level. **Positive control** in every trial: the same load with a clone of the job sender deliberately retained must stay up; it did, in all trials, so the probe can tell "returned" from "never allocated". GPU: RTX 4070 Laptop, 8188 MiB. Under the machine GPU lock, `pwsh -File`. Build: lightbulb a8dcf11 plus the local Fuel patch (`lightbulb-wt-bench`), `fuel-cuda`, release. Model SmolLM2-135M-Instruct.
 
 | Case | n | baseline | loaded | 30 s after drop | returned |
 |---|---|---|---|---|---|
@@ -56,8 +56,8 @@ Reading it, and what it does **not** show:
 
 - RELEASE returned memory in **0 of 12** trials (control valid 12 of 12). The result is the same whether or not the probe holds a device, so the retention is not the probe's own handle.
 - Memory is **stable across cycles** (identical figures in trials 1-3): a cache that is reused, not a growing leak.
-- The returned part is a constant ~246-250 MiB regardless of file size or context. The retained part **does not depend on the quantisation** (f16 and Q8_0 end identically, as if weights were dequantised to the same size) and **grows with context** (+352 MiB for ctx 2048 to 4096, about the KV pool at batch 4). That points at weights and the KV pool staying allocated after the runner thread exits.
-- With no device held, ~1056 MiB stays and the pre-load figure was 0, so even the CUDA context outlives the runner: something process-wide in Fuel (or CUDA) keeps device state alive. **I did not find which**; it is Fuel's allocator/device cache until shown otherwise.
+- The returned part is a constant ~246-256 MiB regardless of file size or context. The retained part **does not depend on the quantisation** (f16 and Q8_0 end identically, as if weights were dequantised to the same size) and **grows with context** (+352 MiB for ctx 2048 to 4096, about the KV pool at batch 4). That points at weights and the KV pool staying allocated after the runner thread exits.
+- With no device held, 1056 MiB (absolute; the pre-load figure was 0) is still in use after the drop: the same +1056 as when the probe holds a device (1181 absolute, of which 125 is the held context). So the memory is not kept alive by the probe's own handle, and something in the process (Fuel's allocator or device cache, CUDA, or a library handle) holds it. **I did not find which.**
 - Not measured: whether a **larger** model loaded after the drop reuses that retained memory (then swapping models of different sizes may still fit) or adds to it; whether this build is representative of a published Fuel release; larger real models (only 135M variants are in the corpus).
 
 **Options for P2 (decision needed; the first two are not mine to build):**
