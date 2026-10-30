@@ -22,7 +22,7 @@
 | 12 | MCP | **n/a at the server (client-side in a chat UI)** | `git grep -il mcp -- src` finds nothing. Cherry's MCP docs (`/advanced-basic/extensions/mcp`) cover only MCP-server transport (SSE / streamable HTTP) and say nothing about the model endpoint. Third-party Cherry tutorials say MCP needs a model Cherry marks as function-calling-capable (a wrench icon); that marking is a Cherry-side setting per model, so MCP use needs the endpoint to return usable `tool_calls`, i.e. rows 9-11. **Unverified against Cherry's code.** | via F4 |
 | 13 | System prompts / chat templates | **have** | Jinja templates via `minijinja` (`Cargo.toml:39`), resolved per model including the template stored in GGUF metadata (`src/api/chat_template.rs:1229 resolve_for_serving`, `chat_template/registry.rs`); `lightbulb-cli --system`. The `render` entry has no `tools` parameter (A4). | - |
 | 14 | Quantized formats (GGUF) | **have, measured by test** | `tests/gguf_e2e_weight_load_census.rs`: `KNOWN_FAILURES` is empty (`:216`); CHANGELOG 0.19.x records 11 of 11 weighted corpus files loading, including IQ-coded files. I did not re-run it today (needs `C:\Models\gguf-corpus` and a long build). Q8_1 is a typed error on Fuel (B12, unverified on 0.25.x). | B12 |
-| 15 | Model architectures | **partial: 7 of 30 installed models** | GGUF: `llama` and `qwen3` only; anything else is refused naming the string (`src/gguf/mod.rs:1742-1747`). SafeTensors: Llama-shaped only. **Installed set (`ollama list` + `ollama show <m>`, 30 models, 2026-10-30; "installed" is not "used daily"):** `qwen35` x10, `qwen2` x5, `llama` x4, `phi3` x4, `qwen3` x3, `nemotron_h` x2, `granite` x1, `gemma4` x1. Lightbulb loads `llama` + `qwen3` = **7 of 30**; the 10 `qwen35` (the largest group, incl. his `overmind-qwen35*`/`qwen38*` variants), 5 `qwen2`, 4 `phi3` (Phi-4-mini/phi4), 2 `nemotron_h`, granite and gemma4 are refused. Quantization of the installed set is mostly Q4_K_M/Q6_K (plus Q5_K_M, Q8_0, Q3_K_M, Q4_0); the corpus census covers K-quants, so quant type is not the obstacle, architecture is. **What Fuel has** (file names at fuel `origin/main`, read 2026-10-30; presence of a file is not proof a GGUF loads): `lazy_quantized_qwen2`, `lazy_quantized_phi3`, `lazy_quantized_gemma3`, `lazy_qwen3_5`, `lazy_granite`, `lazy_gemma4_text`; **no** nemotron_h model (only `lazy_mamba2`, `lazy_granitemoehybrid`). **Correction (same day, after reading the serving seam):** a model file existing in Fuel is not enough, because Lightbulb serves only through `fuel_inference::multi_session::PagedDecodeModel`, which at Fuel `origin/main` is implemented for `LlamaModel`, `Llama3Model`, `QuantizedLlama3Model`, `Qwen3Model` and `QuantizedQwen3Model` only (`fuel-inference/src/multi_session.rs:427-591`; the same five at crates.io 0.25.10). Lightbulb cannot add the impl itself (orphan rule: trait and type are both foreign). So `qwen2` and `phi3` are **not** cheap loaders: each needs Fuel to implement `PagedDecodeModel` for its quantized model and ship it on crates.io; `qwen35` additionally needs a quantized GGUF constructor confirmed; `nemotron_h` has no Fuel model I could find. Asked of the Fuel lane 2026-10-30 (ROADMAP F5). | F5 |
+| 15 | Model architectures | **partial** | GGUF: `llama` and `qwen3` only; anything else is refused naming the string (`src/gguf/mod.rs:1742-1747`). SafeTensors: Llama-shaped only. Share of the most-downloaded GGUF repos this covers: 6.5% (table below). Serving more architectures is blocked on **Fuel** (`PagedDecodeModel` is implemented only for Llama and Qwen3 families, `fuel-inference/src/multi_session.rs:427-591`; Lightbulb cannot add impls); priority one is Qwen3.8-27B, a Gated DeltaNet hybrid that Fuel cannot run yet (`forward` is a typed refusal, GAP-368). Plan: `docs/superpowers/specs/2026-10-30-qwen38-27b-plan.md`. | F5, F10 |
 | 16 | SafeTensors BF16 / F16 weights | **missing** | f32 loader only; waits on Fuel #489 (0.25.13+). | B1 |
 | 17 | Sharded checkpoints | **partial** | Sharded SafeTensors done (0.20.4). Sharded GGUF not started; waits on `mlmf-gguf` split helpers (mlmf#187, in PM gate). | B5 (rest) |
 | 18 | GPU (CUDA) and CPU | **have** | Features `cuda`/`fuel-cuda` (`Cargo.toml:15,22`), device chosen in `model_fuel/device.rs`; falls back to CPU deliberately. **Measured 2026-10-30:** the CUDA build ran the prefix-sharing bench end to end (exit 0, bit-identical output; #227 comment). | - |
@@ -35,9 +35,30 @@
 | 25 | Local auth for a desktop UI | **have** | `--no-auth` flag and API keys (`src/main.rs:24,57`); configurable CORS (`LIGHTBULB_CORS_ORIGINS`, `api/mod.rs:324`) so a browser-based UI can call it. | - |
 | 26 | One-step install (single binary / installer) | **unknown** | `git ls-files` shows no installer, MSI or Dockerfile; whether a release binary is wanted is a decision, not a gap I can size. Lightbulb has never been published (patent-sweep record). | F8 |
 
+## Popular model families (Hugging Face Hub, read 2026-10-30)
+
+**Method (so it can be repeated):** the Hub search tool, `repo_types=[model]`, filters `text-generation` + `gguf`, sorted by `downloads`, limit 50, run 2026-10-30. "Downloads" is the figure the Hub reports for each repo; the tool does not say over what window, and each row is one quantisation repo, not one model, so a popular model that is split across many repos is counted in pieces. Family labels are my grouping from repo names and tags; **one family, Ornith, is untagged on six of its seven repos, so its architecture is unknown to me** (one sibling is tagged `qwen3_5_moe`). 50 repos, 45.1M listed downloads.
+
+| Family | Repos | Downloads | Share | Served by Lightbulb today |
+|---|---|---|---|---|
+| Qwen3.5 / 3.8 hybrid (`qwen3_5`, Gated DeltaNet; dense and MoE) | 18 | 15.3M | 34.0% | no |
+| Ornith (ornith-ai; architecture not tagged on 6 of 7 repos) | 6 | 14.9M | 33.0% | no |
+| DeepSeek V4 (MoE) | 3 | 3.2M | 7.1% | no |
+| Qwen2.5 (`qwen2`) | 5 | 2.7M | 5.9% | no |
+| GLM-5.3 (`glm5_next` / `glm_moe_dsa`, MoE) | 4 | 2.3M | 5.1% | no |
+| Qwen3 dense (`qwen3`) | 4 | 2.2M | 4.9% | **yes** |
+| Spark-X2.5 (`spark2_5`) | 3 | 1.5M | 3.3% | no |
+| LFM2.5 (Liquid) | 2 | 0.8M | 1.8% | no |
+| Llama 3.x-based (`llama`) | 2 | 0.7M | 1.6% | **yes** |
+| gpt-oss | 1 | 0.6M | 1.3% | no |
+| Qwen3 MoE (`qwen3moe`) | 1 | 0.5M | 1.0% | no |
+| Speculative-decoding draft model (not a chat model) | 1 | 0.4M | 0.9% | no |
+
+**Reading it:** Lightbulb serves GGUF `llama` and `qwen3` only (`src/gguf/mod.rs:1742-1747`), which covers 3.0M of 45.1M (6.5%) of these downloads. The Qwen3.5/3.8 hybrid family is the largest identifiable one (15.3M) and is CireSnave's first target. The installed-model list (`ollama list`) used in the first version of this census is **dropped as a priority signal**: CireSnave says he uses none of those (2026-10-30, relayed by the PM).
+
 ## What blocks "replace Ollama and Cherry for CireSnave" (in my order)
 
-1. **Architecture breadth (row 15)**, now the top item by evidence: 23 of the 30 installed models, including the largest group, will not load. This is the "priority by installed set" the PM asked for; whether he uses them daily is a question for CireSnave (the PM has put it on the board).
+1. **Architecture breadth (row 15)**, with **Qwen3.8-27B first** (CireSnave: "The first I really want to run is Qwen 3.8 27B on my desktop rig"). It needs work from Fuel (Gated DeltaNet forward, a quantized `qwen35` model, `PagedDecodeModel` for a hybrid, pipeline-parallel on Vulkan) and from Lightbulb (Vulkan and multi-device selection, a per-device B9 plan); see the plan note. After it, the families in the popularity table, in that order.
 2. **Streaming + tools (rows 10, 11)**: inside the OpenAI-compatible surface (no Ollama-API code), but whether Cherry needs streaming tool calls is unverified. **Embeddings (row 8)** drop to low: Cherry's knowledge base works without an embedding model.
 3. **Model management (rows 2-4):** no pull, one model per process, no `run`. These are the daily-use parts of Ollama.
 4. Parameter gaps (row 7), then Vulkan/Metal (rows 19-20) and the Ollama-native API (row 23, WAIT).
