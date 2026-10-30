@@ -36,6 +36,19 @@ pub struct ModelInfo {
     pub object: String,
     pub created: u64,
     pub owned_by: String,
+    /// Not part of the OpenAI schema. Absent when the model's files cannot
+    /// be read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lightbulb_memory: Option<ModelMemory>,
+}
+
+/// What lightbulb knows about the loaded model's memory footprint.
+#[derive(Debug, Clone, Serialize)]
+pub struct ModelMemory {
+    /// Weight bytes on disk (the `.gguf` file, or the SafeTensors shards).
+    /// A lower bound on the weights' memory: the f32 loader upcasts, and the
+    /// KV cache and activations come on top.
+    pub weights_bytes_on_disk: u64,
 }
 
 /// The models this server can actually serve right now.
@@ -46,11 +59,14 @@ fn loaded_models(state: &AppState) -> Vec<ModelInfo> {
     let id = state.config.default_model.clone();
     // `created` is the model file's mtime when it can be read, else 0
     // (OpenAI clients only require an integer).
-    let created = state
+    let model_path = state
         .config
         .models_dir
         .as_ref()
-        .and_then(|dir| std::fs::metadata(std::path::Path::new(dir).join(&id)).ok())
+        .map(|dir| std::path::Path::new(dir).join(&id));
+    let created = model_path
+        .as_ref()
+        .and_then(|p| std::fs::metadata(p).ok())
         .and_then(|m| m.modified().ok())
         .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
         .map_or(0, |d| d.as_secs());
@@ -59,6 +75,12 @@ fn loaded_models(state: &AppState) -> Vec<ModelInfo> {
         object: "model".to_string(),
         created,
         owned_by: "lightbulb".to_string(),
+        lightbulb_memory: model_path
+            .as_deref()
+            .and_then(crate::model_fuel::preflight::weights_lower_bound)
+            .map(|weights_bytes_on_disk| ModelMemory {
+                weights_bytes_on_disk,
+            }),
     }]
 }
 
@@ -156,6 +178,28 @@ mod tests {
         assert_eq!(data.len(), 1, "{body}");
         assert_eq!(data[0]["id"], "tiny.gguf");
         assert_eq!(data[0]["object"], "model");
+    }
+
+    #[tokio::test]
+    async fn reports_the_weights_size_on_disk_and_omits_it_when_unreadable() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("tiny.gguf"), vec![0u8; 123]).unwrap();
+        let mut with_file = state(true);
+        with_file.config.models_dir = Some(dir.path().to_string_lossy().into_owned());
+        let (_, body) = call(with_file, Method::GET, "/v1/models").await;
+        assert_eq!(
+            body["data"][0]["lightbulb_memory"]["weights_bytes_on_disk"], 123,
+            "{body}"
+        );
+
+        // Control: same server, no file at the path -> the field is absent,
+        // not 0 and not an error.
+        let empty = tempfile::tempdir().unwrap();
+        let mut without = state(true);
+        without.config.models_dir = Some(empty.path().to_string_lossy().into_owned());
+        let (status, body) = call(without, Method::GET, "/v1/models").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body["data"][0].get("lightbulb_memory").is_none(), "{body}");
     }
 
     #[tokio::test]
