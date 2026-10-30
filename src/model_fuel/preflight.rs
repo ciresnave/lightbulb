@@ -9,7 +9,7 @@
 //! 2026-10-30), so a Q4_K_M file is about 4x its size on disk. Otherwise the
 //! on-disk size, a LOWER bound. The KV cache and activations come on top, so
 //! a pass is not a promise. **Fuel row 124 (K-quants stay quantized) makes
-//! the GGUF estimate too high; delete [`gguf_resident_bytes`] then.**
+//! the GGUF estimate too high; delete `gguf_resident_bytes` then.**
 
 use std::path::Path;
 
