@@ -223,6 +223,15 @@ jobs:
     uses: ciresnave/coderipper/.github/workflows/portfolio.yml@ee9c3950c510fae136d316fed3bd9ecda343cede # 0.9.24
 
   gates:
+    # `gates` is the one required status context on this repo's `main`, so
+    # anything that must block a merge has to be able to fail THIS job.
+    # `licence-list` (ROADMAP D6) is therefore a `needs` of `gates`, and the
+    # step "licence list is current" below fails the job unless that job's
+    # result is exactly `success`. `if: always()` is load-bearing: when a
+    # `needs` job fails, GitHub SKIPS the dependent job by default, and a
+    # skipped required check is treated as passing.
+    needs: [licence-list]
+    if: ${{ always() }}
     # WINDOWS, NOT LINUX. Windows is the platform this project is developed
     # on, targets CUDA on, and is known to build on -- the Linux question is
     # answered separately by build-linux above, which only checks that the
@@ -421,12 +430,23 @@ jobs:
       #
       # WHAT THIS DOES NOT CATCH, stated because a guard trusted past its reach
       # is worse than no guard: the expected list is HARDCODED HERE. Adding
+      - name: licence list is current (result of the licence-list job)
+        shell: bash
+        env:
+          LICENCE_LIST_RESULT: ${{ needs.licence-list.result }}
+        run: |
+          if [ "$LICENCE_LIST_RESULT" != "success" ]; then
+            echo "::error::job licence-list finished as '$LICENCE_LIST_RESULT', not 'success': docs/THIRD_PARTY_LICENSES.tsv is stale or the job did not run (regenerate: see docs/THIRD_PARTY_NOTICES.md section 3)"
+            exit 1
+          fi
+          echo licence >> .gates-ran
+
       # ANOTHER gate and forgetting to add its marker leaves that gate unguarded
       # and this check still green. It closes deletion, not omission.
       - name: every gate must have run
         shell: bash
         run: |
-          expected="fmt lockfile doc test featgate clippy"
+          expected="fmt lockfile doc test featgate clippy licence"
           test -f .gates-ran || { echo "::error::no gate markers written at all"; exit 1; }
           missing=""
           for g in $expected; do

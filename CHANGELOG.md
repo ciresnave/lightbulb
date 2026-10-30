@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.20.3
+
+### Changed
+- CI: `licence-list` is now a `needs` of the required `gates` job, which fails unless that job's result is `success` (and records a `licence` marker in its "every gate must have run" check). Before this, a stale `docs/THIRD_PARTY_LICENSES.tsv` failed only a non-required job.
+
 ## 0.20.2
 
 ### Added
