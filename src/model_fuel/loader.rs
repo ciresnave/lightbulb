@@ -164,30 +164,40 @@ pub(crate) fn safetensors_files(dir: &Path) -> Result<Vec<PathBuf>> {
     if names.is_empty() {
         anyhow::bail!("{} lists no shard files", index_path.display());
     }
-    let mut files = Vec::with_capacity(names.len());
-    for name in names {
-        let plain = Path::new(name)
-            .file_name()
-            .is_some_and(|f| f == std::ffi::OsStr::new(name))
-            && !name.contains(['/', '\\'])
-            && name.ends_with(".safetensors");
-        if !plain {
-            anyhow::bail!(
-                "{} lists the shard {name:?}, which is not a plain *.safetensors file name",
-                index_path.display()
-            );
-        }
-        let path = dir.join(name);
-        if !path.is_file() {
-            anyhow::bail!(
-                "{} lists the shard {name}, which is not in {}",
-                index_path.display(),
-                dir.display()
-            );
-        }
-        files.push(path);
+    names
+        .into_iter()
+        .map(|name| shard_path(dir, &index_path, name))
+        .collect()
+}
+
+/// `name` is a single path component ending in `.safetensors`: no separator,
+/// no `..`/`.`, no drive prefix, not empty.
+fn is_plain_safetensors_name(name: &str) -> bool {
+    Path::new(name)
+        .file_name()
+        .is_some_and(|f| f == std::ffi::OsStr::new(name))
+        && !name.contains(['/', '\\'])
+        && name.ends_with(".safetensors")
+}
+
+/// One shard named by the index: checked as a plain file name, then required to
+/// exist in `dir`.
+fn shard_path(dir: &Path, index_path: &Path, name: &str) -> Result<PathBuf> {
+    if !is_plain_safetensors_name(name) {
+        anyhow::bail!(
+            "{} lists the shard {name:?}, which is not a plain *.safetensors file name",
+            index_path.display()
+        );
     }
-    Ok(files)
+    let path = dir.join(name);
+    if !path.is_file() {
+        anyhow::bail!(
+            "{} lists the shard {name}, which is not in {}",
+            index_path.display(),
+            dir.display()
+        );
+    }
+    Ok(path)
 }
 
 /// Load a Llama-shape checkpoint from a local directory containing

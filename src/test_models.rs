@@ -301,25 +301,14 @@ mod tests {
         assert_eq!(loaded.model.weights.layers.len(), arch.num_hidden_layers);
     }
 
-    /// B5: the same synthetic checkpoint, re-split into two shards plus a
-    /// `model.safetensors.index.json` with the single file removed, must load
-    /// through BOTH loaders. A shard-routing mistake (wrong file list, a shard
-    /// skipped) surfaces as a missing tensor and a load error.
-    #[test]
-    fn sharded_synthetic_checkpoint_loads_through_both_loaders() {
-        use crate::model_fuel::loader::{load_llama_from_dir, safetensors_files};
-        use crate::model_fuel::loader_f32::load_llama_f32_from_dir;
+    /// Re-split a single-file checkpoint in `dir` into two shards plus a
+    /// `model.safetensors.index.json`, and delete the single file.
+    fn reshard_into_two(dir: &std::path::Path) {
         use std::collections::HashMap;
-        use synthetic_checkpoint::{SyntheticArchitecture, write_synthetic_checkpoint};
-
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let arch = SyntheticArchitecture::default();
-        write_synthetic_checkpoint(tmp.path(), &arch).expect("writing synthetic checkpoint");
-
-        let single = tmp.path().join("model.safetensors");
+        let single = dir.join("model.safetensors");
         let bytes = std::fs::read(&single).expect("reading the single-file checkpoint");
         let st = safetensors::SafeTensors::deserialize(&bytes).expect("parsing it");
-        let mut names: Vec<String> = st.names().into_iter().cloned().collect();
+        let mut names: Vec<String> = st.names().into_iter().map(str::to_string).collect();
         names.sort();
         assert!(
             names.len() > 4,
@@ -340,20 +329,30 @@ mod tests {
                     views.push((name.clone(), st.tensor(name).expect("tensor")));
                 }
             }
-            safetensors::serialize_to_file(
-                views,
-                None::<HashMap<String, String>>,
-                &tmp.path().join(file),
-            )
-            .expect("writing a shard");
+            safetensors::serialize_to_file(views, None::<HashMap<String, String>>, &dir.join(file))
+                .expect("writing a shard");
         }
         let index = serde_json::json!({ "metadata": { "total_size": bytes.len() }, "weight_map": weight_map });
-        std::fs::write(
-            tmp.path().join("model.safetensors.index.json"),
-            index.to_string(),
-        )
-        .expect("writing the index");
+        std::fs::write(dir.join("model.safetensors.index.json"), index.to_string())
+            .expect("writing the index");
         std::fs::remove_file(&single).expect("removing the single file");
+    }
+
+    /// B5: the same synthetic checkpoint, re-split into two shards plus a
+    /// `model.safetensors.index.json` with the single file removed, must load
+    /// through BOTH loaders. A shard-routing mistake (wrong file list, a shard
+    /// skipped) surfaces as a missing tensor and a load error.
+    #[test]
+    fn sharded_synthetic_checkpoint_loads_through_both_loaders() {
+        use crate::model_fuel::loader::{load_llama_from_dir, safetensors_files};
+        use crate::model_fuel::loader_f32::load_llama_f32_from_dir;
+        use synthetic_checkpoint::{SyntheticArchitecture, write_synthetic_checkpoint};
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let arch = SyntheticArchitecture::default();
+        write_synthetic_checkpoint(tmp.path(), &arch).expect("writing synthetic checkpoint");
+
+        reshard_into_two(tmp.path());
 
         let files = safetensors_files(tmp.path()).expect("resolving shards");
         assert_eq!(files.len(), 2, "{files:?}");
