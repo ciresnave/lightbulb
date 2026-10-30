@@ -23,7 +23,6 @@ pub mod query_analysis;
 pub mod reasoning_controls;
 pub mod relevance_search;
 pub(crate) mod scheduled_runner;
-pub mod slot_monitor;
 pub mod slot_pool;
 pub mod speculative;
 pub mod state_persistence;
@@ -80,7 +79,6 @@ pub use relevance_search::{
     CrossEncoderReranker, Document, DocumentMetadata, HybridSearchPipeline, HydeSearch,
     MetadataFilter, SearchConfig, SearchError, SearchResult, SearchStrategy, SemanticSearch,
 };
-pub use slot_monitor::{AdjustmentConfig, MemoryStatistics, SlotPoolMonitor};
 pub use slot_pool::{
     CompletedToken, Request as SlotPoolRequest, RequestId, SlotId, SlotPool, SlotPoolError,
     SlotPoolStats, SlotState,
