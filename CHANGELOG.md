@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.23.2
+
+### Changed
+- ROADMAP section E, cluster 2 (docs only): the speculative-decoding MVP, checkpoint-captures-KV-cache, Prometheus-"planned", CR.1.1 "infrastructure exists" and two "M5 KV cache compression (COMPLETE)" dependency lines now carry an inline "Superseded" note with the evidence.
+
 ## 0.23.1
 
 ### Changed

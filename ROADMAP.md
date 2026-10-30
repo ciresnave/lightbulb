@@ -1672,7 +1672,7 @@ Experimental optimizations and frontier techniques: KV cache compression, reason
 
 ### **SECTION II.5: CONTINUOUS REASONING & COPROGRAMMER** → *Intelligent Inference (v2.5)*
 
-Mid-reasoning context injection, continuous inference engine, logic-transformation coprogrammer, grounded expert training. **Dependencies**: Builds on M5 KV cache compression (COMPLETE) and segmented KV cache (COMPLETE); some features require M8 training infrastructure.
+Mid-reasoning context injection, continuous inference engine, logic-transformation coprogrammer, grounded expert training. **Dependencies**: Builds on M5 KV cache compression (COMPLETE) [⚠️ **Superseded (section E, verified at 1140e1bc, 2026-10-30):** `src/cache/kv_compression.rs` no longer exists] and segmented KV cache (COMPLETE); some features require M8 training infrastructure.
 
 ### **SECTION III: COGNITIVE ARCHITECTURE (M7-M8)** → *Identity-Aware Systems (v3.0+)*
 
@@ -2218,7 +2218,7 @@ M2 section:
 
 M3 — Acceleration features (0.4)
 
-- Speculative decoding MVP
+- Speculative decoding MVP ⚠️ **Superseded (section E, verified at 1140e1bc, 2026-10-30):** the draft/target orchestration and accept/reject loop (`SpeculativeDecoder`) were removed 2026-10-22 (comment at `src/engine/speculative.rs:122`); only `SpeculativeConfig`/`SpeculativeStats` remain, and nothing in serving consumes them (B6).
   - Draft+target dual-model orchestration; verify-accept loop
   - Acceptance: end-to-end works on two small models; speedup >1.3× on CPU in local tests; accuracy within configured bound
 
@@ -2817,7 +2817,7 @@ M4 — Advanced scheduling (0.5)
 
 - State persistence and recovery
   - ✅ **M4.B IMPLEMENTED** (November 2025): Checkpoint/restore infrastructure complete (570 lines, 9 tests passing)
-    * `InferenceCheckpoint` - Full state snapshot (KV cache, KB, pipeline, decomposition history, active problems)
+    * `InferenceCheckpoint` - Full state snapshot (KV cache, KB, pipeline, decomposition history, active problems) ⚠️ **Superseded (section E, verified at 1140e1bc, 2026-10-30):** `create_checkpoint` writes `kv_cache_state: None` and `pipeline_state: None` (`src/engine/state_persistence.rs:509-511`); only the KB, decomposition history and problems are captured (B10).
     * `CheckpointManager` - Save/load/list/delete with LRU eviction (configurable max_checkpoints)
     * `KvCacheSnapshot` - Layer-wise cache metadata + serialized tensors
     * `KnowledgeBaseSnapshot` - All facts + eviction history + statistics
@@ -3345,7 +3345,7 @@ M5.5 — CLI, Deployment & Operations (0.6+) **→ v1.0 Release Candidate**
   - Acceptance: single docker pull command for deployment; k8s manifest works on GKE/EKS/AKS; HPA scales based on load
 
 - Observability and monitoring integration
-  - Prometheus metrics exporter with standard metric names (request_duration, tokens_per_second, cache_hit_rate, etc.)
+  - Prometheus metrics exporter with standard metric names (request_duration, tokens_per_second, cache_hit_rate, etc.) ⚠️ **Superseded (section E, verified at 1140e1bc, 2026-10-30):** a Prometheus-format `GET /metrics` is registered (`src/api/mod.rs:905`, gated by `enable_metrics_endpoint`, default on) with `lightbulb_http_requests_total` and `lightbulb_http_request_duration_seconds` (`src/api/admin.rs:326`). Not checked: `tokens_per_second`, `cache_hit_rate`, the Grafana templates.
   - Grafana dashboard JSON templates for inference metrics, scheduler state, memory usage
   - OpenTelemetry spans for distributed tracing across multi-stage pipelines
   - Structured logging with configurable levels (JSON format for log aggregation)
@@ -4316,7 +4316,7 @@ The core problem: every current tool use system discards reasoning state at the 
 - Append tool result tokens and process them against the preserved cache
 - The model processes results in the full attentional context of prior reasoning
 - This is significantly better than current systems where tool results start a fresh forward pass
-- **Infrastructure exists**: ParallelKvCache + ParallelCacheBuilder already support this
+- **Infrastructure exists**: ParallelKvCache + ParallelCacheBuilder already support this ⚠️ **Superseded (section E, verified at 1140e1bc, 2026-10-30):** both were removed 2026-10-22 (`src/engine/mod.rs:328`).
 - **Integration point**: ModelRunner inference loop — detect tool call tokens, pause generation, inject result, resume
 - Acceptance: Tool use accuracy improves on cases where LLM prediction and tool result diverge
 
@@ -4344,7 +4344,7 @@ The core problem: every current tool use system discards reasoning state at the 
 ### CR.2 — Continuous Reasoning Engine
 
 **Status**: PLANNED
-**Dependencies**: CR.1 (mid-reasoning injection), M5 KV cache compression (COMPLETE), segmented KV cache (COMPLETE)
+**Dependencies**: CR.1 (mid-reasoning injection), M5 KV cache compression (COMPLETE) [⚠️ **Superseded (section E, verified at 1140e1bc, 2026-10-30):** `src/cache/kv_compression.rs` no longer exists; `src/cache/` has no compression module], segmented KV cache (COMPLETE)
 **Estimated effort**: 4-8 weeks
 
 With KV cache compression handling the memory problem (already solved), there is no fundamental reason for the model to stop running between episodes.
@@ -5565,5 +5565,5 @@ hits); 2199 (speculative MVP; `SpeculativeDecoder` removed); 2205-2210 ("AWQ Pha
 Fuel loaders hard-gate to Llama); 2798 (checkpoint captures KV cache: it writes `None`); 3326 (Prometheus
 "planned": `/metrics` exists); M6.5 criteria ticked with 0 hits for `VirtualMemoryPool` /
 `ElasticCache`; 4157 (`src/loaders.rs`); CR.1.1 "Infrastructure exists: ParallelKvCache +
-ParallelCacheBuilder" (both removed). Repair status: **in progress** (cluster 1, 0.23.1: M3.3 fused kernels, chunk sizing, cache control tools, AWQ Phase 2 `marlin.rs`, M4.1 `src/loaders.rs`, PersistAnt version, `set_priority`, `enhanced_correctness_tests.rs` now carry an inline "Superseded" note; still open: `kv_compression`/M5, speculative MVP, checkpoint KV, Prometheus, M6.5, CR.1.1) (one docs PR per cluster; each repair
+ParallelCacheBuilder" (both removed). Repair status: **in progress** (cluster 2, 0.23.2: speculative MVP, checkpoint KV, Prometheus, CR.1.1 infrastructure, M5 compression dependency lines; cluster 1, 0.23.1: M3.3 fused kernels, chunk sizing, cache control tools, AWQ Phase 2 `marlin.rs`, M4.1 `src/loaders.rs`, PersistAnt version, `set_priority`, `enhanced_correctness_tests.rs` now carry an inline "Superseded" note; still open: M6.5 criteria ticked with 0 hits, the M5 "COMPLETE" heading at the VERIFIED STATUS block, `kv_compression` mentions in `src/model_fuel/policies.rs`) (one docs PR per cluster; each repair
 re-checks its line against `origin/main` first, since line numbers drift).
