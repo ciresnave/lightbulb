@@ -12,7 +12,6 @@ use std::path::Path;
 use anyhow::bail;
 use fuel::DeviceLocation;
 use fuel_backend_contract::backend::BackendRuntime;
-use fuel_backend_contract::dyn_backend::DynBackendDevice;
 
 use crate::memory::format_bytes;
 use crate::memory::preflight::{Preflight, check_with};
