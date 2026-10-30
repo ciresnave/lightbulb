@@ -5497,7 +5497,7 @@ it is not).
 
 | # | Item | Evidence (`origin/main`) | Status |
 |---|---|---|---|
-| A1 | `GET /v1/models` with the real loaded roster. Registered POST-only with a hardcoded list (`lightbulb-7b`). Blocks Cherry AI Studio and any OpenAI client. | `src/api/openai/mod.rs:19`, `models.rs:41` TODO | open (first) |
+| A1 | `GET /v1/models` with the real loaded roster. Was registered POST-only with a hardcoded list (`lightbulb-7b`). | `src/api/openai/mod.rs:23-27`, `models.rs:55 loaded_models` | **done 0.19.21 (#232)**; memory field 0.23.0 (#263) |
 | A2 | `/v1/lightbulb/{knowledge,reasoning,state,tools}/*`: 12 handlers all end in `// TODO`; `kb_add` returns `success:true` and stores nothing. Wire to the engine or remove; reporting success for a no-op is the defect. | `src/api/lightbulb.rs:76,108,145,180,196,217,253,281,308,335,362,391` | **PM ruling 2026-10-25: delete** (501 until real; a stub reporting success is a defect). open |
 | A3 | `OutputContractSpec::Json` is declared but `try_parse` returns `None` ("not yet implemented"). | `src/contracts/validation.rs:147` | open |
 | A4 | Tool calling remainder: render `tools` through the chat template (`render` has no tools parameter), per-family output parsers (Llama-3.1 python_tag, Mistral TOOL_CALLS), streaming tool-call deltas (400 today), `tool_choice` required/forced function (400 today). | `chat_template.rs:152-163,194`; `chat.rs:415,800,858` | open |
@@ -5567,3 +5567,20 @@ Fuel loaders hard-gate to Llama); 2798 (checkpoint captures KV cache: it writes 
 `ElasticCache`; 4157 (`src/loaders.rs`); CR.1.1 "Infrastructure exists: ParallelKvCache +
 ParallelCacheBuilder" (both removed). Repair status: **in progress** (cluster 2, 0.23.2: speculative MVP, checkpoint KV, Prometheus, CR.1.1 infrastructure, M5 compression dependency lines; cluster 1, 0.23.1: M3.3 fused kernels, chunk sizing, cache control tools, AWQ Phase 2 `marlin.rs`, M4.1 `src/loaders.rs`, PersistAnt version, `set_priority`, `enhanced_correctness_tests.rs` now carry an inline "Superseded" note; still open: M6.5 criteria ticked with 0 hits, the M5 "COMPLETE" heading at the VERIFIED STATUS block, `kv_compression` mentions in `src/model_fuel/policies.rs`) (one docs PR per cluster; each repair
 re-checks its line against `origin/main` first, since line numbers drift).
+
+### F. Replacing Ollama and Cherry Studio (census 2026-10-30, `docs/OLLAMA-CHERRY-CENSUS.md`)
+
+Evidence and the have/partial/missing table are in the census; each row cites its table row. Order is the census's own.
+
+| # | Item | Census row | Status |
+|---|---|---|---|
+| F1 | Model pull/download. No download code exists (`hub.rs` deleted #235); parked as a future `mlmf-source-hf` crate (mlmf lane, via PM). Until then models are files in `LIGHTBULB_MODELS_DIR`. | 2 | open (mlmf) |
+| F2 | Several models per server and switching at runtime, plus a `lightbulb run <model>` entry. One `ModelRunner` per process today; a request for any other id is a 400. Needs a design (one runner per model vs swap), and B9's preflight/budget per model. | 3, 4 | open (design first) |
+| F3 | `/v1/embeddings`. Un-defers A6: the PM's list of features in use includes embeddings, which is A6's own trigger. Needs an embedding-model path through Fuel; ask the Fuel lane what exists before designing. | 8 | open (design first) |
+| F4 | Streaming tool calls and `tool_choice` required/named (A4 remainder; today both are 400s). Decides whether MCP use from a chat UI works. Verify against what Cherry actually sends before building. | 10, 11, 12 | open (= A4) |
+| F5 | Architectures beyond `llama`/`qwen3` (GGUF) and Llama-shaped SafeTensors. Ask which models CireSnave runs first; then check what Fuel's model crates provide (`fuel-model-phi` exists in the registry; lightbulb uses only `fuel-model-llama`). | 15 | open (ask CireSnave via PM) |
+| F6 | Vulkan measurement (feature exists, nothing exercises it) and an optional Metal feature (not his hardware). | 19, 20 | open (low) |
+| F7 | Ollama-native HTTP API (`/api/chat`, `/api/generate`, `/api/tags`, `/api/pull`, `/api/show`, `/api/embed`). | 23 | WAIT (PM: no code without a go) |
+| F8 | One-step install (single binary / installer). Lightbulb has never been published; a packaging decision, not sized. | 26 | open (decision) |
+
+Already tracked elsewhere and cited by the census: A5 (OpenAI parameters, incl. `response_format`), A12 (vision, deferred), B1 (BF16/F16 weights, Fuel #489), B5 (sharded GGUF, mlmf#187), B12 (Q8_1).
