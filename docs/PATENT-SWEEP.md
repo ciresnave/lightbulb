@@ -5,11 +5,13 @@ Process: `C:\Projects\PATENT-SWEEP-PROCESS.md`. Manifest line covered: **0.19.x*
 
 **STATUS: INCOMPLETE. This record is NOT a clearance.** Update 2026-10-29: every patent in the table (rows 1-15) now has all its independent claims read in full from Google text (rows 1-2 from USPTO page images); what remains open is search coverage, below. Step 1 (ideas) is done. Step 2 (searches) is done for ideas 3-14 (2026-10-26 and 2026-10-28; ideas 11 and 12 returned papers only), plus ideas 1-2 by cross-reference to the Fuel lane's record and one own query. Step 3 (claim reads) covers the patents in the table; ideas 6, 11 and 12 have no patent read at all, and ideas 1-2 have only thin searches. Do not publish on the strength of this file.
 
+**Update 2026-10-30 (lightbulb 0.23.2 @ 7ccf91f8):** a real patent search surface was found and used for ideas 1, 3, 11 and 12 (Google Patents' own query endpoint, below); two more queries (ideas 2 and 6) were blocked by HTTP 503 and are still to run. **No new claim was read this session**: `tools/patent-claims.py` and the Google Patents page both returned HTTP 503 from the first fetch on (the endpoint answered 4 queries just before, so this looks like rate limiting after the burst, not an outage of the whole site; not proven). Candidates found are listed under "Candidates seen" with verdict `unread`.
+
 ## Ideas swept (what lightbulb does that might be unusual; module in brackets)
 1. A new request splices a live donor request's KV blocks for a shared, block-aligned prompt prefix instead of re-prefilling it. [`engine::model_runner` prefix sharing, `LIGHTBULB_PREFIX_SHARING`, default off]
 2. Hash-and-reuse of prefill KV state for common prompt prefixes keyed by a hash of the token ids. [`cache::prefix_cache`]
 3. Continuous batching with a slot pool where requests join and leave independently and each step batches whatever slots are ready. [`engine::slot_pool`]
-4. Priority-based admission to slots under a tracked memory budget, with an eviction-pressure metric and a slot limit that adjusts to available memory. [`engine::memory_aware_scheduler`]
+4. Priority-based admission to slots under a tracked memory budget, with an eviction-pressure metric and a slot limit that adjusts to available memory. [`engine::memory_aware_scheduler`] **(2026-10-30: the "slot limit that adjusts to available memory" half, `SlotPoolMonitor`, was deleted in 0.22.0; the scheduler's `SlotPool` is a mirror of Fuel's admissions. What the swept idea describes is now only the budget/priority admission accounting.)**
 5. Segment-level KV eviction scored by the model's own attention weights, raised to a configurable power so "relied upon" outweighs "glanced at". [`cache::segmented_eviction_policy`]
 6. Attention-sink plus sliding-window KV eviction (StreamingLLM) and heavy-hitter (H2O) eviction. [`cache::streaming_policy`, `cache::h2o_policy`] (published methods; swept for completeness)
 7. Output contracts for small models: a single enum choice from a fixed list, XML-like tagged fields, and sentinel-delimited commit blocks, each with a forgiving parser and a progressively stricter re-prompt on retry. [`contracts`]
@@ -17,7 +19,7 @@ Process: `C:\Projects\PATENT-SWEEP-PROCESS.md`. Manifest line covered: **0.19.x*
 9. Knowledge-aware iterative decomposition that simplifies a problem from structural to atomic operations as facts accumulate in a knowledge base. [`engine::decomposition`]
 10. An NLI-based check that rejects a new fact contradicting the knowledge base before insertion. [`engine::consistency_checking`]
 11. Capacity-aware Mixture-of-Experts routing with token-drop and expanded-drop policies. [`engine::moe_router`]
-12. Speculative decoding with a draft model and memory estimation that accounts for it. [`engine::speculative`, `memory::speculative`]
+12. Speculative decoding with a draft model and memory estimation that accounts for it. [`engine::speculative`, `memory::speculative`] **(2026-10-30: the draft/target accept-reject algorithm, `SpeculativeDecoder`, was removed 2026-10-22; only `SpeculativeConfig`/`SpeculativeStats` and the memory estimate remain, so lightbulb does not currently perform speculative decoding. Kept so the searches stay traceable, like idea 14.)**
 13. Estimating model plus KV memory from quantized sizes to choose batch size and slot count. [`memory::estimate`, `hardware::batch_sizing`]
 14. Weight pruning by mask applied to GGUF tensors. **Not currently a lightbulb capability; kept so the 2026-10-28 search stays traceable.** All that exists is `quantization::gguf_ops::apply_mask_inplace`, a helper that zeroes an already-materialised F32 slice by a boolean mask, with no caller outside its own tests at 526d800. **Corrected 2026-10-29:** this line and the "our difference" cells of rows 12 and 14 formerly named a `pruning` module that applies masks to GGUF tensors; the Wanda/mask/loader code in `src/pruning` was removed 2026-10-22 (#195) and `pruning` now holds only `name_mapping`.
 
@@ -40,6 +42,14 @@ Source `G` = WebSearch restricted to patents.google.com (+ patents.justia.com wh
 - **Idea 14 (2026-10-28):** G+Justia "patent pruning neural network weights by binary mask applied to quantized GGUF tensors language model claims". Result: US12362764B2 (row 12), CN113383346A and US20220318633A1 (rows 14 and 15, read 2026-10-29).
 - **Idea 1 (own query):** G "patent LLM inference prefix sharing KV cache blocks reuse shared prompt prefix between concurrent requests claims": papers only.
 
+## Queries 2026-10-30 (source `GP` = Google Patents query endpoint, fetched with WebFetch)
+Surface: `https://patents.google.com/xhr/query?url=q%3D<query>%26num%3D10%26type%3DPATENT`. **This is the patent database itself (result counts, assignees, priority dates, per-country legal status), unlike the 2026-10-26/28 general web search.** Control: a broad query ("mixture of experts" expert capacity token drop routing, no phrase quoting) returned 14,011 results; the phrase-quoted queries below return their own, much smaller counts, and the speculative-decoding query returned 122, so a count of 0 is a real zero for that exact string and not a dead endpoint. Phrase-quoted AND queries are narrow: **a zero or a handful here shows the exact phrases do not co-occur, not that no relevant patent exists.**
+- **Idea 11:** GP `"expert capacity" "token drop" "mixture of experts" router` -> 1 result: US20260134293A1 (Articul8 AI, "Robust explainable artificial intelligence", published 2026-05-14). Judged off-topic from the title only; `unread`.
+- **Idea 12:** GP `"speculative decoding" "draft model" "memory" "target model"` -> 122 results. First page: Qualcomm US20250231989A1, US20240320433A1, US20250021761A1, US20240362468A1, US20250245430A1, US20250245530A1, CN120958464A; Inspur CN119150848A; LG US20250363353A1; AISpeech CN119761316A. This is a crowded field with active US applications. **None read** (see the 503 note above). Because lightbulb no longer performs speculative decoding, the practical exposure is low, but the idea-12 verdict stays `unread`, not `clear`.
+- **Idea 1:** GP `"prefix" "key-value cache" "shared" "block" "reference count" "language model"` -> 3 results: CN122019408B (Memory Tensor (Shanghai), "A key-value cache scheduling method and system for language model inference", granted 2026-08-11), US20260211813A1 (Baidu, "Method for processing user query", published 2026-07-23), CN121835896A (China Unicom Online, PD-separated large-model distributed inference). **None read.** CN122019408B is the one most likely to matter (KV cache scheduling).
+- **Idea 3:** GP `"continuous batching" "slot" "language model" "decoding step"` -> 0 results.
+- **Ideas 2 and 6:** GP queries for prefix-cache-by-token-hash and attention-sink/sliding-window eviction were issued and got HTTP 503; **not run**.
+
 ## Hits
 | # | patent | title | assignee | status | claim(s) read | overlap | our difference | verdict |
 |---|---|---|---|---|---|---|---|---|
@@ -60,7 +70,7 @@ Source `G` = WebSearch restricted to patents.google.com (+ patents.justia.com wh
 | 15 | US20220318633A1 | model compression using pruning, quantization and knowledge distillation | Qualcomm | pending application | independents 1, 9, 17, 25 read in full (Google text, 2026-10-29) | prune, quantize, build a teacher from the pruned weights, derive a student, **train** the student from the teacher | no teacher, no student, no training | clear (idea 14); application, claims may change |
 
 
-Candidates seen in search results but **not read** (verdict `unread`): US20260133964A1 (LLM text-to-SQL verification via directional graphs), US12292915B1 (security for generative models using attention analysis). Verdict `unread`; they were judged off-topic from titles only.
+Candidates seen in search results but **not read** (verdict `unread`): from 2026-10-30, US20250231989A1, US20240320433A1, US20250021761A1, US20250245430A1, US20250245530A1 (Qualcomm speculative decoding), CN122019408B (KV cache scheduling), US20260211813A1, CN121835896A, US20260134293A1; earlier: US20260133964A1 (LLM text-to-SQL verification via directional graphs), US12292915B1 (security for generative models using attention analysis). Verdict `unread`; they were judged off-topic from titles only.
 
 Dependent claims were skimmed, not charted. The PDFs have no text layer, so the claim text was read from rendered page images.
 
@@ -74,4 +84,4 @@ The search surface is weak (see Queries): for ideas 3, 6, 11 and 12 it returned 
 AI-assisted; reads limited to the patents in the table; hits 1-2 were routed by the PM from the Fuel lane's work. Not legal advice.
 
 ## To finish
-Search coverage only: re-run ideas 11 and 12 and **record the exact query strings**; find a real patent search surface (not a general web search) for ideas 1, 2, 3, 6, 11, 12; read up to 5 closest hits per idea; read US20260133964A1 and US12292915B1 if any later search ties them to an idea. Any hit whose claims could not be read stays `unread`, never `clear`.
+Search coverage and reads only. (1) Retry the Google Patents fetches after the 503s clear and read the independent claims of CN122019408B (idea 1) and the Qualcomm speculative-decoding family (idea 12), up to 5 per idea. (2) Run the two blocked queries (ideas 2 and 6) and record their exact strings. (3) Broaden ideas 3 and 11 beyond the single phrase-AND query that returned 0 and 1. (4) Read US20260133964A1 and US12292915B1 only if a later search ties them to an idea. Any hit whose claims could not be read stays `unread`, never `clear`.

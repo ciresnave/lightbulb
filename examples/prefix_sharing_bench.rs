@@ -17,6 +17,13 @@
 //! Greedy (temperature 0) completions of every sharer and the control are
 //! compared between arms; sharing must be bit-identical to cold.
 //!
+//! Running the built bench from PowerShell: use `pwsh -File`, not Windows PowerShell
+//! 5.1. The bench reports progress on stderr, and under 5.1 a script that sets
+//! `$ErrorActionPreference = 'Stop'` and redirects the native command (`*>>`)
+//! aborts at the first stderr line (a 2026-10-30 GPU run died after 52 s with
+//! `NativeCommandError`). `pwsh` 7 does not do that. GPU runs also go through
+//! the machine-wide lock (`fuel/scripts/gpu-run.ps1 -Project lightbulb -- <cmd>`).
+//!
 //! Device: CPU by default, the CUDA device when built with `--features
 //! fuel-cuda` (`model_fuel::device::select`).
 //!
