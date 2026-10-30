@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.23.5
+
+### Added
+- `docs/OLLAMA-CHERRY-CENSUS.md`: evidence-based have/partial/missing table of what Lightbulb on Fuel still lacks to replace Ollama and Cherry Studio, and ROADMAP section F (F1-F8) with one row per gap (architecture breadth ranked first by the installed `ollama list` set; Cherry-side claims marked unverified where its docs are silent); ROADMAP A1 marked done (it was, in 0.19.21). Docs only.
+
 ## 0.23.3
 
 ### Changed
