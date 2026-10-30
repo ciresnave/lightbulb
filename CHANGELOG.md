@@ -6,6 +6,11 @@
 - Sharded safetensors checkpoints (ROADMAP B5): both `model_fuel` loaders now read `model.safetensors.index.json` (parsed by the new `mlmf-hf-layout` 0.7.26 dependency) and map every listed shard; a single `model.safetensors` still wins. Shard names from the index are refused unless they are plain `*.safetensors` file names, so an index cannot point outside the model directory. Sharded GGUF is not covered.
 - `SECURITY.md` with a "Supported versions" section: the latest release line receives security fixes; an older line gets a backport only when it is small; no support period is promised.
 
+## 0.20.3
+
+### Changed
+- CI: `licence-list` is now a `needs` of the required `gates` job, which fails unless that job's result is `success` (and records a `licence` marker in its "every gate must have run" check). Before this, a stale `docs/THIRD_PARTY_LICENSES.tsv` failed only a non-required job.
+
 ## 0.20.2
 
 ### Added
