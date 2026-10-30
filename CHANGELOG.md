@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.23.4
+
+### Changed
+- `docs/PATENT-SWEEP.md`: searches for ideas 1, 3, 11, 12 against Google Patents' own query endpoint with the exact strings recorded; candidates listed as `unread` (claim fetches returned HTTP 503); ideas 4 and 12 annotated with the deleted code they describe. `examples/prefix_sharing_bench.rs` header: run it under `pwsh -File`, and through `gpu-run` for GPU. Docs and a doc comment only.
+
 ## 0.23.2
 
 ### Changed
