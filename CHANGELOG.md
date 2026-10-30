@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.20.5
+
+### Added
+- `docs/superpowers/specs/2026-10-30-b8-b9-b10-wiring-design.md`: design (no code) for ROADMAP B8/B9/B10; B9 reads free memory from Fuel's `BackendRuntime`.
+
 ## 0.20.4
 
 ### Added
