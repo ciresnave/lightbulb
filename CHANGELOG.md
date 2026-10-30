@@ -5,6 +5,11 @@
 ### Changed
 - Census row 15 / ROADMAP F5 corrected: more architectures are blocked on Fuel implementing `PagedDecodeModel` for its quantized qwen2/phi3/qwen3_5 models (the serving seam implements it only for Llama and Qwen3 families), not on a lightbulb loader. Docs only.
 
+## 0.23.6
+
+### Changed
+- `docs/PATENT-SWEEP.md`: searches for ideas 1, 3, 11, 12 against Google Patents' own query endpoint with the exact strings recorded; candidates listed as `unread` (claim fetches returned HTTP 503); ideas 4 and 12 annotated with the deleted code they describe. `examples/prefix_sharing_bench.rs` header: run it under `pwsh -File`, and through `gpu-run` for GPU. Docs and a doc comment only.
+
 ## 0.23.5
 
 ### Added
