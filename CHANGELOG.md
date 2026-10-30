@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.23.7
+
+### Changed
+- Census row 15 / ROADMAP F5 corrected: more architectures are blocked on Fuel implementing `PagedDecodeModel` for its quantized qwen2/phi3/qwen3_5 models (the serving seam implements it only for Llama and Qwen3 families), not on a lightbulb loader. Docs only.
+
 ## 0.23.6
 
 ### Changed
