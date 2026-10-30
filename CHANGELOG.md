@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.23.9
+
+### Added
+- `scripts/capture_openai_requests.py`: a stdlib stub OpenAI endpoint that logs what a client (Cherry Studio) sends, with `Authorization` redacted, and ROADMAP row F9 with the steps for CireSnave. It settles whether Cherry streams with `tools`, which `tool_choice` it uses and whether it calls `/v1/embeddings` (F3/F4), without any lane reading Cherry's config or database.
+
 ## 0.23.5
 
 ### Added
