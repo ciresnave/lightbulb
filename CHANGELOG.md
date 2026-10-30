@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.23.8
+
+### Added
+- `docs/superpowers/specs/2026-10-30-f2-multi-model-design.md`: design (no code) for ROADMAP F2, several models per server with load-on-demand and lazy LRU eviction under the B9 preflight (no timer; PM defaults 2026-10-30 recorded); and the measured result that dropping a runner does not return its VRAM (0 of 12 trials, positive control valid 12 of 12), with three options for P2. Docs only.
+
 ## 0.23.7
 
 ### Changed
