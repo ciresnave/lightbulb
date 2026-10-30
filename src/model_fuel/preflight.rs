@@ -129,19 +129,20 @@ fn kv_shape_of_gguf(content: &crate::gguf::Content) -> Option<KvShape> {
     };
     let key = |k: &str| metadata_u64(md, &format!("{arch}.{k}"));
     let heads = key("attention.head_count").ok().filter(|h| *h > 0)?;
-    let kv_heads = key("attention.head_count_kv").unwrap_or(heads);
-    // The Llama loader divides; the Qwen3 loader reads `key_length`.
-    let key_length = if arch == "qwen3" {
-        key("attention.key_length").ok()
-    } else {
-        None
-    };
-    let head_dim = key_length.or_else(|| key("embedding_length").ok().map(|e| e / heads))?;
     Some(KvShape {
         layers: key("block_count").ok()?,
-        kv_heads,
-        head_dim,
+        kv_heads: key("attention.head_count_kv").unwrap_or(heads),
+        head_dim: gguf_head_dim(arch, heads, key)?,
     })
+}
+
+/// Head dimension as the loader for `arch` derives it: the Llama loader
+/// divides, the Qwen3 loader reads `key_length`.
+fn gguf_head_dim(arch: &str, heads: u64, key: impl Fn(&str) -> anyhow::Result<u64>) -> Option<u64> {
+    let key_length = (arch == "qwen3")
+        .then(|| key("attention.key_length").ok())
+        .flatten();
+    key_length.or_else(|| key("embedding_length").ok().map(|e| e / heads))
 }
 
 /// KV geometry from a SafeTensors directory's `config.json` (the Llama-shape
