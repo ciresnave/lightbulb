@@ -3,7 +3,7 @@
 ## 0.23.8
 
 ### Added
-- `docs/superpowers/specs/2026-10-30-f2-multi-model-design.md`: design (no code) for ROADMAP F2, several models per server with load-on-demand and idle unload under the B9 preflight; four phases, one GPU measurement gate. Docs only.
+- `docs/superpowers/specs/2026-10-30-f2-multi-model-design.md`: design (no code) for ROADMAP F2, several models per server with load-on-demand and lazy LRU eviction under the B9 preflight (no timer; PM defaults 2026-10-30 recorded); one GPU measurement gate before P2. Docs only.
 
 ## 0.23.5
 
