@@ -1,9 +1,14 @@
 # Changelog
 
-## 0.23.4
+## 0.23.6
 
 ### Changed
 - `docs/PATENT-SWEEP.md`: searches for ideas 1, 3, 11, 12 against Google Patents' own query endpoint with the exact strings recorded; candidates listed as `unread` (claim fetches returned HTTP 503); ideas 4 and 12 annotated with the deleted code they describe. `examples/prefix_sharing_bench.rs` header: run it under `pwsh -File`, and through `gpu-run` for GPU. Docs and a doc comment only.
+
+## 0.23.5
+
+### Added
+- `docs/OLLAMA-CHERRY-CENSUS.md`: evidence-based have/partial/missing table of what Lightbulb on Fuel still lacks to replace Ollama and Cherry Studio, and ROADMAP section F (F1-F8) with one row per gap (architecture breadth ranked first by the installed `ollama list` set; Cherry-side claims marked unverified where its docs are silent); ROADMAP A1 marked done (it was, in 0.19.21). Docs only.
 
 ## 0.23.3
 
