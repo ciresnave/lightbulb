@@ -54,7 +54,10 @@ impl BudgetSource {
 }
 
 /// The scheduler's `max_memory_bytes`: the explicit setting always wins, else
-/// what the serving device reports available, else `built_in`.
+/// what the serving device reports available, else `built_in`. A device
+/// reading of 0 is treated as no usable figure: `MemoryAwareConfig::validate`
+/// refuses a zero budget, so honouring it would turn "the GPU is momentarily
+/// full" into a server that will not start.
 pub fn resolve_max_memory(
     explicit: Option<u64>,
     device_available: Option<u64>,
@@ -62,8 +65,8 @@ pub fn resolve_max_memory(
 ) -> (u64, BudgetSource) {
     match (explicit, device_available) {
         (Some(v), _) => (v, BudgetSource::Env),
-        (None, Some(v)) => (v, BudgetSource::Device),
-        (None, None) => (built_in, BudgetSource::BuiltIn),
+        (None, Some(v)) if v > 0 => (v, BudgetSource::Device),
+        (None, _) => (built_in, BudgetSource::BuiltIn),
     }
 }
 
@@ -169,10 +172,16 @@ mod tests {
     }
 
     #[test]
-    fn a_device_answer_of_zero_is_used_not_mistaken_for_no_signal() {
+    fn a_device_answer_of_zero_falls_back_rather_than_yielding_a_budget_validate_refuses() {
         assert_eq!(
             resolve_max_memory(None, Some(0), 123),
-            (0, BudgetSource::Device)
+            (123, BudgetSource::BuiltIn)
+        );
+        // An explicit 0 is the operator's word and is passed through unchanged
+        // (validate then reports it by name).
+        assert_eq!(
+            resolve_max_memory(Some(0), Some(9), 123),
+            (0, BudgetSource::Env)
         );
     }
 

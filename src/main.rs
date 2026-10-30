@@ -188,9 +188,13 @@ async fn run(cli: Cli) -> Result<()> {
 /// value and its source are logged.
 fn resolve_scheduler_budget() -> usize {
     use lightbulb::model_fuel::preflight::{device_available_bytes, resolve_max_memory};
-    let explicit = env::var("LIGHTBULB_MAX_MEMORY_BYTES")
-        .ok()
-        .and_then(|v| v.parse::<u64>().ok());
+    let raw = env::var("LIGHTBULB_MAX_MEMORY_BYTES").ok();
+    let explicit = raw.as_deref().and_then(|v| v.trim().parse::<u64>().ok());
+    if let (Some(v), None) = (&raw, explicit) {
+        tracing::warn!(
+            "LIGHTBULB_MAX_MEMORY_BYTES={v:?} is not a whole number of bytes; ignoring it"
+        );
+    }
     let device_available = if explicit.is_some() {
         None
     } else {
