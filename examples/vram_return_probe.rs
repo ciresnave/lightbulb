@@ -116,6 +116,50 @@ fn wait_back_to(target: i64, wait: Duration) -> (i64, f64) {
     }
 }
 
+/// One RELEASE + CONTROL trial; returns (released, control_held).
+fn trial(
+    i: usize,
+    path: &str,
+    ctx: usize,
+    wait: Duration,
+    baseline: i64,
+    tol: i64,
+) -> (bool, bool) {
+    // RELEASE
+    let (tx, ctrl) = start_loaded(path, ctx);
+    let loaded = used_mib();
+    drop(tx);
+    drop(ctrl);
+    let (after, secs) = wait_back_to(baseline + tol, wait);
+    let returned = after <= baseline + tol;
+    // CONTROL
+    let (tx2, ctrl2) = start_loaded(path, ctx);
+    let loaded2 = used_mib();
+    let retained = tx2.clone();
+    drop(tx2);
+    drop(ctrl2);
+    std::thread::sleep(wait.min(Duration::from_secs(10)));
+    let held = used_mib();
+    let control_held = held >= baseline + (loaded2 - baseline) * 9 / 10;
+    drop(retained);
+    let _ = wait_back_to(baseline + tol, wait); // clean up for the next trial
+    println!(
+        "trial {i}: RELEASE loaded {loaded} MiB (+{} over baseline) -> after drop {after} MiB \
+         in {secs:.1}s: {}",
+        loaded - baseline,
+        if returned { "RETURNED" } else { "NOT RETURNED" }
+    );
+    println!(
+        "         CONTROL loaded {loaded2} MiB -> with a retained handle {held} MiB: {}",
+        if control_held {
+            "held (control valid)"
+        } else {
+            "NOT held (control INVALID)"
+        }
+    );
+    (returned, control_held)
+}
+
 fn main() {
     let path = std::env::var("LB_GGUF").expect("set LB_GGUF to a .gguf path");
     let trials = env_usize("LB_TRIALS", 3);
@@ -133,51 +177,18 @@ fn main() {
     let _ctx_holder = hold.then(lightbulb::model_fuel::device::select);
     std::thread::sleep(Duration::from_secs(2));
     let baseline = used_mib();
-    println!("model {path}\nctx {ctx}, trials {trials}, tolerance {tol} MiB, hold_device {hold}");
-    println!(
-        "baseline ({}): {baseline} MiB used\n",
-        if hold {
-            "context only"
-        } else {
-            "no CUDA work yet"
-        }
-    );
+    println!("model {path}");
+    println!("ctx {ctx}, trials {trials}, tolerance {tol} MiB, hold_device {hold}");
+    let what = if hold {
+        "context only"
+    } else {
+        "no CUDA work yet"
+    };
+    println!("baseline ({what}): {baseline} MiB used\n");
 
-    let mut release_ok = 0;
-    let mut control_valid = 0;
+    let (mut release_ok, mut control_valid) = (0, 0);
     for i in 1..=trials {
-        // RELEASE
-        let (tx, ctrl) = start_loaded(&path, ctx);
-        let loaded = used_mib();
-        drop(tx);
-        drop(ctrl);
-        let (after, secs) = wait_back_to(baseline + tol, wait);
-        let returned = after <= baseline + tol;
-        // CONTROL
-        let (tx2, ctrl2) = start_loaded(&path, ctx);
-        let loaded2 = used_mib();
-        let _retained = tx2.clone();
-        drop(tx2);
-        drop(ctrl2);
-        std::thread::sleep(wait.min(Duration::from_secs(10)));
-        let held = used_mib();
-        let control_held = held >= baseline + (loaded2 - baseline) * 9 / 10;
-        drop(_retained);
-        let _ = wait_back_to(baseline + tol, wait); // clean up for the next trial
-        println!(
-            "trial {i}: RELEASE loaded {loaded} MiB (+{} over baseline) -> after drop {after} MiB \
-             in {secs:.1}s: {}",
-            loaded - baseline,
-            if returned { "RETURNED" } else { "NOT RETURNED" }
-        );
-        println!(
-            "         CONTROL loaded {loaded2} MiB -> with a retained handle {held} MiB: {}",
-            if control_held {
-                "held (control valid)"
-            } else {
-                "NOT held (control INVALID)"
-            }
-        );
+        let (returned, control_held) = trial(i, &path, ctx, wait, baseline, tol);
         release_ok += returned as usize;
         control_valid += control_held as usize;
     }
