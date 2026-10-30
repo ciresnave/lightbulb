@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.22.1
+
+### Changed
+- When `LIGHTBULB_MAX_MEMORY_BYTES` is unset, the scheduler's `max_memory_bytes` now defaults to what the serving device reports available (Fuel `BackendRuntime::available_bytes`) instead of a fixed 8 GiB, falling back to 8 GiB when the device cannot say or reports 0 free. A set-but-unparseable `LIGHTBULB_MAX_MEMORY_BYTES` now logs a warning naming it instead of being ignored silently. The chosen value and its source are logged at startup. An explicit value always wins. `lightbulb::model_fuel::preflight` is now `pub` (`resolve_max_memory`, `device_available_bytes`, `BudgetSource`).
+
 ## 0.22.0
 
 ### Removed

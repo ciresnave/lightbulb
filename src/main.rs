@@ -183,15 +183,37 @@ async fn run(cli: Cli) -> Result<()> {
     Ok(())
 }
 
+/// The scheduler's `max_memory_bytes`: `LIGHTBULB_MAX_MEMORY_BYTES` if set,
+/// else what the serving device reports available, else 8 GiB. The chosen
+/// value and its source are logged.
+fn resolve_scheduler_budget() -> usize {
+    use lightbulb::model_fuel::preflight::{device_available_bytes, resolve_max_memory};
+    let raw = env::var("LIGHTBULB_MAX_MEMORY_BYTES").ok();
+    let explicit = raw.as_deref().and_then(|v| v.trim().parse::<u64>().ok());
+    if let (Some(v), None) = (&raw, explicit) {
+        tracing::warn!(
+            "LIGHTBULB_MAX_MEMORY_BYTES={v:?} is not a whole number of bytes; ignoring it"
+        );
+    }
+    let device_available = if explicit.is_some() {
+        None
+    } else {
+        device_available_bytes(&lightbulb::model_fuel::device::select())
+    };
+    let (bytes, source) = resolve_max_memory(explicit, device_available, 8 * 1024 * 1024 * 1024);
+    tracing::info!(
+        "scheduler max_memory_bytes = {bytes} (from {})",
+        source.describe()
+    );
+    usize::try_from(bytes).unwrap_or(usize::MAX)
+}
+
 /// Create memory-aware scheduler. Phase 4 config-management item:
 /// these five had no env override and no startup validation at all
 /// before this -- see MemoryAwareConfig::validate's own doc comment.
 fn scheduler_config_from_env() -> MemoryAwareConfig {
     MemoryAwareConfig {
-        max_memory_bytes: env::var("LIGHTBULB_MAX_MEMORY_BYTES")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(8 * 1024 * 1024 * 1024), // 8GB
+        max_memory_bytes: resolve_scheduler_budget(),
         memory_per_slot_base: env::var("LIGHTBULB_MEMORY_PER_SLOT_BASE")
             .ok()
             .and_then(|v| v.parse().ok())

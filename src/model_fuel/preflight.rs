@@ -31,6 +31,53 @@ pub(crate) fn weights_lower_bound(path: &Path) -> Option<u64> {
     })
 }
 
+/// Where the scheduler's memory budget came from, for the startup log.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BudgetSource {
+    /// `LIGHTBULB_MAX_MEMORY_BYTES` was set and parsed.
+    Env,
+    /// The serving device's `available_bytes` at startup.
+    Device,
+    /// Neither: the built-in default.
+    BuiltIn,
+}
+
+impl BudgetSource {
+    /// Human-readable name for the log line.
+    pub fn describe(self) -> &'static str {
+        match self {
+            Self::Env => "LIGHTBULB_MAX_MEMORY_BYTES",
+            Self::Device => "serving device available_bytes",
+            Self::BuiltIn => "built-in default",
+        }
+    }
+}
+
+/// The scheduler's `max_memory_bytes`: the explicit setting always wins, else
+/// what the serving device reports available, else `built_in`. A device
+/// reading of 0 is treated as no usable figure: `MemoryAwareConfig::validate`
+/// refuses a zero budget, so honouring it would turn "the GPU is momentarily
+/// full" into a server that will not start.
+pub fn resolve_max_memory(
+    explicit: Option<u64>,
+    device_available: Option<u64>,
+    built_in: u64,
+) -> (u64, BudgetSource) {
+    match (explicit, device_available) {
+        (Some(v), _) => (v, BudgetSource::Env),
+        (None, Some(v)) if v > 0 => (v, BudgetSource::Device),
+        (None, _) => (built_in, BudgetSource::BuiltIn),
+    }
+}
+
+/// Bytes the serving device reports available, `None` when it cannot say.
+pub fn device_available_bytes(device: &fuel::Device) -> Option<u64> {
+    device
+        .as_dyn()
+        .as_backend_runtime()
+        .and_then(|r| r.available_bytes())
+}
+
 /// Whether a `WontFit` refuses the load (PM ruling 2026-10-30). VRAM is a hard
 /// limit, so on a GPU it refuses unless `force` is set; free RAM is soft (page
 /// cache, swap, mmap'd weights), so on the CPU it only warns.
@@ -104,6 +151,38 @@ mod tests {
         fn total_bytes(&self) -> Option<u64> {
             self.1
         }
+    }
+
+    #[test]
+    fn an_explicit_budget_beats_the_device_and_unset_differs_from_set() {
+        let built_in = 8 << 30;
+        let (set, set_src) = resolve_max_memory(Some(5), Some(9), built_in);
+        let (unset, unset_src) = resolve_max_memory(None, Some(9), built_in);
+        assert_eq!((set, set_src), (5, BudgetSource::Env));
+        assert_eq!((unset, unset_src), (9, BudgetSource::Device));
+        assert_ne!(set, unset, "positive control: env must change the value");
+    }
+
+    #[test]
+    fn with_no_env_and_no_device_figure_the_built_in_default_is_kept() {
+        assert_eq!(
+            resolve_max_memory(None, None, 123),
+            (123, BudgetSource::BuiltIn)
+        );
+    }
+
+    #[test]
+    fn a_device_answer_of_zero_falls_back_rather_than_yielding_a_budget_validate_refuses() {
+        assert_eq!(
+            resolve_max_memory(None, Some(0), 123),
+            (123, BudgetSource::BuiltIn)
+        );
+        // An explicit 0 is the operator's word and is passed through unchanged
+        // (validate then reports it by name).
+        assert_eq!(
+            resolve_max_memory(Some(0), Some(9), 123),
+            (0, BudgetSource::Env)
+        );
     }
 
     #[test]
