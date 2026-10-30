@@ -826,7 +826,7 @@ place below, pointing back here rather than repeating this evidence 23 times.
     A GitHub-hosted runner can do this; no self-hosted runner is needed for either file.
   - **Checkpoint-needing (CPU-runnable if a model is present, same shape as slice 5.1's test) —
     debt, not yet routed:** `tests/parallel_model_manager_integration.rs` (6, its own pre-existing
-    ones besides 5.1's new test), `tests/enhanced_correctness_tests.rs` (12), `tests/
+    ones besides 5.1's new test), `tests/enhanced_correctness_tests.rs` (12) [⚠️ **Superseded (section E, verified at 9b267a4, 2026-10-30):** file absent], `tests/
     contracts_live.rs` (6), `tests/integration_local_model.rs` (3), `tests/c1_prefill_vs_decode.rs`
     (2), `tests/load_stress_tests.rs` (2, resource need not yet confirmed by reading the file).
   - **GPU-needing (CUDA hardware, not just a checkpoint) — debt, not yet routed:** `tests/
@@ -1277,7 +1277,7 @@ whatever step 2 turns up, reported honestly rather than estimated in advance.
 **PersistAnt adoption status (added 2026-10-21, PM-asked — not blocked on anything):**
 lightbulb stores API keys, audit logs, user sessions, rate-limit usage counters, and auth
 attempt counts, all in Postgres, and adoption is **already complete** in shipped code
-(`persistant-sqlx`/`persistant-relational` 0.7.4, "PersistAnt adoption Step 5" per
+(`persistant-sqlx`/`persistant-relational` 0.7.4 [⚠️ **Superseded (section E, verified at 9b267a4, 2026-10-30):** `Cargo.toml` pins 0.9.24], "PersistAnt adoption Step 5" per
 `Cargo.toml`'s `[dev-dependencies]` comment) — `tokio-postgres`/`refinery`/`postgres-types`
 remain only in `[dev-dependencies]`, deliberately, to simulate a pre-Step-5 deployment's
 refinery-migrated database and inspect raw schema in tests, never in the shipped binary.
@@ -1399,7 +1399,7 @@ slower per token than contiguous on this hardware), not re-discover.
    changelog claim) so streaming works with the same dedup/diff `seen_counts` logic the old driver
    used; `set_priority(id, priority)` is wired as a new non-trait method on
    `FuelPagedSchedulerDriver`, callable by a caller right after `try_admit` returns a `SessionId`
-   (not yet CALLED anywhere — `InferenceJob`'s priority isn't threaded into `ServingDriver::
+   (⚠️ **Superseded (section E, verified at 9b267a4, 2026-10-30):** `src/engine/scheduled_runner.rs:227` now calls `driver.set_priority(id, priority as i32)`; the text that follows is the original wording) (not yet CALLED anywhere — `InferenceJob`'s priority isn't threaded into `ServingDriver::
    try_admit` in this slice; that wiring is still open, tracked separately from the scheduler swap
    itself). `PagedSessionScheduler::new` taking no `SchedulePolicy` turned out not to need a
    parallel `run_batched_paged`: `set_policy`/`policy()` setters exist, called once right after
@@ -2008,7 +2008,7 @@ M1.5 — Hardware Adaptivity (0.2+)
     - Increase batch size if headroom available and request queue is growing
   - Acceptance: Batch size automatically scales from 2 (minimal hardware) to 128+ (server-class hardware); no manual tuning required; prevents OOM errors through conservative estimates; achieves >70% hardware utilization
   - References: docs/DYNAMIC_BATCH_SIZING.md (to be created)
-- ✅ **COMPLETE**: Device-adaptive chunk sizing for multi-chunk prefill
+- ✅ **COMPLETE**: Device-adaptive chunk sizing for multi-chunk prefill ⚠️ **Superseded (section E, verified at 9b267a4, 2026-10-30):** `ChunkedPrefill` has 0 hits in `src`, and `SystemConfig::chunk_size` (the only chunk-size field, never read by prefill) was deleted in 0.22.0 (B8).
   - Empirical benchmarking framework (`examples/benchmark_chunk_sizes.rs`) tests chunk_size vs throughput/efficiency/latency
   - CPU optimization: 256-token chunks win across all metrics (vs 512 default)
     - Minimizes O(n²) attention cost on CPU
@@ -2122,7 +2122,7 @@ M2 section:
     - ✅ Perfect integration with Phase 3: Vector DB as long-term memory with SpanId indexing
     - ✅ Acceptance: Span lifecycle management working; eviction respects dependencies; external token storage demonstrated
     - ✅ Enhanced tagging: ToolOutput, SystemPrompt, UserInput tags with importance scores
-    - ✅ Cache control tools: get_cache_usage(), tag_region(), evict_tagged()
+    - ✅ Cache control tools: get_cache_usage(), tag_region(), evict_tagged() ⚠️ **Superseded (section E, verified at 9b267a4, 2026-10-30):** those three names have 0 hits in `src`; the span API (`begin_span` etc.) lives in `src/cache/cache_span.rs`.
     - ✅ Model can explicitly manage its own context
     - Status: READY FOR PRODUCTION - Complete span system with external storage pattern
     - Next: Thread attention weights from custom_attention.rs to ParallelCacheBuilder for H2O integration
@@ -2224,7 +2224,7 @@ M3 — Acceleration features (0.4)
 
 - **AWQ (Activation-aware Weight Quantization)** - 4-bit weight quantization (M3.7-M3.9)
   - ✅ **Phase 1 COMPLETE**: Kernel infrastructure (7 CUDA files, FFI bindings, build script)
-  - ✅ **Phase 2 COMPLETE**: CustomOp wrappers (marlin.rs with MarlinMatMul for GPTQ/AWQ)
+  - ✅ **Phase 2 COMPLETE**: CustomOp wrappers (marlin.rs with MarlinMatMul for GPTQ/AWQ) ⚠️ **Superseded (section E, verified at 9b267a4, 2026-10-30):** `src/backend/marlin.rs` and `kernels/` are gone (the AWQ loaders were deleted in #195); only `src/backend/marlin_ffi.rs` remains.
   - ⚠️ **"Phase 3 IN PROGRESS" was wrong — measured 2026-10-21 at 0% wired, not partway.**
     See "AWQ loader wiring: slice plan" above for the real state (a complete, unused loader;
     no call site; the model's forward pass doesn't match the serving engine's interface) and
@@ -2275,7 +2275,7 @@ M3 — Acceleration features (0.4)
   - References: low-bit LLMs survey (SmoothQuant, QuaRot)
 
 - CPU kernel optimizations
-  - ✅ **M3.3 COMPLETE**: Kernel fusion infrastructure (fused_linear_silu, fused_matmul_add) built and tested
+  - ✅ **M3.3 COMPLETE**: Kernel fusion infrastructure (fused_linear_silu, fused_matmul_add) built and tested ⚠️ **Superseded (section E, verified at 9b267a4, 2026-10-30):** `src/model/` is gone and `git grep fused_linear_silu fused_matmul_add` over `src`/`tests` finds nothing; the code this describes no longer exists.
   - **Status**: Infrastructure ready, fusion disabled due to Candle API limitations
   - **Findings**: candle_nn::Linear weight extraction overhead (213ms) exceeds theoretical fusion benefits (2-3ms)
   - **Future path**: Requires either (1) custom linear layer with direct weight access, OR (2) Candle upstream fused ops
@@ -2685,7 +2685,7 @@ M4 — Advanced scheduling (0.5)
 **Added**: Jan 2025 (Multi-stage pipelines, knowledge-aware decomposition, and consistency checking expand M4's scope beyond traditional scheduling to orchestrate complex reasoning workflows)
 
 **Name Mapping Integration** (M4.1): ✅ **COMPLETE** (October 2025)
-- ✅ Integrated TensorNameMapper into `src/loaders.rs` (both safetensors and GGUF loaders)
+- ✅ Integrated TensorNameMapper into `src/loaders.rs` (both safetensors and GGUF loaders) ⚠️ **Superseded (section E, verified at 9b267a4, 2026-10-30):** `src/loaders.rs` does not exist; loading is `src/model_fuel/loader*.rs` on Fuel loaders, which hard-gate to Llama.
 - ✅ Both loaders now return `Option<TensorNameMapper>` for architecture detection
 - ✅ Architecture detection logging: Shows detected architecture and layer count during load
 - ✅ Backward compatible: Optional return, graceful fallback if detection fails
@@ -5565,5 +5565,5 @@ hits); 2199 (speculative MVP; `SpeculativeDecoder` removed); 2205-2210 ("AWQ Pha
 Fuel loaders hard-gate to Llama); 2798 (checkpoint captures KV cache: it writes `None`); 3326 (Prometheus
 "planned": `/metrics` exists); M6.5 criteria ticked with 0 hits for `VirtualMemoryPool` /
 `ElasticCache`; 4157 (`src/loaders.rs`); CR.1.1 "Infrastructure exists: ParallelKvCache +
-ParallelCacheBuilder" (both removed). Repair status: **open** (one docs PR per cluster; each repair
+ParallelCacheBuilder" (both removed). Repair status: **in progress** (cluster 1, 0.23.1: M3.3 fused kernels, chunk sizing, cache control tools, AWQ Phase 2 `marlin.rs`, M4.1 `src/loaders.rs`, PersistAnt version, `set_priority`, `enhanced_correctness_tests.rs` now carry an inline "Superseded" note; still open: `kv_compression`/M5, speculative MVP, checkpoint KV, Prometheus, M6.5, CR.1.1) (one docs PR per cluster; each repair
 re-checks its line against `origin/main` first, since line numbers drift).
