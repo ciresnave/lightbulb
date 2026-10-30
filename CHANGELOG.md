@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.23.0
+
+### Added
+- **Breaking** (new public field): `GET /v1/models` and `GET /v1/models/{model}` report `lightbulb_memory.weights_bytes_on_disk` for the loaded model (ROADMAP B9, second half), a lower bound on the weights' memory (`.gguf` file size, or the sum of the SafeTensors shards). It is a non-OpenAI field and is omitted when the files cannot be read. `ModelInfo` gains the field `lightbulb_memory: Option<ModelMemory>`, so code that builds `ModelInfo` by struct literal must add it.
+
 ## 0.22.1
 
 ### Changed
