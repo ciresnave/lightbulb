@@ -10,6 +10,10 @@
 //! on-disk size, a LOWER bound. The KV cache and activations come on top, so
 //! a pass is not a promise. **Fuel row 124 (K-quants stay quantized) makes
 //! the GGUF estimate too high; delete `gguf_resident_bytes` then.**
+//!
+//! The KV pool is added to the figure for non-hybrid models (see
+//! `kv_pool_bytes`): the serving path allocates it as soon as the model is
+//! loaded, so weights alone under-count what the device must hold.
 
 use std::path::Path;
 
@@ -82,6 +86,88 @@ pub(crate) fn weights_resident_estimate(path: &Path) -> Option<u64> {
     Some(on_disk)
 }
 
+/// Bytes per KV element: the serving path runs f32 activations and keeps its
+/// KV cache in the same dtype (`check_dtype` refuses anything else).
+const KV_ELEMENT_BYTES: u64 = 4;
+
+/// Per-token KV geometry of a non-hybrid model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct KvShape {
+    pub layers: u64,
+    pub kv_heads: u64,
+    pub head_dim: u64,
+}
+
+/// Bytes of the KV pool the engine allocates for `max_batch_size` sessions of
+/// up to `context_length` tokens: `num_blocks * KV_BLOCK_SIZE` token slots
+/// (`BatchedServeConfig::new`), each holding K and V for every layer.
+pub(crate) fn kv_pool_bytes(shape: KvShape, max_batch_size: usize, context_length: usize) -> u64 {
+    let block = super::scheduled_llama_engine::KV_BLOCK_SIZE as u64;
+    let blocks =
+        (max_batch_size.max(1) as u64).saturating_mul((context_length as u64).div_ceil(block));
+    let tokens = blocks.saturating_mul(block);
+    let per_token = shape
+        .layers
+        .saturating_mul(2)
+        .saturating_mul(shape.kv_heads)
+        .saturating_mul(shape.head_dim)
+        .saturating_mul(KV_ELEMENT_BYTES);
+    tokens.saturating_mul(per_token)
+}
+
+/// KV geometry from a GGUF's own metadata, for the architectures whose KV
+/// exists in every layer (`llama`, `qwen3`). `None` for anything else
+/// (including the hybrid `qwen35`, whose KV budget is L4) and for any key that
+/// is missing or not a scalar: no figure means no KV term, never a refusal.
+fn kv_shape_of_gguf(content: &crate::gguf::Content) -> Option<KvShape> {
+    use crate::gguf::{GgufArchitecture, metadata_u64};
+    let md = content.metadata();
+    let arch = match crate::gguf::detect_architecture(md).ok()? {
+        GgufArchitecture::Llama => "llama",
+        GgufArchitecture::Qwen3 => "qwen3",
+        GgufArchitecture::Qwen35 => return None,
+    };
+    let key = |k: &str| metadata_u64(md, &format!("{arch}.{k}"));
+    let heads = key("attention.head_count").ok().filter(|h| *h > 0)?;
+    let kv_heads = key("attention.head_count_kv").unwrap_or(heads);
+    // The Llama loader divides; the Qwen3 loader reads `key_length`.
+    let key_length = if arch == "qwen3" {
+        key("attention.key_length").ok()
+    } else {
+        None
+    };
+    let head_dim = key_length.or_else(|| key("embedding_length").ok().map(|e| e / heads))?;
+    Some(KvShape {
+        layers: key("block_count").ok()?,
+        kv_heads,
+        head_dim,
+    })
+}
+
+/// KV geometry from a SafeTensors directory's `config.json` (the Llama-shape
+/// loader's fields); `None` when unreadable or incomplete.
+fn kv_shape_of_config_json(dir: &Path) -> Option<KvShape> {
+    let text = std::fs::read_to_string(dir.join("config.json")).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&text).ok()?;
+    let get = |k: &str| v.get(k).and_then(serde_json::Value::as_u64);
+    let heads = get("num_attention_heads").filter(|h| *h > 0)?;
+    Some(KvShape {
+        layers: get("num_hidden_layers")?,
+        kv_heads: get("num_key_value_heads").unwrap_or(heads),
+        head_dim: get("head_dim").or_else(|| get("hidden_size").map(|h| h / heads))?,
+    })
+}
+
+/// [`KvShape`] of the model at `path`, `None` when it has no figure.
+pub(crate) fn kv_shape(path: &Path) -> Option<KvShape> {
+    if path.is_file() {
+        let content = crate::gguf::Content::read(path).ok()?;
+        kv_shape_of_gguf(&content)
+    } else {
+        kv_shape_of_config_json(path)
+    }
+}
+
 /// Where the scheduler's memory budget came from, for the startup log.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BudgetSource {
@@ -141,34 +227,37 @@ pub(crate) fn refuses_on_wont_fit(location: DeviceLocation, force: bool) -> bool
 pub(crate) fn enforce_with(
     model_path: &Path,
     weights_bytes: u64,
+    kv_bytes: u64,
     runtime: Option<&dyn BackendRuntime>,
     refuse: bool,
 ) -> anyhow::Result<()> {
-    match check_with(weights_bytes, runtime) {
-        Preflight::Fits => tracing::info!(
-            "memory preflight: {} of weights fit ({})",
-            format_bytes(weights_bytes as usize),
-            model_path.display()
-        ),
+    let total = weights_bytes.saturating_add(kv_bytes);
+    let what = format!(
+        "{} (weights {} + KV cache {})",
+        format_bytes(total as usize),
+        format_bytes(weights_bytes as usize),
+        format_bytes(kv_bytes as usize)
+    );
+    match check_with(total, runtime) {
+        Preflight::Fits => {
+            tracing::info!("memory preflight: {what} fit ({})", model_path.display())
+        }
         Preflight::Tight => tracing::warn!(
-            "memory preflight: {} of weights fit but leave the device tight ({})",
-            format_bytes(weights_bytes as usize),
+            "memory preflight: {what} fit but leave the device tight ({})",
             model_path.display()
         ),
         Preflight::Unknown => tracing::debug!(
             "memory preflight: backend reports no memory figure; not checking ({})",
             model_path.display()
         ),
-        Preflight::WontFit { needed, available } if refuse => bail!(
-            "model weights need at least {} but the device reports {} available \
+        Preflight::WontFit { available, .. } if refuse => bail!(
+            "model needs at least {what} but the device reports {} available \
              (set LIGHTBULB_ALLOW_OVERSIZE_MODEL=1 to load anyway)",
-            format_bytes(needed as usize),
             format_bytes(available as usize)
         ),
-        Preflight::WontFit { needed, available } => tracing::warn!(
-            "memory preflight: weights need at least {} but the device reports {} available; \
+        Preflight::WontFit { available, .. } => tracing::warn!(
+            "memory preflight: model needs at least {what} but the device reports {} available; \
              loading anyway ({})",
-            format_bytes(needed as usize),
             format_bytes(available as usize),
             model_path.display()
         ),
@@ -178,13 +267,23 @@ pub(crate) fn enforce_with(
 
 /// Refuse the load when the device says the weights cannot fit, per
 /// [`refuses_on_wont_fit`]. Never refuses on "no signal".
-pub(crate) fn enforce(model_path: &Path, device: &fuel::Device, force: bool) -> anyhow::Result<()> {
+pub(crate) fn enforce(
+    model_path: &Path,
+    device: &fuel::Device,
+    force: bool,
+    max_batch_size: usize,
+    context_length: usize,
+) -> anyhow::Result<()> {
     let Some(bytes) = weights_resident_estimate(model_path) else {
         return Ok(());
     };
+    let kv_bytes = kv_shape(model_path).map_or(0, |shape| {
+        kv_pool_bytes(shape, max_batch_size, context_length)
+    });
     enforce_with(
         model_path,
         bytes,
+        kv_bytes,
         device.as_dyn().as_backend_runtime(),
         refuses_on_wont_fit(device.as_dyn().location_dyn(), force),
     )
@@ -314,11 +413,11 @@ mod tests {
         let resident = gguf_resident_bytes([(elements, 12)]);
         let rt = Mock(Some(24 << 30), Some(24 << 30)); // a 24 GiB GPU
         assert!(
-            enforce_with(Path::new("m.gguf"), on_disk, Some(&rt), true).is_ok(),
+            enforce_with(Path::new("m.gguf"), on_disk, 0, Some(&rt), true).is_ok(),
             "positive control: the on-disk figure passes, which is the B17 defect"
         );
-        let err = enforce_with(Path::new("m.gguf"), resident, Some(&rt), true).unwrap_err();
-        assert!(format!("{err:#}").contains("need at least"), "{err:#}");
+        let err = enforce_with(Path::new("m.gguf"), resident, 0, Some(&rt), true).unwrap_err();
+        assert!(format!("{err:#}").contains("needs at least"), "{err:#}");
     }
 
     #[test]
@@ -339,13 +438,176 @@ mod tests {
         assert_eq!(weights_resident_estimate(&g), Some(on_disk_q));
     }
 
+    /// A GGUF with `arch` metadata (`u32` keys under `<arch>.`) and one tiny tensor.
+    fn gguf_with_meta(dir: &Path, arch: &str, keys: &[(&str, u32)]) -> std::path::PathBuf {
+        fn s(b: &mut Vec<u8>, v: &str) {
+            b.extend_from_slice(&(v.len() as u64).to_le_bytes());
+            b.extend_from_slice(v.as_bytes());
+        }
+        let mut b = Vec::new();
+        b.extend_from_slice(b"GGUF");
+        b.extend_from_slice(&3u32.to_le_bytes());
+        b.extend_from_slice(&1u64.to_le_bytes()); // tensors
+        b.extend_from_slice(&(keys.len() as u64 + 1).to_le_bytes()); // metadata kvs
+        s(&mut b, "general.architecture");
+        b.extend_from_slice(&8u32.to_le_bytes());
+        s(&mut b, arch);
+        for (k, v) in keys {
+            s(&mut b, &format!("{arch}.{k}"));
+            b.extend_from_slice(&4u32.to_le_bytes());
+            b.extend_from_slice(&v.to_le_bytes());
+        }
+        s(&mut b, "w");
+        b.extend_from_slice(&1u32.to_le_bytes());
+        b.extend_from_slice(&32u64.to_le_bytes());
+        b.extend_from_slice(&0u32.to_le_bytes());
+        b.extend_from_slice(&0u64.to_le_bytes());
+        while b.len() % 32 != 0 {
+            b.push(0);
+        }
+        b.extend(std::iter::repeat_n(0u8, 128));
+        let f = dir.join(format!("{arch}.gguf"));
+        std::fs::write(&f, b).unwrap();
+        f
+    }
+
+    const LLAMA_8B: &[(&str, u32)] = &[
+        ("block_count", 32),
+        ("attention.head_count", 32),
+        ("attention.head_count_kv", 8),
+        ("embedding_length", 4096),
+    ];
+
+    #[test]
+    fn the_kv_pool_is_the_engines_blocks_times_k_and_v_for_every_layer() {
+        let shape = KvShape {
+            layers: 32,
+            kv_heads: 8,
+            head_dim: 128,
+        };
+        // 32 x 2 x 8 x 128 x 4 B = 256 KiB per token; 2 sessions x 4096 tokens.
+        assert_eq!(kv_pool_bytes(shape, 2, 4096), 2 * 4096 * 256 * 1024);
+        // The pool rounds each session up to whole 16-token blocks.
+        assert_eq!(kv_pool_bytes(shape, 1, 17), 32 * 256 * 1024);
+        // The engine clamps a batch of 0 to 1, so the estimate does too.
+        assert_eq!(kv_pool_bytes(shape, 0, 16), 16 * 256 * 1024);
+    }
+
+    #[test]
+    fn the_kv_shape_is_read_from_gguf_metadata_for_llama_and_qwen3() {
+        let dir = tempfile::tempdir().unwrap();
+        let llama = gguf_with_meta(dir.path(), "llama", LLAMA_8B);
+        assert_eq!(
+            kv_shape(&llama),
+            Some(KvShape {
+                layers: 32,
+                kv_heads: 8,
+                head_dim: 128
+            })
+        );
+        // Qwen3 declares `key_length`, which wins over embedding / heads.
+        let qwen3 = gguf_with_meta(
+            dir.path(),
+            "qwen3",
+            &[
+                ("block_count", 36),
+                ("attention.head_count", 32),
+                ("attention.head_count_kv", 8),
+                ("attention.key_length", 128),
+                ("embedding_length", 2560),
+            ],
+        );
+        assert_eq!(
+            kv_shape(&qwen3),
+            Some(KvShape {
+                layers: 36,
+                kv_heads: 8,
+                head_dim: 128
+            })
+        );
+    }
+
+    #[test]
+    fn no_kv_figure_for_a_hybrid_an_unknown_architecture_or_a_missing_key() {
+        let dir = tempfile::tempdir().unwrap();
+        // Hybrid: only 16 of 64 layers hold KV (L4), so no per-layer figure is claimed.
+        let hybrid = gguf_with_meta(dir.path(), "qwen35", LLAMA_8B);
+        assert_eq!(kv_shape(&hybrid), None);
+        let other = gguf_with_meta(dir.path(), "mamba", LLAMA_8B);
+        assert_eq!(kv_shape(&other), None);
+        // Control: the same keys under `llama` do give a figure.
+        assert!(kv_shape(&gguf_with_meta(dir.path(), "llama", LLAMA_8B)).is_some());
+        let no_layers = gguf_with_meta(dir.path(), "llama", &LLAMA_8B[1..]);
+        assert_eq!(kv_shape(&no_layers), None);
+        assert_eq!(kv_shape(&dir.path().join("absent.gguf")), None);
+    }
+
+    #[test]
+    fn the_kv_shape_is_read_from_a_safetensors_config_json() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("config.json"),
+            r#"{"num_hidden_layers": 22, "num_attention_heads": 32,
+                "num_key_value_heads": 4, "hidden_size": 2048}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            kv_shape(dir.path()),
+            Some(KvShape {
+                layers: 22,
+                kv_heads: 4,
+                head_dim: 64
+            })
+        );
+        // GQA key absent: every head has its own KV.
+        std::fs::write(
+            dir.path().join("config.json"),
+            r#"{"num_hidden_layers": 2, "num_attention_heads": 8, "hidden_size": 64}"#,
+        )
+        .unwrap();
+        assert_eq!(kv_shape(dir.path()).map(|s| s.kv_heads), Some(8));
+    }
+
+    /// Both sides of the new rule: the same weights on the same device load
+    /// without a KV term and are refused with one, and a small context
+    /// brings the KV term back under the line.
+    #[test]
+    fn the_kv_pool_can_turn_a_pass_into_a_refusal_and_a_small_context_turns_it_back() {
+        let shape = KvShape {
+            layers: 32,
+            kv_heads: 8,
+            head_dim: 128,
+        };
+        let weights = 10u64 << 30;
+        let rt = Mock(Some(12 << 30), Some(12 << 30)); // a 12 GiB GPU
+        let big = kv_pool_bytes(shape, 1, 32_768); // 8 GiB
+        let small = kv_pool_bytes(shape, 1, 1_024); // 256 MiB
+        let m = Path::new("m.gguf");
+        assert!(
+            enforce_with(m, weights, 0, Some(&rt), true).is_ok(),
+            "weights alone fit: this is what used to pass"
+        );
+        let err = enforce_with(m, weights, big, Some(&rt), true).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("KV cache 8.00 GB") && msg.contains("weights 10.00 GB"),
+            "{msg}"
+        );
+        assert!(
+            enforce_with(m, weights, small, Some(&rt), true).is_ok(),
+            "a short context keeps the same model loadable"
+        );
+        // CPU rule unchanged: the same overage only warns.
+        assert!(enforce_with(m, weights, big, Some(&rt), false).is_ok());
+    }
+
     #[test]
     fn wont_fit_refuses_with_both_figures_in_the_message() {
         let rt = Mock(Some(1_000), Some(10_000));
-        let err = enforce_with(Path::new("m.gguf"), 5_000, Some(&rt), true).unwrap_err();
+        let err = enforce_with(Path::new("m.gguf"), 5_000, 0, Some(&rt), true).unwrap_err();
         let msg = format!("{err:#}");
         assert!(
-            msg.contains("need at least")
+            msg.contains("needs at least")
                 && msg.contains("available")
                 && msg.contains("LIGHTBULB_ALLOW_OVERSIZE_MODEL"),
             "{msg}"
@@ -355,7 +617,7 @@ mod tests {
     #[test]
     fn wont_fit_without_the_refuse_flag_warns_and_proceeds() {
         let rt = Mock(Some(1_000), Some(10_000));
-        assert!(enforce_with(Path::new("m.gguf"), 5_000, Some(&rt), false).is_ok());
+        assert!(enforce_with(Path::new("m.gguf"), 5_000, 0, Some(&rt), false).is_ok());
     }
 
     #[test]
@@ -378,10 +640,10 @@ mod tests {
     #[test]
     fn tight_and_unknown_and_no_runtime_proceed() {
         let tight = Mock(Some(80), Some(100));
-        assert!(enforce_with(Path::new("m"), 70, Some(&tight), true).is_ok());
+        assert!(enforce_with(Path::new("m"), 70, 0, Some(&tight), true).is_ok());
         let blind = Mock(None, None);
-        assert!(enforce_with(Path::new("m"), u64::MAX, Some(&blind), true).is_ok());
-        assert!(enforce_with(Path::new("m"), u64::MAX, None, true).is_ok());
+        assert!(enforce_with(Path::new("m"), u64::MAX, 0, Some(&blind), true).is_ok());
+        assert!(enforce_with(Path::new("m"), u64::MAX, 0, None, true).is_ok());
     }
 
     /// The real CPU device answers (or honestly declines) without panicking,
@@ -389,6 +651,15 @@ mod tests {
     #[test]
     fn the_real_cpu_device_never_refuses_one_byte() {
         let dev = fuel::Device::cpu();
-        assert!(enforce_with(Path::new("m"), 1, dev.as_dyn().as_backend_runtime(), true).is_ok());
+        assert!(
+            enforce_with(
+                Path::new("m"),
+                1,
+                0,
+                dev.as_dyn().as_backend_runtime(),
+                true
+            )
+            .is_ok()
+        );
     }
 }

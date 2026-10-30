@@ -460,7 +460,7 @@ impl<'m> SchedulerDriver for ServingDriver<'m> {
 /// division wastes little, small enough that a short prompt does not reserve
 /// a whole extra block it will never use. Matches the block size fuel's own
 /// `multi_session.rs` test fixtures use.
-const KV_BLOCK_SIZE: usize = 16;
+pub(super) const KV_BLOCK_SIZE: usize = 16;
 
 /// The server-wide (not per-request) pieces of the batched path, bundled so
 /// every function between [`run_fuel_engine`] and [`run_batched`] takes one
@@ -612,9 +612,13 @@ pub(crate) fn run_fuel_engine(
         ctrl_rx,
     );
     config.prefix_sharing_enabled = options.prefix_sharing;
-    if let Err(e) =
-        super::preflight::enforce(model_path, &config.device, options.allow_oversize_model)
-    {
+    if let Err(e) = super::preflight::enforce(
+        model_path,
+        &config.device,
+        options.allow_oversize_model,
+        max_batch_size,
+        context_length,
+    ) {
         return load_failed(model_path, e, rx);
     }
     let is_gguf = model_path
