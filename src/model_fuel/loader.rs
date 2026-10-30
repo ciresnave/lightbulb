@@ -202,7 +202,7 @@ fn shard_path(dir: &Path, index_path: &Path, name: &str) -> Result<PathBuf> {
 
 /// Load a Llama-shape checkpoint from a local directory containing
 /// `config.json` and either `model.safetensors` or a sharded set described by
-/// `model.safetensors.index.json` (see [`safetensors_files`]).
+/// `model.safetensors.index.json` (see `safetensors_files`).
 ///
 /// # Safety
 ///
