@@ -5,6 +5,11 @@
 ### Changed
 - `docs/PATENT-SWEEP.md`: searches for ideas 1, 3, 11, 12 against Google Patents' own query endpoint with the exact strings recorded; candidates listed as `unread` (claim fetches returned HTTP 503); ideas 4 and 12 annotated with the deleted code they describe. `examples/prefix_sharing_bench.rs` header: run it under `pwsh -File`, and through `gpu-run` for GPU. Docs and a doc comment only.
 
+## 0.23.3
+
+### Changed
+- ROADMAP section E, cluster 3 (docs and one source comment): the nine M6.5 acceptance ticks (✅ with no code behind them) are reset to ☐, the M5 "COMPLETE" item in the VERIFIED STATUS block and the `kv_compression` entry in `model_fuel/policies.rs` carry a "Superseded" note.
+
 ## 0.23.2
 
 ### Changed
