@@ -44,7 +44,7 @@ def log_request(method, path, headers, raw_body):
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
-    def log_message(self, fmt, *args):  # one terse line per request
+    def log_message(self, format, *args):  # one terse line per request  # pylint: disable=redefined-builtin
         sys.stderr.write("%s %s\n" % (self.command, self.path))
 
     def _send_json(self, status, obj):
@@ -82,14 +82,17 @@ class Handler(BaseHTTPRequestHandler):
         if path.endswith("/chat/completions"):
             self._chat(body or {})
         elif path.endswith("/embeddings"):
-            inputs = (body or {}).get("input", [])
-            count = len(inputs) if isinstance(inputs, list) else 1
-            self._send_json(200, {"object": "list", "model": MODEL_ID,
-                                  "data": [{"object": "embedding", "index": i, "embedding": [0.0, 0.1, 0.2]}
-                                           for i in range(count)],
-                                  "usage": {"prompt_tokens": 1, "total_tokens": 1}})
+            self._embed(body or {})
         else:
             self._send_json(404, {"error": {"message": "capture stub: not found"}})
+
+    def _embed(self, body):
+        inputs = body.get("input", [])
+        count = len(inputs) if isinstance(inputs, list) else 1
+        self._send_json(200, {"object": "list", "model": MODEL_ID,
+                              "data": [{"object": "embedding", "index": i, "embedding": [0.0, 0.1, 0.2]}
+                                       for i in range(count)],
+                              "usage": {"prompt_tokens": 1, "total_tokens": 1}})
 
     def _chat(self, body):
         text = "capture stub reply"
