@@ -1,9 +1,17 @@
 # Changelog
 
-## 0.20.5
+## 0.21.1
 
 ### Added
 - `docs/superpowers/specs/2026-10-30-b8-b9-b10-wiring-design.md`: design (no code) for ROADMAP B8/B9/B10; B9 reads free memory from Fuel's `BackendRuntime`.
+
+## 0.21.0
+
+### Removed
+- **Breaking:** the ten `debug-*` Cargo features (`debug-all`, `debug-prefill`, `debug-decode`, `debug-attention`, `debug-attention-scores`, `debug-cache`, `debug-rope`, `debug-mlp`, `debug-chunking`, `debug-engine`) and the `lightbulb::debug` module with its eight macros (ROADMAP B14). None had a call site; enabling a `debug-*` feature printed nothing. `docs/DEBUG.md` and `docs/DEBUG_IMPLEMENTATION.md` are removed with them. Use `tracing` / `RUST_LOG` instead.
+
+### Added
+- `SECURITY.md` now says to report vulnerabilities privately through GitHub private vulnerability reporting (enabled on the repository) and not to open a public issue.
 
 ## 0.20.4
 

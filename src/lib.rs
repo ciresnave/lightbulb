@@ -17,7 +17,6 @@ pub mod api;
 pub mod backend; // Hardware-specific backends (CUDA, ROCm, etc.)
 pub mod cache;
 pub mod contracts; // Output Contracts — structured responses from small/weak LLMs
-pub mod debug;
 pub mod engine;
 pub mod gguf;
 pub mod hardware; // Hardware detection and adaptive configuration
