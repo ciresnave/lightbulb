@@ -1,9 +1,14 @@
 # Changelog
 
-## 0.21.3
+## 0.22.1
 
 ### Changed
 - When `LIGHTBULB_MAX_MEMORY_BYTES` is unset, the scheduler's `max_memory_bytes` now defaults to what the serving device reports available (Fuel `BackendRuntime::available_bytes`) instead of a fixed 8 GiB, falling back to 8 GiB when the device cannot say or reports 0 free. A set-but-unparseable `LIGHTBULB_MAX_MEMORY_BYTES` now logs a warning naming it instead of being ignored silently. The chosen value and its source are logged at startup. An explicit value always wins. `lightbulb::model_fuel::preflight` is now `pub` (`resolve_max_memory`, `device_available_bytes`, `BudgetSource`).
+
+## 0.22.0
+
+### Removed
+- **Breaking** (ROADMAP B8): `lightbulb::engine::slot_monitor` (`SlotPoolMonitor`, `AdjustmentConfig`, `MemoryStatistics`, and the `engine::` re-exports), `SystemConfig::chunk_size` and `SystemConfig::enable_monitoring`, and the `chunk_size` parameter of `SystemConfig::custom`. The serving path's `SlotPool` is a mirror of Fuel's `PagedSessionScheduler` admissions (`scheduled_llama_engine.rs`), so resizing it changed bookkeeping and never capacity, and no prefill code read `chunk_size`: both looked live and did nothing. Migration: delete the monitor calls; drop the `chunk_size` argument from `SystemConfig::custom(hardware, model, slot_pool_size, dtype_bytes)`. Also removed: `tests/slot_adjustment_test.rs`, `examples/runtime_slot_adjustment.rs`; `examples/hardware_aware_init.rs` no longer shows a monitor or a chunk size. Real resize needs a Fuel-side hook (ROADMAP B8b).
 
 ## 0.21.2
 

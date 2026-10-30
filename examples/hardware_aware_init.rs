@@ -7,13 +7,11 @@
 //! This example shows:
 //! 1. Hardware detection (CPU, RAM, GPU)
 //! 2. Automatic batch size calculation
-//! 3. Optimal chunk size selection
-//! 4. Memory utilization analysis
-//! 5. Integration with SlotPool and SlotPoolMonitor
+//! 3. Memory utilization analysis
+//! 4. Integration with SlotPool
 //!
 //! Run: `cargo run --example hardware_aware_init --release`
 
-use lightbulb::engine::slot_monitor::{AdjustmentConfig, SlotPoolMonitor};
 use lightbulb::engine::slot_pool::SlotPool;
 use lightbulb::hardware::batch_sizing::ModelMemoryProfile;
 use lightbulb::init::SystemConfig;
@@ -60,34 +58,6 @@ fn main() -> anyhow::Result<()> {
         config.slot_pool_size
     );
 
-    // Initialize monitoring if enabled
-    if config.enable_monitoring {
-        let monitor_config = AdjustmentConfig {
-            target_utilization: config.memory_utilization_target,
-            ..AdjustmentConfig::default()
-        };
-
-        let _monitor =
-            SlotPoolMonitor::with_config(model_profile.clone(), config.dtype_bytes, monitor_config);
-        println!("✓ SlotPoolMonitor initialized");
-        println!(
-            "  - Target utilization: {:.0}%",
-            config.memory_utilization_target * 100.0
-        );
-        println!("  - Runtime adjustment: enabled");
-    }
-
-    println!("\n📈 Chunk Size Configuration:");
-    println!("  Chunk size: {} tokens", config.chunk_size);
-    println!(
-        "  Strategy: {}",
-        if config.hardware.gpu.is_some() {
-            "GPU-optimized (larger chunks for throughput)"
-        } else {
-            "CPU-optimized (conservative chunks from benchmarks)"
-        }
-    );
-
     // Simulate usage scenarios
     println!("\n🔬 Simulation: Load Scenarios\n");
 
@@ -126,13 +96,8 @@ fn main() -> anyhow::Result<()> {
     // Performance projections
     println!("\n📊 Performance Projections:");
 
-    let prefill_tokens_per_chunk = config.chunk_size;
     let decode_latency_ms = 50.0; // Approximate per-token decode latency
 
-    println!(
-        "  Prefill throughput: {} tokens/chunk",
-        prefill_tokens_per_chunk
-    );
     println!(
         "  Decode latency: ~{:.0} ms/token (estimated)",
         decode_latency_ms
@@ -167,15 +132,7 @@ fn main() -> anyhow::Result<()> {
     println!("\n💡 Tips:");
     if config.hardware.gpu.is_some() {
         println!("  • GPU detected: Consider enabling FlashAttention for 2-4x speedup");
-        println!(
-            "  • Larger chunk sizes ({}+) work well on GPU",
-            config.chunk_size
-        );
     } else {
-        println!(
-            "  • CPU mode: Chunk size optimized for L3 cache ({})",
-            config.chunk_size
-        );
         println!("  • Consider quantization (Q4, Q8) for 2-4x memory savings");
     }
 

@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! Hardware-aware system initialization
 //!
-//! This module provides automatic configuration of batch size, chunk size,
-//! and slot pool sizing based on detected hardware capabilities.
+//! This module provides automatic configuration of batch size and slot pool
+//! sizing based on detected hardware capabilities.
 //!
 //! # Usage
 //!
@@ -15,13 +15,10 @@
 //! // Or customize
 //! let config = SystemConfig {
 //!     slot_pool_size: 64,
-//!     chunk_size: 256,
-//!     enable_monitoring: true,
 //!     ..SystemConfig::auto_detect(model_profile)?
 //! };
 //!
-//! println!("Optimized for: {} slots, {} chunk size",
-//!          config.slot_pool_size, config.chunk_size);
+//! println!("Optimized for: {} slots", config.slot_pool_size);
 //! ```
 
 use crate::engine::speculative::SpeculativeConfig;
@@ -33,12 +30,6 @@ use anyhow::{Context, Result};
 pub struct SystemConfig {
     /// Number of concurrent request slots (batch size)
     pub slot_pool_size: usize,
-
-    /// Chunk size for prefill operations (tokens per chunk)
-    pub chunk_size: usize,
-
-    /// Enable runtime slot pool monitoring and adjustment
-    pub enable_monitoring: bool,
 
     /// Memory utilization target (0.0-1.0)
     pub memory_utilization_target: f64,
@@ -110,13 +101,8 @@ impl SystemConfig {
             calculate_optimal_batch_size(&hardware, &model, dtype_bytes, Some(batch_config))
                 .context("Failed to calculate optimal batch size")?;
 
-        // Determine optimal chunk size based on device
-        let chunk_size = Self::calculate_chunk_size(&hardware);
-
         println!("\n✅ Auto-configured:");
         println!("  Slot pool size: {} concurrent requests", slot_pool_size);
-        println!("  Chunk size: {} tokens per prefill chunk", chunk_size);
-        println!("  Monitoring: enabled");
 
         // Configure speculative decoding if beneficial
         let speculative = Self::configure_speculative_decoding(&hardware, &model);
@@ -129,8 +115,6 @@ impl SystemConfig {
 
         Ok(Self {
             slot_pool_size,
-            chunk_size,
-            enable_monitoring: true,
             memory_utilization_target: 0.7,
             hardware,
             model,
@@ -180,33 +164,6 @@ impl SystemConfig {
         })
     }
 
-    /// Calculate optimal chunk size based on hardware
-    ///
-    /// Chunk size affects prefill memory usage and throughput.
-    /// Larger chunks = faster prefill but higher memory spikes.
-    ///
-    /// # Strategy
-    ///
-    /// - **CPU**: 256 tokens (from benchmark results)
-    /// - **GPU (mobile/integrated)**: 512 tokens
-    /// - **GPU (discrete)**: 1024 tokens
-    fn calculate_chunk_size(hardware: &HardwareProfile) -> usize {
-        if let Some(gpu) = &hardware.gpu {
-            // GPU: scale based on VRAM
-            // < 4GB: 512 tokens (mobile/integrated)
-            // >= 4GB: 1024 tokens (discrete GPU)
-            if gpu.vram_bytes < 4 * 1024 * 1024 * 1024 {
-                512
-            } else {
-                1024
-            }
-        } else {
-            // CPU: conservative chunk size (from benchmark results)
-            // benchmark_chunk_sizes.rs showed 256 is optimal for CPU
-            256
-        }
-    }
-
     /// Create a custom configuration with specific settings
     ///
     /// # Example
@@ -216,7 +173,6 @@ impl SystemConfig {
     ///     hardware,
     ///     model,
     ///     32,   // slot_pool_size
-    ///     512,  // chunk_size
     ///     2,    // dtype_bytes (f16)
     /// );
     /// ```
@@ -224,13 +180,10 @@ impl SystemConfig {
         hardware: HardwareProfile,
         model: ModelMemoryProfile,
         slot_pool_size: usize,
-        chunk_size: usize,
         dtype_bytes: usize,
     ) -> Self {
         Self {
             slot_pool_size,
-            chunk_size,
-            enable_monitoring: true,
             memory_utilization_target: 0.7,
             hardware,
             model,
@@ -286,15 +239,6 @@ impl SystemConfig {
         println!(
             "  Slot pool size:    {} concurrent requests",
             self.slot_pool_size
-        );
-        println!("  Chunk size:        {} tokens", self.chunk_size);
-        println!(
-            "  Monitoring:        {}",
-            if self.enable_monitoring {
-                "enabled"
-            } else {
-                "disabled"
-            }
         );
 
         if stats.utilization_percent > 90.0 {
@@ -353,14 +297,6 @@ mod tests {
             limits.min_batch_size,
             limits.max_batch_size
         );
-        // The exact legal set, not a loose range, so a regression in
-        // `calculate_chunk_size` (0, or an unbounded value) is caught.
-        assert!(
-            matches!(config.chunk_size, 256 | 512 | 1024),
-            "chunk_size {} is not a value calculate_chunk_size can return",
-            config.chunk_size
-        );
-        assert!(config.enable_monitoring);
     }
 
     #[test]
@@ -382,7 +318,7 @@ mod tests {
         };
 
         let model = test_model();
-        let config = SystemConfig::custom(hardware, model, 16, 256, 2);
+        let config = SystemConfig::custom(hardware, model, 16, 2);
         let stats = config.memory_stats();
 
         assert!((stats.model_weights_gb - 6.0).abs() < 0.5); // Within 0.5GB
@@ -390,54 +326,5 @@ mod tests {
         assert!(stats.total_memory_gb > stats.model_weights_gb);
         assert!(stats.utilization_percent > 0.0);
         assert!(stats.utilization_percent <= 100.0);
-    }
-
-    #[test]
-    fn test_chunk_size_cpu() {
-        let hardware = HardwareProfile {
-            cpu: crate::hardware::CpuInfo {
-                physical_cores: 4,
-                logical_cores: 8,
-                architecture: "x86_64".to_string(),
-                model_name: "Test CPU".to_string(),
-            },
-            memory: crate::hardware::MemoryInfo {
-                total_bytes: 16 * 1024 * 1024 * 1024,
-                available_bytes: 14 * 1024 * 1024 * 1024,
-                bandwidth_gbs: None,
-            },
-            gpu: None,
-            ml_score: 4.0,
-        };
-
-        let chunk_size = SystemConfig::calculate_chunk_size(&hardware);
-        assert_eq!(chunk_size, 256); // CPU default from benchmarks
-    }
-
-    #[test]
-    fn test_chunk_size_gpu() {
-        let hardware = HardwareProfile {
-            cpu: crate::hardware::CpuInfo {
-                physical_cores: 8,
-                logical_cores: 16,
-                architecture: "x86_64".to_string(),
-                model_name: "Test CPU".to_string(),
-            },
-            memory: crate::hardware::MemoryInfo {
-                total_bytes: 32 * 1024 * 1024 * 1024,
-                available_bytes: 28 * 1024 * 1024 * 1024,
-                bandwidth_gbs: None,
-            },
-            gpu: Some(crate::hardware::GpuInfo {
-                name: "NVIDIA RTX 4090".to_string(),
-                vram_bytes: 24 * 1024 * 1024 * 1024, // 24GB
-                backend: crate::hardware::GpuBackend::Cuda,
-                compute_capability: Some("8.9".to_string()),
-            }),
-            ml_score: 9.0,
-        };
-
-        let chunk_size = SystemConfig::calculate_chunk_size(&hardware);
-        assert_eq!(chunk_size, 1024); // High-end GPU
     }
 }
