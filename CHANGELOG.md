@@ -3,7 +3,7 @@
 ## 0.21.0
 
 ### Removed
-- **Breaking:** the nine `debug-*` Cargo features (`debug-all`, `debug-prefill`, `debug-decode`, `debug-attention`, `debug-attention-scores`, `debug-cache`, `debug-rope`, `debug-mlp`, `debug-chunking`, `debug-engine`) and the `lightbulb::debug` module with its eight macros (ROADMAP B14). None had a call site; enabling a `debug-*` feature printed nothing. `docs/DEBUG.md` and `docs/DEBUG_IMPLEMENTATION.md` are removed with them. Use `tracing` / `RUST_LOG` instead.
+- **Breaking:** the ten `debug-*` Cargo features (`debug-all`, `debug-prefill`, `debug-decode`, `debug-attention`, `debug-attention-scores`, `debug-cache`, `debug-rope`, `debug-mlp`, `debug-chunking`, `debug-engine`) and the `lightbulb::debug` module with its eight macros (ROADMAP B14). None had a call site; enabling a `debug-*` feature printed nothing. `docs/DEBUG.md` and `docs/DEBUG_IMPLEMENTATION.md` are removed with them. Use `tracing` / `RUST_LOG` instead.
 
 ### Added
 - `SECURITY.md` now says to report vulnerabilities privately through GitHub private vulnerability reporting (enabled on the repository) and not to open a public issue.
