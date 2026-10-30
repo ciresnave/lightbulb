@@ -5,6 +5,11 @@
 ### Added
 - `docs/OLLAMA-CHERRY-CENSUS.md`: evidence-based have/partial/missing table of what Lightbulb on Fuel still lacks to replace Ollama and Cherry Studio, and ROADMAP section F (F1-F8) with one row per gap (architecture breadth ranked first by the installed `ollama list` set; Cherry-side claims marked unverified where its docs are silent); ROADMAP A1 marked done (it was, in 0.19.21). Docs only.
 
+## 0.23.3
+
+### Changed
+- ROADMAP section E, cluster 3 (docs and one source comment): the nine M6.5 acceptance ticks (✅ with no code behind them) are reset to ☐, the M5 "COMPLETE" item in the VERIFIED STATUS block and the `kv_compression` entry in `model_fuel/policies.rs` carry a "Superseded" note.
+
 ## 0.23.2
 
 ### Changed

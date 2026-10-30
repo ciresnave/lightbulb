@@ -652,7 +652,7 @@ France</s>"`, was already stale before the fix: it predated the BOS fix in #19.
 Retained here only as provenance.)*
 
 **3. `M5 KV cache compression (COMPLETE)`** is cited as a satisfied dependency by
-CR.1 and CR.2 (lines ~2701, ~2748).
+CR.1 and CR.2 (lines ~2701, ~2748). ⚠️ **Superseded (section E, verified at 7ccf91f8, 2026-10-30):** `src/cache/` has no compression module any more (deleted in #195), so the findings in this item describe deleted code and stay only as history.
 
 `src/cache/kv_compression.rs`'s `PerGroup` granularity was a live
 `todo!("Grouped quantization not yet implemented")` — **a panic, not a bail**,
@@ -4123,17 +4123,17 @@ Elastic KV cache management using CUDA virtual memory APIs to enable:
 - [ ] User documentation and integration examples
 - [ ] Feature flag system for gradual rollout
 
-**Acceptance Criteria**:
+**Acceptance Criteria**: ⚠️ **Superseded (section E, verified at 7ccf91f8, 2026-10-30):** these were ticked ✅ but are targets, not results. `git grep` for `ElasticCache`, `VirtualMemoryPool`, `SharedMemoryPool` and `candle-cuda-vmm` over `src`, `Cargo.toml`, `tests` and `examples` finds nothing (its one hit is the prose in `tests/MULTI_GPU_TESTING.md`), and the status above is PLANNED. The ticks are reset to ☐.
 
-- ✅ `candle-cuda-vmm` crate published and integrated
-- ✅ Elastic cache works with BatchedTransformer (API-compatible)
-- ✅ Multi-model serving supports ≥4 concurrent models
-- ✅ TTFT improvement ≥1.2× in multi-model scenarios (measured)
-- ✅ Memory efficiency: 2× more models vs static allocation
-- ✅ Allocation latency <100μs per 2MB page (benchmarked)
-- ✅ Single-model throughput within 2% of static allocation
-- ✅ 24hr stability test passes with no memory leaks
-- ✅ Comprehensive documentation and examples published
+- ☐ `candle-cuda-vmm` crate published and integrated
+- ☐ Elastic cache works with BatchedTransformer (API-compatible)
+- ☐ Multi-model serving supports ≥4 concurrent models
+- ☐ TTFT improvement ≥1.2× in multi-model scenarios (measured)
+- ☐ Memory efficiency: 2× more models vs static allocation
+- ☐ Allocation latency <100μs per 2MB page (benchmarked)
+- ☐ Single-model throughput within 2% of static allocation
+- ☐ 24hr stability test passes with no memory leaks
+- ☐ Comprehensive documentation and examples published
 
 **References**:
 - **KVCached Project**: [ovg-project/kvcached](https://github.com/ovg-project/kvcached)
@@ -5565,7 +5565,7 @@ hits); 2199 (speculative MVP; `SpeculativeDecoder` removed); 2205-2210 ("AWQ Pha
 Fuel loaders hard-gate to Llama); 2798 (checkpoint captures KV cache: it writes `None`); 3326 (Prometheus
 "planned": `/metrics` exists); M6.5 criteria ticked with 0 hits for `VirtualMemoryPool` /
 `ElasticCache`; 4157 (`src/loaders.rs`); CR.1.1 "Infrastructure exists: ParallelKvCache +
-ParallelCacheBuilder" (both removed). Repair status: **in progress** (cluster 2, 0.23.2: speculative MVP, checkpoint KV, Prometheus, CR.1.1 infrastructure, M5 compression dependency lines; cluster 1, 0.23.1: M3.3 fused kernels, chunk sizing, cache control tools, AWQ Phase 2 `marlin.rs`, M4.1 `src/loaders.rs`, PersistAnt version, `set_priority`, `enhanced_correctness_tests.rs` now carry an inline "Superseded" note; still open: M6.5 criteria ticked with 0 hits, the M5 "COMPLETE" heading at the VERIFIED STATUS block, `kv_compression` mentions in `src/model_fuel/policies.rs`) (one docs PR per cluster; each repair
+ParallelCacheBuilder" (both removed). Repair status: **done for the items listed** (cluster 3, 0.23.3: M6.5 acceptance ticks reset, M5 heading in the VERIFIED STATUS block, `policies.rs` note; cluster 2, 0.23.2: speculative MVP, checkpoint KV, Prometheus, CR.1.1 infrastructure, M5 compression dependency lines; cluster 1, 0.23.1: M3.3 fused kernels, chunk sizing, cache control tools, AWQ Phase 2 `marlin.rs`, M4.1 `src/loaders.rs`, PersistAnt version, `set_priority`, `enhanced_correctness_tests.rs` now carry an inline "Superseded" note). Any further stale line found later is a new row, not a continuation of this one (one docs PR per cluster; each repair
 re-checks its line against `origin/main` first, since line numbers drift).
 
 ### F. Replacing Ollama and Cherry Studio (census 2026-10-30, `docs/OLLAMA-CHERRY-CENSUS.md`)
