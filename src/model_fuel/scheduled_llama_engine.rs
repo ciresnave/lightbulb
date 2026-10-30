@@ -612,7 +612,9 @@ pub(crate) fn run_fuel_engine(
         ctrl_rx,
     );
     config.prefix_sharing_enabled = options.prefix_sharing;
-    if let Err(e) = super::preflight::enforce(model_path, &config.device) {
+    if let Err(e) =
+        super::preflight::enforce(model_path, &config.device, options.allow_oversize_model)
+    {
         return load_failed(model_path, e, rx);
     }
     let is_gguf = model_path

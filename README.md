@@ -71,6 +71,7 @@ projects:
 | Variable | Default | Effect |
 |---|---|---|
 | `LIGHTBULB_PREFIX_SHARING` | off | `1`/`true`/`yes`/`on` lets a request splice a live donor's KV blocks for a shared block-aligned prompt prefix instead of prefilling it again. Experimental: no benchmark yet shows a win (Fuel's paged attention has no fused CUDA kernel), so it stays off by default. Prefix-hit *detection* (the `cache_stats` counters) runs either way. Library users set `ApiConfig::model_prefix_sharing` or pass `EngineOptions` to `ModelRunner::start_with_options`; only the binary reads the variable. |
+| `LIGHTBULB_ALLOW_OVERSIZE_MODEL` | off | `1`/`true`/`yes`/`on` loads a model even when the serving GPU reports its weights cannot fit. Without it a GPU load whose on-disk weight size exceeds the available VRAM is refused; on the CPU the same finding only logs a warning and loads (free RAM is soft). Library users set `ApiConfig::model_allow_oversize` or `EngineOptions::allow_oversize_model`. |
 
 Pin checkpoint fixtures by revision. A plain `git clone` of a Hugging Face repo
 tracks its default branch and moves under you on `git pull`, which silently
