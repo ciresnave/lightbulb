@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.23.12
+
+### Added
+- F10 (Qwen3.8-27B, priority one): the `qwen35` byte-level tokenizer rule is now verified and accepted. It was refused because no admissible reference existed; `Qwen/Qwen3.5-0.8B`'s own `tokenizer.json` is one (NFC; `[\p{L}\p{M}]+` where `qwen2` has `\p{L}+`). `gguf_bpe_tokenizer_fidelity` gates it against the real `unsloth/Qwen3.5-0.8B-GGUF` over 132 cases, now including combining marks that NFC cannot compose (Devanagari, Thai, Arabic): 0 disagreements across all 11 pairs, and with the `qwen2` rule in its place the gate fails 2 cases. A unit test pins that the two rules split a Devanagari word differently.
+- `detect_architecture` recognises `general.architecture = "qwen35"` and the Fuel engine refuses it with a specific message (needs a hybrid decode model and quantized K-quants from Fuel) instead of the generic unsupported-architecture one.
+- ROADMAP F10 records the real `qwen35` GGUF metadata keys and tensor names read from the 0.8B header; the superseded `qwen35` refusal notes are marked.
+
 ## 0.23.11
 
 ### Fixed

@@ -646,6 +646,9 @@ fn serve_gguf(
     match detect_architecture(content.metadata()) {
         Ok(GgufArchitecture::Llama) => serve_gguf_llama(model_path, context_length, config, rx),
         Ok(GgufArchitecture::Qwen3) => serve_gguf_qwen3(model_path, context_length, config, rx),
+        Ok(GgufArchitecture::Qwen35) => {
+            load_failed(model_path, anyhow::anyhow!(QWEN35_UNSERVED), rx)
+        }
         Err(e) => load_failed(model_path, e, rx),
     }
 }
@@ -723,6 +726,15 @@ fn serve_f32(
         ServingDriverInner::F32,
     );
 }
+
+/// Why a `qwen35` GGUF is recognised but not served: a specific refusal rather
+/// than the generic unsupported-architecture one, so the reader is not sent
+/// looking for a defect in a file that is fine.
+const QWEN35_UNSERVED: &str = "this GGUF declares `general.architecture = \"qwen35\"` \
+    (Qwen3.5/3.8: Gated DeltaNet layers interleaved with full attention). Lightbulb \
+    recognises it and its tokenizer is supported, but serving it needs a hybrid decode \
+    model with per-session recurrent state and K-quants kept quantized, which Fuel does \
+    not provide yet (ROADMAP F10).";
 
 /// Report a load failure the same way both branches of [`run_fuel_engine`]
 /// need to, then drain `rx` so no job is left waiting on a model that will
