@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.23.11
+
+### Fixed
+- B17: the GPU memory preflight compared a GGUF's on-disk size to free VRAM, but Fuel keeps only `Q4_0` quantized and dequantizes every other dtype to f32 at load, so a Q4_K_M file needs about 4x its size (a 4.9 GB 8B needs ~32 GB) and the preflight passed models that then failed to allocate. It now estimates resident bytes from the GGUF tensor directory (`Q4_0` as stored, everything else as f32). Fuel ROADMAP row 124 (K-quants stay quantized) supersedes this estimate; delete `gguf_resident_bytes` then. `/v1/models` `weights_bytes_on_disk` is unchanged.
+
 ## 0.23.10
 
 ### Added
