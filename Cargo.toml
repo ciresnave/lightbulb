@@ -4,7 +4,7 @@
     license     = "MIT OR Apache-2.0"
     name        = "lightbulb"
     repository  = "https://github.com/ciresnave/lightbulb"
-    version     = "0.20.4"
+    version     = "0.21.0"
 
 [features]
     # CUDA, via Fuel only. Was `["candlelight/cuda", "fuel/cuda"]`; candlelight
@@ -27,18 +27,6 @@
     # it (CI's `gates` job among them) until they're updated to stop.
     fuel-engine = []
     default = []
-
-    # Debug output categories - enable individually or use debug-all
-    debug-all = ["debug-prefill", "debug-decode", "debug-attention", "debug-cache", "debug-rope", "debug-mlp", "debug-chunking", "debug-engine", "debug-attention-scores"]
-    debug-prefill = []
-    debug-decode = []
-    debug-attention = []
-    debug-attention-scores = []
-    debug-cache = []
-    debug-rope = []
-    debug-mlp = []
-    debug-chunking = []
-    debug-engine = []
 
 [dependencies]
     ahash              = "0.8"
