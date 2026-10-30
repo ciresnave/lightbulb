@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.23.14
+
+### Added
+- Design note `docs/superpowers/specs/2026-10-30-l2-l4-l5-hybrid-device-design.md` (no code): L2 mixed-vendor device selection (`LIGHTBULB_DEVICE`, `auto` picks most free bytes that fit), L4 hybrid KV plus fixed-state budget and the missing KV term in preflight, L5 prefix sharing disabled for hybrid models, with test plans, sequencing against Fuel rows, and four questions for the PM.
+
 ## 0.23.13
 
 ### Changed
