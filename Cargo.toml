@@ -4,7 +4,7 @@
     license     = "MIT OR Apache-2.0"
     name        = "lightbulb"
     repository  = "https://github.com/ciresnave/lightbulb"
-    version     = "0.21.1"
+    version     = "0.21.2"
 
 [features]
     # CUDA, via Fuel only. Was `["candlelight/cuda", "fuel/cuda"]`; candlelight
@@ -191,6 +191,9 @@
     # (`fuel::probe`, `fuel::topology`, `fuel::transfer_cost`), so this is the
     # only reason for a direct dependency on this crate.
     fuel-ir = "0.25.10"
+    # `BackendRuntime` (`available_bytes` / `would_fit`) and `DynBackendDevice::as_backend_runtime`,
+    # which `src/model_fuel/preflight.rs` calls and `fuel` does not re-export.
+    fuel-backend-contract = "0.25.10"
     # `multi_session::SessionScheduler` + `DecodeModel` — the batched
     # multi-session decode driver `src/model_fuel/scheduler_driver.rs` wires
     # in. Consistent with the rest of this block: `fuel`/`fuel-transformers`/

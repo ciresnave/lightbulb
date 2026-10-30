@@ -27,11 +27,10 @@ If neither exists this is a Fuel ask (a `Device::runtime()`), not hand-rolled pr
 2. Inputs to `MemoryEstimate` come from what the loaders already know before allocating: GGUF tensor
    byte sizes (header only), safetensors file sizes / shard index total, plus `KvCacheMemory` from the
    config and the served context length.
-3. Call site: just before the weights are materialised in `scheduled_llama_engine.rs` (the GGUF load at
-   `:657` and the safetensors load at `:705`). `WontFit` => refuse the load with a typed error naming
-   need/available, mapped to the existing startup failure path. `Tight` => `tracing::warn!`. `Unknown`
-   => proceed (never refuse on no signal). Env override to skip the check is *not* proposed; if wanted it
-   is a ConfigurAnt key (ant-first).
+3. Call site: once in `run_fuel_engine` (`scheduled_llama_engine.rs`), before any of the three loaders runs,
+   using the model's on-disk weight size as a lower bound. `WontFit` follows the ruling below (GPU refuses via the
+   existing `load_failed` path, CPU warns), the message naming need/available. `Tight` => `tracing::warn!`.
+   `Unknown` => proceed (never refuse on no signal).
 4. `/v1/models`: add the estimate breakdown (weights / KV / activations / total bytes) to the loaded
    model's object under a clearly non-OpenAI field (`lightbulb_memory`), absent when unknown. `models.rs`
    already lists exactly the loaded model.
@@ -40,8 +39,12 @@ If neither exists this is a Fuel ask (a `Device::runtime()`), not hand-rolled pr
 `Unknown` refuse (must turn the "no signal proceeds" test red). Controls: the same estimate against a
 runtime reporting plenty of memory must pass.
 
-**Risk.** CPU `available_bytes` is system-wide and noisy (contract doc says so); the check therefore
-refuses only on `WontFit` and warns on `Tight`.
+**Ruling (PM 2026-10-30).** GPU `WontFit` refuses (VRAM is a hard limit); CPU `WontFit` WARNS and proceeds
+(free RAM is soft: page cache, swap, mmap'd weights), the message naming both figures. One explicit override,
+`LIGHTBULB_ALLOW_OVERSIZE_MODEL` (`ApiConfig::model_allow_oversize` / `EngineOptions::allow_oversize_model`),
+forces the load on a GPU too. `Tight` warns; `Unknown` never refuses. Implemented in 0.21.2.
+
+**Risk.** CPU `available_bytes` is system-wide and noisy (contract doc says so); hence the CPU rule above.
 
 ## B8: `SystemConfig::auto_detect` and `SlotPoolMonitor`
 

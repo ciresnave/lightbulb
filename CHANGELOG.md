@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.21.2
+
+### Added
+- Pre-load memory check (ROADMAP B9, first half): before loading, the Fuel path asks the serving device (Fuel `BackendRuntime::would_fit`) whether the model's on-disk weight size fits. If the device says it will not, a GPU load is refused with a message naming both figures (VRAM is a hard limit); a CPU load only logs a warning and proceeds (free RAM is soft: page cache, swap, mmap'd weights). `LIGHTBULB_ALLOW_OVERSIZE_MODEL=1` (`ApiConfig::model_allow_oversize`, `EngineOptions::allow_oversize_model`) forces the GPU load too. `Tight` logs a warning; a backend that cannot measure (`Unknown`) never refuses. New direct dependency `fuel-backend-contract` (already in the tree via `fuel`). `/v1/models` memory reporting follows separately.
+
 ## 0.21.1
 
 ### Added

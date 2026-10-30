@@ -118,6 +118,11 @@ async fn run(cli: Cli) -> Result<()> {
     let model_prefix_sharing = env::var("LIGHTBULB_PREFIX_SHARING")
         .map(|v| parse_flag(&v))
         .unwrap_or(false);
+    // Off unless explicitly enabled: lets a model load on a GPU that reports
+    // it cannot fit (ROADMAP B9). CPU never refuses, so this changes nothing there.
+    let model_allow_oversize = env::var("LIGHTBULB_ALLOW_OVERSIZE_MODEL")
+        .map(|v| parse_flag(&v))
+        .unwrap_or(false);
 
     let cors_allowed_origins: Vec<String> = env::var("LIGHTBULB_CORS_ORIGINS")
         .map(|v| {
@@ -144,6 +149,7 @@ async fn run(cli: Cli) -> Result<()> {
         model_context_length,
         model_max_queue_depth,
         model_prefix_sharing,
+        model_allow_oversize,
         request_timeout_ms,
         enable_audit_log: database_url.is_some(), // Disable audit logging without database
         tls: Default::default(),                  // TLS disabled by default

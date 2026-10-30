@@ -100,6 +100,7 @@ pub mod loader_f32;
 pub mod loader_gguf;
 pub mod loader_gguf_qwen3;
 pub mod policies;
+pub(crate) mod preflight;
 pub mod scheduled_llama_engine;
 pub mod scheduler_driver_paged;
 pub mod session;

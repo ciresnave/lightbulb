@@ -210,6 +210,7 @@ fn start_runner(
         scheduler,
         EngineOptions {
             prefix_sharing: sharing,
+            ..EngineOptions::default()
         },
     )
     .expect("starting runner");

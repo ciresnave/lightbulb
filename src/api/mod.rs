@@ -120,6 +120,11 @@ pub struct ApiConfig {
     /// `main.rs` sets it from `LIGHTBULB_PREFIX_SHARING`.
     pub model_prefix_sharing: bool,
 
+    /// Load a model even when the serving GPU reports it cannot fit
+    /// ([`crate::engine::model_runner::EngineOptions::allow_oversize_model`]).
+    /// Default `false`. `main.rs` sets it from `LIGHTBULB_ALLOW_OVERSIZE_MODEL`.
+    pub model_allow_oversize: bool,
+
     /// How long an inference job may sit between being enqueued and the
     /// model runner thread finishing it, before the HTTP handler gives up
     /// and returns 504 instead of waiting forever. Phase 4 hardening
@@ -226,6 +231,7 @@ impl Default for ApiConfig {
             model_context_length: 2048,
             model_max_queue_depth: 32,
             model_prefix_sharing: false,
+            model_allow_oversize: false,
             request_timeout_ms: 300_000,
             tls: crate::tls::TlsConfig::default(),
             no_auth: false,
@@ -741,6 +747,7 @@ fn try_start_model_runner(state: &mut AppState) {
         state.scheduler.clone(),
         EngineOptions {
             prefix_sharing: state.config.model_prefix_sharing,
+            allow_oversize_model: state.config.model_allow_oversize,
         },
     ) {
         Ok((sender, ctrl_sender)) => {
