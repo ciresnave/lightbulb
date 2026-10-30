@@ -42,7 +42,7 @@ use super::loader::LoadedLlama;
 /// Load a Llama-shape checkpoint with **every** weight as f32.
 ///
 /// Same directory layout as [`super::loader::load_llama_from_dir`]: `config.json`
-/// plus a single `model.safetensors`.
+/// plus `model.safetensors` or a sharded set (`model.safetensors.index.json`).
 ///
 /// # Safety
 ///
@@ -58,11 +58,8 @@ pub fn load_llama_f32_from_dir(dir: &Path) -> Result<LoadedLlama> {
             .map_err(|e| anyhow::anyhow!("parsing config.json: {e:?}"))?;
     let config: LlamaConfig = full.to_lazy_config();
 
-    let weights_path = dir.join("model.safetensors");
-    if !weights_path.is_file() {
-        anyhow::bail!("no model.safetensors in {}", dir.display());
-    }
-    let st = unsafe { MmapedSafetensors::multi(&[weights_path]) }
+    let weight_files = super::loader::safetensors_files(dir)?;
+    let st = unsafe { MmapedSafetensors::multi(&weight_files) }
         .map_err(|e| anyhow::anyhow!("mmapping safetensors: {e:?}"))?;
 
     let dim = config.dim;

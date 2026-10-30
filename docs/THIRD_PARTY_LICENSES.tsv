@@ -273,8 +273,10 @@ miniz_oxide@0.8.9		X									X					X
 mio@1.2.2											X					
 mlmf-awq@0.5.11		X									X					
 mlmf-core@0.5.11		X									X					
+mlmf-core@0.7.26		X									X					
 mlmf-ggml@0.5.10		X									X					
 mlmf-gguf@0.5.11		X									X					
+mlmf-hf-layout@0.7.26		X									X					
 mlmf-safetensors@0.5.11		X									X					
 mlmf-source-file@0.5.11		X									X					
 mocopr@0.1.0		X									X					

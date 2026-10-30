@@ -4,7 +4,7 @@
     license     = "MIT OR Apache-2.0"
     name        = "lightbulb"
     repository  = "https://github.com/ciresnave/lightbulb"
-    version     = "0.20.2"
+    version     = "0.20.4"
 
 [features]
     # CUDA, via Fuel only. Was `["candlelight/cuda", "fuel/cuda"]`; candlelight
@@ -47,6 +47,7 @@
     clap               = { version = "4", features = ["derive"] }
     ggml-quants        = "0.1.0"
     memmap2            = "0.9"
+    mlmf-hf-layout     = "0.7.26"
     # Chat-template rendering. HuggingFace `chat_template` values are Jinja.
     # minijinja is pure Rust with no C dependencies, which keeps the CUDA build
     # unaffected.
