@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.22.0
+
+### Removed
+- **Breaking** (ROADMAP B8): `lightbulb::engine::slot_monitor` (`SlotPoolMonitor`, `AdjustmentConfig`, `MemoryStatistics`, and the `engine::` re-exports), `SystemConfig::chunk_size` and `SystemConfig::enable_monitoring`, and the `chunk_size` parameter of `SystemConfig::custom`. The serving path's `SlotPool` is a mirror of Fuel's `PagedSessionScheduler` admissions (`scheduled_llama_engine.rs`), so resizing it changed bookkeeping and never capacity, and no prefill code read `chunk_size`: both looked live and did nothing. Migration: delete the monitor calls; drop the `chunk_size` argument from `SystemConfig::custom(hardware, model, slot_pool_size, dtype_bytes)`. Also removed: `tests/slot_adjustment_test.rs`, `examples/runtime_slot_adjustment.rs`; `examples/hardware_aware_init.rs` no longer shows a monitor or a chunk size. Real resize needs a Fuel-side hook (ROADMAP B8b).
+
 ## 0.21.2
 
 ### Added
