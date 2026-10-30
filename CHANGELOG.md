@@ -5,6 +5,16 @@
 ### Fixed
 - B17: the GPU memory preflight compared a GGUF's on-disk size to free VRAM, but Fuel keeps only `Q4_0` quantized and dequantizes every other dtype to f32 at load, so a Q4_K_M file needs about 4x its size (a 4.9 GB 8B needs ~32 GB) and the preflight passed models that then failed to allocate. It now estimates resident bytes from the GGUF tensor directory (`Q4_0` as stored, everything else as f32). Fuel ROADMAP row 124 (K-quants stay quantized) supersedes this estimate; delete `gguf_resident_bytes` then. `/v1/models` `weights_bytes_on_disk` is unchanged.
 
+## 0.23.10
+
+### Added
+- `docs/superpowers/specs/2026-10-30-qwen38-27b-plan.md`: plan (no code) for priority one, Qwen3.8-27B on CireSnave's desktop (single P40 first; no multi-GPU split needed; Windows and Linux differences listed): target config from the Hub, memory arithmetic, Lightbulb work L1-L8 and the Fuel dependency list D1-D6 (with Fuel's answers: GGUF K-quants are dequantized to f32 on load, so Fuel row 124 is first; ROADMAP B17 records the resulting B9 under-estimate). ROADMAP F5 is now "support all popular models" ordered by Hub downloads (method and table in the census), the installed-model signal is dropped, F6 (Vulkan) becomes a prerequisite, and F10 is the Qwen3.8-27B row. Docs only.
+
+## 0.23.9
+
+### Added
+- `scripts/capture_openai_requests.py`: a stdlib stub OpenAI endpoint that logs what a client (Cherry Studio) sends, with `Authorization` redacted, and ROADMAP row F9 with the steps for CireSnave. It settles whether Cherry streams with `tools`, which `tool_choice` it uses and whether it calls `/v1/embeddings` (F3/F4), without any lane reading Cherry's config or database.
+
 ## 0.23.8
 
 ### Added
