@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.21.2
+
+### Added
+- Pre-load memory check (ROADMAP B9, first half): before loading, the Fuel path asks the serving device (Fuel `BackendRuntime::would_fit`) whether the model's on-disk weight size fits, and refuses the load with a message naming both figures when the backend says it will not. `Tight` logs a warning; a backend that cannot measure (`Unknown`) never refuses. New direct dependency `fuel-backend-contract` (already in the tree via `fuel`). `/v1/models` memory reporting follows separately.
+
 ## 0.21.1
 
 ### Added

@@ -5,6 +5,7 @@
 //! Supports single models, quantized models (AWQ/GPTQ), and speculative decoding pairs.
 
 pub mod estimate;
+pub mod preflight;
 pub mod speculative;
 pub mod utils;
 
