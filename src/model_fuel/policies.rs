@@ -29,6 +29,10 @@
 //!   noise. Grouped quantization is still unimplemented; it now returns an `Err`
 //!   rather than panicking. Not wired, not stubbed here.
 //!
+//!   ⚠️ **Superseded (section E, 2026-10-30):** `crate::cache::kv_compression` no
+//!   longer exists (deleted in #195; `src/cache/` has no compression module), so
+//!   this exclusion is moot and the entry stays as history.
+//!
 //!   ⚠️ **DISCHARGED 2026-09-06:** this entry read *"`kv_compression.rs:446` is
 //!   a live `todo!("Grouped quantization not yet implemented")`"*. **That was
 //!   fixed on 2026-09-02** — it returns an `Err` now, `src/` contains zero live
