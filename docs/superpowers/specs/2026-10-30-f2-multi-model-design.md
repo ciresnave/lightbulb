@@ -29,23 +29,49 @@ Status: draft for PM review, 2026-10-30. Read at `origin/main` f04cf26b (0.23.5)
 | P | Change | Gate |
 |---|---|---|
 | P1 | Registry with one entry; behaviour identical; `start_with_options` also returns the thread's `JoinHandle`. | existing tests green; a test that dropping the senders ends the thread. |
-| P2 | On-demand load + lazy LRU eviction under the B9 preflight; `keep_alive` field checked at admission; explicit unload API. | **GPU measurement first (PM): n>=3, load A, unload A, load B on the 8 GB card; confirm VRAM is returned when the runner thread exits** (**unverified** today). Positive control: a deliberately retained handle must show VRAM NOT returned, so the measurement can tell the two apart. |
+| P2 | **Blocked by the measurement below.** As written (unload = drop the senders, thread exits) it does not free the dominant allocations in this Fuel build. P2 needs one of the three options under "Measured". | n/a until an option is chosen. |
 | P3 | `/v1/models` lists available models with `lightbulb_loaded`; `lightbulb-cli list` / `run`. | tests for the omit-unsupported rule, using the corpus files. |
 | P4 | (folded into P2: co-residency whenever B9 says both fit.) | - |
 
 ## Open questions and risks
 
-- **Does unloading free VRAM?** Unmeasured (see P2). If Fuel keeps allocator pools alive past the model, P2 degrades to "restart the process to switch", which is a different, smaller feature.
+- **Does unloading free VRAM?** Measured 2026-10-30: **no** (next section).
 - **Load latency vs client timeouts.** A 9B Q4_K_M load will take seconds to tens of seconds (not measured; the only model I have timed is 135M). Cherry's request timeout is unknown to me (its docs do not say). The server must hold the request open rather than 503 in the common case.
 - **Shared mirror scheduler.** One `MemoryAwareScheduler` mirrors all models; its per-token memory guess is already a guess (B8). With several models the mirror is less meaningful, not more. Acceptable only while it is a mirror.
 - **Model-name semantics.** Ollama names carry tags (`qwen3:8b`). Whether ids are file names, or a name map, is a user-facing decision; the proposal uses the file name (as `default_model` does today).
 - **Security:** a client choosing a model by name must not reach outside `LIGHTBULB_MODELS_DIR` (reject separators and `..`, same rule as the shard-name check in `loader.rs`); resource use by loading arbitrary listed models is bounded by the preflight, not by auth.
+
+## Measured 2026-10-30: dropping a runner does not return its VRAM
+
+Probe: `examples/vram_return_probe.rs` (this branch's PR). It starts a runner, serves one tiny job so weights and KV pool really exist, reads device-wide used memory from `nvidia-smi`, drops **both** senders (the runner thread then sees `Disconnected` and exits), and polls up to 30 s for memory to fall back to the pre-load level. **Positive control** in every trial: the same load with a clone of the job sender deliberately retained must stay up; it did, in all trials, so the probe can tell "returned" from "never allocated". GPU: RTX 4070 Laptop, 8188 MiB. Under the machine GPU lock, `pwsh -File`. Build: lightbulb a8dcf11 plus the local Fuel patch (`lightbulb-wt-bench`), `fuel-cuda`, release. Model SmolLM2-135M-Instruct.
+
+| Case | n | baseline | loaded | 30 s after drop | returned |
+|---|---|---|---|---|---|
+| f16, ctx 2048, no device held (server-like) | 3 | 0 MiB | +1302 | +1056 | ~246 MiB |
+| f16, ctx 2048, a device held by the probe | 3 | 125 | +1302 | +1056 | ~246 MiB |
+| Q8_0, ctx 2048, a device held | 3 | 125 | +1302..1312 | +1056 | ~250 MiB |
+| f16, ctx 4096, a device held | 3 | 125 | +1654 | +1408 | ~246 MiB |
+
+Reading it, and what it does **not** show:
+
+- RELEASE returned memory in **0 of 12** trials (control valid 12 of 12). The result is the same whether or not the probe holds a device, so the retention is not the probe's own handle.
+- Memory is **stable across cycles** (identical figures in trials 1-3): a cache that is reused, not a growing leak.
+- The returned part is a constant ~246-250 MiB regardless of file size or context. The retained part **does not depend on the quantisation** (f16 and Q8_0 end identically, as if weights were dequantised to the same size) and **grows with context** (+352 MiB for ctx 2048 to 4096, about the KV pool at batch 4). That points at weights and the KV pool staying allocated after the runner thread exits.
+- With no device held, ~1056 MiB stays and the pre-load figure was 0, so even the CUDA context outlives the runner: something process-wide in Fuel (or CUDA) keeps device state alive. **I did not find which**; it is Fuel's allocator/device cache until shown otherwise.
+- Not measured: whether a **larger** model loaded after the drop reuses that retained memory (then swapping models of different sizes may still fit) or adds to it; whether this build is representative of a published Fuel release; larger real models (only 135M variants are in the corpus).
+
+**Options for P2 (decision needed; the first two are not mine to build):**
+1. *Fuel-side release.* Ask Fuel for an explicit way to release device memory held for a dropped model (pool trim / device cache clear), or confirmation that one exists. Cheapest if it exists.
+2. *One worker process per model.* A supervisor spawns a `lightbulb` worker per model and unloads by process exit, which is the one release the OS guarantees. Large change (IPC or a reverse proxy in front); would also isolate CUDA faults.
+3. *Swap by restart, no in-process unload.* Keep P1 (registry) and P3 (`list`/`run`, listing); a request for a non-resident model is answered "restart with X" or the server re-execs itself. Smallest, least Ollama-like.
+
+Recommendation: ask Fuel (option 1) first, since it also unblocks B8b-style work; if there is no release API, option 2 is the honest route to Ollama-style switching.
 
 ## PM defaults 2026-10-30 (CireSnave can override)
 
 1. No timer thread; evict LRU lazily at admission when B9 says the new model does not fit; `keep_alive` honoured at the next request/admission only; explicit unload API yes.
 2. `/v1/models` lists unloaded models, with a state field (`lightbulb_loaded`).
 3. Co-residency whenever B9 says both fit; otherwise evict LRU; never evict a model with an in-flight request.
-4. P2 stays gated on the VRAM-return measurement (n>=3, with the retained-handle positive control).
+4. P2 was gated on the VRAM-return measurement (n>=3, with the retained-handle positive control). Done: the answer is no (next section).
 
-Recommendation: P1 now (no behaviour change, de-risks the rest); do the VRAM-return measurement before P2.
+Recommendation: P1 now (no behaviour change; it also becomes useful for any option below). Choose among the options in "Measured" before P2.
