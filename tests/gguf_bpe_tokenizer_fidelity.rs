@@ -116,6 +116,7 @@
 //!   gpt-2            openai-community/gpt2                     ggml-vocab-gpt-2.gguf
 //!   falcon           tiiuae/falcon-7b                          ggml-vocab-falcon.gguf
 //!   qwen2            Qwen/Qwen2-7B                             ggml-vocab-qwen2.gguf
+//!   qwen35           Qwen/Qwen3.5-0.8B                         unsloth/Qwen3.5-0.8B-GGUF (a real one)
 //!   deepseek-coder   deepseek-ai/deepseek-coder-6.7b-instruct  ggml-vocab-deepseek-coder.gguf
 //!   refact           smallcloudai/Refact-1_6B-fim              ggml-vocab-refact.gguf
 //!   deepseek-llm     deepseek-ai/deepseek-llm-7b-base          ggml-vocab-deepseek-llm.gguf
@@ -123,19 +124,21 @@
 //!
 //! # ⚠️ A 0-of-130 result is not automatically evidence
 //!
-//! **`qwen35` scored 0 of 130 and is still REFUSED.** Its obvious reference,
-//! `Qwen/Qwen3-8B`, declares a pre-tokenizer and vocab BYTE-IDENTICAL to
-//! `Qwen/Qwen2-7B` — so it is a reference for `qwen2`, not for that name.
-//! llama.cpp does define a distinct QWEN35 rule (`[\p{L}\p{M}]+` where qwen2
-//! has `\p{L}+`), and **this corpus cannot tell the two apart: measured, they
-//! differ on 0 of 130 cases**, because the qwen2 normalizer is NFC and composes
-//! away the combining marks the difference turns on.
+//! **`qwen35` scored 0 of 130 against a label-only file and was REFUSED for it.**
+//! The only `ggml-vocab-qwen35.gguf` in the corpus is `ggml-vocab-qwen2.gguf`
+//! with a different label, and the obvious reference, `Qwen/Qwen3-8B`, declares a
+//! pre-tokenizer and vocab BYTE-IDENTICAL to `Qwen/Qwen2-7B`. llama.cpp's
+//! distinct QWEN35 rule (`[\p{L}\p{M}]+` where qwen2 has `\p{L}+`) differed from
+//! qwen2 on 0 of 130 cases, because NFC composes away the combining marks the
+//! difference turns on. A passing score from that blind gate was not evidence.
 //!
-//! So the score was real, the corpus was the one used for every other entry,
-//! and the result carried **no information about which rule is correct**. The
-//! gate that would have caught a wrong rule here is blind to this particular
-//! distinction, and a passing score from a blind gate is not evidence.
-//! See `Content::bpe_refusal_reason`.
+//! **Superseded 2026-10-30.** A real `qwen35` checkpoint now supplies an
+//! admissible reference: `Qwen/Qwen3.5-0.8B`'s own `tokenizer.json` declares the
+//! distinct rule (NFC normalizer, 248044 vocab + 26 added tokens, 247587 merges,
+//! matching `unsloth/Qwen3.5-0.8B-GGUF`'s 247587), and `CASES` carries strings
+//! whose combining marks have no precomposed form, so the gate can now tell the
+//! two rules apart (see `qwen35_and_qwen2_split_a_combining_mark_differently`).
+//! The pair to run is `Qwen3.5-0.8B-*.gguf|Qwen3.5-0.8B/tokenizer.json`.
 //!
 //! **A reference is only admissible once its vocab matches the GGUF's.** All
 //! five were checked before use: `gpt-2` and `falcon` match exactly; `qwen2`
@@ -303,6 +306,10 @@ const CASES: &[&str] = &[
     "\u{3053}\u{3093}\u{306b}\u{3061}\u{306f}\u{4e16}\u{754c}",
     "\u{ff21}\u{ff22}\u{ff23} \u{ff11}\u{ff12}\u{ff13}",
     "e\u{301} vs \u{e9}",
+    // combining marks with NO precomposed form, so NFC leaves them in place and
+    // `\p{L}+` vs `[\p{L}\p{M}]+` (qwen2 vs qwen35) split them differently
+    "\u{939}\u{93f}\u{928}\u{94d}\u{926}\u{940} \u{e2a}\u{e27}\u{e31}\u{e2a}\u{e14}\u{e35}",
+    "\u{645}\u{64e}\u{631}\u{652}\u{62d}\u{64e}\u{628}\u{64b}\u{627} x\u{303}y\u{20d7}",
     "\u{200b}zero\u{200b}width\u{200b}",
     // special-token text must not be swallowed as ordinary characters
     "<|im_start|>user\nhi<|im_end|>",

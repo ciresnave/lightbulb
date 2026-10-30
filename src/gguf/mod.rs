@@ -1061,9 +1061,6 @@ impl Content {
     /// for reasons a score cannot express.
     fn bpe_refusal_reason(pre: &str) -> Option<&'static str> {
         match pre {
-            "qwen35" => Some(
-                r#"No admissible reference exists for it, and NO CORPUS COULD DISCRIMINATE IT. `ggml-vocab-qwen2.gguf` and `ggml-vocab-qwen35.gguf` are 5928681 and 5928682 bytes, differ first at byte 539, and differ in size by exactly one — the length of "qwen35" over "qwen2". They are THE SAME FILE WITH A DIFFERENT LABEL: identical `general.architecture` (qwen2), identical `general.name`, identical token lists. So the string under test is the only difference between the two inputs, and a disagreement count between them is a logical necessity rather than a measurement. The obvious reference, `Qwen/Qwen3-8B`, declares a pre-tokenizer and vocab BYTE-IDENTICAL to `Qwen/Qwen2-7B`, so it is a reference for `qwen2` and not for this name. llama.cpp does define a distinct QWEN35 rule, matching `[\p{L}\p{M}]+` where the qwen2 rule matches `\p{L}+`. HISTORICAL, and kept because it is how this was first established: the 130-case corpus scored them 0 of 130 apart, because the qwen2 normalizer is NFC and composes away the combining marks the difference turns on. That was an empirical claim about one corpus; the byte-level fact above is structural and cannot rot."#,
-            ),
             "mpt" => Some(
                 r#"Investigated and refused: no reference exists for THIS checkpoint. Its vocab is byte-identical to this corpus's own gpt-neox vocab file (tokens and merges identical), and its own reference is gated on HuggingFace — `mosaicml/mpt-7b` returns HTTP 401. It EXISTS and is gated; an earlier note here said "not found", which was a connector rendering an authorization failure as absence. It scores 0 of 130 against the stand-in, and that is NOT sufficient: vocab identity does not imply RULE identity. Measured on this very corpus, `Qwen/Qwen3-8B` has a vocab and pre-tokenizer byte-identical to `Qwen/Qwen2-7B` while llama.cpp assigns those two `pre` names DIFFERENT rules — so an identical vocab is consistent with a different splitting rule, and only the checkpoint's own `tokenizer.json` settles it. RE-MEASURED 2026-09-03 and the premise HOLDS: `ggml-vocab-mpt.gguf` declares `general.architecture = mpt` and `general.name = mpt`, so it really is an MPT file and the gated repo really is the right one. A GGUF or GGML re-upload would not help — those carry the `pre` NAME, not the rule; only a `tokenizer.json` supplies the pre-tokenizer JSON, and no ungated re-upload carrying one has been found."#,
             ),
@@ -1092,6 +1089,7 @@ impl Content {
         "gpt-2",
         "falcon",
         "qwen2",
+        "qwen35",
         "deepseek-coder",
         "refact",
         "deepseek-llm",
@@ -1153,6 +1151,16 @@ impl Content {
             // `tokenizer.json`, whose vocab and merges match this GGUF.
             "qwen2" => Some((
                 r##"{"type":"Sequence","pretokenizers":[{"type":"Split","pattern":{"Regex":"(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\\r\\n\\p{L}\\p{N}]?\\p{L}+|\\p{N}| ?[^\\s\\p{L}\\p{N}]+[\\r\\n]*|\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+"},"behavior":"Isolated","invert":false},{"type":"ByteLevel","add_prefix_space":false,"trim_offsets":false,"use_regex":false}]}"##,
+                r##"{"type":"NFC"}"##,
+            )),
+            // Qwen/Qwen3.5-0.8B -- the rule is copied from that checkpoint's own
+            // `tokenizer.json` (2026-10-30), and differs from `qwen2` in two places:
+            // `[\p{L}\p{M}]+` for `\p{L}+` and `[^\s\p{L}\p{M}\p{N}]+` for
+            // `[^\s\p{L}\p{N}]+`, so a combining mark stays inside its word.
+            // Gated by `gguf_bpe_tokenizer_fidelity` against the real
+            // `unsloth/Qwen3.5-0.8B-GGUF` (not the label-only `ggml-vocab-qwen35`).
+            "qwen35" => Some((
+                r##"{"type":"Sequence","pretokenizers":[{"type":"Split","pattern":{"Regex":"(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\\r\\n\\p{L}\\p{N}]?[\\p{L}\\p{M}]+|\\p{N}| ?[^\\s\\p{L}\\p{M}\\p{N}]+[\\r\\n]*|\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+"},"behavior":"Isolated","invert":false},{"type":"ByteLevel","add_prefix_space":false,"trim_offsets":false,"use_regex":false}]}"##,
                 r##"{"type":"NFC"}"##,
             )),
             // deepseek-ai/deepseek-coder-6.7b-instruct -- verified 0 of 130 cases against that checkpoint's own
@@ -1722,6 +1730,10 @@ pub(crate) fn require_llama_architecture(metadata: &HashMap<String, Value>) -> R
 pub(crate) enum GgufArchitecture {
     Llama,
     Qwen3,
+    /// Qwen3.5 / Qwen3.8: 3 Gated DeltaNet layers then 1 full-attention layer.
+    /// Recognised so the refusal can say why; no loader exists yet (it needs a
+    /// hybrid `PagedDecodeModel` from Fuel, ROADMAP F10).
+    Qwen35,
 }
 
 /// Read `general.architecture` and classify it, or refuse with the EXACT
@@ -1741,6 +1753,7 @@ pub(crate) fn detect_architecture(metadata: &HashMap<String, Value>) -> Result<G
     match architecture.as_str() {
         "llama" => Ok(GgufArchitecture::Llama),
         "qwen3" => Ok(GgufArchitecture::Qwen3),
+        "qwen35" => Ok(GgufArchitecture::Qwen35),
         other => bail!(
             "this GGUF declares `general.architecture = {other:?}`, which lightbulb does not \
              yet serve. Supported: `llama`, `qwen3`."
@@ -2188,6 +2201,15 @@ mod architecture_gate_tests {
             detect_architecture(&declaring("qwen3")).unwrap(),
             GgufArchitecture::Qwen3
         );
+    }
+
+    /// Recognised (so the refusal can be specific), and NOT lumped in with
+    /// `qwen3`, whose loader would read it as a plain transformer.
+    #[test]
+    fn detect_architecture_classifies_qwen35_apart_from_qwen3() {
+        let got = detect_architecture(&declaring("qwen35")).unwrap();
+        assert_eq!(got, GgufArchitecture::Qwen35);
+        assert_ne!(got, GgufArchitecture::Qwen3);
     }
 
     #[test]
@@ -3493,6 +3515,47 @@ mod bpe_spec_tests {
         }
     }
 
+    /// `qwen35` and `qwen2` are different rules, and a string exists on which
+    /// they split differently AFTER the normalizer.
+    ///
+    /// The old refusal rested on a corpus that could not tell them apart,
+    /// because NFC composes away the combining marks the difference turns on.
+    /// Devanagari vowel signs have no precomposed form, so NFC leaves them
+    /// alone: `\p{L}+` stops at each sign, `[\p{L}\p{M}]+` does not. Without
+    /// this, "the table has two entries" would pass if they were the same rule.
+    #[test]
+    fn qwen35_and_qwen2_split_a_combining_mark_differently() {
+        use tokenizers::tokenizer::{PreTokenizedString, PreTokenizer};
+
+        fn pieces(pre: &str, text: &str) -> Vec<String> {
+            let (pre_json, _) = Content::bpe_pre_tokenizer(pre).expect("spec");
+            let tok: tokenizers::pre_tokenizers::PreTokenizerWrapper =
+                serde_json::from_str(pre_json).expect("parse");
+            let mut p = PreTokenizedString::from(text);
+            tok.pre_tokenize(&mut p).expect("pre_tokenize");
+            p.get_splits(
+                tokenizers::OffsetReferential::Original,
+                tokenizers::OffsetType::Byte,
+            )
+            .into_iter()
+            .map(|(s, _, _)| s.to_string())
+            .collect()
+        }
+
+        // "hindi" in Devanagari: consonants joined by vowel signs (category M).
+        let text = "\u{939}\u{93f}\u{928}\u{94d}\u{926}\u{940}";
+        let q35 = pieces("qwen35", text);
+        let q2 = pieces("qwen2", text);
+        assert_ne!(
+            q35, q2,
+            "the two rules must split a combining mark differently"
+        );
+        assert!(
+            q35.len() < q2.len(),
+            "qwen35 keeps the marks in the word: {q35:?} vs {q2:?}"
+        );
+    }
+
     /// And a name that is NOT on the list has no spec.
     ///
     /// The necessary pair: without it, the test above is satisfied by a
@@ -3515,23 +3578,24 @@ mod bpe_spec_tests {
         // fact it rests on, and this test cannot check that fact -- it checks
         // that the table says no, not that saying no is right.
         //
+        // ⚠️ `qwen35` LEFT ON 2026-10-30. Its refusal rested on "no admissible
+        // reference exists", and that was true then: the only `qwen35` file in
+        // the corpus is a label-only copy of `qwen2`. A real `qwen35` checkpoint
+        // (`Qwen/Qwen3.5-0.8B`, GGUF `unsloth/Qwen3.5-0.8B-GGUF`) now exists, its
+        // own `tokenizer.json` declares the distinct rule, and
+        // `gguf_bpe_tokenizer_fidelity` gates it with cases the rule differs on.
+        //
         // THE SURVIVORS ARE CHOSEN, NOT LEFTOVERS. Every name below is refused
-        // FOR CAUSE rather than merely unexamined, and all three premises were
+        // FOR CAUSE rather than merely unexamined, and both premises were
         // RE-MEASURED on 2026-09-03 rather than carried forward:
         //
         //   mpt        `general.architecture = mpt`, so it really is an MPT file
         //              and `mosaicml/mpt-7b` really is the right reference. It
         //              returns 401 -- gated, not absent. HOLDS.
-        //   qwen35     `ggml-vocab-qwen2.gguf` and `ggml-vocab-qwen35.gguf` differ
-        //              by ONE BYTE, at the offset where `pre` is stored. The
-        //              string under test is the only difference between the two
-        //              inputs, so no corpus can discriminate them. HOLDS, and is
-        //              now structural rather than empirical.
         //   <absent>   `general.name = gpt-neox-20b`, no `pre` key at all; keying
         //              on ABSENCE would apply one checkpoint's rule to every
         //              future GGUF that omits the field. HOLDS.
         assert!(Content::bpe_pre_tokenizer("mpt").is_none());
-        assert!(Content::bpe_pre_tokenizer("qwen35").is_none());
         assert!(Content::bpe_pre_tokenizer("<absent>").is_none());
         assert!(Content::bpe_pre_tokenizer("").is_none());
     }
