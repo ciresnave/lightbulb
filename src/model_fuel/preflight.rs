@@ -3,9 +3,13 @@
 //!
 //! Before a loader allocates, ask the serving device (through Fuel's
 //! `BackendRuntime`) whether the weights can fit. The figure used is the
-//! model's on-disk size, a LOWER bound: the f32 loader upcasts, and the KV
-//! cache and activations come on top. A refusal is therefore certain; a pass
-//! is not a promise.
+//! bytes the weights occupy once Fuel has loaded them (B17): for a GGUF,
+//! computed from the tensor directory, because Fuel keeps only `Q4_0`
+//! quantized and dequantizes every other dtype to f32 (Fuel PR #530 audit,
+//! 2026-10-30), so a Q4_K_M file is about 4x its size on disk. Otherwise the
+//! on-disk size, a LOWER bound. The KV cache and activations come on top, so
+//! a pass is not a promise. **Fuel row 124 (K-quants stay quantized) makes
+//! the GGUF estimate too high; delete [`gguf_resident_bytes`] then.**
 
 use std::path::Path;
 
@@ -29,6 +33,53 @@ pub(crate) fn weights_lower_bound(path: &Path) -> Option<u64> {
             .ok()
             .map(|m| sum.saturating_add(m.len()))
     })
+}
+
+/// GGML type code of `Q4_0`, the one dtype Fuel's GGUF loader keeps quantized.
+const GGML_Q4_0: u32 = 2;
+
+/// Bytes of one `Q4_0` block (32 weights: an f16 scale and 16 nibble bytes).
+const Q4_0_BLOCK_BYTES: u64 = 18;
+
+/// Bytes a GGUF's tensors occupy after Fuel's loader has run, from
+/// `(element count, GGML type code)` pairs: `Q4_0` as stored, every other
+/// dtype as f32 (4 bytes per element). Remove when Fuel keeps K-quants
+/// quantized (Fuel ROADMAP row 124).
+pub(crate) fn gguf_resident_bytes(tensors: impl IntoIterator<Item = (u64, u32)>) -> u64 {
+    tensors.into_iter().fold(0u64, |sum, (elements, ty)| {
+        let bytes = if ty == GGML_Q4_0 {
+            elements.div_ceil(32).saturating_mul(Q4_0_BLOCK_BYTES)
+        } else {
+            elements.saturating_mul(4)
+        };
+        sum.saturating_add(bytes)
+    })
+}
+
+/// [`gguf_resident_bytes`] over the tensor directory of the GGUF at `path`;
+/// `None` when the directory cannot be read.
+fn gguf_resident_bytes_of(path: &Path) -> Option<u64> {
+    let content = crate::gguf::Content::read(path).ok()?;
+    let infos = content.lightning_tensor_infos().ok()?;
+    Some(gguf_resident_bytes(infos.iter().map(|t| {
+        (
+            t.dimensions.iter().fold(1u64, |n, d| n.saturating_mul(*d)),
+            t.tensor_type,
+        )
+    })))
+}
+
+/// Bytes the weights at `path` will occupy on the serving device: for a
+/// `.gguf` the larger of the on-disk size and the resident estimate (never
+/// below the lower bound), else [`weights_lower_bound`].
+pub(crate) fn weights_resident_estimate(path: &Path) -> Option<u64> {
+    let on_disk = weights_lower_bound(path)?;
+    if path.is_file() {
+        if let Some(resident) = gguf_resident_bytes_of(path) {
+            return Some(resident.max(on_disk));
+        }
+    }
+    Some(on_disk)
 }
 
 /// Where the scheduler's memory budget came from, for the startup log.
@@ -128,7 +179,7 @@ pub(crate) fn enforce_with(
 /// Refuse the load when the device says the weights cannot fit, per
 /// [`refuses_on_wont_fit`]. Never refuses on "no signal".
 pub(crate) fn enforce(model_path: &Path, device: &fuel::Device, force: bool) -> anyhow::Result<()> {
-    let Some(bytes) = weights_lower_bound(model_path) else {
+    let Some(bytes) = weights_resident_estimate(model_path) else {
         return Ok(());
     };
     enforce_with(
@@ -215,6 +266,77 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         assert_eq!(weights_lower_bound(&dir.path().join("missing.gguf")), None);
         assert_eq!(weights_lower_bound(dir.path()), None);
+    }
+
+    /// A GGUF with one tensor of `dims` and GGML type `ty`, `data_len` data bytes.
+    fn tiny_gguf(dir: &Path, dims: &[u64], ty: u32, data_len: usize) -> std::path::PathBuf {
+        let mut b = Vec::new();
+        b.extend_from_slice(b"GGUF");
+        b.extend_from_slice(&3u32.to_le_bytes());
+        b.extend_from_slice(&1u64.to_le_bytes()); // tensors
+        b.extend_from_slice(&0u64.to_le_bytes()); // metadata kvs
+        let name = b"w";
+        b.extend_from_slice(&(name.len() as u64).to_le_bytes());
+        b.extend_from_slice(name);
+        b.extend_from_slice(&(dims.len() as u32).to_le_bytes());
+        for d in dims {
+            b.extend_from_slice(&d.to_le_bytes());
+        }
+        b.extend_from_slice(&ty.to_le_bytes());
+        b.extend_from_slice(&0u64.to_le_bytes()); // offset
+        while b.len() % 32 != 0 {
+            b.push(0);
+        }
+        b.extend(std::iter::repeat_n(0u8, data_len));
+        let f = dir.join("m.gguf");
+        std::fs::write(&f, b).unwrap();
+        f
+    }
+
+    #[test]
+    fn q4_0_stays_quantized_and_every_other_dtype_counts_as_f32() {
+        // 4096 weights: Q4_0 = 128 blocks x 18 B; Q4_K (12), Q8_0 (8), f16 (1), f32 (0) = 4 B each.
+        assert_eq!(gguf_resident_bytes([(4096, 2)]), 128 * 18);
+        for ty in [12, 8, 1, 0, 14] {
+            assert_eq!(gguf_resident_bytes([(4096, ty)]), 4096 * 4, "type {ty}");
+        }
+        assert_eq!(
+            gguf_resident_bytes([(4096, 2), (4096, 12)]),
+            128 * 18 + 4096 * 4
+        );
+    }
+
+    #[test]
+    fn a_q4_k_m_8b_is_refused_by_resident_bytes_not_on_disk_size() {
+        // ~8B weights: 4.9 GB on disk as Q4_K_M, ~32 GB once Fuel dequantizes to f32.
+        let elements = 8_000_000_000u64;
+        let on_disk = 4_900_000_000u64;
+        let resident = gguf_resident_bytes([(elements, 12)]);
+        let rt = Mock(Some(24 << 30), Some(24 << 30)); // a 24 GiB GPU
+        assert!(
+            enforce_with(Path::new("m.gguf"), on_disk, Some(&rt), true).is_ok(),
+            "positive control: the on-disk figure passes, which is the B17 defect"
+        );
+        let err = enforce_with(Path::new("m.gguf"), resident, Some(&rt), true).unwrap_err();
+        assert!(format!("{err:#}").contains("need at least"), "{err:#}");
+    }
+
+    #[test]
+    fn the_estimate_reads_the_tensor_directory_of_a_real_gguf() {
+        let dir = tempfile::tempdir().unwrap();
+        // 256x2 Q4_K: 2 super-blocks of 144 B on disk, 512 x 4 B resident.
+        let f = tiny_gguf(dir.path(), &[256, 2], 12, 288);
+        let on_disk = std::fs::metadata(&f).unwrap().len();
+        let est = weights_resident_estimate(&f).unwrap();
+        assert_eq!(est, 2048.max(on_disk));
+        assert!(
+            est > on_disk,
+            "resident {est} must exceed on-disk {on_disk}"
+        );
+        // Q4_0 stays as stored, so the figure falls back to the on-disk floor.
+        let g = tiny_gguf(dir.path(), &[64, 1], 2, 36);
+        let on_disk_q = std::fs::metadata(&g).unwrap().len();
+        assert_eq!(weights_resident_estimate(&g), Some(on_disk_q));
     }
 
     #[test]
