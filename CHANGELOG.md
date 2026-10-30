@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.23.1
+
+### Changed
+- ROADMAP section E, cluster 1 (docs only): eight lines that assert deleted or changed code (M3.3 fused kernels, chunk sizing, cache control tools, AWQ Phase 2 `marlin.rs`, M4.1 `src/loaders.rs`, PersistAnt 0.7.4, `set_priority` "not yet called", `enhanced_correctness_tests.rs`) now carry an inline "Superseded" note with the evidence.
+
 ## 0.23.0
 
 ### Added
