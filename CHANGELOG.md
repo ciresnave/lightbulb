@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.23.3
+
+### Changed
+- ROADMAP section E, cluster 3 (docs and one source comment): the nine M6.5 acceptance ticks (✅ with no code behind them) are reset to ☐, the M5 "COMPLETE" item in the VERIFIED STATUS block and the `kv_compression` entry in `model_fuel/policies.rs` carry a "Superseded" note.
+
 ## 0.23.2
 
 ### Changed
