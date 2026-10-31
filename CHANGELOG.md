@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.23.17
+
+### Added
+- F10 (Qwen3.8-27B) L6: the real `qwen35` chat template (`Qwen/Qwen3.5-0.8B`'s `chat_template.jinja`, Apache-2.0, vendored byte for byte with its origin and sha256) renders through `ChatTemplate::render` exactly as the reference engine renders it: 7 render cases and 4 `raise_exception` refusals, answer key produced by Python `jinja2` 3.1.6 in `transformers`' dialect. This template uses `namespace`, a macro with `is iterable`/`is mapping`/`is string`, `loop.previtem`/`nextitem`, `[::-1]`, `|trim` and Python string methods, none exercised by another test here; all work with no change to `render`. Not covered because `render` does not pass them: `tools`, `enable_thinking` (undefined, so the prompt ends with an empty closed think block, non-thinking mode), `add_vision_id`, list content and assistant `tool_calls`. Tests only; no behaviour change.
+
 ## 0.23.16
 
 ### Added
