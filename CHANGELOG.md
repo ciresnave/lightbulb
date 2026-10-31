@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.23.24
+
+### Changed
+- **Behaviour change:** A4, `tools` with `stream: true` on `/v1/chat/completions` is served instead of refused with a 400. The reply is generated in full, `<tool_call>` tags are parsed as on the non-streaming path, and the result is replayed as OpenAI-shaped chunks: a role/content delta, one `delta.tool_calls` entry per call (`index`, `id`, `type`, `function.name`, `function.arguments` as a JSON string), a finish chunk (`finish_reason: tool_calls` when calls were found), the `include_usage` chunk if asked, then `[DONE]`. There are no per-token deltas on this path: a tag cannot be recognised before it closes. Still refused: `tool_choice` `required`/named function, and a non-empty `stop` with `stream: true`.
+
 ## 0.23.23
 
 ### Added
