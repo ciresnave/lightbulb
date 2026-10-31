@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.23.21
+
+### Changed
+- F10 L5: prefix sharing is refused for hybrid models. `LIGHTBULB_PREFIX_SHARING` stays an operator opt-in, but when the GGUF declares a hybrid architecture (`qwen35`) it is ignored with a warning, because splicing cached KV blocks cannot restore a recurrent layer's state at the prefix boundary and would produce wrong output silently. `model_fuel::memory_shape::{effective_prefix_sharing, gguf_is_hybrid, resolve_prefix_sharing}`. No served model is hybrid yet (the loader still refuses `qwen35`), so serving is unchanged today. SafeTensors hybrids are not detected; they have no loader either.
+
 ## 0.23.20
 
 ### Changed

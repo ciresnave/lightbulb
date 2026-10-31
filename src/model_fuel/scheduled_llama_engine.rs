@@ -614,7 +614,8 @@ pub(crate) fn run_fuel_engine(
         Ok(c) => c,
         Err(e) => return load_failed(model_path, e, rx),
     };
-    config.prefix_sharing_enabled = options.prefix_sharing;
+    config.prefix_sharing_enabled =
+        super::memory_shape::resolve_prefix_sharing(options.prefix_sharing, model_path);
     if let Err(e) = super::preflight::enforce(
         model_path,
         &config.device,
@@ -1121,6 +1122,27 @@ mod tests {
             cold_completion(&model, &short_prompt, 3),
             "the short sharer must see only its own 2 matched blocks"
         );
+    }
+
+    /// F10 L5 at the engine: a hybrid model's effective setting is OFF, so the
+    /// donor-then-identical-prompt scenario that splices on a non-hybrid must
+    /// not splice. The control arm runs the same scenario with the non-hybrid
+    /// setting and must splice, so a driver that cannot share would not pass
+    /// this test vacuously.
+    #[test]
+    fn a_hybrid_model_never_takes_the_sharing_admission_path() {
+        use super::super::memory_shape::effective_prefix_sharing;
+        let model = tiny_model(1);
+        let prompt = [1u32, 2, 3, 4, 5];
+        let shared_admissions = |hybrid: bool| {
+            let mut d = serving_driver(&model, effective_prefix_sharing(true, hybrid));
+            d.try_admit(&prompt, 3, 0.0).expect("donor must admit");
+            let _ = d.step().expect("donor's prefill tick must not error");
+            d.try_admit(&prompt, 3, 0.0).expect("repeat must admit");
+            d.prefix_shared_admissions
+        };
+        assert_eq!(shared_admissions(false), 1, "control: non-hybrid splices");
+        assert_eq!(shared_admissions(true), 0, "hybrid must not splice");
     }
 
     /// The companion half of the slice 3 requirement: with the switch OFF

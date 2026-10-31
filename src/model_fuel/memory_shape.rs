@@ -80,6 +80,39 @@ pub fn max_sessions_that_fit(
     capacity_bytes.saturating_sub(weights_bytes) / per_session
 }
 
+/// Whether prefix sharing runs: only when the operator asked for it and the
+/// model is not hybrid. Splicing cached KV blocks cannot restore a recurrent
+/// layer's state at the prefix boundary, so on a hybrid it would give wrong
+/// output with no error (F10 L5).
+pub fn effective_prefix_sharing(requested: bool, hybrid: bool) -> bool {
+    requested && !hybrid
+}
+
+/// Whether the GGUF at `path` declares a hybrid architecture (`qwen35`).
+/// `false` for anything else, including a file that cannot be read: the
+/// loader reports that itself.
+pub fn gguf_is_hybrid(path: &std::path::Path) -> bool {
+    use crate::gguf::{Content, GgufArchitecture, detect_architecture};
+    path.is_file()
+        && Content::read(path)
+            .ok()
+            .and_then(|c| detect_architecture(c.metadata()).ok())
+            .is_some_and(|a| a == GgufArchitecture::Qwen35)
+}
+
+/// [`effective_prefix_sharing`] for the model at `model_path`, warning when an
+/// operator's request is overridden.
+pub fn resolve_prefix_sharing(requested: bool, model_path: &std::path::Path) -> bool {
+    let hybrid = requested && gguf_is_hybrid(model_path);
+    if hybrid {
+        tracing::warn!(
+            "prefix sharing requested but disabled: {} is a hybrid model (recurrent layers              hold state a spliced KV prefix cannot restore)",
+            model_path.display()
+        );
+    }
+    effective_prefix_sharing(requested, hybrid)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -187,5 +220,24 @@ mod tests {
         }
         // Literal pin: 2 sessions x 4096 tokens x 256 KiB per token.
         assert_eq!(bytes_needed(&shape, 0, 2, 4096), 2 * 4096 * 256 * 1024);
+    }
+
+    #[test]
+    fn prefix_sharing_runs_only_when_asked_for_on_a_non_hybrid() {
+        assert!(effective_prefix_sharing(true, false));
+        assert!(!effective_prefix_sharing(true, true));
+        assert!(!effective_prefix_sharing(false, false));
+        assert!(!effective_prefix_sharing(false, true));
+    }
+
+    #[test]
+    fn a_missing_or_non_gguf_path_is_not_hybrid() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(!gguf_is_hybrid(&dir.path().join("absent.gguf")));
+        assert!(!gguf_is_hybrid(dir.path()));
+        assert!(resolve_prefix_sharing(
+            true,
+            &dir.path().join("absent.gguf")
+        ));
     }
 }
