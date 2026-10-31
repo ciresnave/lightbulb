@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.23.15
+
+### Changed
+- **Behaviour change: the GPU memory preflight now counts the KV cache, so it can refuse a load that used to pass.** The check compared only the weights to free VRAM, but the serving path allocates the KV pool at load (`max_batch_size` sessions x `context_length` tokens, rounded to 16-token blocks, K and V for every layer, f32). For `llama` and `qwen3` GGUFs (geometry from the file's metadata) and SafeTensors directories (`config.json`) the pool is added to the figure, and the refusal names both parts ("weights X + KV cache Y"). A model that fits only without its KV pool is now refused on a GPU unless `LIGHTBULB_ALLOW_OVERSIZE_MODEL=1`, or loads again with a smaller `LIGHTBULB_MODEL_CONTEXT_LENGTH` / batch size. CPU still only warns. Hybrid (`qwen35`) and unknown architectures, and any file whose geometry keys are missing, get no KV term (L4 covers the hybrid budget). Tests pin the same weights passing without and refused with the KV term, and passing again at a short context.
+
 ## 0.23.14
 
 ### Added
