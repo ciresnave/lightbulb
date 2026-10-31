@@ -98,6 +98,17 @@ pub(crate) struct KvShape {
     pub head_dim: u64,
 }
 
+impl KvShape {
+    /// Bytes of K and V for one token across every layer.
+    pub(crate) fn bytes_per_token(&self) -> u64 {
+        self.layers
+            .saturating_mul(2)
+            .saturating_mul(self.kv_heads)
+            .saturating_mul(self.head_dim)
+            .saturating_mul(KV_ELEMENT_BYTES)
+    }
+}
+
 /// Bytes of the KV pool the engine allocates for `max_batch_size` sessions of
 /// up to `context_length` tokens: `num_blocks * KV_BLOCK_SIZE` token slots
 /// (`BatchedServeConfig::new`), each holding K and V for every layer.
@@ -106,13 +117,7 @@ pub(crate) fn kv_pool_bytes(shape: KvShape, max_batch_size: usize, context_lengt
     let blocks =
         (max_batch_size.max(1) as u64).saturating_mul((context_length as u64).div_ceil(block));
     let tokens = blocks.saturating_mul(block);
-    let per_token = shape
-        .layers
-        .saturating_mul(2)
-        .saturating_mul(shape.kv_heads)
-        .saturating_mul(shape.head_dim)
-        .saturating_mul(KV_ELEMENT_BYTES);
-    tokens.saturating_mul(per_token)
+    tokens.saturating_mul(shape.bytes_per_token())
 }
 
 /// KV geometry from a GGUF's own metadata, for the architectures whose KV
