@@ -8,6 +8,11 @@
 ### Changed
 - **Behaviour change:** an explicit device selector that cannot be satisfied is now an error that stops the model load and lists the devices, where before everything fell back to the CPU. `LIGHTBULB_CUDA_DEVICE_INDEX` set to something that is not a whole number used to mean card 0; it is now an error. Setting both `LIGHTBULB_DEVICE` and `LIGHTBULB_CUDA_DEVICE_INDEX` is an error. Unset or `auto` behaves as before on a one-card or CPU-only box. `fuel-hardware` becomes an optional direct dependency, enabled by `fuel-cuda`.
 
+## 0.23.17
+
+### Added
+- F10 (Qwen3.8-27B) L6: the real `qwen35` chat template (`Qwen/Qwen3.5-0.8B`'s `chat_template.jinja`, Apache-2.0, vendored byte for byte with its origin and sha256) renders through `ChatTemplate::render` exactly as the reference engine renders it: 7 render cases and 4 `raise_exception` refusals, answer key produced by Python `jinja2` 3.1.6 in `transformers`' dialect. This template uses `namespace`, a macro with `is iterable`/`is mapping`/`is string`, `loop.previtem`/`nextitem`, `[::-1]`, `|trim` and Python string methods, none exercised by another test here; all work with no change to `render`. Not covered because `render` does not pass them: `tools`, `enable_thinking` (undefined, so the prompt ends with an empty closed think block, non-thinking mode), `add_vision_id`, list content and assistant `tool_calls`. Tests only; no behaviour change.
+
 ## 0.23.16
 
 ### Added

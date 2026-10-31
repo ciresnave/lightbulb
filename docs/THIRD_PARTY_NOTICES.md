@@ -10,6 +10,7 @@ licence come from. Method and evidence: [`PROVENANCE.md`](../PROVENANCE.md). Mea
 | File | Origin | Licence of origin | What we carry |
 |---|---|---|---|
 | `src/backend/marlin_ffi.rs` (compiled only with `feature = "cuda"`) | [`guoqingbao/attention.rs`](https://github.com/guoqingbao/attention.rs), `src/kernels/src/ffi.rs` | MIT (declared in that repo's `Cargo.toml`; the repo has no `LICENSE` file, so GitHub reports none) | `extern "C"` declarations of the Marlin CUDA kernel entry points, including six parameter renames (`A`→`inputs`, `B`→`weight`, `C`→`out`, `prob_m`/`prob_k`/`prob_n`→`m`/`k`/`n`) that match that file. |
+| `tests/fixtures/qwen35_chat_template/chat_template.jinja` (test fixture only) | [`Qwen/Qwen3.5-0.8B`](https://huggingface.co/Qwen/Qwen3.5-0.8B), `chat_template.jinja` (7755 bytes, sha256 `273d8e0e683b885071fb17e08d71e5f2a5ddfb5309756181681de4f5a1822d80`) | Apache-2.0 (that repo's `LICENSE` and model card) | The file verbatim, unmodified; origin and licence also in the fixture directory's `README.md`. |
 
 Status of `marlin_ffi.rs`: CireSnave ruled on 2026-08-20 that the block is **interface, not expression** (its
 types and order are dictated by the CUDA kernel ABI), so no third-party copyright is owed and this crate's
