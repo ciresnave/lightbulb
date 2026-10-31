@@ -5,6 +5,11 @@
 ### Added
 - F10 (Qwen3.8-27B) L1: `model_fuel::qwen35_config::Qwen35Config` reads and validates a `qwen35` GGUF's geometry from its metadata (layers, heads, KV heads, key/value length, rope, `ssm.*`, `full_attention_interval`), with the per-layer Gated DeltaNet / full-attention split (24 layers at interval 4 give 18 + 6; 64 give 48 + 16). Every key is required and a layer count that is not a whole number of groups is refused. The engine's `qwen35` refusal now quotes the file's own geometry (or why it could not be read). No serving change: the architecture is still refused until Fuel provides the hybrid decode model. Tests use metadata built from the 0.8B header's key names and its `config.json` values; no real `qwen35` GGUF with tensors is in the corpus yet.
 
+## 0.23.15
+
+### Changed
+- **Behaviour change: the GPU memory preflight now counts the KV cache, so it can refuse a load that used to pass.** The check compared only the weights to free VRAM, but the serving path allocates the KV pool at load (`max_batch_size` sessions x `context_length` tokens, rounded to 16-token blocks, K and V for every layer, f32). For `llama` and `qwen3` GGUFs (geometry from the file's metadata) and SafeTensors directories (`config.json`) the pool is added to the figure, and the refusal names both parts ("weights X + KV cache Y"). A model that fits only without its KV pool is now refused on a GPU unless `LIGHTBULB_ALLOW_OVERSIZE_MODEL=1`, or loads again with a smaller `LIGHTBULB_MODEL_CONTEXT_LENGTH` / batch size. CPU still only warns. Hybrid (`qwen35`) and unknown architectures, and any file whose geometry keys are missing, get no KV term (L4 covers the hybrid budget). Tests pin the same weights passing without and refused with the KV term, and passing again at a short context.
+
 ## 0.23.14
 
 ### Added
