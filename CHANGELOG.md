@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.23.22
+
+### Added
+- F2 P1: `ModelRunner::start_with_handle`, `start_with_options` that also returns the serving thread's `JoinHandle`, so a multi-model registry can wait for a model's thread to exit after dropping its senders. `start_with_options` delegates to it; serving behaviour is unchanged. Not called by the server yet.
+
 ## 0.23.21
 
 ### Changed

@@ -388,6 +388,39 @@ impl ModelRunner {
         scheduler: SharedScheduler,
         options: EngineOptions,
     ) -> Result<(InferenceRequestSender, ControlSender)> {
+        let (tx, ctrl_tx, _thread) = Self::start_with_handle(
+            model_path,
+            max_batch_size,
+            context_length,
+            dtype,
+            max_queue_depth,
+            cache_stats,
+            scheduler,
+            options,
+        )?;
+        Ok((tx, ctrl_tx))
+    }
+
+    /// [`Self::start_with_options`] that also returns the serving thread's
+    /// [`JoinHandle`](std::thread::JoinHandle), so a caller can wait for the
+    /// thread to exit once it has dropped every [`InferenceRequestSender`]
+    /// clone (F2 P1: the multi-model registry needs this to unload a model
+    /// and know the thread is gone before it re-runs the memory preflight).
+    #[allow(clippy::too_many_arguments)] // `start_with_options`'s eight
+    pub fn start_with_handle(
+        model_path: impl Into<PathBuf>,
+        max_batch_size: usize,
+        context_length: usize,
+        dtype: Option<String>,
+        max_queue_depth: usize,
+        cache_stats: SharedCacheStats,
+        scheduler: SharedScheduler,
+        options: EngineOptions,
+    ) -> Result<(
+        InferenceRequestSender,
+        ControlSender,
+        std::thread::JoinHandle<()>,
+    )> {
         let model_path = model_path.into();
         let (tx, rx): (SyncSender<InferenceJob>, Receiver<InferenceJob>) =
             std::sync::mpsc::sync_channel(max_queue_depth);
@@ -395,7 +428,7 @@ impl ModelRunner {
 
         check_dtype(dtype.as_deref())?;
 
-        std::thread::spawn(move || {
+        let thread = std::thread::spawn(move || {
             // `scheduled_llama_engine::run_fuel_engine` (board item 97) loads
             // the checkpoint — dispatching on `.gguf` vs a SafeTensors
             // directory, same as before — and architecture (Llama vs Qwen3,
@@ -434,7 +467,7 @@ impl ModelRunner {
             );
         });
 
-        Ok((tx, ctrl_tx))
+        Ok((tx, ctrl_tx, thread))
     }
 }
 
@@ -505,6 +538,44 @@ mod tests {
         .unwrap_err();
         let u = err.downcast_ref::<UnsupportedDtype>().expect("typed error");
         assert_eq!(u.requested, "bf16");
+    }
+
+    #[test]
+    fn dropping_the_senders_ends_the_serving_thread() {
+        let stats = std::sync::Arc::new(std::sync::Mutex::new(
+            crate::cache::PrefixCacheStats::default(),
+        ));
+        let sched = std::sync::Arc::new(std::sync::Mutex::new(
+            crate::engine::MemoryAwareScheduler::new(Default::default()),
+        ));
+        // The path does not exist, so the thread takes the load-failure
+        // path, which blocks in `drain_with_error` until the senders go:
+        // the same wait a loaded model's serving loop does.
+        let (tx, ctrl, thread) = ModelRunner::start_with_handle(
+            "does-not-exist.gguf",
+            1,
+            16,
+            None,
+            1,
+            stats,
+            sched,
+            EngineOptions::default(),
+        )
+        .expect("spawn");
+        // Positive control: while a sender is alive the thread is parked.
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert!(!thread.is_finished(), "thread exited with senders alive");
+        drop(tx);
+        drop(ctrl);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while !thread.is_finished() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "thread still running 30 s after the senders dropped"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        thread.join().expect("serving thread panicked");
     }
 
     #[test]
