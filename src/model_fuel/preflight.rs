@@ -228,13 +228,65 @@ pub(crate) fn refuses_on_wont_fit(location: DeviceLocation, force: bool) -> bool
     !force && !matches!(location, DeviceLocation::Cpu)
 }
 
+/// Total memory Fuel's inventory lists for the device at `location`, from
+/// `infos` (`model_fuel::device::enumerate`). `None` for the CPU, for a device
+/// the list does not name, and for a listed 0 ("could not say").
+pub(crate) fn listed_total_bytes(
+    location: DeviceLocation,
+    infos: &[super::device::DeviceInfo],
+) -> Option<u64> {
+    let DeviceLocation::Cuda { gpu_id } = location else {
+        return None;
+    };
+    infos
+        .iter()
+        .find(|d| d.backend == "cuda" && u64::from(d.index) == gpu_id as u64)
+        .map(|d| d.total_bytes)
+        .filter(|t| *t > 0)
+}
+
+/// Classify `needed` bytes on a device. The runtime's own verdict wins. When it
+/// has no free-bytes figure (`Unknown`) but the device's total is known, a need
+/// above the total still cannot fit, so that is `WontFit`; the second value
+/// names which figure the verdict compared against.
+pub(crate) fn classify(
+    needed: u64,
+    runtime: Option<&dyn BackendRuntime>,
+    device_total: Option<u64>,
+) -> (Preflight, &'static str) {
+    match (check_with(needed, runtime), device_total) {
+        (Preflight::Unknown, Some(total)) if needed > total => (
+            Preflight::WontFit {
+                needed,
+                available: total,
+            },
+            "in total",
+        ),
+        (verdict, _) => (verdict, "available"),
+    }
+}
+
 /// [`enforce`] with the runtime and the refusal rule supplied, so tests need
-/// no real device.
+/// no real device. Tests only: production goes through [`enforce_with_total`].
+#[cfg(test)]
 pub(crate) fn enforce_with(
     model_path: &Path,
     weights_bytes: u64,
     kv_bytes: u64,
     runtime: Option<&dyn BackendRuntime>,
+    refuse: bool,
+) -> anyhow::Result<()> {
+    enforce_with_total(model_path, weights_bytes, kv_bytes, runtime, None, refuse)
+}
+
+/// [`enforce_with`] plus the device's listed total, the fallback when the
+/// runtime reports no free-bytes figure.
+pub(crate) fn enforce_with_total(
+    model_path: &Path,
+    weights_bytes: u64,
+    kv_bytes: u64,
+    runtime: Option<&dyn BackendRuntime>,
+    device_total: Option<u64>,
     refuse: bool,
 ) -> anyhow::Result<()> {
     let total = weights_bytes.saturating_add(kv_bytes);
@@ -244,7 +296,19 @@ pub(crate) fn enforce_with(
         format_bytes(weights_bytes as usize),
         format_bytes(kv_bytes as usize)
     );
-    match check_with(total, runtime) {
+    let (verdict, basis) = classify(total, runtime, device_total);
+    report(model_path, &what, verdict, basis, refuse)
+}
+
+/// Log the verdict, or refuse when it is `WontFit` and `refuse` is set.
+fn report(
+    model_path: &Path,
+    what: &str,
+    verdict: Preflight,
+    basis: &str,
+    refuse: bool,
+) -> anyhow::Result<()> {
+    match verdict {
         Preflight::Fits => {
             tracing::info!("memory preflight: {what} fit ({})", model_path.display())
         }
@@ -257,13 +321,11 @@ pub(crate) fn enforce_with(
             model_path.display()
         ),
         Preflight::WontFit { available, .. } if refuse => bail!(
-            "model needs at least {what} but the device reports {} available \
-             (set LIGHTBULB_ALLOW_OVERSIZE_MODEL=1 to load anyway)",
+            "model needs at least {what} but the device reports {} {basis}              (set LIGHTBULB_ALLOW_OVERSIZE_MODEL=1 to load anyway)",
             format_bytes(available as usize)
         ),
         Preflight::WontFit { available, .. } => tracing::warn!(
-            "memory preflight: model needs at least {what} but the device reports {} available; \
-             loading anyway ({})",
+            "memory preflight: model needs at least {what} but the device reports {} {basis};              loading anyway ({})",
             format_bytes(available as usize),
             model_path.display()
         ),
@@ -286,12 +348,15 @@ pub(crate) fn enforce(
     let kv_bytes = kv_shape(model_path).map_or(0, |shape| {
         kv_pool_bytes(shape, max_batch_size, context_length)
     });
-    enforce_with(
+    let location = device.as_dyn().location_dyn();
+    let total = listed_total_bytes(location, &super::device::enumerate());
+    enforce_with_total(
         model_path,
         bytes,
         kv_bytes,
         device.as_dyn().as_backend_runtime(),
-        refuses_on_wont_fit(device.as_dyn().location_dyn(), force),
+        total,
+        refuses_on_wont_fit(location, force),
     )
 }
 
@@ -667,5 +732,62 @@ mod tests {
             )
             .is_ok()
         );
+    }
+
+    fn listed(index: u32, mib: u64) -> super::super::device::DeviceInfo {
+        super::super::device::DeviceInfo {
+            backend: "cuda".into(),
+            index,
+            name: "P40".into(),
+            total_bytes: mib << 20,
+        }
+    }
+
+    #[test]
+    fn the_listed_total_is_found_by_the_device_actually_chosen() {
+        let infos = [listed(0, 8_192), listed(1, 24_576)];
+        let at = |gpu_id| listed_total_bytes(DeviceLocation::Cuda { gpu_id }, &infos);
+        assert_eq!(at(1), Some(24_576 << 20));
+        assert_eq!(at(0), Some(8_192 << 20));
+        assert_eq!(at(2), None, "a device the list does not name");
+        assert_eq!(listed_total_bytes(DeviceLocation::Cpu, &infos), None);
+        let unknown = [listed(0, 0)];
+        assert_eq!(
+            listed_total_bytes(DeviceLocation::Cuda { gpu_id: 0 }, &unknown),
+            None
+        );
+    }
+
+    #[test]
+    fn with_no_free_figure_a_need_above_the_total_is_refused_and_one_below_is_not() {
+        let blind = Mock(None, None);
+        let total = Some(24u64 << 30);
+        let m = Path::new("m.gguf");
+        let err = enforce_with_total(m, 30 << 30, 0, Some(&blind), total, true).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("24.00 GB in total"), "{msg}");
+        assert!(
+            enforce_with_total(m, 20 << 30, 0, Some(&blind), total, true).is_ok(),
+            "control: below the total there is no evidence of a misfit"
+        );
+        assert!(
+            enforce_with_total(m, 30 << 30, 0, Some(&blind), None, true).is_ok(),
+            "control: with no listed total the old no-signal rule holds"
+        );
+        assert!(enforce_with_total(m, 30 << 30, 0, Some(&blind), total, false).is_ok());
+    }
+
+    #[test]
+    fn a_runtime_verdict_beats_the_listed_total() {
+        let rt = Mock(Some(1_000), Some(10_000));
+        let (v, basis) = classify(5_000, Some(&rt), Some(1 << 40));
+        assert_eq!(
+            v,
+            Preflight::WontFit {
+                needed: 5_000,
+                available: 1_000
+            }
+        );
+        assert_eq!(basis, "available");
     }
 }

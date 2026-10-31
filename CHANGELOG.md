@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.23.20
+
+### Changed
+- **Behaviour change:** F10 L3, the memory preflight now uses the listed total of the device actually chosen when the backend reports no free-bytes figure. Before, such a device was never checked; now a model whose weights plus KV cache exceed the card's total memory is refused on a GPU (or warned about on the CPU rule, unchanged) with the message `... the device reports N in total`. A device with a free-bytes figure behaves as before, and `LIGHTBULB_ALLOW_OVERSIZE_MODEL` still overrides. The hybrid fixed-state term is not in the figure yet; it arrives with the L4 wiring (Fuel rows 117/118).
+
 ## 0.23.19
 
 ### Added
