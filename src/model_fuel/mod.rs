@@ -99,6 +99,7 @@ pub mod loader;
 pub mod loader_f32;
 pub mod loader_gguf;
 pub mod loader_gguf_qwen3;
+pub mod memory_shape;
 pub mod policies;
 pub mod preflight;
 pub(crate) mod qwen35_config;

@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.23.19
+
+### Added
+- F10 (Qwen3.8-27B) L4: `model_fuel::memory_shape`, a loader-supplied `MemoryShape` (`bytes_per_kv_block`, `fixed_state_bytes_per_session`, `is_hybrid`) and the budget arithmetic over it as pure functions (`bytes_per_session`, `bytes_needed`, `max_sessions_that_fit`). For a hybrid, a session costs its KV blocks plus a fixed recurrent-state term that does not grow with context. Tests pin the 27B shape on one 24 GB P40 (two 32k sessions fit, three do not) and a non-hybrid case equal to the current KV-pool number. Not wired into the engine yet: the hybrid figures wait on Fuel rows 117/118, so serving behaviour is unchanged.
+
 ## 0.23.18
 
 ### Added
