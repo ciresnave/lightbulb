@@ -651,7 +651,7 @@ fn serve_gguf(
         Ok(GgufArchitecture::Llama) => serve_gguf_llama(model_path, context_length, config, rx),
         Ok(GgufArchitecture::Qwen3) => serve_gguf_qwen3(model_path, context_length, config, rx),
         Ok(GgufArchitecture::Qwen35) => {
-            load_failed(model_path, anyhow::anyhow!(QWEN35_UNSERVED), rx)
+            load_failed(model_path, qwen35_unserved(content.metadata()), rx)
         }
         Err(e) => load_failed(model_path, e, rx),
     }
@@ -739,6 +739,14 @@ const QWEN35_UNSERVED: &str = "this GGUF declares `general.architecture = \"qwen
     recognises it and its tokenizer is supported, but serving it needs a hybrid decode \
     model with per-session recurrent state and K-quants kept quantized, which Fuel does \
     not provide yet (ROADMAP F10).";
+
+/// [`QWEN35_UNSERVED`] plus the file's own geometry, or why it could not be read.
+fn qwen35_unserved(md: &std::collections::HashMap<String, crate::gguf::Value>) -> anyhow::Error {
+    match super::qwen35_config::Qwen35Config::from_metadata(md) {
+        Ok(c) => anyhow::anyhow!("{QWEN35_UNSERVED} This file: {}.", c.describe()),
+        Err(e) => anyhow::anyhow!("{QWEN35_UNSERVED} Its geometry could not be read: {e:#}."),
+    }
+}
 
 /// Report a load failure the same way both branches of [`run_fuel_engine`]
 /// need to, then drain `rx` so no job is left waiting on a model that will

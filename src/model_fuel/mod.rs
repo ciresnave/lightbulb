@@ -101,6 +101,7 @@ pub mod loader_gguf;
 pub mod loader_gguf_qwen3;
 pub mod policies;
 pub mod preflight;
+pub(crate) mod qwen35_config;
 pub mod scheduled_llama_engine;
 pub mod scheduler_driver_paged;
 pub mod session;
