@@ -4,7 +4,7 @@
     license     = "MIT OR Apache-2.0"
     name        = "lightbulb"
     repository  = "https://github.com/ciresnave/lightbulb"
-    version     = "0.23.17"
+    version     = "0.23.18"
 
 [features]
     # CUDA, via Fuel only. Was `["candlelight/cuda", "fuel/cuda"]`; candlelight
@@ -19,7 +19,7 @@
     # removal) -- kept as a separate name because call sites and CI already
     # name it; collapse into `cuda` in a later cleanup if nothing still
     # distinguishes them.
-    fuel-cuda = ["fuel/cuda", "dep:fuel-cuda-backend"]
+    fuel-cuda = ["fuel/cuda", "dep:fuel-cuda-backend", "dep:fuel-hardware", "fuel-hardware/cuda"]
     # Vulkan, via Fuel.
     vulkan = ["fuel/vulkan"]
     # Was the opt-in flag selecting Fuel over candlelight as the serving path.
@@ -211,6 +211,9 @@
     # every `cargo test` including CPU-only ones. Optional + feature-activated
     # keeps default builds free of it entirely.
     fuel-cuda-backend = { version = "0.25.10", optional = true }
+    # Fuel's device inventory (name, total memory) for `model_fuel::device`; only
+    # the CUDA arm is read today, so it rides on `fuel-cuda`.
+    fuel-hardware = { version = "0.25.10", optional = true }
 sysinfo = { version = "0.39.6", default-features = false, features = ["system"] }
     # `metrics` is a pure facade (the `gauge!`/`counter!` macros record
     # against a global recorder, with no dependencies of their own beyond

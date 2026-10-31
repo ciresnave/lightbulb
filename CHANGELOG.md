@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.23.18
+
+### Added
+- F10 (Qwen3.8-27B) L2, CUDA arm: `LIGHTBULB_DEVICE` selects the serving device by `auto`, `cpu`, `cuda:<n>` or a case-insensitive part of the device name (`p40`), from Fuel's own device inventory (`fuel_hardware::probe`), with no OS or driver probe of ours. `auto` picks the card with the most total memory when there are several (lowest index on a tie) and logs the runners-up. `model_fuel::device::{DeviceInfo, Selector, choose, enumerate, try_select}`; `choose` is pure and unit-tested over fabricated device lists. Vulkan and ROCm devices are not listed yet (they wait on Fuel exposing free bytes and enumeration, ROADMAP F10).
+
+### Changed
+- **Behaviour change:** an explicit device selector that cannot be satisfied is now an error that stops the model load and lists the devices, where before everything fell back to the CPU. `LIGHTBULB_CUDA_DEVICE_INDEX` set to something that is not a whole number used to mean card 0; it is now an error. Setting both `LIGHTBULB_DEVICE` and `LIGHTBULB_CUDA_DEVICE_INDEX` is an error. Unset or `auto` behaves as before on a one-card or CPU-only box. `fuel-hardware` becomes an optional direct dependency, enabled by `fuel-cuda`.
+
 ## 0.23.17
 
 ### Added
