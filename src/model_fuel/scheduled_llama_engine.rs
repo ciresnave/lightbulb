@@ -496,10 +496,10 @@ impl BatchedServeConfig {
         scheduler: SharedScheduler,
         cache_stats: SharedCacheStats,
         ctrl_rx: Receiver<ControlMsg>,
-    ) -> Self {
+    ) -> anyhow::Result<Self> {
         let max_batch_size = max_batch_size.max(1);
-        Self {
-            device: super::device::select(),
+        Ok(Self {
+            device: super::device::try_select()?,
             max_batch: max_batch_size,
             policy: SERVING_SCHEDULE_POLICY,
             budget: KvBudget {
@@ -510,7 +510,7 @@ impl BatchedServeConfig {
             cache_stats,
             ctrl_rx,
             prefix_sharing_enabled: false,
-        }
+        })
     }
 }
 
@@ -604,13 +604,16 @@ pub(crate) fn run_fuel_engine(
     cache_stats: SharedCacheStats,
     options: crate::engine::model_runner::EngineOptions,
 ) {
-    let mut config = BatchedServeConfig::new(
+    let mut config = match BatchedServeConfig::new(
         max_batch_size,
         context_length,
         scheduler,
         cache_stats,
         ctrl_rx,
-    );
+    ) {
+        Ok(c) => c,
+        Err(e) => return load_failed(model_path, e, rx),
+    };
     config.prefix_sharing_enabled = options.prefix_sharing;
     if let Err(e) = super::preflight::enforce(
         model_path,
