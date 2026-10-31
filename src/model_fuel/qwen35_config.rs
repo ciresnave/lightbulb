@@ -60,32 +60,25 @@ impl Qwen35Config {
     /// Read and validate the geometry. Every key is required: a hybrid
     /// layout guessed from defaults would be a wrong model, not a missing key.
     pub(crate) fn from_metadata(md: &HashMap<String, Value>) -> Result<Self> {
-        match md.get("general.architecture") {
-            Some(Value::String(a)) if a == "qwen35" => {}
-            other => bail!("not a `qwen35` GGUF (general.architecture = {other:?})"),
-        }
+        require_qwen35(md)?;
         let u = |k: &str| metadata_u64(md, &format!("qwen35.{k}"));
+        let attn = read_attention(md)?;
+        let rope = read_rope(md)?;
         let cfg = Self {
             layers: u("block_count")?,
             context_length: u("context_length")?,
             hidden_size: u("embedding_length")?,
             ffn_size: u("feed_forward_length")?,
-            heads: u("attention.head_count")?,
-            kv_heads: u("attention.head_count_kv")?,
-            key_length: u("attention.key_length")?,
-            value_length: u("attention.value_length")?,
-            rms_eps: metadata_f32(md, "qwen35.attention.layer_norm_rms_epsilon")?,
-            rope_theta: metadata_f32(md, "qwen35.rope.freq_base")?,
-            rope_dimensions: u("rope.dimension_count")?,
-            rope_sections: int_array(md, "qwen35.rope.dimension_sections")?,
+            heads: attn.heads,
+            kv_heads: attn.kv_heads,
+            key_length: attn.key_length,
+            value_length: attn.value_length,
+            rms_eps: attn.rms_eps,
+            rope_theta: rope.theta,
+            rope_dimensions: rope.dimensions,
+            rope_sections: rope.sections,
             full_attention_interval: u("full_attention_interval")?,
-            ssm: SsmConfig {
-                conv_kernel: u("ssm.conv_kernel")?,
-                state_size: u("ssm.state_size")?,
-                group_count: u("ssm.group_count")?,
-                time_step_rank: u("ssm.time_step_rank")?,
-                inner_size: u("ssm.inner_size")?,
-            },
+            ssm: read_ssm(md)?,
         };
         cfg.validate()?;
         Ok(cfg)
@@ -150,6 +143,80 @@ impl Qwen35Config {
     }
 }
 
+/// `general.architecture` must say `qwen35`.
+fn require_qwen35(md: &HashMap<String, Value>) -> Result<()> {
+    match md.get("general.architecture") {
+        Some(Value::String(a)) if a == "qwen35" => Ok(()),
+        other => bail!("not a `qwen35` GGUF (general.architecture = {other:?})"),
+    }
+}
+
+struct Attention {
+    heads: u64,
+    kv_heads: u64,
+    key_length: u64,
+    value_length: u64,
+    rms_eps: f32,
+}
+
+fn read_attention(md: &HashMap<String, Value>) -> Result<Attention> {
+    let u = |k: &str| metadata_u64(md, &format!("qwen35.attention.{k}"));
+    Ok(Attention {
+        heads: u("head_count")?,
+        kv_heads: u("head_count_kv")?,
+        key_length: u("key_length")?,
+        value_length: u("value_length")?,
+        rms_eps: metadata_f32(md, "qwen35.attention.layer_norm_rms_epsilon")?,
+    })
+}
+
+struct Rope {
+    theta: f32,
+    dimensions: u64,
+    sections: Vec<u64>,
+}
+
+fn read_rope(md: &HashMap<String, Value>) -> Result<Rope> {
+    Ok(Rope {
+        theta: metadata_f32(md, "qwen35.rope.freq_base")?,
+        dimensions: metadata_u64(md, "qwen35.rope.dimension_count")?,
+        sections: int_array(md, "qwen35.rope.dimension_sections")?,
+    })
+}
+
+fn read_ssm(md: &HashMap<String, Value>) -> Result<SsmConfig> {
+    let u = |k: &str| metadata_u64(md, &format!("qwen35.ssm.{k}"));
+    Ok(SsmConfig {
+        conv_kernel: u("conv_kernel")?,
+        state_size: u("state_size")?,
+        group_count: u("group_count")?,
+        time_step_rank: u("time_step_rank")?,
+        inner_size: u("inner_size")?,
+    })
+}
+
+/// An unsigned integer entry, or `None` for any other kind.
+fn unsigned_entry(v: &Value) -> Option<u64> {
+    match v {
+        Value::U8(n) => Some(u64::from(*n)),
+        Value::U16(n) => Some(u64::from(*n)),
+        Value::U32(n) => Some(u64::from(*n)),
+        Value::U64(n) => Some(*n),
+        _ => None,
+    }
+}
+
+/// A signed integer entry, or `None` for any other kind.
+fn signed_entry(v: &Value) -> Option<i64> {
+    match v {
+        Value::I8(n) => Some(i64::from(*n)),
+        Value::I16(n) => Some(i64::from(*n)),
+        Value::I32(n) => Some(i64::from(*n)),
+        Value::I64(n) => Some(*n),
+        _ => None,
+    }
+}
+
 /// An integer-array metadata key, refusing a wrong type or a negative entry.
 fn int_array(md: &HashMap<String, Value>, key: &str) -> Result<Vec<u64>> {
     let Some(Value::Array(items)) = md.get(key) else {
@@ -157,16 +224,14 @@ fn int_array(md: &HashMap<String, Value>, key: &str) -> Result<Vec<u64>> {
     };
     items
         .iter()
-        .map(|v| match v {
-            Value::U8(n) => Ok(u64::from(*n)),
-            Value::U16(n) => Ok(u64::from(*n)),
-            Value::U32(n) => Ok(u64::from(*n)),
-            Value::U64(n) => Ok(*n),
-            Value::I8(n) => u64::try_from(*n).map_err(Into::into),
-            Value::I16(n) => u64::try_from(*n).map_err(Into::into),
-            Value::I32(n) => u64::try_from(*n).map_err(Into::into),
-            Value::I64(n) => u64::try_from(*n).map_err(Into::into),
-            other => bail!("`{key}` holds a non-integer entry: {other:?}"),
+        .map(|v| {
+            unsigned_entry(v)
+                .or_else(|| signed_entry(v).and_then(|n| u64::try_from(n).ok()))
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "`{key}` holds an entry that is not a non-negative integer: {v:?}"
+                    )
+                })
         })
         .collect()
 }
