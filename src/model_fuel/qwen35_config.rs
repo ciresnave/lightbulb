@@ -61,14 +61,14 @@ impl Qwen35Config {
     /// layout guessed from defaults would be a wrong model, not a missing key.
     pub(crate) fn from_metadata(md: &HashMap<String, Value>) -> Result<Self> {
         require_qwen35(md)?;
-        let u = |k: &str| metadata_u64(md, &format!("qwen35.{k}"));
+        let core = read_core(md)?;
         let attn = read_attention(md)?;
         let rope = read_rope(md)?;
         let cfg = Self {
-            layers: u("block_count")?,
-            context_length: u("context_length")?,
-            hidden_size: u("embedding_length")?,
-            ffn_size: u("feed_forward_length")?,
+            layers: core.layers,
+            context_length: core.context_length,
+            hidden_size: core.hidden_size,
+            ffn_size: core.ffn_size,
             heads: attn.heads,
             kv_heads: attn.kv_heads,
             key_length: attn.key_length,
@@ -77,7 +77,7 @@ impl Qwen35Config {
             rope_theta: rope.theta,
             rope_dimensions: rope.dimensions,
             rope_sections: rope.sections,
-            full_attention_interval: u("full_attention_interval")?,
+            full_attention_interval: core.full_attention_interval,
             ssm: read_ssm(md)?,
         };
         cfg.validate()?;
@@ -149,6 +149,25 @@ fn require_qwen35(md: &HashMap<String, Value>) -> Result<()> {
         Some(Value::String(a)) if a == "qwen35" => Ok(()),
         other => bail!("not a `qwen35` GGUF (general.architecture = {other:?})"),
     }
+}
+
+struct Core {
+    layers: u64,
+    context_length: u64,
+    hidden_size: u64,
+    ffn_size: u64,
+    full_attention_interval: u64,
+}
+
+fn read_core(md: &HashMap<String, Value>) -> Result<Core> {
+    let u = |k: &str| metadata_u64(md, &format!("qwen35.{k}"));
+    Ok(Core {
+        layers: u("block_count")?,
+        context_length: u("context_length")?,
+        hidden_size: u("embedding_length")?,
+        ffn_size: u("feed_forward_length")?,
+        full_attention_interval: u("full_attention_interval")?,
+    })
 }
 
 struct Attention {
