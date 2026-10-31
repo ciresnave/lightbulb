@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.23.23
+
+### Added
+- A5: `stream_options.include_usage` on `/v1/chat/completions`. When true, a streamed response ends with one extra chunk (`choices: []`, `usage` with the runner's prompt/completion/total token counts) after the `finish_reason` chunk and before `[DONE]`. Absent or false leaves the stream unchanged. `StreamItem::Done` now carries `prompt_tokens` and `completion_tokens`. Not done here: `/v1/completions` (no streaming path) and the sampling parameters (`top_p`, `seed`, penalties, `logprobs`), which need Fuel: its `SamplingStrategy` is only `Greedy`/`Temperature{temp, seed}`.
+
 ## 0.23.22
 
 ### Added

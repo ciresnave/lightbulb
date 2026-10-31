@@ -307,7 +307,11 @@ pub(crate) fn run_scheduled_jobs<D: SchedulerDriver>(
                             let _ = resp_tx.send(result);
                         }
                         ResponseMode::Streaming(tx) => {
-                            let _ = tx.send(Ok(StreamItem::Done { finish_reason }));
+                            let _ = tx.send(Ok(StreamItem::Done {
+                                finish_reason,
+                                prompt_tokens: meta.prompt_tokens,
+                                completion_tokens,
+                            }));
                         }
                     }
                 }
@@ -659,7 +663,8 @@ mod tests {
         assert!(matches!(
             items[2],
             StreamItem::Done {
-                finish_reason: FinishReason::Length
+                finish_reason: FinishReason::Length,
+                ..
             }
         ));
     }
