@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.23.16
+
+### Added
+- F10 (Qwen3.8-27B) L1: `model_fuel::qwen35_config::Qwen35Config` reads and validates a `qwen35` GGUF's geometry from its metadata (layers, heads, KV heads, key/value length, rope, `ssm.*`, `full_attention_interval`), with the per-layer Gated DeltaNet / full-attention split (24 layers at interval 4 give 18 + 6; 64 give 48 + 16). Every key is required and a layer count that is not a whole number of groups is refused. The engine's `qwen35` refusal now quotes the file's own geometry (or why it could not be read). No serving change: the architecture is still refused until Fuel provides the hybrid decode model. Tests use metadata built from the 0.8B header's key names and its `config.json` values; no real `qwen35` GGUF with tensors is in the corpus yet.
+
 ## 0.23.14
 
 ### Added
