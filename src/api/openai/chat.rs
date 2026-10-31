@@ -65,6 +65,12 @@ pub struct ChatCompletionRequest {
     #[serde(default = "default_n")]
     pub n: usize,
 
+    /// `stream_options` (OpenAI). `include_usage: true` makes a streamed
+    /// response end with one extra chunk, `choices: []` and the request's
+    /// `usage`, before `[DONE]`. Ignored when `stream` is false.
+    #[serde(default)]
+    pub stream_options: Option<StreamOptions>,
+
     /// Stop sequences. Accepts either shape the spec allows (a bare string
     /// or an array) — see [`StopSequences`].
     #[serde(default)]
@@ -262,6 +268,36 @@ pub struct ChatChoice {
     pub index: usize,
     pub message: ChatMessage,
     pub finish_reason: String,
+}
+
+/// The `stream_options` request object.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct StreamOptions {
+    #[serde(default)]
+    pub include_usage: bool,
+}
+
+/// The final streamed chunk when `stream_options.include_usage` is set:
+/// empty `choices` and the usage totals, as OpenAI sends it.
+fn usage_chunk(
+    chat_id: &str,
+    created: u64,
+    model: &str,
+    prompt_tokens: usize,
+    completion_tokens: usize,
+) -> serde_json::Value {
+    serde_json::json!({
+        "id": chat_id,
+        "object": "chat.completion.chunk",
+        "created": created,
+        "model": model,
+        "choices": [],
+        "usage": {
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": prompt_tokens + completion_tokens
+        }
+    })
 }
 
 /// Token usage statistics
@@ -1503,6 +1539,10 @@ fn create_chat_stream(
     // stalled runner left an SSE client waiting forever, the exact hang
     // this PR otherwise fixes.
     let timeout_ms = state.config.request_timeout_ms;
+    let include_usage = request
+        .stream_options
+        .as_ref()
+        .is_some_and(|o| o.include_usage);
     // Same reason as the other clones above.
     let queue_depth = state.queue_depth.clone();
 
@@ -1593,6 +1633,9 @@ fn create_chat_stream(
             rx: tokio::sync::mpsc::UnboundedReceiver<anyhow::Result<StreamItem>>,
             is_first: bool,
             done: bool,
+            // The `include_usage` chunk, held back one step so it follows the
+            // `finish_reason` chunk.
+            pending_usage: Option<serde_json::Value>,
             // Held only so its `Drop` runs when THIS struct is dropped --
             // i.e. when the stream itself ends, whether that's normal
             // completion or the client disconnecting early -- not when
@@ -1604,6 +1647,7 @@ fn create_chat_stream(
             rx: stream_rx,
             is_first: true,
             done: false,
+            pending_usage: None,
             _queue_depth_guard: queue_depth_guard,
         };
         let token_stream = stream::unfold(state, move |mut st| {
@@ -1611,6 +1655,10 @@ fn create_chat_stream(
             let model = model.clone();
             let eos_monitor = eos_monitor.clone();
             async move {
+                if let Some(usage) = st.pending_usage.take() {
+                    st.done = true;
+                    return Some((sse_event(Event::default().data(usage.to_string())), st));
+                }
                 if st.done {
                     return None;
                 }
@@ -1656,13 +1704,27 @@ fn create_chat_stream(
                             .to_string(),
                         ),
                     ),
-                    Ok(Some(Ok(StreamItem::Done { finish_reason }))) => {
+                    Ok(Some(Ok(StreamItem::Done {
+                        finish_reason,
+                        prompt_tokens,
+                        completion_tokens,
+                    }))) => {
                         // The stream's one observation of how generation
                         // ended. It is the same value the frame below
                         // reports to the client, read here rather than
                         // re-derived.
                         record_completion(&eos_monitor, resolved_by, finish_reason);
-                        st.done = true;
+                        if include_usage {
+                            st.pending_usage = Some(usage_chunk(
+                                &chat_id,
+                                created,
+                                &model,
+                                prompt_tokens,
+                                completion_tokens,
+                            ));
+                        } else {
+                            st.done = true;
+                        }
                         sse_event(
                             Event::default().data(
                                 serde_json::json!({
@@ -2319,7 +2381,11 @@ mod tests {
                     }
                     ResponseMode::Streaming(chunks) => {
                         let _ = chunks.send(Ok(StreamItem::Token(UNPARSEABLE_REPLY.to_string())));
-                        let _ = chunks.send(Ok(StreamItem::Done { finish_reason }));
+                        let _ = chunks.send(Ok(StreamItem::Done {
+                            finish_reason,
+                            prompt_tokens: 1,
+                            completion_tokens: 1,
+                        }));
                     }
                 }
             }
@@ -3275,6 +3341,56 @@ mod tests {
         );
 
         runner.join().expect("stub runner panicked");
+    }
+
+    /// Frames of a streamed stub-runner reply, with `stream_options` set as given.
+    async fn stub_stream_frames(
+        stream_options: Option<serde_json::Value>,
+    ) -> Vec<serde_json::Value> {
+        let (tx, runner) = stub_runner_with(FinishReason::Stop);
+        let state = state_with_runner(None, Some(tx));
+        let mut req = serde_json::to_value(serde_json::json!({
+            "model": "lightbulb-default",
+            "messages": [{"role": "user", "content": CONTRACT_QUESTION}],
+            "max_tokens": 8,
+            "stream": true
+        }))
+        .unwrap();
+        if let Some(o) = stream_options {
+            req["stream_options"] = o;
+        }
+        let req: ChatCompletionRequest = serde_json::from_value(req).unwrap();
+        let response = chat_completions(State(state), axum::http::HeaderMap::new(), Json(req))
+            .await
+            .into_response();
+        let frames = sse_frames(response).await;
+        runner.join().expect("stub runner panicked");
+        frames
+    }
+
+    /// `stream_options.include_usage` adds one final chunk (empty `choices`,
+    /// the runner's counts) after the `finish_reason` chunk.
+    #[tokio::test]
+    async fn include_usage_adds_a_final_usage_chunk_after_the_finish_chunk() {
+        let frames = stub_stream_frames(Some(serde_json::json!({"include_usage": true}))).await;
+        // token, finish, usage
+        assert_eq!(frames.len(), 3, "frames: {frames:?}");
+        assert_eq!(frames[1]["choices"][0]["finish_reason"], "stop");
+        assert!(frames[1].get("usage").is_none());
+        assert_eq!(frames[2]["choices"], serde_json::json!([]));
+        assert_eq!(frames[2]["usage"]["prompt_tokens"], 1);
+        assert_eq!(frames[2]["usage"]["completion_tokens"], 1);
+        assert_eq!(frames[2]["usage"]["total_tokens"], 2);
+    }
+
+    /// Without the option (absent, or `include_usage: false`) no chunk carries usage.
+    #[tokio::test]
+    async fn no_usage_chunk_unless_include_usage_is_true() {
+        for opts in [None, Some(serde_json::json!({"include_usage": false}))] {
+            let frames = stub_stream_frames(opts.clone()).await;
+            assert_eq!(frames.len(), 2, "options {opts:?}: {frames:?}");
+            assert!(frames.iter().all(|f| f.get("usage").is_none()));
+        }
     }
 
     /// The no-model fallback stream is a real, client-visible response shape

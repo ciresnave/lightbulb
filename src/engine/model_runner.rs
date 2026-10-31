@@ -57,7 +57,14 @@ pub struct CompletionResult {
 #[derive(Debug)]
 pub enum StreamItem {
     Token(String),
-    Done { finish_reason: FinishReason },
+    /// `prompt_tokens`/`completion_tokens` are the runner's own counts, the
+    /// same ones a complete-mode reply reports, so a streaming client can
+    /// be given `usage` (`stream_options.include_usage`).
+    Done {
+        finish_reason: FinishReason,
+        prompt_tokens: usize,
+        completion_tokens: usize,
+    },
 }
 
 /// Classify how a finished request ended.
