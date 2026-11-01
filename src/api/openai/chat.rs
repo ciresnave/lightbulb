@@ -449,10 +449,10 @@ pub async fn chat_completions(
         return create_buffered_tool_stream(state, request, priority).await;
     }
 
-    // `n` accepted-and-silently-discarded is the defect class board item 71's
-    // item 2 exists to close — see `validate_n` for why this is a reject
-    // rather than an implementation.
-    if let Err(msg) = validate_n(request.n) {
+    // `n` is honoured on the non-streaming path (`create_n_completions`);
+    // out-of-range values and `n > 1` with `stream` are refused rather than
+    // silently reduced to one choice.
+    if let Err(msg) = validate_chat_n(request.n, request.stream) {
         return (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({"error": msg})),
@@ -508,7 +508,7 @@ pub async fn chat_completions(
         create_chat_stream(state, request, priority)
     } else {
         // Non-streaming response
-        match create_chat_completion_honouring_tool_choice(state, request, priority).await {
+        match create_n_completions(state, request, priority).await {
             Ok(response) => (StatusCode::OK, Json(response)).into_response(),
             Err(e) => queue_error_response(e),
         }
@@ -1018,6 +1018,60 @@ async fn create_chat_completion_honouring_tool_choice(
             .map_or_else(String::new, |v| v.to_string())
     ))
     .into())
+}
+
+/// The most choices one chat request may ask for. Each is a full generation.
+const MAX_CHAT_N: usize = 8;
+
+/// `n` for `/v1/chat/completions`: `1..=MAX_CHAT_N`, and only `1` with
+/// `stream: true` (interleaved per-choice deltas are not implemented).
+/// `/v1/completions` still uses [`validate_n`], which accepts only `1`.
+fn validate_chat_n(n: usize, stream: bool) -> Result<(), String> {
+    if n == 0 || n > MAX_CHAT_N {
+        return Err(format!("n={n} is out of range: send 1 to {MAX_CHAT_N}"));
+    }
+    if n > 1 && stream {
+        return Err(format!(
+            "n={n} with `stream: true` is not supported: streaming one choice at a time is \
+             all that is implemented. Send `stream: false` to get {n} choices, or n=1 to stream."
+        ));
+    }
+    Ok(())
+}
+
+/// Run the request `n` times concurrently and return one response whose
+/// `choices` are the runs' choices (indices `0..n`) and whose `usage` is the
+/// sum. Greedy requests (`temperature` 0) give `n` identical choices.
+async fn create_n_completions(
+    state: AppState,
+    request: ChatCompletionRequest,
+    priority: crate::engine::Priority,
+) -> anyhow::Result<ChatCompletionResponse> {
+    let runs = (0..request.n.max(1)).map(|_| {
+        create_chat_completion_honouring_tool_choice(state.clone(), request.clone(), priority)
+    });
+    Ok(merge_choices(futures::future::try_join_all(runs).await?))
+}
+
+/// Fold several single-choice responses into the first one. `resps` is non-empty.
+fn merge_choices(resps: Vec<ChatCompletionResponse>) -> ChatCompletionResponse {
+    let mut it = resps.into_iter();
+    let mut merged = it.next().expect("at least one response");
+    for r in it {
+        for mut choice in r.choices {
+            choice.index = merged.choices.len();
+            merged.choices.push(choice);
+        }
+        merged.usage = match (merged.usage.take(), r.usage) {
+            (Some(a), Some(b)) => Some(Usage {
+                prompt_tokens: a.prompt_tokens + b.prompt_tokens,
+                completion_tokens: a.completion_tokens + b.completion_tokens,
+                total_tokens: a.total_tokens + b.total_tokens,
+            }),
+            (a, b) => a.or(b),
+        };
+    }
+    merged
 }
 
 /// Validate `n` against what Lightbulb actually implements: only `1` (the
@@ -4681,16 +4735,71 @@ mod tests {
         );
     }
 
+    #[test]
+    fn validate_chat_n_bounds_and_the_stream_restriction() {
+        assert!(validate_chat_n(1, true).is_ok());
+        assert!(validate_chat_n(1, false).is_ok());
+        assert!(validate_chat_n(MAX_CHAT_N, false).is_ok());
+        assert!(validate_chat_n(0, false).is_err());
+        assert!(validate_chat_n(MAX_CHAT_N + 1, false).is_err());
+        let err = validate_chat_n(2, true).expect_err("n>1 with stream");
+        assert!(err.contains("stream"), "{err}");
+    }
+
     #[tokio::test]
-    async fn chat_completions_rejects_n_greater_than_one() {
+    async fn chat_completions_rejects_n_greater_than_one_with_stream() {
         let state = state_with(None);
         let mut req = request();
         req.n = 3;
+        req.stream = true;
 
         let response = chat_completions(State(state), axum::http::HeaderMap::new(), Json(req))
             .await
             .into_response();
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn n_runs_return_n_indexed_choices_and_summed_usage() {
+        let (tx, runner) = stub_runner_with_text("hello", FinishReason::Stop);
+        let state = state_with_runner(None, Some(tx));
+        let mut req = request();
+        req.n = 3;
+
+        let resp = create_n_completions(state, req, crate::engine::Priority::Normal)
+            .await
+            .expect("n runs");
+        drop(runner);
+        let idx: Vec<usize> = resp.choices.iter().map(|c| c.index).collect();
+        assert_eq!(idx, vec![0, 1, 2]);
+        assert!(resp.choices.iter().all(|c| c.message.content == "hello"));
+        let one = {
+            let (tx, runner) = stub_runner_with_text("hello", FinishReason::Stop);
+            let state = state_with_runner(None, Some(tx));
+            let r = create_n_completions(state, request(), crate::engine::Priority::Normal)
+                .await
+                .expect("n=1");
+            drop(runner);
+            r.usage.expect("usage").total_tokens
+        };
+        assert_eq!(resp.usage.expect("usage").total_tokens, 3 * one);
+    }
+
+    #[tokio::test]
+    async fn chat_completions_serves_n_greater_than_one_without_stream() {
+        let (tx, runner) = stub_runner_with_text("hi", FinishReason::Stop);
+        let state = state_with_runner(None, Some(tx));
+        let mut req = request();
+        req.model = "lightbulb-default".into();
+        req.n = 2;
+        let response = chat_completions(State(state), axum::http::HeaderMap::new(), Json(req))
+            .await
+            .into_response();
+        drop(runner);
+        let status = response.status();
+        let body = json_body(response).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["choices"].as_array().map(Vec::len), Some(2), "{body}");
     }
 
     #[tokio::test]

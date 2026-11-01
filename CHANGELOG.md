@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.23.26
+
+### Changed
+- **Behaviour change:** A5, `n` from 2 to 8 on non-streaming `/v1/chat/completions` returns `n` choices (indices `0..n`, the runs execute concurrently) with `usage` summed, instead of a 400. `n` of 0 or above 8 is a 400; `n > 1` with `stream: true` is still a 400 (interleaved per-choice deltas are not implemented); `/v1/completions` still accepts only `n=1`. Each choice is a full generation: at `temperature` 0 they are identical, and sampled requests differ by the per-session seed. Applies with tools and `tool_choice` (each run is checked).
+
 ## 0.23.25
 
 ### Changed
