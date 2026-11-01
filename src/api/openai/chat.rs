@@ -438,24 +438,15 @@ pub async fn chat_completions(
             .into_response();
     }
 
-    // Streaming tool-call deltas are a separate, not-yet-implemented shape
-    // (OpenAI streams `id`/`type`/`function.name` in one delta and appends to
-    // `function.arguments` across later ones — see
-    // `docs/TOOL-CALLING-DESIGN-2026-09-25.md`). Silently prompting for tools
-    // and then never parsing them back out of the stream would be exactly the
-    // silent-lie failure mode item 2 of this task exists to avoid, so this
-    // combination is refused rather than degraded.
+    // `tools` with `stream: true`: the reply is generated in full, the
+    // `<tool_call>` tags are parsed out of it exactly as on the non-streaming
+    // path, and the result is then sent as OpenAI-shaped chunks (a content
+    // delta, one `tool_calls` delta per call, the finish chunk) -- see
+    // `create_buffered_tool_stream`. Tokens are NOT streamed as they are
+    // generated: a tag cannot be recognised before it closes, and tokens
+    // already sent cannot be un-sent.
     if request.stream && request_wants_tools(&request) {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({
-                "error": "`tools` with `stream: true` is not yet implemented: tool-call \
-                    deltas are a separate streaming shape from the non-streaming path \
-                    landed here. Send `stream: false` to use tools today, or omit `tools` \
-                    to stream."
-            })),
-        )
-            .into_response();
+        return create_buffered_tool_stream(state, request, priority).await;
     }
 
     // `n` accepted-and-silently-discarded is the defect class board item 71's
@@ -522,6 +513,74 @@ pub async fn chat_completions(
             Err(e) => queue_error_response(e),
         }
     }
+}
+
+/// Serve `stream: true` + `tools` (A4): run the ordinary non-streaming
+/// generation, then replay the finished reply as SSE chunks. The client gets
+/// the OpenAI streaming shape (`delta.tool_calls` entries carrying `index`,
+/// `id`, `type` and `function`), but all of it arrives after generation
+/// ends; there are no per-token deltas on this path.
+async fn create_buffered_tool_stream(
+    state: AppState,
+    request: ChatCompletionRequest,
+    priority: crate::engine::Priority,
+) -> axum::response::Response {
+    let include_usage = request
+        .stream_options
+        .as_ref()
+        .is_some_and(|o| o.include_usage);
+    match create_chat_completion(state, request, priority).await {
+        Ok(resp) => {
+            let events = replay_frames(&resp, include_usage)
+                .into_iter()
+                .map(|f| sse_event(Event::default().data(f.to_string())))
+                .chain(std::iter::once(sse_event(Event::default().data("[DONE]"))));
+            Sse::new(stream::iter(events).boxed()).into_response()
+        }
+        Err(e) => queue_error_response(e),
+    }
+}
+
+/// The chunk sequence for a finished reply: content, one delta per tool
+/// call, the finish chunk, and (when asked) the usage chunk.
+fn replay_frames(resp: &ChatCompletionResponse, include_usage: bool) -> Vec<serde_json::Value> {
+    let chunk = |delta: serde_json::Value, finish: Option<&str>| {
+        serde_json::json!({
+            "id": resp.id,
+            "object": "chat.completion.chunk",
+            "created": resp.created,
+            "model": resp.model,
+            "choices": [{"index": 0, "delta": delta, "finish_reason": finish}]
+        })
+    };
+    let Some(choice) = resp.choices.first() else {
+        return Vec::new();
+    };
+    let msg = &choice.message;
+    let mut frames = vec![chunk(
+        serde_json::json!({"role": "assistant", "content": msg.content}),
+        None,
+    )];
+    for (index, call) in msg.tool_calls.iter().flatten().enumerate() {
+        let delta = serde_json::json!({"tool_calls": [{
+            "index": index,
+            "id": call.id,
+            "type": call.kind,
+            "function": {"name": call.function.name, "arguments": call.function.arguments}
+        }]});
+        frames.push(chunk(delta, None));
+    }
+    frames.push(chunk(serde_json::json!({}), Some(&choice.finish_reason)));
+    if let (true, Some(u)) = (include_usage, &resp.usage) {
+        frames.push(usage_chunk(
+            &resp.id,
+            resp.created,
+            &resp.model,
+            u.prompt_tokens,
+            u.completion_tokens,
+        ));
+    }
+    frames
 }
 
 /// Map an inference error to a response, giving
@@ -4241,8 +4300,78 @@ mod tests {
         assert!(response.choices[0].message.tool_calls.is_none());
     }
 
+    fn weather_reply(finish: &str) -> ChatCompletionResponse {
+        let call = |id: &str, name: &str, arguments: &str| ToolCall {
+            id: id.into(),
+            kind: "function".into(),
+            function: ToolCallFunction {
+                name: name.into(),
+                arguments: arguments.into(),
+            },
+        };
+        ChatCompletionResponse {
+            id: "chatcmpl-x".into(),
+            object: "chat.completion".into(),
+            created: 7,
+            model: "m".into(),
+            choices: vec![ChatChoice {
+                index: 0,
+                message: ChatMessage {
+                    role: "assistant".into(),
+                    content: "Checking.".into(),
+                    name: None,
+                    tool_calls: Some(vec![
+                        call("call_1", "get_weather", r#"{"city":"Paris"}"#),
+                        call("call_2", "get_time", "{}"),
+                    ]),
+                    tool_call_id: None,
+                },
+                finish_reason: finish.into(),
+            }],
+            usage: Some(Usage {
+                prompt_tokens: 5,
+                completion_tokens: 3,
+                total_tokens: 8,
+            }),
+            lightbulb_result: None,
+        }
+    }
+
+    #[test]
+    fn replay_frames_sends_content_then_one_delta_per_tool_call_then_finish() {
+        let frames = replay_frames(&weather_reply("tool_calls"), false);
+        assert_eq!(frames.len(), 4, "{frames:?}");
+        assert_eq!(frames[0]["choices"][0]["delta"]["role"], "assistant");
+        assert_eq!(frames[0]["choices"][0]["delta"]["content"], "Checking.");
+        let c1 = &frames[1]["choices"][0]["delta"]["tool_calls"][0];
+        assert_eq!(c1["index"], 0);
+        assert_eq!(c1["id"], "call_1");
+        assert_eq!(c1["type"], "function");
+        assert_eq!(c1["function"]["name"], "get_weather");
+        assert_eq!(c1["function"]["arguments"], r#"{"city":"Paris"}"#);
+        assert_eq!(
+            frames[2]["choices"][0]["delta"]["tool_calls"][0]["index"],
+            1
+        );
+        assert_eq!(frames[3]["choices"][0]["finish_reason"], "tool_calls");
+        assert!(
+            frames[..3]
+                .iter()
+                .all(|f| f["choices"][0]["finish_reason"].is_null())
+        );
+    }
+
+    #[test]
+    fn replay_frames_appends_the_usage_chunk_only_when_asked() {
+        assert_eq!(replay_frames(&weather_reply("tool_calls"), false).len(), 4);
+        let frames = replay_frames(&weather_reply("tool_calls"), true);
+        assert_eq!(frames.len(), 5);
+        assert_eq!(frames[4]["choices"], serde_json::json!([]));
+        assert_eq!(frames[4]["usage"]["total_tokens"], 8);
+    }
+
     #[tokio::test]
-    async fn chat_completions_rejects_stream_with_tools() {
+    async fn chat_completions_streams_with_tools_instead_of_refusing() {
         let state = state_with(None);
         let mut req = request();
         req.stream = true;
@@ -4257,7 +4386,18 @@ mod tests {
         let response = chat_completions(State(state), axum::http::HeaderMap::new(), Json(req))
             .await
             .into_response();
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("reading the SSE body");
+        let body = String::from_utf8(bytes.to_vec()).expect("UTF-8");
+        assert_eq!(
+            body.lines()
+                .filter_map(|l| l.strip_prefix("data: "))
+                .next_back(),
+            Some("[DONE]"),
+            "body: {body:?}"
+        );
     }
 
     #[tokio::test]
