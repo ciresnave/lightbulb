@@ -508,7 +508,7 @@ pub async fn chat_completions(
         create_chat_stream(state, request, priority)
     } else {
         // Non-streaming response
-        match create_chat_completion(state, request, priority).await {
+        match create_chat_completion_honouring_tool_choice(state, request, priority).await {
             Ok(response) => (StatusCode::OK, Json(response)).into_response(),
             Err(e) => queue_error_response(e),
         }
@@ -529,7 +529,7 @@ async fn create_buffered_tool_stream(
         .stream_options
         .as_ref()
         .is_some_and(|o| o.include_usage);
-    match create_chat_completion(state, request, priority).await {
+    match create_chat_completion_honouring_tool_choice(state, request, priority).await {
         Ok(resp) => {
             let events = replay_frames(&resp, include_usage)
                 .into_iter()
@@ -600,6 +600,8 @@ fn queue_error_response(e: anyhow::Error) -> axum::response::Response {
         .is_some()
     {
         StatusCode::GATEWAY_TIMEOUT
+    } else if e.downcast_ref::<ToolChoiceUnmet>().is_some() {
+        StatusCode::BAD_GATEWAY
     } else {
         StatusCode::INTERNAL_SERVER_ERROR
     };
@@ -886,23 +888,136 @@ fn request_wants_tools(request: &ChatCompletionRequest) -> bool {
         && !matches!(&request.tool_choice, Some(v) if v.as_str() == Some("none"))
 }
 
-/// Validate `tool_choice` against what Lightbulb actually implements.
-///
-/// Only `"auto"` (the default when the field is omitted) and `"none"` are
-/// real policies. Per item 2 of the portfolio PM's task — decide deliberately
-/// between implementing a parameter and rejecting it, and say which — forcing
-/// one named tool, or `"required"`, is rejected with a 400 naming what IS
-/// supported, rather than silently treated as `"auto"`.
-fn validate_tool_choice(request: &ChatCompletionRequest) -> Result<(), String> {
+/// What `tool_choice` demands of a reply.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ToolDemand {
+    /// `auto` / `none` / absent: the model may answer in prose or call.
+    Free,
+    /// `"required"`: at least one tool call.
+    Any,
+    /// `{"type":"function","function":{"name":N}}`: calls to `N` only.
+    Named(String),
+}
+
+/// The function name in a named `tool_choice` object, if it is one.
+fn named_tool_choice(v: &serde_json::Value) -> Option<&str> {
+    if v.get("type")?.as_str()? != "function" {
+        return None;
+    }
+    v.get("function")?.get("name")?.as_str()
+}
+
+fn tool_demand(request: &ChatCompletionRequest) -> ToolDemand {
     match &request.tool_choice {
-        None => Ok(()),
-        Some(v) if v.as_str() == Some("auto") || v.as_str() == Some("none") => Ok(()),
-        Some(v) => Err(format!(
-            "tool_choice {v} is not supported; Lightbulb implements only \"auto\" \
-             (the default when the field is omitted) and \"none\". Forcing a \
-             specific tool, or \"required\", is not implemented."
+        Some(v) if v.as_str() == Some("required") => ToolDemand::Any,
+        Some(v) => named_tool_choice(v).map_or(ToolDemand::Free, |n| ToolDemand::Named(n.into())),
+        None => ToolDemand::Free,
+    }
+}
+
+/// Validate `tool_choice`: `auto`, `none`, `required` (needs `tools`) and a
+/// named function that is in `tools` are accepted; anything else is a 400.
+///
+/// `required` and a named function are **enforced by prompting and checking**,
+/// not by constraining decoding (nothing in the serving path can mask tokens):
+/// see [`create_chat_completion_honouring_tool_choice`].
+fn validate_tool_choice(request: &ChatCompletionRequest) -> Result<(), String> {
+    let Some(v) = &request.tool_choice else {
+        return Ok(());
+    };
+    if matches!(v.as_str(), Some("auto" | "none")) {
+        return Ok(());
+    }
+    let tools: &[Tool] = request.tools.as_deref().unwrap_or(&[]);
+    if v.as_str() == Some("required") {
+        return if tools.is_empty() {
+            Err("tool_choice \"required\" needs a non-empty `tools` list".to_string())
+        } else {
+            Ok(())
+        };
+    }
+    match named_tool_choice(v) {
+        Some(name)
+            if tools
+                .iter()
+                .any(|Tool::Function { function }| function.name == name) =>
+        {
+            Ok(())
+        }
+        Some(name) => Err(format!(
+            "tool_choice names \"{name}\", which is not in `tools`"
+        )),
+        None => Err(format!(
+            "tool_choice {v} is not supported; use \"auto\", \"none\", \"required\" or \
+             {{\"type\": \"function\", \"function\": {{\"name\": ...}}}}"
         )),
     }
+}
+
+/// How many times a reply that ignores `tool_choice` is regenerated.
+const TOOL_CHOICE_ATTEMPTS: usize = 3;
+
+/// A `tool_choice` of `required` or a named function that the model did not
+/// honour in [`TOOL_CHOICE_ATTEMPTS`] tries. Answered with a 502 rather than
+/// a prose reply the client asked not to get.
+#[derive(Debug)]
+pub(crate) struct ToolChoiceUnmet(String);
+
+impl std::fmt::Display for ToolChoiceUnmet {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl std::error::Error for ToolChoiceUnmet {}
+
+fn honours_demand(resp: &ChatCompletionResponse, demand: &ToolDemand) -> bool {
+    let calls: &[ToolCall] = resp
+        .choices
+        .first()
+        .and_then(|c| c.message.tool_calls.as_deref())
+        .unwrap_or(&[]);
+    match demand {
+        ToolDemand::Free => true,
+        ToolDemand::Any => !calls.is_empty(),
+        ToolDemand::Named(n) => !calls.is_empty() && calls.iter().all(|c| c.function.name == *n),
+    }
+}
+
+/// `create_chat_completion` plus `tool_choice` enforcement. The model is told
+/// what is required (see `build_tools_instruction`); a reply that still does
+/// not comply is regenerated up to [`TOOL_CHOICE_ATTEMPTS`] times, then
+/// refused with [`ToolChoiceUnmet`]. A named function is also the only tool
+/// the prompt lists. Note that at `temperature` 0 a regeneration repeats the
+/// same reply, so the retries only help sampled requests.
+async fn create_chat_completion_honouring_tool_choice(
+    state: AppState,
+    mut request: ChatCompletionRequest,
+    priority: crate::engine::Priority,
+) -> anyhow::Result<ChatCompletionResponse> {
+    let demand = tool_demand(&request);
+    if demand == ToolDemand::Free {
+        return create_chat_completion(state, request, priority).await;
+    }
+    if let ToolDemand::Named(n) = &demand {
+        if let Some(tools) = request.tools.as_mut() {
+            tools.retain(|Tool::Function { function }| function.name == *n);
+        }
+    }
+    for _ in 0..TOOL_CHOICE_ATTEMPTS {
+        let resp = create_chat_completion(state.clone(), request.clone(), priority).await?;
+        if honours_demand(&resp, &demand) {
+            return Ok(resp);
+        }
+    }
+    Err(ToolChoiceUnmet(format!(
+        "tool_choice {} was not honoured by the model in {TOOL_CHOICE_ATTEMPTS} attempts",
+        request
+            .tool_choice
+            .as_ref()
+            .map_or_else(String::new, |v| v.to_string())
+    ))
+    .into())
 }
 
 /// Validate `n` against what Lightbulb actually implements: only `1` (the
@@ -974,7 +1089,7 @@ fn tool_prompt_strategy(
 
 /// Build the instruction text describing `tools` and the exact tag Lightbulb
 /// asks the model to answer with.
-fn build_tools_instruction(tools: &[Tool]) -> String {
+fn build_tools_instruction(tools: &[Tool], demand: &ToolDemand) -> String {
     let mut s = String::from(
         "You have access to the following tools. When you need to call one, \
          respond with exactly one line per call, in this form and no other:\n",
@@ -982,10 +1097,17 @@ fn build_tools_instruction(tools: &[Tool]) -> String {
     s.push_str(TOOL_CALL_TAG_START);
     s.push_str(r#"{"name": "<tool name>", "arguments": {<argument object>}}"#);
     s.push_str(TOOL_CALL_TAG_END);
-    s.push_str(
-        "\nDo not use any other format. If no tool call is needed, answer \
-         normally without that tag.\n\nAvailable tools:\n",
-    );
+    s.push_str("\nDo not use any other format.");
+    match demand {
+        ToolDemand::Free => {
+            s.push_str(" If no tool call is needed, answer normally without that tag.")
+        }
+        ToolDemand::Any => s.push_str(" You MUST call a tool; do not answer in prose."),
+        ToolDemand::Named(n) => s.push_str(&format!(
+            " You MUST call the tool \"{n}\"; do not answer in prose."
+        )),
+    }
+    s.push_str("\n\nAvailable tools:\n");
     for tool in tools {
         let Tool::Function { function } = tool;
         s.push_str("- ");
@@ -1013,8 +1135,12 @@ fn build_tools_instruction(tools: &[Tool]) -> String {
 /// message, one is inserted at the front. This changes the conversation the
 /// caller sent — documented here and in the PR description precisely so it
 /// is observable rather than a surprise.
-fn inject_tools_instruction(messages: &[ChatMessage], tools: &[Tool]) -> Vec<ChatMessage> {
-    let instruction = build_tools_instruction(tools);
+fn inject_tools_instruction(
+    messages: &[ChatMessage],
+    tools: &[Tool],
+    demand: &ToolDemand,
+) -> Vec<ChatMessage> {
+    let instruction = build_tools_instruction(tools, demand);
     let mut out = Vec::with_capacity(messages.len() + 1);
     let mut merged = false;
     for m in messages {
@@ -1151,7 +1277,7 @@ async fn create_chat_completion(
         // own doc comment — but the call site already asks the question a
         // real native-template implementation would need answered.
         let _ = tool_prompt_strategy(state.chat_template.as_deref());
-        let spliced = inject_tools_instruction(&request.messages, tools);
+        let spliced = inject_tools_instruction(&request.messages, tools, &tool_demand(&request));
         build_prompt(&state, &spliced)
     } else {
         build_prompt(&state, &request.messages)
@@ -4117,19 +4243,105 @@ mod tests {
         assert!(validate_tool_choice(&req).is_ok());
     }
 
+    fn tool_named(name: &str) -> Tool {
+        Tool::Function {
+            function: ToolFunctionDef {
+                name: name.to_string(),
+                description: None,
+                parameters: None,
+            },
+        }
+    }
+
+    fn named_choice(name: &str) -> serde_json::Value {
+        serde_json::json!({"type": "function", "function": {"name": name}})
+    }
+
     #[test]
-    fn validate_tool_choice_rejects_required_and_forced_function() {
+    fn validate_tool_choice_accepts_required_and_a_listed_named_function() {
         let mut req = request();
+        req.tools = Some(vec![tool_named("get_weather")]);
+        req.tool_choice = Some(serde_json::json!("required"));
+        assert!(validate_tool_choice(&req).is_ok());
+        req.tool_choice = Some(named_choice("get_weather"));
+        assert!(validate_tool_choice(&req).is_ok());
+    }
+
+    #[test]
+    fn validate_tool_choice_rejects_what_cannot_be_honoured() {
+        let mut req = request();
+        // required with no tools
         req.tool_choice = Some(serde_json::json!("required"));
         assert!(validate_tool_choice(&req).is_err());
+        // a name that is not in `tools`
+        req.tools = Some(vec![tool_named("get_weather")]);
+        req.tool_choice = Some(named_choice("get_time"));
+        let err = validate_tool_choice(&req).expect_err("unlisted name");
+        assert!(err.contains("get_time"), "{err}");
+        // malformed
+        req.tool_choice = Some(serde_json::json!("sometimes"));
+        assert!(validate_tool_choice(&req).is_err());
+    }
 
-        req.tool_choice =
-            Some(serde_json::json!({"type": "function", "function": {"name": "get_weather"}}));
-        let err =
-            validate_tool_choice(&req).expect_err("forced-function choice is not implemented");
+    const CALL_WEATHER: &str =
+        r#"<tool_call>{"name": "get_weather", "arguments": {"city": "Paris"}}</tool_call>"#;
+
+    async fn run_with_choice(
+        generated: &str,
+        choice: serde_json::Value,
+    ) -> anyhow::Result<ChatCompletionResponse> {
+        let (tx, runner) = stub_runner_with_text(generated, FinishReason::Stop);
+        let state = state_with_runner(None, Some(tx));
+        let mut req = request();
+        req.tools = Some(vec![tool_named("get_weather"), tool_named("get_time")]);
+        req.tool_choice = Some(choice);
+        let out = create_chat_completion_honouring_tool_choice(
+            state,
+            req,
+            crate::engine::Priority::Normal,
+        )
+        .await;
+        drop(runner);
+        out
+    }
+
+    #[tokio::test]
+    async fn required_returns_a_reply_that_calls_a_tool() {
+        let r = run_with_choice(CALL_WEATHER, serde_json::json!("required"))
+            .await
+            .expect("a compliant reply passes");
+        assert_eq!(r.choices[0].finish_reason, "tool_calls");
+    }
+
+    #[tokio::test]
+    async fn required_refuses_a_prose_reply_after_the_retries() {
+        let e = run_with_choice("It is sunny.", serde_json::json!("required"))
+            .await
+            .expect_err("prose must not pass as a required call");
+        assert!(e.downcast_ref::<ToolChoiceUnmet>().is_some(), "{e}");
+        assert_eq!(queue_error_response(e).status(), StatusCode::BAD_GATEWAY);
+    }
+
+    #[tokio::test]
+    async fn a_named_choice_accepts_that_function_and_refuses_another() {
+        run_with_choice(CALL_WEATHER, named_choice("get_weather"))
+            .await
+            .expect("the named function passes");
+        let e = run_with_choice(CALL_WEATHER, named_choice("get_time"))
+            .await
+            .expect_err("a call to a different function must not pass");
+        assert!(e.downcast_ref::<ToolChoiceUnmet>().is_some(), "{e}");
+    }
+
+    #[test]
+    fn the_instruction_states_what_tool_choice_requires() {
+        let tools = vec![tool_named("get_weather")];
+        assert!(!build_tools_instruction(&tools, &ToolDemand::Free).contains("MUST"));
+        assert!(build_tools_instruction(&tools, &ToolDemand::Any).contains("MUST call a tool"));
+        let named = build_tools_instruction(&tools, &ToolDemand::Named("get_weather".into()));
         assert!(
-            err.contains("auto") && err.contains("none"),
-            "rejection must name what IS supported, not just reject: {err}"
+            named.contains("MUST call the tool \"get_weather\""),
+            "{named}"
         );
     }
 
@@ -4158,7 +4370,7 @@ mod tests {
                 tool_call_id: None,
             },
         ];
-        let out = inject_tools_instruction(&messages, &tools);
+        let out = inject_tools_instruction(&messages, &tools, &ToolDemand::Free);
         let system_count = out.iter().filter(|m| m.role == "system").count();
         assert_eq!(
             system_count, 1,
@@ -4183,7 +4395,7 @@ mod tests {
             },
         }];
         let messages = one_user_message();
-        let out = inject_tools_instruction(&messages, &tools);
+        let out = inject_tools_instruction(&messages, &tools, &ToolDemand::Free);
         assert_eq!(out.len(), messages.len() + 1);
         assert_eq!(out[0].role, "system");
         assert!(out[0].content.contains("get_weather"));
@@ -4404,7 +4616,7 @@ mod tests {
     async fn chat_completions_rejects_an_unsupported_tool_choice() {
         let state = state_with(None);
         let mut req = request();
-        req.tool_choice = Some(serde_json::json!("required"));
+        req.tool_choice = Some(serde_json::json!("sometimes"));
 
         let response = chat_completions(State(state), axum::http::HeaderMap::new(), Json(req))
             .await

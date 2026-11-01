@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.23.25
+
+### Changed
+- **Behaviour change:** A4, `tool_choice` `"required"` and a named function (`{"type":"function","function":{"name":N}}`) are accepted on `/v1/chat/completions` instead of returning a 400. `required` needs a non-empty `tools`; a named function must be in `tools` (else 400). Enforcement is by prompting and checking, not by constraining decoding (nothing in the serving path can mask tokens): the tool instruction tells the model it MUST call a tool (or the named one, which is then the only tool listed), and a reply that does not comply is regenerated up to 3 times, then refused with a 502 rather than returned as prose. At temperature 0 a regeneration repeats the same reply, so the retries help only sampled requests. Applies to streamed tool requests too (buffered replay, 0.23.24; whether Cherry Studio accepts a replayed tool stream is still unconfirmed, F9).
+
 ## 0.23.24
 
 ### Changed
