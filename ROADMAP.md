@@ -17,6 +17,32 @@ Purpose: a clear plan to reach a robust, fast, and memory-efficient inference en
 
 ---
 
+# Fuel dependency bump: 0.25.10 to 0.36.4 (note written 2026-11-02 by the Fuel lane; the Lightbulb lane was not running)
+
+**Why it is needed.** Lightbulb pins Fuel `0.25.10`. Every published `fuel-quantized` was yanked on 2026-11-01 (the
+integer dot kernels were removed, Fuel `0.36.0`), and the Baracuda `0.0.1-alpha.158` line that `fuel-cuda-backend`
+`0.25.10` requires has a yanked `baracuda-kernels-sys`. A fresh resolve of the current pins therefore fails. Fuel
+`0.36.4` (published 2026-11-02, 43 crates, tag `v0.36.4`) is the first release without the yanked pieces.
+
+**What to change (measured, not assumed).** In `Cargo.toml` set every Fuel dependency to `0.36.4`: `fuel`,
+`fuel-cpu-backend`, `fuel-model-llama`, `fuel-transformers`, `fuel-loaders`, `fuel-ir`, `fuel-backend-contract`,
+`fuel-inference`, `fuel-hardware`, and the optional `fuel-cuda-backend`. They must move together: a scratch copy of
+`origin/main` `7f58f49` with `fuel-hardware` left at `0.25.10` does NOT resolve, because its `fuel-cuda-backend`
+`0.25.10` and Fuel `0.36.4`'s `fuel-cuda-backend` both pull a `baracuda-kernels-sys` that `links = "baracuda_kernels"`,
+and Cargo allows one such package. Delete or regenerate `Cargo.lock` (a fresh resolve takes the Baracuda
+`0.1.0-alpha.80` family).
+
+**What moved in the API: nothing that Lightbulb's code touches.** With all ten Fuel dependencies at `0.36.4` in a
+scratch copy (a `git archive` of `7f58f49`, no Lightbulb source edited), `cargo check -j 2 --all-targets` exits 0 with
+59 warnings and zero errors, and so does `cargo check -j 2 --all-targets --features vulkan` (Windows, Rust as pinned in
+Fuel's toolchain file). **Not checked:** the `cuda` and `fuel-cuda` features (they run the CUDA forge, about 100
+minutes), any test run, and any GPU run. Treat those three as the remaining work before a release; the compile result
+says nothing about behaviour, and Fuel `0.36.0` changed CPU quantized matmul to the float route (single-row CPU
+decode on quantized weights measured 2 to 10 times slower than the removed integer route; agreement with a float64
+reference about 500 times tighter; GPU routes unchanged), so Lightbulb's CPU quantized speed numbers will move.
+
+---
+
 # ⚠️ VERIFIED STATUS — read this before planning from anything below
 
 **Measured 2026-09-01 at `origin/main` `794b88e`.** Every figure here was
