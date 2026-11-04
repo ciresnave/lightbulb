@@ -5,6 +5,12 @@
 ### Changed
 - Docs only: F2 design note update (answer to one-runner-vs-swap and B9 per model; status; a source-read lead on why unload frees no VRAM, not yet measured).
 
+## 0.23.28
+
+### Added
+- **A5 `response_format`** on `/v1/chat/completions`: `{"type": "json_object"}` and `{"type": "json_schema", "json_schema": {"name", "schema"}}` (`text` is the no-op default). Honoured by prompt and check, **not** constrained decoding: the model is told to answer with JSON only (and given the schema), the reply is parsed (prose and code fences around the JSON are stripped, the content returned is compact JSON) and, for `json_schema`, validated with the `jsonschema` crate. A reply that does not comply is regenerated up to 3 times, then the request fails with a 502 (at `temperature` 0 a regeneration repeats the reply, so retries only help sampled requests). A `length` cut-off JSON counts as not complying. `stream: true` is served as a buffered replay, as for `tools`. Unknown `type`, a missing or invalid schema, and `response_format` together with `tools` or `lightbulb.output_contract` are 400s. `strict` is accepted and ignored (the check is always applied). Works with `n`.
+- Dependency `jsonschema 0.60` (no default features); `deny.toml` allows `MIT-0` for its transitive `borrow-or-share`. Licence list regenerated.
+
 ## 0.23.27
 
 ### Changed

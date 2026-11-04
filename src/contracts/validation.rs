@@ -152,7 +152,7 @@ pub fn try_parse(text: &str, spec: &OutputContractSpec) -> Option<ContractOutput
 /// else the body of a Markdown code fence, else the first balanced `{..}` or
 /// `[..]` span that parses.  Bare scalars only count when they are the whole
 /// text, so prose containing a stray number is not a JSON answer.
-fn parse_json(text: &str) -> Option<serde_json::Value> {
+pub(crate) fn parse_json(text: &str) -> Option<serde_json::Value> {
     let trimmed = text.trim();
     serde_json::from_str(trimmed)
         .ok()

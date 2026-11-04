@@ -29,6 +29,9 @@ fn sse_event(event: Event) -> Result<Event, Infallible> {
 
 use crate::api::AppState;
 
+mod response_format;
+pub(crate) use response_format::FormatUnmet;
+
 /// Chat completion request (OpenAI-compatible)
 #[derive(Debug, Clone, Deserialize)]
 pub struct ChatCompletionRequest {
@@ -89,6 +92,13 @@ pub struct ChatCompletionRequest {
     /// portfolio PM's two-item task: a documented refusal beats a silent lie.
     #[serde(default)]
     pub tool_choice: Option<serde_json::Value>,
+
+    /// `response_format` (OpenAI): `text` (default), `json_object` or
+    /// `json_schema`. Honoured by prompt and check with regeneration, not by
+    /// constrained decoding — see `response_format`. Not combinable with
+    /// `tools` or `lightbulb.output_contract` (400).
+    #[serde(default)]
+    pub response_format: Option<serde_json::Value>,
 
     /// Lightbulb-specific extensions
     #[serde(default)]
@@ -430,7 +440,9 @@ pub async fn chat_completions(
 
     // `tool_choice` values Lightbulb does not implement get a named 400
     // rather than silently behaving as `"auto"` — see `validate_tool_choice`.
-    if let Err(msg) = validate_tool_choice(&request) {
+    if let Err(msg) =
+        validate_tool_choice(&request).and_then(|()| response_format::validate_request(&request))
+    {
         return (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({"error": msg})),
@@ -445,7 +457,11 @@ pub async fn chat_completions(
     // `create_buffered_tool_stream`. Tokens are NOT streamed as they are
     // generated: a tag cannot be recognised before it closes, and tokens
     // already sent cannot be un-sent.
-    if request.stream && request_wants_tools(&request) {
+    // `response_format` with `stream: true` takes the same road: the JSON can
+    // only be checked once it is complete.
+    if request.stream
+        && (request_wants_tools(&request) || response_format::active(&request).is_some())
+    {
         return create_buffered_tool_stream(state, request, priority).await;
     }
 
@@ -600,7 +616,9 @@ fn queue_error_response(e: anyhow::Error) -> axum::response::Response {
         .is_some()
     {
         StatusCode::GATEWAY_TIMEOUT
-    } else if e.downcast_ref::<ToolChoiceUnmet>().is_some() {
+    } else if e.downcast_ref::<ToolChoiceUnmet>().is_some()
+        || e.downcast_ref::<FormatUnmet>().is_some()
+    {
         StatusCode::BAD_GATEWAY
     } else {
         StatusCode::INTERNAL_SERVER_ERROR
@@ -995,6 +1013,9 @@ async fn create_chat_completion_honouring_tool_choice(
     mut request: ChatCompletionRequest,
     priority: crate::engine::Priority,
 ) -> anyhow::Result<ChatCompletionResponse> {
+    if let Some(format) = response_format::active(&request) {
+        return response_format::run(state, request, priority, format).await;
+    }
     let demand = tool_demand(&request);
     if demand == ToolDemand::Free {
         return create_chat_completion(state, request, priority).await;
@@ -1194,7 +1215,12 @@ fn inject_tools_instruction(
     tools: &[Tool],
     demand: &ToolDemand,
 ) -> Vec<ChatMessage> {
-    let instruction = build_tools_instruction(tools, demand);
+    inject_system_text(messages, build_tools_instruction(tools, demand))
+}
+
+/// Append `instruction` to the first system message, or insert a system
+/// message holding it at the front (see [`inject_tools_instruction`]).
+fn inject_system_text(messages: &[ChatMessage], instruction: String) -> Vec<ChatMessage> {
     let mut out = Vec::with_capacity(messages.len() + 1);
     let mut merged = false;
     for m in messages {
@@ -4482,6 +4508,64 @@ mod tests {
             }
         });
         (tx, handle)
+    }
+
+    async fn run_with_format(
+        generated: &str,
+        format: serde_json::Value,
+    ) -> anyhow::Result<ChatCompletionResponse> {
+        let (tx, runner) = stub_runner_with_text(generated, FinishReason::Stop);
+        let state = state_with_runner(None, Some(tx));
+        let mut req = request();
+        req.response_format = Some(format);
+        let out = create_chat_completion_honouring_tool_choice(
+            state,
+            req,
+            crate::engine::Priority::Normal,
+        )
+        .await;
+        drop(runner);
+        out
+    }
+
+    #[tokio::test]
+    async fn json_object_returns_the_bare_json_of_a_fenced_reply() {
+        let r = run_with_format(
+            "Sure!
+```json
+{\"a\": 1}
+```",
+            serde_json::json!({"type": "json_object"}),
+        )
+        .await
+        .expect("a fenced object passes");
+        assert_eq!(r.choices[0].message.content, "{\"a\":1}");
+    }
+
+    #[tokio::test]
+    async fn json_schema_refuses_a_reply_that_breaks_the_schema() {
+        let format = serde_json::json!({"type": "json_schema", "json_schema": {
+            "name": "p", "schema": {"type": "object", "required": ["n"]}}});
+        run_with_format("{\"n\": 1}", format.clone())
+            .await
+            .expect("a conforming reply passes");
+        let e = run_with_format("{\"m\": 1}", format)
+            .await
+            .expect_err("a reply missing a required key must not pass");
+        assert!(e.downcast_ref::<FormatUnmet>().is_some(), "{e}");
+        assert_eq!(queue_error_response(e).status(), StatusCode::BAD_GATEWAY);
+    }
+
+    #[test]
+    fn response_format_is_refused_with_tools_and_unknown_types() {
+        let mut req = request();
+        req.response_format = Some(serde_json::json!({"type": "json_object"}));
+        assert!(response_format::validate_request(&req).is_ok());
+        req.tools = Some(vec![tool_named("get_weather")]);
+        assert!(response_format::validate_request(&req).is_err());
+        req.tools = None;
+        req.response_format = Some(serde_json::json!({"type": "yaml"}));
+        assert!(response_format::validate_request(&req).is_err());
     }
 
     #[tokio::test]

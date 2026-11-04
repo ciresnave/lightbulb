@@ -35,7 +35,9 @@ bit-vec@0.8.0		X									X
 bitflags@2.13.1		X									X					
 block-buffer@0.10.4		X									X					
 block-buffer@0.12.1		X									X					
+borrow-or-share@0.2.4												X				
 bumpalo@3.20.3		X									X					
+bytecount@0.6.9		X									X					
 bytemuck@1.25.2		X									X					X
 bytemuck_derive@1.11.0		X									X					X
 byteorder@1.5.0											X				X	
@@ -112,6 +114,7 @@ dyn-stack@0.13.2											X
 dyn-stack-macros@0.1.3											X					
 ego-tree@0.11.0									X							
 either@1.17.0		X									X					
+email_address@0.2.9											X					
 encode_unicode@1.0.0		X									X					
 encoding_rs@0.8.35		X			X						X					
 enum-as-inner@0.6.1		X									X					
@@ -130,11 +133,13 @@ fdeflate@0.3.7		X									X
 find-msvc-tools@0.1.9		X									X					
 flate2@1.1.9		X									X					
 float8@0.7.0											X					
+fluent-uri@0.4.1											X					
 fnv@1.0.7		X									X					
 foldhash@0.2.0																X
 foreign-types@0.3.2		X									X					
 foreign-types-shared@0.1.1		X									X					
 form_urlencoded@1.2.2		X									X					
+fraction@0.17.0		X									X					
 fs_extra@1.3.0											X					
 fuel@0.36.4		X									X					
 fuel-backend-contract@0.36.4		X									X					
@@ -238,6 +243,9 @@ jni-sys-macros@0.4.1		X									X
 jobserver@0.1.35		X									X					
 js-sys@0.3.103		X									X					
 json5@0.4.1									X							
+jsonschema@0.60.2											X					
+jsonschema-regex@0.60.2											X					
+jsonschema-value@0.60.2											X					
 kiss-classify-vocab@0.4.0		X									X					
 kiss-ops-vocab@0.4.0		X									X					
 kiss-ref-core@0.4.0		X									X					
@@ -265,6 +273,7 @@ memo-map@0.3.3		X
 metrics@0.24.6											X					
 metrics-exporter-prometheus@0.18.3		X									X					
 metrics-util@0.20.4											X					
+micromap@0.3.0											X					
 mime@0.3.17		X									X					
 minijinja@2.23.0		X														
 minijinja-contrib@2.23.0		X														
@@ -294,10 +303,14 @@ nix@0.31.3											X
 nom@7.1.3											X					
 ntapi@0.4.3		X									X					
 nu-ansi-term@0.50.3											X					
+num@0.4.3		X									X					
 num-bigint@0.4.8		X									X					
+num-cmp@0.1.0		X									X					
 num-complex@0.4.6		X									X					
 num-conv@0.2.2		X									X					
 num-integer@0.1.46		X									X					
+num-iter@0.1.46		X									X					
+num-rational@0.4.2		X									X					
 num-traits@0.2.19		X									X					
 num_cpus@1.17.0		X									X					
 nvml-wrapper@0.13.0		X									X					
@@ -323,6 +336,7 @@ openssl-probe@0.2.1		X									X
 openssl-sys@0.9.117											X					
 option-ext@0.2.0													X			
 ordered-multimap@0.7.3											X					
+outref@0.5.2											X					
 parking@2.2.1		X									X					
 parking_lot@0.12.5		X									X					
 parking_lot_core@0.9.12		X									X					
@@ -382,6 +396,9 @@ rcgen@0.14.8		X									X
 reborrow@0.5.5											X					
 redox_syscall@0.5.18											X					
 redox_users@0.5.2											X					
+ref-cast@1.0.27		X									X					
+ref-cast-impl@1.0.27		X									X					
+referencing@0.60.2											X					
 regex@1.13.1		X									X					
 regex-automata@0.4.16		X									X					
 regex-syntax@0.8.11		X									X					
@@ -451,6 +468,8 @@ string_cache@0.9.0		X									X
 string_cache_codegen@0.6.1		X									X					
 stringprep@0.1.5		X									X					
 strsim@0.11.1											X					
+strum@0.28.0											X					
+strum_macros@0.28.0											X					
 subtle@2.6.1					X											
 syn@2.0.119		X									X					
 syn@3.0.3		X									X					
@@ -510,6 +529,7 @@ typeid@1.0.3		X									X
 typenum@1.20.1		X									X					
 ucd-trie@0.1.7		X									X					
 unicode-bidi@0.3.18		X									X					
+unicode-general-category@1.1.0		X														
 unicode-ident@1.0.24		X									X			X		
 unicode-normalization@0.1.25		X									X					
 unicode-normalization-alignments@0.1.12		X									X					
@@ -529,8 +549,10 @@ utf8-zero@0.8.1		X									X
 utf8_iter@1.0.4		X									X					
 utf8parse@0.2.2		X									X					
 uuid@1.24.0		X									X					
+uuid-simd@0.8.0											X					
 vcpkg@0.2.15		X									X					
 version_check@0.9.5		X									X					
+vsimd@0.8.0											X					
 walkdir@2.5.0											X				X	
 want@0.3.1											X					
 wasi@0.11.1+wasi-snapshot-preview1		X	X								X					
