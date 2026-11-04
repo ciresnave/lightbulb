@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.23.27
+
+### Changed
+- **Dependency move:** every Fuel dependency (`fuel`, `fuel-cpu-backend`, `fuel-model-llama`, `fuel-transformers`, `fuel-loaders`, `fuel-ir`, `fuel-backend-contract`, `fuel-inference`, `fuel-hardware`, optional `fuel-cuda-backend`) from `0.25.10` to `0.36.4`. They must move together: the old `fuel-cuda-backend` and the new one both pull a `baracuda-kernels-sys` with the same `links` key. Every published `fuel-quantized` below 0.36 was yanked on 2026-11-01 (patent ruling, board 307), so the old pins no longer resolve.
+- **Behaviour change (from Fuel 0.36.0):** CPU quantized matmul uses the float route; Fuel measured single-row CPU decode on quantized weights 2 to 10 times slower than the removed integer route (agreement with a float64 reference about 500 times tighter). Lightbulb's CPU quantized speed numbers will move.
+- **Checked:** `cargo check --all-targets --locked` exit 0, and with `--features vulkan`. **Not checked:** the `cuda` and `fuel-cuda` features, any test run, any GPU run.
+- ROADMAP: the Fuel lane's note on this move (measured).
+
 ## 0.23.26
 
 ### Changed

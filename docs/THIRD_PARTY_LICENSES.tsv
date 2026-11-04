@@ -136,26 +136,26 @@ foreign-types@0.3.2		X									X
 foreign-types-shared@0.1.1		X									X					
 form_urlencoded@1.2.2		X									X					
 fs_extra@1.3.0											X					
-fuel@0.25.10		X									X					
-fuel-backend-contract@0.25.10		X									X					
-fuel-correctness-fixtures@0.25.10		X									X					
-fuel-cpu-backend@0.25.10		X									X					
-fuel-cpu-kernels@0.25.10		X									X					
-fuel-dispatch@0.25.10		X									X					
-fuel-formats@0.25.10		X									X					
-fuel-graph@0.25.10		X									X					
-fuel-hardware@0.25.10		X									X					
-fuel-inference@0.25.10		X									X					
-fuel-ir@0.25.10		X									X					
-fuel-kernel-seam-types@0.25.10		X									X					
-fuel-kv-pool@0.25.10		X									X					
-fuel-loaders@0.25.10		X									X					
-fuel-memory@0.25.10		X									X					
-fuel-model-llama@0.25.10		X									X					
-fuel-model-phi@0.25.10		X									X					
-fuel-quantized@0.25.10		X									X					
-fuel-tensor@0.25.10		X									X					
-fuel-transformers@0.25.10		X									X					
+fuel@0.36.4		X									X					
+fuel-backend-contract@0.36.4		X									X					
+fuel-correctness-fixtures@0.36.4		X									X					
+fuel-cpu-backend@0.36.4		X									X					
+fuel-cpu-kernels@0.36.4		X									X					
+fuel-dispatch@0.36.4		X									X					
+fuel-formats@0.36.4		X									X					
+fuel-graph@0.36.4		X									X					
+fuel-hardware@0.36.4		X									X					
+fuel-inference@0.36.4		X									X					
+fuel-ir@0.36.4		X									X					
+fuel-kernel-seam-types@0.36.4		X									X					
+fuel-kv-pool@0.36.4		X									X					
+fuel-loaders@0.36.4		X									X					
+fuel-memory@0.36.4		X									X					
+fuel-model-llama@0.36.4		X									X					
+fuel-model-phi@0.36.4		X									X					
+fuel-quantized@0.36.4		X									X					
+fuel-tensor@0.36.4		X									X					
+fuel-transformers@0.36.4		X									X					
 futures@0.3.33		X									X					
 futures-channel@0.3.34		X									X					
 futures-core@0.3.34		X									X					
@@ -505,7 +505,7 @@ tracing-subscriber@0.3.23											X
 try-lock@0.2.5											X					
 tungstenite@0.23.0		X									X					
 tungstenite@0.24.0		X									X					
-typed-path@0.12.3		X									X					
+typed-path@0.13.0		X									X					
 typeid@1.0.3		X									X					
 typenum@1.20.1		X									X					
 ucd-trie@0.1.7		X									X					
@@ -595,7 +595,7 @@ zeroize@1.9.0		X									X
 zerotrie@0.2.4														X		
 zerovec@0.11.6														X		
 zerovec-derive@0.11.3														X		
-zip@9.0.5											X					
+zip@9.2.2											X					
 zmij@1.0.23											X					
 zune-core@0.5.1		X									X					X
 zune-jpeg@0.5.15		X									X					X
