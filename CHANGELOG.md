@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.23.29
+
+### Changed
+- Docs only: F2 design note update (answer to one-runner-vs-swap and B9 per model; status; a source-read lead on why unload frees no VRAM, not yet measured).
+
 ## 0.23.27
 
 ### Changed
