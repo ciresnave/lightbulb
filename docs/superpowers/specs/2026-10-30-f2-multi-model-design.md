@@ -75,3 +75,13 @@ Recommendation: ask Fuel (option 1) first, since it also unblocks B8b-style work
 4. P2 was gated on the VRAM-return measurement (n>=3, with the retained-handle positive control). Done: the answer is no (next section).
 
 Recommendation: P1 now (no behaviour change; it also becomes useful for any option below). Choose among the options in "Measured" before P2.
+
+## Update 2026-11-04 (origin/main 266be35, Fuel 0.36.4)
+
+**Answer to "one runner per model, or swap, and B9 per model":** one runner per model in the registry, loaded on demand, co-resident whenever the B9 preflight says the new model fits next to what is resident, otherwise evict the least-recently-used idle model (the PM defaults above stand). Swap-by-restart is the fallback only if P2 below has no answer. B9 runs once per model load, at the moment of the load; its device figure must be the live free memory (the runtime verdict), not the file size alone, so resident models are already counted. **Not checked:** that B9's runtime verdict reads device free memory rather than a total minus its own bookkeeping; P2 must confirm that before relying on it.
+
+**Status:** P1 is partly done: `ModelRunner::start_with_handle` returns the serving thread's `JoinHandle` (0.23.22). The `AppState` registry itself is not started (about 274 references to `inference_tx`, `cache_control` and `chat_template` across 11 files). P2 (unload) is still blocked on the measurement above.
+
+**New lead on P2, from reading source only (not measured):** `fuel-cuda-backend 0.36.4`, `src/device.rs:533-534`, takes the driver's default memory pool for the device and sets its release threshold to `u64::MAX`, so memory freed back to that pool is **held, not returned to the OS**; the comment at `:531` lists a `trim_to` at realize-end as an unbuilt follow-up. `baracuda-driver 0.1.0-alpha.80` has `MemPool::trim_to(min_bytes_to_keep)` (`src/mempool.rs:171`). That fits the probe's reading (constant retention after the runner thread exits, stable across cycles) but the probe did not test it: allocations that bypass the pool (if any) would not be returned by a trim either.
+
+**Next measurement (needs a GPU slot, PM "slot go"):** rerun `examples/vram_return_probe.rs` with one added step after the drop: `default_pool(..).trim_to(0)` on the same device, n >= 3, with the retained-sender positive control. If memory returns, the options are (1) ask Fuel for a public `trim`/release call on `CudaDevice` (preferred: no new dependency), or (2) Lightbulb calls `baracuda-driver` directly (a new crates.io dependency, and it must hold a context for that device). If it does not return, the three options above stand and the worker-process route is next.
