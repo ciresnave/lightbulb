@@ -29,7 +29,9 @@
 //!
 //! Knobs: `LB_GGUF` (required), `LB_TRIALS` (3), `LB_CTX` (2048),
 //! `LB_WAIT_S` (30), `LB_TOL_MIB` (64, the slack on "back to baseline"),
-//! `LB_HOLD_DEVICE` (1; 0 = hold no device, like the server).
+//! `LB_HOLD_DEVICE` (1; 0 = hold no device, like the server), `LB_TRIM` (0; 1 =
+//! after a RELEASE that returned nothing, `trim_to(0)` the driver's default
+//! mem-pool and report its used/reserved bytes and whether memory came back).
 
 use lightbulb::engine::model_runner::{EngineOptions, InferenceJob, ModelRunner, ResponseMode};
 use lightbulb::engine::{
@@ -116,6 +118,51 @@ fn wait_back_to(target: i64, wait: Duration) -> (i64, f64) {
     }
 }
 
+/// The driver's default memory pool for device 0 (`LB_TRIM=1`), made BEFORE
+/// the baseline so its context is part of the baseline, not of what is measured.
+#[cfg(feature = "fuel-cuda")]
+type TrimPool = baracuda_driver::mempool::MemoryPool;
+#[cfg(not(feature = "fuel-cuda"))]
+type TrimPool = ();
+
+#[cfg(feature = "fuel-cuda")]
+fn make_trim_pool() -> Option<TrimPool> {
+    let device = baracuda_driver::Device::get(0).expect("cuda device 0");
+    let context = baracuda_driver::Context::new(&device).expect("cuda context");
+    let pool = baracuda_driver::mempool::default_pool(&context, &device).expect("default pool");
+    std::mem::forget(context); // keep the context alive for the whole run
+    Some(pool)
+}
+#[cfg(not(feature = "fuel-cuda"))]
+fn make_trim_pool() -> Option<TrimPool> {
+    panic!("LB_TRIM needs --features fuel-cuda")
+}
+
+/// After a RELEASE that did not return memory: print the pool's own used and
+/// reserved bytes, `trim_to(0)`, print them again, and wait for the device to
+/// fall back. Returns whether memory came back.
+#[cfg(feature = "fuel-cuda")]
+fn trim_and_report(pool: &TrimPool, i: usize, wait: Duration, baseline: i64, tol: i64) -> bool {
+    let mib = |b: u64| b as i64 / (1 << 20);
+    let (u0, r0) = (pool.used_bytes().unwrap(), pool.reserved_bytes().unwrap());
+    let smi0 = used_mib();
+    pool.trim_to(0).expect("trim_to(0)");
+    let (u1, r1) = (pool.used_bytes().unwrap(), pool.reserved_bytes().unwrap());
+    let (after, secs) = wait_back_to(baseline + tol, wait);
+    println!(
+        "trial {i}: TRIM pool used {} -> {} MiB, reserved {} -> {} MiB; nvidia-smi {smi0} ->          {after} MiB in {secs:.1}s",
+        mib(u0),
+        mib(u1),
+        mib(r0),
+        mib(r1)
+    );
+    after <= baseline + tol
+}
+#[cfg(not(feature = "fuel-cuda"))]
+fn trim_and_report(_: &TrimPool, _: usize, _: Duration, _: i64, _: i64) -> bool {
+    false
+}
+
 /// One RELEASE + CONTROL trial; returns (released, control_held).
 fn trial(
     i: usize,
@@ -124,6 +171,7 @@ fn trial(
     wait: Duration,
     baseline: i64,
     tol: i64,
+    pool: Option<&TrimPool>,
 ) -> (bool, bool) {
     // RELEASE
     let (tx, ctrl) = start_loaded(path, ctx);
@@ -131,7 +179,10 @@ fn trial(
     drop(tx);
     drop(ctrl);
     let (after, secs) = wait_back_to(baseline + tol, wait);
-    let returned = after <= baseline + tol;
+    let mut returned = after <= baseline + tol;
+    if let (false, Some(pool)) = (returned, pool) {
+        returned = trim_and_report(pool, i, wait, baseline, tol);
+    }
     // CONTROL
     let (tx2, ctrl2) = start_loaded(path, ctx);
     let loaded2 = used_mib();
@@ -175,6 +226,9 @@ fn main() {
     // must name which one it was.
     let hold = env_usize("LB_HOLD_DEVICE", 1) != 0;
     let _ctx_holder = hold.then(lightbulb::model_fuel::device::select);
+    let trim_pool = (env_usize("LB_TRIM", 0) != 0)
+        .then(make_trim_pool)
+        .flatten();
     std::thread::sleep(Duration::from_secs(2));
     let baseline = used_mib();
     println!("model {path}");
@@ -188,7 +242,8 @@ fn main() {
 
     let (mut release_ok, mut control_valid) = (0, 0);
     for i in 1..=trials {
-        let (returned, control_held) = trial(i, &path, ctx, wait, baseline, tol);
+        let (returned, control_held) =
+            trial(i, &path, ctx, wait, baseline, tol, trim_pool.as_ref());
         release_ok += returned as usize;
         control_valid += control_held as usize;
     }

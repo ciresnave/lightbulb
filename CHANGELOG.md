@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.23.30
+
+### Changed
+- **Dependency move:** every Fuel dependency (`fuel`, `fuel-cpu-backend`, `fuel-model-llama`, `fuel-transformers`, `fuel-loaders`, `fuel-ir`, `fuel-backend-contract`, `fuel-inference`, `fuel-hardware`, optional `fuel-cuda-backend`) from `0.36.4` to `0.36.7`, together. **Do not pin Fuel 0.36.4 with the `cuda` / `fuel-cuda` feature:** `fuel-dispatch 0.36.4` calls `fuel_quantized::dequant_ggml_bytes` (`baracuda_dispatch.rs:938`) without declaring the dependency, so the CUDA build fails with E0433. `fuel-dispatch 0.36.7` declares it (optional). Checked: `cargo build --release --example vram_return_probe --features fuel-cuda` builds on 0.36.7 and fails on 0.36.4 (same box, same command).
+- `examples/vram_return_probe.rs`: `LB_TRIM=1` calls `MemoryPool::trim_to(0)` on the device's default pool after a RELEASE that returned nothing and reports the pool's used/reserved bytes. New optional dependency `baracuda-driver` (`0.1.0-alpha.80`, already in the tree through Fuel), pulled only by `fuel-cuda`.
+- F2 note and ROADMAP F2: measured result, 6 of 6 trials returned to baseline after `trim_to(0)` (SmolLM2-135M, ctx 2048); not shown: a larger model, two resident models, a Fuel-side API (none; Fuel sets the pool release threshold to `u64::MAX`), a server process.
+
 ## 0.23.29
 
 ### Changed
