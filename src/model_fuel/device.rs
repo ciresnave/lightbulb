@@ -314,7 +314,13 @@ fn open(_choice: Choice, _selector: &Selector) -> Result<Device> {
 /// `open`, where the fallback is logged and the chosen device recorded
 /// ([`chosen`]). Loaders use [`try_select`] and propagate the error instead.
 pub fn select() -> Device {
-    match try_select() {
+    unwrap_selected(try_select())
+}
+
+/// The failure arm of [`select`], separate so a test can reach it without
+/// setting a process environment variable.
+fn unwrap_selected(r: Result<Device>) -> Device {
+    match r {
         Ok(d) => d,
         Err(e) => {
             panic!("model_fuel: device selection failed, refusing to fall back to the CPU: {e:#}")
@@ -333,6 +339,34 @@ mod tests {
             name: name.into(),
             total_bytes: mib << 20,
         }
+    }
+
+    /// An explicit selector that cannot be honoured must not become the CPU (it did,
+    /// until 0.23.32, which let a run that asked for `cuda:0` measure the CPU).
+    #[test]
+    #[should_panic(expected = "refusing to fall back to the CPU")]
+    fn select_never_hides_a_failed_selection_behind_the_cpu() {
+        let _ = unwrap_selected(Err(anyhow::anyhow!(
+            "asked for cuda:7, which is not present"
+        )));
+    }
+
+    /// Control for the test above: a successful selection passes through unchanged.
+    #[test]
+    fn unwrap_selected_passes_a_device_through() {
+        let _ = unwrap_selected(Ok(Device::cpu()));
+    }
+
+    /// The same refusal one step earlier: an explicit absent index is an error from
+    /// `choose`, never a CPU choice (only `auto` falls back).
+    #[test]
+    fn an_explicit_absent_device_is_refused_by_choose() {
+        let sel = Selector::Index {
+            backend: "cuda".into(),
+            index: 7,
+        };
+        assert!(choose(&rig(), &sel).is_err());
+        assert_eq!(choose(&[], &Selector::Auto).unwrap(), Choice::Cpu);
     }
 
     /// CireSnave's CUDA cards as the driver names them.

@@ -624,7 +624,9 @@ mod bench_served_driver_steps {
             None,
         )
         .unwrap();
-        d.try_admit(&ids, 6, 0.0).ok().expect("admit");
+        if d.try_admit(&ids, 6, 0.0).is_err() {
+            panic!("the driver refused to admit the bench prompt");
+        }
         let mut i = 0;
         while d.has_active_sessions() {
             let t = std::time::Instant::now();

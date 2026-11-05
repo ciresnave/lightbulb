@@ -24,6 +24,22 @@ fn env(k: &str, d: usize) -> usize {
 
 fn main() {
     let path = std::env::var("LB_GGUF").expect("set LB_GGUF");
+    report_device();
+    let t = Instant::now();
+    let loaded = lightbulb::model_fuel::loader_gguf_qwen3::load_quantized_qwen3_gguf(
+        std::path::Path::new(&path),
+    )
+    .expect("load");
+    println!(
+        "load: {:?}  loaded.device = {:?}",
+        t.elapsed(),
+        loaded.device
+    );
+    time_prefill_and_steps(&loaded);
+}
+
+/// Print what was asked for, what Fuel lists, and what `try_select` returns.
+fn report_device() {
     let sel = std::env::var("LIGHTBULB_DEVICE").unwrap_or_else(|_| "(unset=auto)".into());
     println!("LIGHTBULB_DEVICE={sel}");
     println!(
@@ -35,18 +51,10 @@ fn main() {
         "try_select => {:?}",
         chosen.as_ref().map(|d| format!("{d:?}"))
     );
+}
 
-    let t = Instant::now();
-    let loaded = lightbulb::model_fuel::loader_gguf_qwen3::load_quantized_qwen3_gguf(
-        std::path::Path::new(&path),
-    )
-    .expect("load");
-    println!(
-        "load: {:?}  loaded.device = {:?}",
-        t.elapsed(),
-        loaded.device
-    );
-
+/// Time one prefill and each decode step through the persistent forward.
+fn time_prefill_and_steps(loaded: &lightbulb::model_fuel::loader_gguf_qwen3::LoadedQuantizedQwen3) {
     let text = "The quick brown fox jumps over the lazy dog. ".repeat(env("LB_PROMPT_REPS", 6));
     let ids: Vec<u32> = loaded
         .tokenizer

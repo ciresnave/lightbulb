@@ -3,7 +3,7 @@
 ## 0.23.32
 
 ### Fixed
-- **`LIGHTBULB_DEVICE` set explicitly can no longer quietly become the CPU.** `device::select()` (used by `main`'s memory probe and tests) logged an error and returned the CPU when the selector could not be honoured, so a run that asked for `cuda:0` could measure the CPU and look like a GPU result. It now panics with the reason; the four model loaders use `try_select()?` and propagate the error. `auto` (no variable) still falls back to the CPU, logged. Born-red: `tests/device_explicit_selector.rs` returned `CpuBackendDevice` for an absent `cuda:7` before the change.
+- **`LIGHTBULB_DEVICE` set explicitly can no longer quietly become the CPU.** `device::select()` (used by `main`'s memory probe and tests) logged an error and returned the CPU when the selector could not be honoured, so a run that asked for `cuda:0` could measure the CPU and look like a GPU result. It now panics with the reason; the four model loaders use `try_select()?` and propagate the error. `auto` (no variable) still falls back to the CPU, logged. Tests: `select_never_hides_a_failed_selection_behind_the_cpu` (goes red if the failure arm returns the CPU again; checked by restoring that arm) and `an_explicit_absent_device_is_refused_by_choose`. Before the change an env-based check (`LIGHTBULB_DEVICE=cuda:7`) showed `select()` returning `CpuBackendDevice`; it was reshaped into these unit tests to avoid `unsafe` env mutation.
 
 ### Added
 - `/v1/models` reports `lightbulb_device` (`"cpu"` or `"cuda:<n>"`, from `device::chosen()`, set by the selection that the model load made) so a run can prove its device; omitted until a selection has happened. Not part of the OpenAI schema.
