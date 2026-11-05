@@ -557,10 +557,17 @@ mod tests {
         let existing = vec!["Fact 1".to_string(), "Fact 2".to_string()];
         let new_fact = "Fact 3";
 
-        let result = checker.validate(new_fact, &existing).unwrap();
+        // The MEDIAN of several runs, not one: a single wall-clock sample failed once
+        // on a loaded CI runner (a scheduling pause, not a slow check), and the
+        // requirement is about the check's usual latency.
+        let mut runs: Vec<u64> = (0..9)
+            .map(|_| checker.validate(new_fact, &existing).unwrap().latency_us)
+            .collect();
+        runs.sort_unstable();
+        let median = runs[runs.len() / 2];
 
         // Should be under 50ms (50,000 microseconds)
-        assert!(result.latency_us < 50_000);
+        assert!(median < 50_000, "median {median} us over runs {runs:?}");
     }
 
     #[test]
