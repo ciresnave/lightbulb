@@ -4556,6 +4556,81 @@ mod tests {
         assert_eq!(queue_error_response(e).status(), StatusCode::BAD_GATEWAY);
     }
 
+    /// A runner that answers every job after `delay_ms` with text that is not JSON.
+    fn slow_unparseable_runner(
+        delay_ms: u64,
+    ) -> (
+        std::sync::mpsc::SyncSender<crate::engine::model_runner::InferenceJob>,
+        std::thread::JoinHandle<()>,
+    ) {
+        use crate::engine::model_runner::{CompletionResult, InferenceJob, ResponseMode};
+        let (tx, rx) = std::sync::mpsc::sync_channel::<InferenceJob>(32);
+        let handle = std::thread::spawn(move || {
+            while let Ok(job) = rx.recv() {
+                std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+                if let ResponseMode::Complete(resp) = job.response_mode {
+                    let _ = resp.send(Ok(CompletionResult {
+                        text: "no json here".to_string(),
+                        prompt_tokens: 1,
+                        completion_tokens: 1,
+                        finish_reason: FinishReason::Stop,
+                    }));
+                }
+            }
+        });
+        (tx, handle)
+    }
+
+    /// The attempts share ONE `request_timeout_ms`. Each answers in ~150ms and never
+    /// parses; with a 200ms budget the second attempt runs out of time. Per-attempt
+    /// budgets would run all three (~450ms) before refusing.
+    #[tokio::test]
+    async fn response_format_attempts_share_one_deadline() {
+        let (tx, runner) = slow_unparseable_runner(150);
+        let mut state = state_with_runner(None, Some(tx));
+        state.config.request_timeout_ms = 200;
+        let mut req = request();
+        req.response_format = Some(serde_json::json!({"type": "json_object"}));
+        let started = std::time::Instant::now();
+        let e = create_chat_completion_honouring_tool_choice(
+            state,
+            req,
+            crate::engine::Priority::Normal,
+        )
+        .await
+        .expect_err("a model that never produces JSON must be refused");
+        let elapsed = started.elapsed();
+        drop(runner);
+        assert!(e.downcast_ref::<FormatUnmet>().is_some(), "{e}");
+        assert_eq!(queue_error_response(e).status(), StatusCode::BAD_GATEWAY);
+        assert!(
+            elapsed < std::time::Duration::from_millis(400),
+            "one shared deadline, not one per attempt: took {elapsed:?}"
+        );
+    }
+
+    /// When no attempt finished at all, the timeout is a timeout (504), not a format failure.
+    #[tokio::test]
+    async fn response_format_first_attempt_timeout_is_a_504() {
+        let (tx, runner) = slow_unparseable_runner(400);
+        let mut state = state_with_runner(None, Some(tx));
+        state.config.request_timeout_ms = 100;
+        let mut req = request();
+        req.response_format = Some(serde_json::json!({"type": "json_object"}));
+        let e = create_chat_completion_honouring_tool_choice(
+            state,
+            req,
+            crate::engine::Priority::Normal,
+        )
+        .await
+        .expect_err("an attempt that never answers must time out");
+        drop(runner);
+        assert_eq!(
+            queue_error_response(e).status(),
+            StatusCode::GATEWAY_TIMEOUT
+        );
+    }
+
     #[test]
     fn response_format_is_refused_with_tools_and_unknown_types() {
         let mut req = request();

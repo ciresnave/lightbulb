@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.23.31
+
+### Fixed
+- **A5 `response_format` attempts now share ONE `request_timeout_ms`.** Each of the 3 attempts used to get a fresh full timeout, so a slow model held the connection for up to 3x the configured timeout. Now the budget is one deadline: if a retry runs out of it after an earlier attempt answered without the format, the request is a 502 `FormatUnmet` (it states how many attempts completed); if the first attempt itself times out it stays a 504. Pinned by `response_format_attempts_share_one_deadline` (fails on the old code at 462 ms vs the 400 ms limit) and `response_format_first_attempt_timeout_is_a_504` (passes either way; it pins the unchanged case).
+
+### Added
+- `tests/response_format_live.rs` (`#[ignore]`, set `LIGHTBULB_GGUF`): `response_format` through the real router and runner with a real checkpoint; asserts a 200 with valid (schema-conforming) JSON and prints each outcome and its time. **Measured so far (CPU, 0.23.30):** SmolLM2-135M f16 debug build, `json_object` 502 after 3 attempts, `json_schema` 504; Qwen3-0.6B Q8_0 release build, plain 8-token baseline 45 s (about 5 s per token on this CPU), `json_object` 504 at the 300 s timeout. No 200 with a real model has been observed yet; the GPU run is pending.
+
 ## 0.23.30
 
 ### Changed
