@@ -180,7 +180,7 @@ pub fn load_llama_f32_from_dir(dir: &Path) -> Result<LoadedLlama> {
         config,
         tokenizer,
         eos: full.eos_token_id,
-        device: super::device::select(),
+        device: super::device::try_select()?,
     })
 }
 

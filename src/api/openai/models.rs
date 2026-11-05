@@ -40,6 +40,11 @@ pub struct ModelInfo {
     /// be read.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lightbulb_memory: Option<ModelMemory>,
+    /// Not part of the OpenAI schema. The device the model load selected
+    /// (`"cpu"` or `"cuda:<n>"`), so a run can prove where it ran. Absent when
+    /// no selection has been recorded in this process.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lightbulb_device: Option<String>,
 }
 
 /// What lightbulb knows about the loaded model's memory footprint.
@@ -81,6 +86,7 @@ fn loaded_models(state: &AppState) -> Vec<ModelInfo> {
             .map(|weights_bytes_on_disk| ModelMemory {
                 weights_bytes_on_disk,
             }),
+        lightbulb_device: crate::model_fuel::device::chosen(),
     }]
 }
 
@@ -200,6 +206,17 @@ mod tests {
         let (status, body) = call(without, Method::GET, "/v1/models").await;
         assert_eq!(status, StatusCode::OK);
         assert!(body["data"][0].get("lightbulb_memory").is_none(), "{body}");
+    }
+
+    /// A run must be able to PROVE its device (a GPU run that silently served on the
+    /// CPU was reported as a GPU result on 2026-11-05). `/v1/models` carries the device
+    /// the model load selected, and omits it when nothing has been selected.
+    #[tokio::test]
+    async fn reports_the_device_the_load_selected() {
+        let _ = crate::model_fuel::device::select();
+        let want = crate::model_fuel::device::chosen().expect("select() records its choice");
+        let (_, body) = call(state(true), Method::GET, "/v1/models").await;
+        assert_eq!(body["data"][0]["lightbulb_device"], want, "{body}");
     }
 
     #[tokio::test]

@@ -245,6 +245,21 @@ pub fn enumerate() -> Vec<DeviceInfo> {
     Vec::new()
 }
 
+/// The device the last successful selection chose (`"cpu"` or `"cuda:<n>"`).
+static CHOSEN: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+fn record_chosen(label: String) {
+    if let Ok(mut g) = CHOSEN.lock() {
+        *g = Some(label);
+    }
+}
+
+/// What this process selected, so a run can PROVE its device (`/v1/models`
+/// reports it). `None` until a model load has selected one.
+pub fn chosen() -> Option<String> {
+    CHOSEN.lock().ok().and_then(|g| g.clone())
+}
+
 /// The device this build serves on, or why the requested one cannot be used.
 ///
 /// An invalid or absent explicit selector is an error here; `auto` (the
@@ -264,6 +279,7 @@ fn open(choice: Choice, selector: &Selector) -> Result<Device> {
         match fuel_cuda_backend::CudaDevice::new(index as usize) {
             Ok(d) => {
                 tracing::info!("model_fuel: CUDA device {index} selected");
+                record_chosen(format!("cuda:{index}"));
                 return Ok(Device::from(d));
             }
             Err(e) if *selector == Selector::Auto => {
@@ -276,35 +292,34 @@ fn open(choice: Choice, selector: &Selector) -> Result<Device> {
         }
     }
     tracing::info!("model_fuel: CPU selected");
+    record_chosen("cpu".to_string());
     Ok(Device::cpu())
 }
 
 #[cfg(not(feature = "fuel-cuda"))]
 fn open(_choice: Choice, _selector: &Selector) -> Result<Device> {
     tracing::info!("model_fuel: CPU selected");
+    record_chosen("cpu".to_string());
     Ok(Device::cpu())
 }
 
-/// The device this build serves on.
+/// The device this build serves on, for the few callers that cannot return an
+/// error (`main`'s memory-budget probe, tests).
 ///
-/// Infallible for the call sites deep in a load; they run after
-/// [`try_select`] has already accepted the same environment at the start of the
-/// load (`BatchedServeConfig::new`), so the error arm is unreachable in
-/// practice. If it is reached anyway it is logged as an error and the CPU is
-/// returned, which is the one place a bad explicit selector is not fatal.
-///
-/// **Falling back to CPU for `auto` is deliberate.** A server that refuses to
-/// start on a CPU-only host is worse than one that starts slow, and the log
-/// line names which was chosen so a surprising benchmark has somewhere to look.
-///
-/// The measurement harness (`tests/gpu_paged_vs_contiguous.rs`) makes the
-/// OPPOSITE choice and fails outright, because a benchmark that silently
-/// measures CPU is an artifact rather than a result.
+/// **It never turns a failure into the CPU.** It used to: an unusable explicit
+/// `LIGHTBULB_DEVICE` (say `cuda:0` on a box where the card cannot be opened) was
+/// logged as an error and the CPU returned, so a run that asked for the GPU
+/// quietly measured the CPU. A bad explicit selector now panics with the reason.
+/// `auto` (no variable) still falls back to the CPU, inside [`try_select`]'s
+/// `open`, where the fallback is logged and the chosen device recorded
+/// ([`chosen`]). Loaders use [`try_select`] and propagate the error instead.
 pub fn select() -> Device {
-    try_select().unwrap_or_else(|e| {
-        tracing::error!("model_fuel: device selection failed ({e:#}); using the CPU");
-        Device::cpu()
-    })
+    match try_select() {
+        Ok(d) => d,
+        Err(e) => {
+            panic!("model_fuel: device selection failed, refusing to fall back to the CPU: {e:#}")
+        }
+    }
 }
 
 #[cfg(test)]
