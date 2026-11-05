@@ -37,9 +37,8 @@ async fn post(app: &axum::Router, body: serde_json::Value) -> (StatusCode, serde
     (status, serde_json::from_slice(&bytes).unwrap_or_default())
 }
 
-#[tokio::test]
-#[ignore = "needs a GGUF checkpoint; set LIGHTBULB_GGUF"]
-async fn response_format_against_a_real_model() {
+/// The router over a real runner on the checkpoint in `LIGHTBULB_GGUF`.
+fn app_on_the_checkpoint() -> axum::Router {
     let path = PathBuf::from(std::env::var_os("LIGHTBULB_GGUF").expect("set LIGHTBULB_GGUF"));
     assert!(path.is_file(), "LIGHTBULB_GGUF is not a file");
     let scheduler = Arc::new(std::sync::Mutex::new(MemoryAwareScheduler::new(
@@ -78,32 +77,23 @@ async fn response_format_against_a_real_model() {
         live_system: lightbulb::api::new_shared_system_metrics(),
         queue_depth: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
     };
-    let app = lightbulb::api::openai::routes().with_state(state);
+    lightbulb::api::openai::routes().with_state(state)
+}
 
-    let schema = serde_json::json!({
+fn capital_schema() -> serde_json::Value {
+    serde_json::json!({
         "type": "object",
         "properties": {"city": {"type": "string"}, "country": {"type": "string"}},
         "required": ["city", "country"],
         "additionalProperties": false
-    });
-    let cases = vec![
-        (
-            "json_object",
-            serde_json::json!({"type": "json_object"}),
-            "Give the capital of France as a JSON object with keys city and country.",
-        ),
-        (
-            "json_schema",
-            serde_json::json!({"type": "json_schema",
-                "json_schema": {"name": "capital", "schema": schema.clone()}}),
-            "Give the capital of France.",
-        ),
-    ];
-    // Baseline: the same model with no response_format and a tiny budget, timed, so
-    // a slow result below can be told apart from a slow CPU.
+    })
+}
+
+/// A plain, tiny request, timed, so a slow result below can be told apart from a slow CPU.
+async fn print_baseline(app: &axum::Router) {
     let t = std::time::Instant::now();
     let (status, v) = post(
-        &app,
+        app,
         serde_json::json!({"model": "lightbulb-default",
             "messages": [{"role": "user", "content": "Say hi."}],
             "max_tokens": 8, "temperature": 0.0}),
@@ -114,36 +104,60 @@ async fn response_format_against_a_real_model() {
         t.elapsed(),
         v["choices"][0]["message"]["content"]
     );
-    for (label, rf, prompt) in cases {
-        let t = std::time::Instant::now();
-        let (status, v) = post(
-            &app,
-            serde_json::json!({
-                "model": "lightbulb-default",
-                "messages": [{"role": "user", "content": prompt}],
-                "max_tokens": 96,
-                "temperature": 0.0,
-                "response_format": rf,
-            }),
-        )
-        .await;
-        let content = v["choices"][0]["message"]["content"].as_str().unwrap_or("");
-        println!(
-            "CASE {label}: elapsed={:?} status={status} content={content:?} body={v}",
-            t.elapsed()
+}
+
+/// One `response_format` request: print the outcome, then assert it.
+///
+/// The checkpoint under test is chosen to be able to follow the format, so anything
+/// but a 200 with conforming content is a failure, not a tolerated outcome.
+async fn check_case(app: &axum::Router, label: &str, rf: serde_json::Value, prompt: &str) {
+    let t = std::time::Instant::now();
+    let (status, v) = post(
+        app,
+        serde_json::json!({
+            "model": "lightbulb-default",
+            "messages": [{"role": "user", "content": format!("{prompt} /no_think")}],
+            "max_tokens": 256,
+            "temperature": 0.0,
+            "response_format": rf,
+        }),
+    )
+    .await;
+    let content = v["choices"][0]["message"]["content"].as_str().unwrap_or("");
+    println!(
+        "CASE {label}: elapsed={:?} status={status} content={content:?} body={v}",
+        t.elapsed()
+    );
+    assert_eq!(status, StatusCode::OK, "{label}: body={v}");
+    let parsed: serde_json::Value =
+        serde_json::from_str(content).expect("200 content must be bare JSON");
+    assert!(parsed.is_object(), "{label}: 200 content is not an object");
+    if label == "json_schema" {
+        assert!(
+            jsonschema::is_valid(&capital_schema(), &parsed),
+            "{label}: 200 content breaks the schema"
         );
-        // The checkpoint under test is chosen to be able to follow the format, so
-        // anything but a 200 with conforming content is a failure to read, not a
-        // tolerated outcome. The line above prints what happened either way.
-        assert_eq!(status, StatusCode::OK, "{label}: body={v}");
-        let parsed: serde_json::Value =
-            serde_json::from_str(content).expect("200 content must be bare JSON");
-        assert!(parsed.is_object(), "{label}: 200 content is not an object");
-        if label == "json_schema" {
-            assert!(
-                jsonschema::is_valid(&schema, &parsed),
-                "{label}: 200 content breaks the schema"
-            );
-        }
     }
+}
+
+#[tokio::test]
+#[ignore = "needs a GGUF checkpoint; set LIGHTBULB_GGUF"]
+async fn response_format_against_a_real_model() {
+    let app = app_on_the_checkpoint();
+    print_baseline(&app).await;
+    check_case(
+        &app,
+        "json_object",
+        serde_json::json!({"type": "json_object"}),
+        "Give the capital of France as a JSON object with keys city and country.",
+    )
+    .await;
+    check_case(
+        &app,
+        "json_schema",
+        serde_json::json!({"type": "json_schema",
+            "json_schema": {"name": "capital", "schema": capital_schema()}}),
+        "Give the capital of France.",
+    )
+    .await;
 }
