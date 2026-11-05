@@ -144,7 +144,7 @@ pub fn load_quantized_llama_gguf(path: &Path) -> Result<LoadedQuantizedLlama> {
         );
     }
 
-    let device = super::device::select();
+    let device = super::device::try_select()?;
     let model = QuantizedLlama3Model::from_gguf(path, &full).map_err(|e| {
         anyhow::anyhow!(
             "building QuantizedLlama3Model from {}: {e:?}",

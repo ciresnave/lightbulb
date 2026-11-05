@@ -144,7 +144,7 @@ pub fn load_quantized_qwen3_gguf(path: &Path) -> Result<LoadedQuantizedQwen3> {
     let (_bos, eos) = bos_eos_from_metadata(&content);
     warn_if_no_eos(path, eos.is_none());
 
-    let device = super::device::select();
+    let device = super::device::try_select()?;
     let model = QuantizedQwen3Model::from_gguf(path, &cfg).map_err(|e| {
         anyhow::anyhow!(
             "building QuantizedQwen3Model from {}: {e:?}",
