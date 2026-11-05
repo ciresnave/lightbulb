@@ -135,9 +135,33 @@ pub(super) async fn run(
     format: Format,
 ) -> anyhow::Result<ChatCompletionResponse> {
     request.messages = super::inject_system_text(&request.messages, instruction(&format));
+    // ONE deadline for every attempt, as the output-contract path has: a fresh
+    // `request_timeout_ms` per attempt let one request hold the connection for
+    // ATTEMPTS times the configured timeout.
+    let deadline = std::time::Instant::now()
+        + std::time::Duration::from_millis(state.config.request_timeout_ms);
+    let mut unmet = 0usize;
     for _ in 0..ATTEMPTS {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() {
+            break;
+        }
+        let mut attempt_state = state.clone();
+        attempt_state.config.request_timeout_ms = (left.as_millis() as u64).max(1);
         let mut resp =
-            super::create_chat_completion(state.clone(), request.clone(), priority).await?;
+            match super::create_chat_completion(attempt_state, request.clone(), priority).await {
+                Ok(r) => r,
+                // The model answered earlier but not in the format, and the budget
+                // ran out on a retry: that is an unmet format, not a bare timeout.
+                Err(e)
+                    if unmet > 0
+                        && e.downcast_ref::<crate::engine::model_runner::RequestTimeoutError>()
+                            .is_some() =>
+                {
+                    break;
+                }
+                Err(e) => return Err(e),
+            };
         if let Some(json) = resp
             .choices
             .first()
@@ -146,9 +170,10 @@ pub(super) async fn run(
             resp.choices[0].message.content = json;
             return Ok(resp);
         }
+        unmet += 1;
     }
     Err(FormatUnmet(format!(
-        "the model did not produce JSON matching response_format in {ATTEMPTS} attempts"
+        "the model did not produce JSON matching response_format ({unmet} of {ATTEMPTS} attempts completed within the request timeout)"
     ))
     .into())
 }
