@@ -574,3 +574,63 @@ mod tests {
         }
     }
 }
+
+/// BENCH (an `#[ignore]`d test, because it needs a crate-private type and a
+/// checkpoint): the per-step cost of the scheduler driver the server runs,
+/// `FuelPagedSchedulerDriver::step()`, with none of the runner/queue/HTTP layers.
+///
+/// Measured 2026-11-05, Qwen3-0.6B Q8_0, RTX 4070 Laptop, release, 61-token prompt,
+/// 6 new tokens: cuda:0 prefill step 247 s then ~3.7 s/decode step; cpu prefill
+/// step 169 s then ~2.5 s/decode step. The same model through
+/// `forward_with_kv_context_persistent` alone (examples/decode_step_bench.rs) is
+/// ~0.10 s/step on cuda:0 and ~0.25 s/step on cpu.
+///
+/// ```text
+/// LB_GGUF=<qwen3 .gguf> LIGHTBULB_DEVICE=cuda:0 cargo test --release ///   --features fuel-cuda --lib bench_served_driver_steps -- --ignored --nocapture
+/// ```
+/// GPU runs go through `fuel/scripts/gpu-run.ps1 -Project lightbulb`.
+#[cfg(test)]
+mod bench_served_driver_steps {
+    use super::*;
+    use crate::engine::scheduled_runner::SchedulerDriver;
+
+    #[test]
+    #[ignore = "bench: needs LB_GGUF (a qwen3 GGUF); prints per-step timings"]
+    fn bench_served_driver_steps() {
+        let path = std::env::var("LB_GGUF").expect("LB_GGUF");
+        let loaded = crate::model_fuel::loader_gguf_qwen3::load_quantized_qwen3_gguf(
+            std::path::Path::new(&path),
+        )
+        .unwrap();
+        let device = crate::model_fuel::device::try_select().unwrap();
+        println!("driver device = {device:?}");
+        let text = "The quick brown fox jumps over the lazy dog. ".repeat(6);
+        let ids: Vec<u32> = loaded
+            .tokenizer
+            .encode(text, false)
+            .unwrap()
+            .get_ids()
+            .to_vec();
+        let mut d = FuelPagedSchedulerDriver::new(
+            &loaded.model,
+            KvBudget {
+                block_size: 16,
+                num_blocks: 64,
+            },
+            fuel::DType::F32,
+            &device,
+            SERVING_SCHEDULE_POLICY,
+            1,
+            None,
+        )
+        .unwrap();
+        d.try_admit(&ids, 6, 0.0).ok().expect("admit");
+        let mut i = 0;
+        while d.has_active_sessions() {
+            let t = std::time::Instant::now();
+            let adv = d.step().unwrap();
+            println!("served step {i}: {:?} emitted {}", t.elapsed(), adv.len());
+            i += 1;
+        }
+    }
+}
