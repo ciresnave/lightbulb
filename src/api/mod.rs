@@ -32,8 +32,11 @@ pub mod chat_template;
 pub mod lightbulb;
 pub mod openai;
 pub mod persistant_migrate;
+pub mod registry;
 pub mod security_event;
 pub mod types;
+
+pub use registry::{ModelEntry, ModelRegistry};
 
 use anyhow::Result;
 use axum::{
@@ -433,29 +436,19 @@ pub struct AppState {
     /// repo's dependency tree.
     pub pg_backend: Option<persistant_sqlx::PgBackend>,
 
-    /// Sender to enqueue inference jobs to the model runner thread (if started)
-    pub inference_tx:
-        Option<std::sync::mpsc::SyncSender<crate::engine::model_runner::InferenceJob>>,
-
-    /// Sender for administrative control messages to the model runner
-    /// thread (if started) -- `cache_clear`'s real implementation (board PM
-    /// task, 2026-10-22). `None` under the same condition `inference_tx` is
-    /// `None`: no model runner means nothing is listening on the other end.
-    pub cache_control: Option<crate::engine::model_runner::ControlSender>,
-
-    /// Chat template for the loaded model, plus the special tokens it renders
-    /// with — resolved once at startup.
+    /// The models this server serves: each one's runner sender, control sender
+    /// and chat template (see [`registry`]). Until the multi-model phases land it
+    /// holds at most one entry, read through [`AppState::model`].
     ///
-    /// `None` when no model runner started, or when no tier produced a
-    /// template. In that case the handlers fall back to the legacy
-    /// `role: content` join and `chat_template::resolve` has already said so at
-    /// `warn` level, naming the model directory.
-    ///
-    /// The template and its tokens are held **together**, in one
-    /// `ResolvedTemplate`, so that no caller is ever in a position to supply
-    /// `bos`/`eos` itself — which in practice means a literal `"<s>"`/`"</s>"`,
-    /// correct for the Llama-2 family and silently wrong for every other.
-    pub chat_template: Option<Arc<crate::api::chat_template::ResolvedTemplate>>,
+    /// `chat_template` inside an entry is `None` when no model runner started or
+    /// when no tier produced a template; the handlers then fall back to the
+    /// legacy `role: content` join, and `chat_template::resolve` has already said
+    /// so at `warn` level, naming the model directory. The template and its
+    /// tokens are held **together**, in one `ResolvedTemplate`, so no caller is
+    /// ever in a position to supply `bos`/`eos` itself, which in practice means a
+    /// literal `"<s>"`/`"</s>"`, correct for the Llama-2 family and silently wrong
+    /// for every other.
+    pub models: ModelRegistry,
 
     /// Rolling EOS-fire rate over recent completions, shared by every
     /// completion path.
@@ -499,6 +492,15 @@ pub struct AppState {
     /// `engine::model_runner::QueueDepthGuard`, which owns incrementing and
     /// decrementing it.
     pub queue_depth: crate::engine::model_runner::SharedQueueDepth,
+}
+
+impl AppState {
+    /// The model this server serves: its runner sender, control sender and chat
+    /// template. An entry with all three `None` when no model was configured or its
+    /// runner failed to start. A clone, cheap (two `Arc`-backed handles).
+    pub fn model(&self) -> ModelEntry {
+        self.models.entry()
+    }
 }
 
 /// Shared, persistent system sampler for CPU/memory metrics. See
@@ -751,8 +753,11 @@ fn try_start_model_runner(state: &mut AppState) {
         },
     ) {
         Ok((sender, ctrl_sender)) => {
-            state.inference_tx = Some(sender);
-            state.cache_control = Some(ctrl_sender);
+            let model_name = state.config.default_model.clone();
+            state.models.update(&model_name, |e| {
+                e.inference_tx = Some(sender);
+                e.cache_control = Some(ctrl_sender);
+            });
 
             // Resolve the chat template HERE and only here. Both
             // halves read files, and a per-request read would put
@@ -763,8 +768,11 @@ fn try_start_model_runner(state: &mut AppState) {
             // produced one" rule; the three integration harnesses
             // call the same function so they cannot drift from what
             // this line builds.
-            state.chat_template = chat_template::resolve_for_serving(&model_path);
-            if let Some(t) = &state.chat_template {
+            let template = chat_template::resolve_for_serving(&model_path);
+            state
+                .models
+                .update(&model_name, |e| e.chat_template = template.clone());
+            if let Some(t) = &template {
                 tracing::info!(
                     "Chat template for {} resolved via {:?} (bos {:?}, eos {:?})",
                     model_path.display(),
@@ -854,9 +862,14 @@ impl ApiServer {
             scheduler,
             config: config.clone(),
             pg_backend,
-            inference_tx: None,
-            cache_control: None,
-            chat_template: None,
+            models: crate::api::ModelRegistry::single(
+                "test-model",
+                crate::api::ModelEntry {
+                    inference_tx: None,
+                    cache_control: None,
+                    chat_template: None,
+                },
+            ),
             eos_monitor: Arc::new(crate::engine::eos_monitor::EosMonitor::default()),
             security_sinks,
             cache_stats: Arc::new(std::sync::Mutex::new(
@@ -1229,7 +1242,7 @@ async fn readiness_check(State(state): State<AppState>) -> impl IntoResponse {
     // the failure and continues rather than refusing to start — see the
     // call site). `config.models_dir` is what distinguishes those two: it
     // is set only when the operator asked for a model at all.
-    let model = if state.inference_tx.is_some() {
+    let model = if state.model().inference_tx.is_some() {
         CheckStatus::Ok
     } else if state.config.models_dir.is_some() {
         CheckStatus::NotLoaded
@@ -1613,9 +1626,14 @@ mod tests {
                 ..ApiConfig::default()
             },
             pg_backend: None,
-            inference_tx,
-            cache_control: None,
-            chat_template: None,
+            models: crate::api::ModelRegistry::single(
+                "test-model",
+                crate::api::ModelEntry {
+                    inference_tx,
+                    cache_control: None,
+                    chat_template: None,
+                },
+            ),
             eos_monitor: Arc::new(crate::engine::eos_monitor::EosMonitor::default()),
             security_sinks: Vec::new(),
             cache_stats: Arc::new(std::sync::Mutex::new(

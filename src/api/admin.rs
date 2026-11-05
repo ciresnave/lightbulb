@@ -185,7 +185,7 @@ async fn cache_clear(
         .map(|guard| guard.clone())
         .unwrap_or_default();
 
-    if let Some(ctrl_tx) = &state.cache_control {
+    if let Some(ctrl_tx) = &state.model().cache_control {
         // The response still reports the pre-clear snapshot either way (same
         // "best-effort, what existed when you asked" contract as the
         // `cache_control: None` case below) -- there is no live index left to
@@ -1041,9 +1041,14 @@ mod tests {
             ))),
             config: crate::api::ApiConfig::default(),
             pg_backend: None,
-            inference_tx: None,
-            cache_control: None,
-            chat_template: None,
+            models: crate::api::ModelRegistry::single(
+                "test-model",
+                crate::api::ModelEntry {
+                    inference_tx: None,
+                    cache_control: None,
+                    chat_template: None,
+                },
+            ),
             eos_monitor: std::sync::Arc::new(crate::engine::eos_monitor::EosMonitor::default()),
             security_sinks: Vec::new(),
             cache_stats: std::sync::Arc::new(std::sync::Mutex::new(
@@ -1323,14 +1328,17 @@ mod tests {
     /// handler never actually computed.
     #[tokio::test]
     async fn cache_clear_sends_the_real_control_message_and_reports_the_snapshot() {
-        let mut app_state = state();
+        let app_state = state();
         {
             let mut guard = app_state.cache_stats.lock().unwrap();
             guard.entries = 3;
             guard.size_bytes = 96;
         }
         let (ctrl_tx, ctrl_rx) = std::sync::mpsc::channel();
-        app_state.cache_control = Some(ctrl_tx);
+        let name = app_state.config.default_model.clone();
+        app_state
+            .models
+            .update(&name, |e| e.cache_control = Some(ctrl_tx));
 
         let req = Request::builder()
             .method("POST")

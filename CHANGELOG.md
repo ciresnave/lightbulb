@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.23.33
+
+### Changed
+- **F2 P1: a model registry in place of three `AppState` fields.** `AppState.inference_tx`, `cache_control` and `chat_template` are now one `ModelRegistry` (`src/api/registry.rs`): name -> `ModelEntry { inference_tx, cache_control, chat_template }`, read through `AppState::model()`. **No behaviour change:** the registry holds at most one entry, the handlers still refuse any request whose `model` is not `config.default_model`, and each piece stays independently optional as before. Request-name resolution, load on demand and eviction are later phases. `eos_monitor` and `cache_stats` stay in `AppState` (the runner takes `cache_stats` at start; they move with unload, P2). Public API: `lightbulb::api::{ModelRegistry, ModelEntry}` replace the three public `AppState` fields (a breaking change for anyone constructing `AppState` by hand; the in-repo integration tests did).
+
 ## 0.23.32
 
 ### Fixed

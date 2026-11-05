@@ -105,9 +105,14 @@ async fn complete_raw(path: &Path, prompt: &str, max_tokens: usize) -> serde_jso
         scheduler,
         config: ApiConfig::default(),
         pg_backend: None,
-        inference_tx: Some(tx),
-        cache_control: Some(ctrl_tx),
-        chat_template: None,
+        models: lightbulb::api::ModelRegistry::single(
+            "test-model",
+            lightbulb::api::ModelEntry {
+                inference_tx: Some(tx),
+                cache_control: Some(ctrl_tx),
+                chat_template: None,
+            },
+        ),
         eos_monitor: Default::default(),
         security_sinks: Vec::new(),
         cache_stats: std::sync::Arc::new(std::sync::Mutex::new(

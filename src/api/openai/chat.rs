@@ -352,7 +352,7 @@ pub async fn chat_completions(
     // every name serving the same model turns one real failure into several
     // distinct, misleading ones. See `docs/TOOL-CALLING-DESIGN-2026-09-25.md`
     // for the fuller writeup; this is the fix, not the design.
-    if state.inference_tx.is_some() && request.model != state.config.default_model {
+    if state.model().inference_tx.is_some() && request.model != state.config.default_model {
         return (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({
@@ -766,7 +766,7 @@ fn build_prompt(state: &AppState, messages: &[ChatMessage]) -> BuiltPrompt {
         })
         .collect();
 
-    build_prompt_from_raw(state.chat_template.as_deref(), &raw)
+    build_prompt_from_raw(state.model().chat_template.as_deref(), &raw)
 }
 
 /// [`build_prompt`] over the contracts module's own message type, taking the
@@ -1356,7 +1356,7 @@ async fn create_chat_completion(
         // `tool_prompt_strategy`'s two arms are identical today — see its
         // own doc comment — but the call site already asks the question a
         // real native-template implementation would need answered.
-        let _ = tool_prompt_strategy(state.chat_template.as_deref());
+        let _ = tool_prompt_strategy(state.model().chat_template.as_deref());
         let spliced = inject_tools_instruction(&request.messages, tools, &tool_demand(&request));
         build_prompt(&state, &spliced)
     } else {
@@ -1367,7 +1367,8 @@ async fn create_chat_completion(
     let temperature = request.temperature as f64;
 
     // If a model runner is available, enqueue the request and wait for generated text.
-    if let Some(tx) = &state.inference_tx {
+    let model_entry = state.model();
+    if let Some(tx) = &model_entry.inference_tx {
         let result = run_inference_once(
             tx,
             &state.queue_depth,
@@ -1381,7 +1382,7 @@ async fn create_chat_completion(
 
         record_completion(
             &state.eos_monitor,
-            state.chat_template.as_ref().map(|t| t.resolved_by()),
+            model_entry.chat_template.as_ref().map(|t| t.resolved_by()),
             result.finish_reason,
         );
 
@@ -1624,7 +1625,7 @@ async fn create_chat_completion_with_contract(
     let temperature = request.temperature as f64;
 
     // No model runner → error immediately.
-    let Some(tx) = state.inference_tx.clone() else {
+    let Some(tx) = state.model().inference_tx else {
         return Err(anyhow::anyhow!("no model runner available"));
     };
     let queue_depth = state.queue_depth.clone();
@@ -1640,7 +1641,7 @@ async fn create_chat_completion_with_contract(
 
     // Cloned/copied out of `state` before the closure, because the closure
     // must be `Fn` and outlives this borrow.
-    let template = state.chat_template.clone();
+    let template = state.model().chat_template;
     // ONE deadline for the whole contract call, not a fresh `timeout_ms`
     // per attempt (Sourcery review of #155): `execute_contract` retries up
     // to `max_attempts` times and falls back across contracts, awaiting
@@ -1710,7 +1711,11 @@ async fn create_chat_completion_with_contract(
     if let Some(reason) = exec.finish_reason {
         record_completion(
             &state.eos_monitor,
-            state.chat_template.as_ref().map(|t| t.resolved_by()),
+            state
+                .model()
+                .chat_template
+                .as_ref()
+                .map(|t| t.resolved_by()),
             reason,
         );
     }
@@ -1797,7 +1802,8 @@ fn create_chat_stream(
     // behind, and a monitor fed by only one of the two never fills its window
     // on a server whose clients stream.
     let eos_monitor = state.eos_monitor.clone();
-    let resolved_by = state.chat_template.as_ref().map(|t| t.resolved_by());
+    let model_entry = state.model();
+    let resolved_by = model_entry.chat_template.as_ref().map(|t| t.resolved_by());
     // Copied out before `state.inference_tx` is moved below, same reason as
     // `eos_monitor`/`resolved_by` above. Sourcery review of #155: the
     // non-streaming timeout had no streaming counterpart at all -- a
@@ -1812,7 +1818,7 @@ fn create_chat_stream(
     let queue_depth = state.queue_depth.clone();
 
     // If a model runner is available, create a streaming job
-    if let Some(tx) = state.inference_tx {
+    if let Some(tx) = model_entry.inference_tx {
         let (stream_tx, stream_rx) = tokio::sync::mpsc::unbounded_channel();
 
         let job = crate::engine::model_runner::InferenceJob {
@@ -2356,9 +2362,14 @@ mod tests {
             ))),
             config: crate::api::ApiConfig::default(),
             pg_backend: None,
-            inference_tx,
-            cache_control: None,
-            chat_template,
+            models: crate::api::ModelRegistry::single(
+                "test-model",
+                crate::api::ModelEntry {
+                    inference_tx,
+                    cache_control: None,
+                    chat_template,
+                },
+            ),
             eos_monitor,
             security_sinks: Vec::new(),
             cache_stats: std::sync::Arc::new(std::sync::Mutex::new(
@@ -2402,7 +2413,7 @@ mod tests {
         let dir = bos_doubling_checkpoint("templated");
         let state = state_with(crate::api::chat_template::resolve_for_serving(&dir));
         assert!(
-            state.chat_template.is_some(),
+            state.model().chat_template.is_some(),
             "the fixture's tokenizer_config.json did not resolve a template, so \
              this test would be measuring the legacy join"
         );

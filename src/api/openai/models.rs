@@ -5,7 +5,7 @@
 //!
 //! The roster is what is actually loaded: the one model the runner thread
 //! was started with (`state.config.default_model`), and only while
-//! `state.inference_tx` is `Some`. With no model loaded the list is empty,
+//! the model entry's `inference_tx` is `Some`. With no model loaded the list is empty,
 //! which is the truth; it used to be a hardcoded roster of three names
 //! (`lightbulb-default`, `lightbulb-7b`, `lightbulb-13b`) that no server ever
 //! had, which sends a client that picks from the list straight into the
@@ -58,7 +58,7 @@ pub struct ModelMemory {
 
 /// The models this server can actually serve right now.
 fn loaded_models(state: &AppState) -> Vec<ModelInfo> {
-    if state.inference_tx.is_none() {
+    if state.model().inference_tx.is_none() {
         return Vec::new();
     }
     let id = state.config.default_model.clone();
@@ -143,9 +143,14 @@ mod tests {
                 ..crate::api::ApiConfig::default()
             },
             pg_backend: None,
-            inference_tx,
-            cache_control: None,
-            chat_template: None,
+            models: crate::api::ModelRegistry::single(
+                "test-model",
+                crate::api::ModelEntry {
+                    inference_tx,
+                    cache_control: None,
+                    chat_template: None,
+                },
+            ),
             eos_monitor: std::sync::Arc::new(crate::engine::eos_monitor::EosMonitor::default()),
             security_sinks: Vec::new(),
             cache_stats: std::sync::Arc::new(std::sync::Mutex::new(
