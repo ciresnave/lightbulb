@@ -89,6 +89,15 @@ pub async fn scope_to_model(state: &AppState, requested: &str) -> Result<Scoped,
                 format!("model load task: {e}"),
             )
         })?;
+    answer(state, requested, result)
+}
+
+/// Turn the outcome of `acquire` into a scoped state, or the response that refuses it.
+fn answer(
+    state: &AppState,
+    requested: &str,
+    result: Result<Lease, LoadError>,
+) -> Result<Scoped, Rejection> {
     match result {
         Ok(lease) => Ok(scoped_to(state, requested, lease)),
         // Nothing is loaded at all: let the handler's own "no model available" answer it.

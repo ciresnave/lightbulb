@@ -8,6 +8,7 @@
 
 ### Changed
 - The real server no longer registers a placeholder `test-model` entry; its registry holds only models that exist. With no models directory there is no manager and the old rule applies (the request must name the one loaded model).
+- Split `scope_to_model` and `completions_scoped` into smaller functions (`answer`, `reject_unsupported`, `generation_error`) to meet the Codacy complexity and length limits; no behaviour change.
 
 ## 0.23.36
 

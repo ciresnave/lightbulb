@@ -122,25 +122,8 @@ async fn completions_scoped(
     // `n` and `top_p` accepted-and-silently-discarded is the defect class
     // board item 71's item 2 exists to close — see the reasoning on
     // `chat::validate_n` and on this struct's `top_p` field doc.
-    if let Err(msg) = crate::api::openai::chat::validate_n(request.n) {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": msg})),
-        )
-            .into_response();
-    }
-    if request.top_p != 1.0 {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({
-                "error": format!(
-                    "top_p={} is not supported: nucleus sampling is not wired into either \
-                     decode path. Send top_p=1.0 (the default) or omit the field.",
-                    request.top_p
-                )
-            })),
-        )
-            .into_response();
+    if let Some(rejected) = reject_unsupported(&request) {
+        return rejected;
     }
 
     // Same check and reasoning as `openai::chat::chat_completions` (board
@@ -171,27 +154,53 @@ async fn completions_scoped(
 
     match create_completion(state, request, priority).await {
         Ok(response) => (StatusCode::OK, Json(response)).into_response(),
-        Err(e) => {
-            // `QueueFullError` (503, safe to retry) and `RequestTimeoutError`
-            // (504, not obviously safe to retry) get their own statuses;
-            // every other enqueue or generation failure keeps the generic
-            // 500 — see `chat::queue_error_response`, which this mirrors.
-            let status = if e
-                .downcast_ref::<crate::engine::model_runner::QueueFullError>()
-                .is_some()
-            {
-                StatusCode::SERVICE_UNAVAILABLE
-            } else if e
-                .downcast_ref::<crate::engine::model_runner::RequestTimeoutError>()
-                .is_some()
-            {
-                StatusCode::GATEWAY_TIMEOUT
-            } else {
-                StatusCode::INTERNAL_SERVER_ERROR
-            };
-            (status, Json(serde_json::json!({"error": e.to_string()}))).into_response()
-        }
+        Err(e) => generation_error(&e),
     }
+}
+
+/// 400 for the `n` / `top_p` values this server cannot honour.
+fn reject_unsupported(request: &CompletionRequest) -> Option<Response> {
+    if let Err(msg) = crate::api::openai::chat::validate_n(request.n) {
+        return Some(
+            (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": msg})),
+            )
+                .into_response(),
+        );
+    }
+    (request.top_p != 1.0).then(|| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": format!(
+                    "top_p={} is not supported: nucleus sampling is not wired into either                      decode path. Send top_p=1.0 (the default) or omit the field.",
+                    request.top_p
+                )
+            })),
+        )
+            .into_response()
+    })
+}
+
+/// `QueueFullError` (503, safe to retry) and `RequestTimeoutError` (504, not obviously
+/// safe to retry) get their own statuses; every other enqueue or generation failure keeps
+/// the generic 500 — see `chat::queue_error_response`, which this mirrors.
+fn generation_error(e: &anyhow::Error) -> Response {
+    let status = if e
+        .downcast_ref::<crate::engine::model_runner::QueueFullError>()
+        .is_some()
+    {
+        StatusCode::SERVICE_UNAVAILABLE
+    } else if e
+        .downcast_ref::<crate::engine::model_runner::RequestTimeoutError>()
+        .is_some()
+    {
+        StatusCode::GATEWAY_TIMEOUT
+    } else {
+        StatusCode::INTERNAL_SERVER_ERROR
+    };
+    (status, Json(serde_json::json!({"error": e.to_string()}))).into_response()
 }
 
 /// Create completion
