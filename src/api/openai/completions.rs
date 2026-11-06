@@ -100,7 +100,7 @@ pub async fn completions(
     // reject a `model` that does not name what is actually loaded, only
     // while a model IS loaded, so the existing "No model available on the
     // server" fallback in `create_completion` still handles the other case.
-    if state.inference_tx.is_some() && request.model != state.config.default_model {
+    if state.model().inference_tx.is_some() && request.model != state.config.default_model {
         return (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({
@@ -206,7 +206,7 @@ async fn create_completion(
     // NO CHAT TEMPLATE. `/v1/completions` is OpenAI's raw-text endpoint; the
     // prompt is used exactly as given. Templating belongs to
     // `/v1/chat/completions` — see the chat-template-resolution spec.
-    let Some(tx) = &state.inference_tx else {
+    let Some(tx) = state.model().inference_tx else {
         // Degrade the same way the chat endpoint does: the server is up, the
         // model is not, and that is information rather than an error.
         return Ok(CompletionResponse {
@@ -231,7 +231,7 @@ async fn create_completion(
     // templated prompts take the opposite answer — see
     // `chat::build_prompt`'s docs.
     let result = crate::api::openai::chat::run_inference_once(
-        tx,
+        &tx,
         &state.queue_depth,
         crate::api::openai::chat::BuiltPrompt::raw(prompt_text.clone()),
         max_new_tokens,
@@ -326,9 +326,14 @@ mod tests {
             ))),
             config: crate::api::ApiConfig::default(),
             pg_backend: None,
-            inference_tx,
-            cache_control: None,
-            chat_template: None,
+            models: crate::api::ModelRegistry::single(
+                "test-model",
+                crate::api::ModelEntry {
+                    inference_tx,
+                    cache_control: None,
+                    chat_template: None,
+                },
+            ),
             eos_monitor: std::sync::Arc::new(crate::engine::eos_monitor::EosMonitor::default()),
             security_sinks: Vec::new(),
             cache_stats: std::sync::Arc::new(std::sync::Mutex::new(

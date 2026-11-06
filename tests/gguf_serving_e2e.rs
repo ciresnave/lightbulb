@@ -147,9 +147,14 @@ async fn serve_the_fixed_prompt(path: &Path) -> (StatusCode, serde_json::Value) 
         scheduler,
         config: ApiConfig::default(),
         pg_backend: None,
-        inference_tx: Some(tx),
-        cache_control: Some(ctrl_tx),
-        chat_template: chat_template::resolve_for_serving(path),
+        models: lightbulb::api::ModelRegistry::single(
+            "test-model",
+            lightbulb::api::ModelEntry {
+                inference_tx: Some(tx),
+                cache_control: Some(ctrl_tx),
+                chat_template: chat_template::resolve_for_serving(path),
+            },
+        ),
         eos_monitor: Default::default(),
         security_sinks: Vec::new(),
         cache_stats: std::sync::Arc::new(std::sync::Mutex::new(

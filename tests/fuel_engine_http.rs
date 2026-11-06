@@ -160,9 +160,14 @@ async fn fuel_runner_serves_a_coherent_completion_over_http() {
         scheduler,
         config: ApiConfig::default(),
         pg_backend: None,
-        inference_tx: Some(tx),
-        cache_control: Some(ctrl_tx),
-        chat_template: chat_template_for(&dir),
+        models: lightbulb::api::ModelRegistry::single(
+            "test-model",
+            lightbulb::api::ModelEntry {
+                inference_tx: Some(tx),
+                cache_control: Some(ctrl_tx),
+                chat_template: chat_template_for(&dir),
+            },
+        ),
         // Default window (20): these harnesses make a handful of requests, so
         // the monitor never fills it and never logs. It is here because
         // `AppState` requires it, not as anything under test.
@@ -319,9 +324,14 @@ async fn fuel_runner_serves_a_default_temperature_completion() {
         scheduler,
         config: ApiConfig::default(),
         pg_backend: None,
-        inference_tx: Some(tx),
-        cache_control: Some(ctrl_tx),
-        chat_template: chat_template_for(&dir),
+        models: lightbulb::api::ModelRegistry::single(
+            "test-model",
+            lightbulb::api::ModelEntry {
+                inference_tx: Some(tx),
+                cache_control: Some(ctrl_tx),
+                chat_template: chat_template_for(&dir),
+            },
+        ),
         // Default window (20): these harnesses make a handful of requests, so
         // the monitor never fills it and never logs. It is here because
         // `AppState` requires it, not as anything under test.

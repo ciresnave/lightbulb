@@ -66,9 +66,14 @@ fn app_on_the_checkpoint() -> axum::Router {
             ..ApiConfig::default()
         },
         pg_backend: None,
-        inference_tx: Some(tx),
-        cache_control: Some(ctrl_tx),
-        chat_template: chat_template::resolve_for_serving(&path),
+        models: lightbulb::api::ModelRegistry::single(
+            "test-model",
+            lightbulb::api::ModelEntry {
+                inference_tx: Some(tx),
+                cache_control: Some(ctrl_tx),
+                chat_template: chat_template::resolve_for_serving(&path),
+            },
+        ),
         eos_monitor: Default::default(),
         security_sinks: Vec::new(),
         cache_stats: Arc::new(std::sync::Mutex::new(

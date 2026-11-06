@@ -82,9 +82,14 @@ mod tests {
             ))),
             config: crate::api::ApiConfig::default(),
             pg_backend: None,
-            inference_tx: None,
-            cache_control: None,
-            chat_template: None,
+            models: crate::api::ModelRegistry::single(
+                "test-model",
+                crate::api::ModelEntry {
+                    inference_tx: None,
+                    cache_control: None,
+                    chat_template: None,
+                },
+            ),
             eos_monitor: std::sync::Arc::new(crate::engine::eos_monitor::EosMonitor::default()),
             security_sinks: Vec::new(),
             cache_stats: std::sync::Arc::new(std::sync::Mutex::new(
