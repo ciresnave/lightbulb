@@ -1,9 +1,19 @@
 # Changelog
 
-## 0.23.40
+## 0.23.43
 
 ### Fixed
 - **A model whose runner thread has exited is no longer served forever.** A model that fails to load inside its runner thread (for example a preflight refusal) stayed registered and answered every request with the runner's error. `ModelManager::acquire` now notices the exited thread, unloads the entry and starts a fresh load, so the model works again once the cause (memory, a replaced file) is gone. A model that keeps failing is retried per request rather than wedged.
+
+## 0.23.41
+
+### Added
+- **F2: `POST /v1/lightbulb/admin/models/{name}/unload` unloads a model on request.** Admin-role only (it is merged into the admin routes). 200 with `runner_joined` and `device_memory_returned`; 404 if the model is not loaded; 409 if a request is running on it (the same never-evict-a-busy-model rule the LRU follows); 501 when the server has no model manager. `ModelManager::unload` is the call behind it. The next request for the model loads it again.
+
+## 0.23.38
+
+### Added
+- **F2 P3: `/v1/models` lists every model a request can name.** With a model manager (a models directory is configured) the list is every servable `.gguf` file directly under `LIGHTBULB_MODELS_DIR` (readable, architecture `llama` or `qwen3`; hidden, unreadable and other-architecture files are omitted rather than listed to fail), sorted, each with a new `lightbulb_loaded` field (true when the model is in memory; a request for an unloaded one loads it). `GET /v1/models/{id}` answers 200 for any of them. Without a manager the list is unchanged (the loaded model only, `lightbulb_loaded: true`). `lightbulb_device` is now reported only for loaded models.
 
 ## 0.23.37
 
