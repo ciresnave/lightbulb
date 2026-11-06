@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.23.40
+
+### Fixed
+- **A model whose runner thread has exited is no longer served forever.** A model that fails to load inside its runner thread (for example a preflight refusal) stayed registered and answered every request with the runner's error. `ModelManager::acquire` now notices the exited thread, unloads the entry and starts a fresh load, so the model works again once the cause (memory, a replaced file) is gone. A model that keeps failing is retried per request rather than wedged.
+
 ## 0.23.37
 
 ### Added

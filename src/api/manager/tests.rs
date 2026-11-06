@@ -71,6 +71,62 @@ fn rig(
     (mgr, fake)
 }
 
+/// A loader whose runner thread exits at once (a model that fails to load inside the thread).
+struct Dying {
+    loads: AtomicUsize,
+}
+
+impl ModelLoader for Dying {
+    fn needed_bytes(&self, _: &str) -> Result<u64, LoadError> {
+        Ok(1)
+    }
+
+    fn load(&self, registry: &ModelRegistry, name: &str) -> Result<(), LoadError> {
+        self.loads.fetch_add(1, Ordering::SeqCst);
+        let (tx, _rx) =
+            std::sync::mpsc::sync_channel::<crate::engine::model_runner::InferenceJob>(1);
+        let join = std::thread::spawn(|| {});
+        registry.set(
+            name,
+            ModelEntry {
+                inference_tx: Some(tx),
+                join: Some(Arc::new(Mutex::new(Some(join)))),
+                ..ModelEntry::default()
+            },
+        );
+        Ok(())
+    }
+}
+
+#[test]
+fn a_model_whose_runner_has_exited_is_dropped_and_loaded_afresh() {
+    let dying = Arc::new(Dying {
+        loads: AtomicUsize::new(0),
+    });
+    let m = ModelManager::new(
+        ModelRegistry::default(),
+        dying.clone(),
+        Arc::new(|| u64::MAX),
+        Duration::from_secs(5),
+    );
+    drop(m.acquire("a").unwrap());
+    while !m.registry.runner_exited("a") {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    // The dead entry is not served again: this request loads a fresh one.
+    drop(m.acquire("a").unwrap());
+    assert_eq!(dying.loads.load(Ordering::SeqCst), 2);
+}
+
+#[test]
+fn a_live_runner_is_not_dropped() {
+    let (m, fake) = rig(&[("a", 4)], 10, None);
+    drop(m.acquire("a").unwrap());
+    drop(m.acquire("a").unwrap());
+    assert_eq!(fake.loads.load(Ordering::SeqCst), 1);
+    assert!(!m.registry.runner_exited("a"));
+}
+
 fn names(m: &ModelManager) -> Vec<String> {
     m.registry.names()
 }

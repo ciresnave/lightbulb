@@ -161,8 +161,34 @@ impl ModelManager {
         })
     }
 
+    /// Forget a model whose runner thread has exited (its load failed inside the thread, or
+    /// it died), so the request that found it starts a fresh load instead of being sent to
+    /// a runner that can never answer. Without this such an entry stayed registered and
+    /// failed every request forever.
+    fn reap_if_dead(&self, name: &str) {
+        if !self.registry.runner_exited(name) {
+            return;
+        }
+        let Ok(_gate) = self.gate.lock() else {
+            return;
+        };
+        // Re-check under the gate: another request may have replaced it already.
+        if !self.registry.runner_exited(name) {
+            return;
+        }
+        if let Ok(mut b) = self.book.lock() {
+            b.models.remove(name);
+        }
+        tracing::warn!(
+            "runner for model '{name}' has exited; dropping it so the next load starts fresh"
+        );
+        // The entry is gone from the registry whatever this returns.
+        let _ = unload_model(&self.registry, name, self.unload_wait);
+    }
+
     /// The model `name`, loaded, with a lease on it.
     pub fn acquire(&self, name: &str) -> Result<Lease, LoadError> {
+        self.reap_if_dead(name);
         if let Some(lease) = self.lease_if_loaded(name) {
             return Ok(lease);
         }
