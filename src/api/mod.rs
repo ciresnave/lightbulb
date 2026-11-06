@@ -30,6 +30,7 @@ pub mod admin;
 pub mod auth_middleware;
 pub mod chat_template;
 pub mod lightbulb;
+pub mod manager;
 pub mod openai;
 pub mod persistant_migrate;
 pub mod registry;
