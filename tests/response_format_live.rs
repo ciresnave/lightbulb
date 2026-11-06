@@ -66,6 +66,7 @@ fn app_on_the_checkpoint() -> axum::Router {
             ..ApiConfig::default()
         },
         pg_backend: None,
+        manager: None,
         models: lightbulb::api::ModelRegistry::single(
             "test-model",
             lightbulb::api::ModelEntry {

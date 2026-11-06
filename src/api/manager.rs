@@ -173,6 +173,7 @@ impl ModelManager {
         }
         let needed = self.loader.needed_bytes(name)?;
         self.make_room(needed)?;
+        tracing::info!("loading model '{name}' on demand (needs {needed} bytes)");
         self.loader.load(&self.registry, name)?;
         self.adopt(name, needed);
         self.lease_if_loaded(name)
@@ -198,9 +199,14 @@ impl ModelManager {
         for name in order {
             let claimed = self.book.lock().map_err(poisoned)?.claim_for_eviction(name);
             if claimed {
-                return unload_model(&self.registry, name, self.unload_wait)
-                    .map(|_| ())
-                    .map_err(|e| LoadError::Failed(format!("unloading '{name}': {e}")));
+                let out = unload_model(&self.registry, name, self.unload_wait)
+                    .map_err(|e| LoadError::Failed(format!("unloading '{name}': {e}")))?;
+                tracing::info!(
+                    "evicted model '{name}' (runner joined: {}, device memory returned: {})",
+                    out.joined,
+                    out.released.is_some()
+                );
+                return Ok(());
             }
         }
         Ok(())

@@ -29,8 +29,10 @@
 pub mod admin;
 pub mod auth_middleware;
 pub mod chat_template;
+pub mod fuel_loader;
 pub mod lightbulb;
 pub mod manager;
+pub mod model_select;
 pub mod openai;
 pub mod persistant_migrate;
 pub mod registry;
@@ -55,7 +57,7 @@ use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer};
 use tower_http::trace::TraceLayer;
 
-use crate::engine::model_runner::{EngineOptions, ModelRunner, SharedScheduler};
+use crate::engine::model_runner::SharedScheduler;
 use persistant_relational::RelationalBackend;
 use std::path::Path;
 
@@ -451,6 +453,11 @@ pub struct AppState {
     /// for every other.
     pub models: ModelRegistry,
 
+    /// Loads models on demand and evicts idle ones (see [`manager`]). `None` when the
+    /// server has no models directory, and in tests that build `AppState` by hand: the
+    /// handlers then keep the old rule (the request must name the one loaded model).
+    pub manager: Option<Arc<manager::ModelManager>>,
+
     /// Rolling EOS-fire rate over recent completions, shared by every
     /// completion path.
     ///
@@ -731,7 +738,10 @@ fn try_start_model_runner(state: &mut AppState) {
     let Some(models_dir) = &state.config.models_dir else {
         return;
     };
-    let model_path = Path::new(models_dir).join(&state.config.default_model);
+    let name = state.config.default_model.clone();
+    // The operator's own config, not request input: joined as it always was (a name with
+    // a subdirectory still works here; only request-supplied names go through `resolve_in`).
+    let model_path = Path::new(models_dir).join(&name);
     if !model_path.exists() {
         tracing::warn!(
             "Model path {} not found; skipping model runner startup",
@@ -739,61 +749,55 @@ fn try_start_model_runner(state: &mut AppState) {
         );
         return;
     }
-
-    match ModelRunner::start_with_handle(
+    if let Err(e) = fuel_loader::start_into(
+        &state.models,
+        &name,
         &model_path,
-        state.config.model_max_batch_size,
-        state.config.model_context_length,
-        Some("f32".to_string()),
-        state.config.model_max_queue_depth,
-        state.cache_stats.clone(),
-        state.scheduler.clone(),
-        EngineOptions {
-            prefix_sharing: state.config.model_prefix_sharing,
-            allow_oversize_model: state.config.model_allow_oversize,
-        },
+        &fuel_loader::StartParams::from_state(state),
     ) {
-        Ok((sender, ctrl_sender, join)) => {
-            let model_name = state.config.default_model.clone();
-            state.models.update(&model_name, |e| {
-                e.inference_tx = Some(sender);
-                e.cache_control = Some(ctrl_sender);
-                e.join = Some(std::sync::Arc::new(std::sync::Mutex::new(Some(join))));
-            });
-
-            // Resolve the chat template HERE and only here. Both
-            // halves read files, and a per-request read would put
-            // filesystem I/O in the request path for a value that
-            // cannot change while the process runs.
-            //
-            // `resolve_for_serving` owns the "keep it only if a tier
-            // produced one" rule; the three integration harnesses
-            // call the same function so they cannot drift from what
-            // this line builds.
-            let template = chat_template::resolve_for_serving(&model_path);
-            state
-                .models
-                .update(&model_name, |e| e.chat_template = template.clone());
-            if let Some(t) = &template {
-                tracing::info!(
-                    "Chat template for {} resolved via {:?} (bos {:?}, eos {:?})",
-                    model_path.display(),
-                    t.resolved_by(),
-                    t.tokens.bos,
-                    t.tokens.eos
-                );
-            }
-
-            tracing::info!("Started model runner for {}", model_path.display());
-        }
-        Err(e) => {
-            tracing::error!(
-                "Failed to start model runner for {}: {}",
-                model_path.display(),
-                e
-            );
-        }
+        tracing::error!(
+            "Failed to start model runner for {}: {}",
+            model_path.display(),
+            e
+        );
     }
+}
+
+/// The on-demand model manager for a server that has a models directory.
+///
+/// Free device memory comes from the serving device (re-read after every unload). When
+/// the device cannot say (the CPU, or no figure), it reports "plenty", so nothing is
+/// evicted and the runner's own preflight decides, as before.
+fn build_manager(state: &AppState) -> Option<Arc<manager::ModelManager>> {
+    let models_dir = state.config.models_dir.as_ref()?;
+    let loader = Arc::new(fuel_loader::FuelLoader::new(
+        models_dir,
+        fuel_loader::StartParams::from_state(state),
+    ));
+    let device = crate::model_fuel::device::try_select().ok();
+    let free: manager::FreeBytes = Arc::new(move || {
+        device
+            .as_ref()
+            .and_then(crate::model_fuel::preflight::device_available_bytes)
+            .unwrap_or(u64::MAX)
+    });
+    let manager = manager::ModelManager::new(
+        state.models.clone(),
+        loader.clone(),
+        free,
+        std::time::Duration::from_secs(30),
+    );
+    // The startup model was started outside the manager; track it so it can be evicted.
+    let name = &state.config.default_model;
+    if state
+        .models
+        .get(name)
+        .is_some_and(|e| e.inference_tx.is_some())
+    {
+        use manager::ModelLoader as _;
+        manager.adopt(name, loader.needed_bytes(name).unwrap_or(0));
+    }
+    Some(Arc::new(manager))
 }
 
 /// API server
@@ -864,15 +868,8 @@ impl ApiServer {
             scheduler,
             config: config.clone(),
             pg_backend,
-            models: crate::api::ModelRegistry::single(
-                "test-model",
-                crate::api::ModelEntry {
-                    inference_tx: None,
-                    cache_control: None,
-                    chat_template: None,
-                    ..Default::default()
-                },
-            ),
+            manager: None,
+            models: ModelRegistry::default(),
             eos_monitor: Arc::new(crate::engine::eos_monitor::EosMonitor::default()),
             security_sinks,
             cache_stats: Arc::new(std::sync::Mutex::new(
@@ -883,6 +880,7 @@ impl ApiServer {
         };
 
         try_start_model_runner(&mut state);
+        state.manager = build_manager(&state);
 
         Ok(Self { state })
     }
@@ -1610,7 +1608,7 @@ mod tests {
     /// — these tests exercise `readiness_check`'s own branching on
     /// `pg_backend`/`inference_tx`/`config.models_dir`, not startup. Every
     /// field is `pub` for exactly this (see the field's own doc comment).
-    fn bare_state(models_dir: Option<&str>, inference_tx_present: bool) -> AppState {
+    pub(super) fn bare_state(models_dir: Option<&str>, inference_tx_present: bool) -> AppState {
         use crate::engine::{MemoryAwareConfig, MemoryAwareScheduler};
 
         let inference_tx = if inference_tx_present {
@@ -1629,6 +1627,7 @@ mod tests {
                 ..ApiConfig::default()
             },
             pg_backend: None,
+            manager: None,
             models: crate::api::ModelRegistry::single(
                 "test-model",
                 crate::api::ModelEntry {

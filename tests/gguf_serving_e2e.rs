@@ -147,6 +147,7 @@ async fn serve_the_fixed_prompt(path: &Path) -> (StatusCode, serde_json::Value) 
         scheduler,
         config: ApiConfig::default(),
         pg_backend: None,
+        manager: None,
         models: lightbulb::api::ModelRegistry::single(
             "test-model",
             lightbulb::api::ModelEntry {

@@ -213,6 +213,14 @@ pub fn resolve_max_memory(
     }
 }
 
+/// Device bytes loading `path` needs: resident weights plus the KV pool for this batch
+/// and context. `None` when the weights cannot be estimated.
+pub fn model_load_bytes(path: &Path, max_batch_size: usize, context_length: usize) -> Option<u64> {
+    let weights = weights_resident_estimate(path)?;
+    let kv = kv_shape(path).map_or(0, |s| kv_pool_bytes(s, max_batch_size, context_length));
+    Some(weights.saturating_add(kv))
+}
+
 /// Bytes the serving device reports available, `None` when it cannot say.
 pub fn device_available_bytes(device: &fuel::Device) -> Option<u64> {
     device

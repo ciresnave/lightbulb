@@ -105,6 +105,7 @@ async fn complete_raw(path: &Path, prompt: &str, max_tokens: usize) -> serde_jso
         scheduler,
         config: ApiConfig::default(),
         pg_backend: None,
+        manager: None,
         models: lightbulb::api::ModelRegistry::single(
             "test-model",
             lightbulb::api::ModelEntry {
