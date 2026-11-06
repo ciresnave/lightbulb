@@ -103,6 +103,7 @@ async fn post_raw(path: &str, body: serde_json::Value) -> (StatusCode, Vec<u8>) 
         scheduler,
         config: ApiConfig::default(),
         pg_backend: None,
+        manager: None,
         models: lightbulb::api::ModelRegistry::single(
             "test-model",
             lightbulb::api::ModelEntry {

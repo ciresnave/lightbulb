@@ -28,6 +28,7 @@ fn sse_event(event: Event) -> Result<Event, Infallible> {
 }
 
 use crate::api::AppState;
+use crate::api::model_select::{hold, scope_to_model};
 
 mod response_format;
 pub(crate) use response_format::FormatUnmet;
@@ -336,34 +337,30 @@ pub async fn chat_completions(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
     Json(request): Json<ChatCompletionRequest>,
+) -> Response {
+    // Resolve the model the request names (loading it, evicting idle ones, if needed):
+    // a request for a `model` that is not here is a 400, as it always was (measured
+    // 2026-09-24: before, `model: "nonexistent-model"` got a 200 from whatever was
+    // loaded, which misleads a caller such as OverMind that tries candidate models in
+    // turn and records a failure per name). The lease keeps the model from being
+    // evicted until the response, streamed or not, is finished.
+    let scoped = match scope_to_model(&state, &request.model).await {
+        Ok(s) => s,
+        Err(response) => return *response,
+    };
+    let response = chat_completions_scoped(scoped.state, headers, request)
+        .await
+        .into_response();
+    hold(response, scoped.lease)
+}
+
+/// [`chat_completions`] once `state` is scoped to the request's model.
+async fn chat_completions_scoped(
+    state: AppState,
+    headers: axum::http::HeaderMap,
+    request: ChatCompletionRequest,
 ) -> impl IntoResponse {
     let priority = priority_from_headers(&headers);
-
-    // Reject a `model` that does not name what is actually loaded, while a
-    // model IS loaded (`inference_tx.is_some()`) — when none is loaded, the
-    // existing "No model available on the server" fallback further down
-    // already reports that, and this check must not shadow it.
-    //
-    // Measured 2026-09-24: `model: "nonexistent-model"` against a running
-    // server returned a normal 200, served by whatever was actually loaded,
-    // silently ignoring the field. Harmless for a single-model server in
-    // isolation, but a specific hazard for a caller (OverMind) that tries
-    // candidate models in sequence and records a failure per model NAME —
-    // every name serving the same model turns one real failure into several
-    // distinct, misleading ones. See `docs/TOOL-CALLING-DESIGN-2026-09-25.md`
-    // for the fuller writeup; this is the fix, not the design.
-    if state.model().inference_tx.is_some() && request.model != state.config.default_model {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({
-                "error": format!(
-                    "model '{}' is not loaded on this server; the loaded model is '{}'",
-                    request.model, state.config.default_model
-                )
-            })),
-        )
-            .into_response();
-    }
 
     // Memory-budget admission (board item M4 slice 2): reject, synchronously
     // and before dispatch, a request whose own estimated cost alone would
@@ -2362,6 +2359,7 @@ mod tests {
             ))),
             config: crate::api::ApiConfig::default(),
             pg_backend: None,
+            manager: None,
             models: crate::api::ModelRegistry::single(
                 "test-model",
                 crate::api::ModelEntry {

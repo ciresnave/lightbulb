@@ -82,6 +82,7 @@ mod tests {
             ))),
             config: crate::api::ApiConfig::default(),
             pg_backend: None,
+            manager: None,
             models: crate::api::ModelRegistry::single(
                 "test-model",
                 crate::api::ModelEntry {

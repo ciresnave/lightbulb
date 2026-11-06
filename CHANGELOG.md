@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.23.37
+
+### Added
+- **F2 P2b-2: a request's `model` now selects the model, loading it on demand.** `chat/completions` and `completions` resolve `request.model` through the `ModelManager` (`api::model_select::scope_to_model`): a model in `LIGHTBULB_MODELS_DIR` that is not loaded is loaded, evicting idle models (least recently used first, one at a time, free device memory re-read after each) if the device lacks room. The model is leased for the whole response, a stream included, so it cannot be evicted mid-answer. Answers: 400 for a name that is not a model here (unchanged), **503 + `Retry-After: 5`** when only busy models stand in the way, 500 when the load fails. A request-supplied name is a single path component under the models directory (no separators, `..` or leading dot).
+- `api::fuel_loader`: the real `ModelLoader` and the one `start_into` that starts a runner and registers it, now also used by startup. `preflight::model_load_bytes` (weights + KV) is the size estimate.
+
+### Changed
+- The real server no longer registers a placeholder `test-model` entry; its registry holds only models that exist. With no models directory there is no manager and the old rule applies (the request must name the one loaded model).
+
 ## 0.23.36
 
 ### Added

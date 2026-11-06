@@ -4,11 +4,17 @@
 //! OpenAI-compatible `/v1/completions` endpoint for raw text completion
 //! (non-chat format).
 
-use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
+use axum::{
+    Json,
+    extract::State,
+    http::StatusCode,
+    response::{IntoResponse, Response},
+};
 use serde::{Deserialize, Serialize};
 use std::time::SystemTime;
 
 use crate::api::AppState;
+use crate::api::model_select::{hold, scope_to_model};
 
 /// Completion request (OpenAI-compatible)
 #[derive(Debug, Clone, Deserialize)]
@@ -93,25 +99,25 @@ pub async fn completions(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
     Json(request): Json<CompletionRequest>,
+) -> Response {
+    // Same resolution and the same reasoning as `openai::chat::chat_completions`.
+    let scoped = match scope_to_model(&state, &request.model).await {
+        Ok(s) => s,
+        Err(response) => return *response,
+    };
+    let response = completions_scoped(scoped.state, headers, request)
+        .await
+        .into_response();
+    hold(response, scoped.lease)
+}
+
+/// [`completions`] once `state` is scoped to the request's model.
+async fn completions_scoped(
+    state: AppState,
+    headers: axum::http::HeaderMap,
+    request: CompletionRequest,
 ) -> impl IntoResponse {
     let priority = crate::api::openai::chat::priority_from_headers(&headers);
-
-    // Same check and same reasoning as `openai::chat::chat_completions` —
-    // reject a `model` that does not name what is actually loaded, only
-    // while a model IS loaded, so the existing "No model available on the
-    // server" fallback in `create_completion` still handles the other case.
-    if state.model().inference_tx.is_some() && request.model != state.config.default_model {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({
-                "error": format!(
-                    "model '{}' is not loaded on this server; the loaded model is '{}'",
-                    request.model, state.config.default_model
-                )
-            })),
-        )
-            .into_response();
-    }
 
     // `n` and `top_p` accepted-and-silently-discarded is the defect class
     // board item 71's item 2 exists to close — see the reasoning on
@@ -326,6 +332,7 @@ mod tests {
             ))),
             config: crate::api::ApiConfig::default(),
             pg_backend: None,
+            manager: None,
             models: crate::api::ModelRegistry::single(
                 "test-model",
                 crate::api::ModelEntry {

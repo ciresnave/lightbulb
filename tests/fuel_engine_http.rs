@@ -160,6 +160,7 @@ async fn fuel_runner_serves_a_coherent_completion_over_http() {
         scheduler,
         config: ApiConfig::default(),
         pg_backend: None,
+        manager: None,
         models: lightbulb::api::ModelRegistry::single(
             "test-model",
             lightbulb::api::ModelEntry {
@@ -325,6 +326,7 @@ async fn fuel_runner_serves_a_default_temperature_completion() {
         scheduler,
         config: ApiConfig::default(),
         pg_backend: None,
+        manager: None,
         models: lightbulb::api::ModelRegistry::single(
             "test-model",
             lightbulb::api::ModelEntry {
