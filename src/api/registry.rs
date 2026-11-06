@@ -21,7 +21,7 @@
 //! belongs with unload (P2).
 
 use std::collections::BTreeMap;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 
 use crate::api::chat_template::ResolvedTemplate;
 use crate::engine::model_runner::{ControlSender, InferenceJob};
@@ -41,7 +41,14 @@ pub struct ModelEntry {
     /// legacy `role: content` join). Held together in one [`ResolvedTemplate`] so
     /// no caller supplies `bos`/`eos` itself.
     pub chat_template: Option<Arc<ResolvedTemplate>>,
+    /// The runner thread's join handle (from `ModelRunner::start_with_handle`), so an
+    /// unload can wait for the thread to exit before it returns the model's memory.
+    /// Shared and taken once: a `JoinHandle` is not `Clone`.
+    pub join: Option<JoinSlot>,
 }
+
+/// A runner thread's join handle, shared between clones of its entry.
+pub type JoinSlot = Arc<Mutex<Option<std::thread::JoinHandle<()>>>>;
 
 /// Models by name. Cloning shares the same set (an `Arc`), so every request's
 /// copy of `AppState` sees a change made after startup.
@@ -78,6 +85,12 @@ impl ModelRegistry {
         self.entries.read().ok()?.get(name).cloned()
     }
 
+    /// Remove and return the entry for `name`. Requests that arrive afterwards no
+    /// longer find it; requests already running keep the sender clones they took.
+    pub fn take(&self, name: &str) -> Option<ModelEntry> {
+        self.entries.write().ok()?.remove(name)
+    }
+
     /// The one entry this phase holds, or an empty entry when none was ever set
     /// (no model configured, or its runner failed to start). With several
     /// entries (not yet reachable) it is the first by name.
@@ -96,6 +109,63 @@ impl ModelRegistry {
             .map(|g| g.keys().cloned().collect())
             .unwrap_or_default()
     }
+}
+
+/// What [`unload_model`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Unloaded {
+    /// The runner thread exited within the wait. `false` means a request still holds a
+    /// sender, so the thread (and the model's memory) lives until that request ends.
+    pub joined: bool,
+    /// What returning the memory to the OS did; `None` when there is no device handle
+    /// (CPU) or the thread had not exited yet.
+    pub released: Option<crate::model_fuel::device_pool::Released>,
+}
+
+/// Unload `name` (F2 P2): remove its entry so new requests cannot reach it, drop the
+/// entry's senders (the runner thread exits when the last sender is gone), wait up to
+/// `wait` for the thread to exit, then hand the device's unused memory back to the OS.
+///
+/// Blocking: call it from `spawn_blocking`. It does not check for requests in flight;
+/// the caller decides who to evict ([`crate::engine::eviction::plan_eviction`], which
+/// never picks a busy model). If one is running anyway, its sender clone keeps the
+/// thread alive and this returns `joined: false` after `wait`, with nothing released.
+pub fn unload_model(
+    registry: &ModelRegistry,
+    name: &str,
+    wait: std::time::Duration,
+) -> anyhow::Result<Unloaded> {
+    let entry = registry
+        .take(name)
+        .ok_or_else(|| anyhow::anyhow!("model '{name}' is not loaded"))?;
+    let join = entry.join.clone();
+    drop(entry); // drops the registry's senders
+    let handle = join.and_then(|slot| slot.lock().ok().and_then(|mut g| g.take()));
+    let Some(handle) = handle else {
+        return Ok(Unloaded {
+            joined: false,
+            released: None,
+        });
+    };
+    let started = std::time::Instant::now();
+    while !handle.is_finished() {
+        if started.elapsed() >= wait {
+            // The handle is dropped here: the thread detaches and exits when the last
+            // sender clone does.
+            return Ok(Unloaded {
+                joined: false,
+                released: None,
+            });
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    handle
+        .join()
+        .map_err(|_| anyhow::anyhow!("the runner thread for '{name}' panicked"))?;
+    Ok(Unloaded {
+        joined: true,
+        released: crate::model_fuel::device_pool::release_unused_device_memory()?,
+    })
 }
 
 #[cfg(test)]
@@ -150,5 +220,84 @@ mod tests {
             "the runner must survive the update"
         );
         assert!(e.cache_control.is_some());
+    }
+
+    /// A stand-in for a runner: exits when every sender is gone, and records that it did.
+    fn stub_runner() -> (ModelEntry, std::sync::Arc<std::sync::atomic::AtomicBool>) {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let (tx, rx) = std::sync::mpsc::sync_channel::<InferenceJob>(1);
+        let exited = Arc::new(AtomicBool::new(false));
+        let flag = exited.clone();
+        let handle = std::thread::spawn(move || {
+            while rx.recv().is_ok() {}
+            flag.store(true, Ordering::SeqCst);
+        });
+        let entry = ModelEntry {
+            inference_tx: Some(tx),
+            join: Some(Arc::new(Mutex::new(Some(handle)))),
+            ..ModelEntry::default()
+        };
+        (entry, exited)
+    }
+
+    const WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+
+    #[test]
+    fn unload_removes_the_entry_and_waits_for_the_runner_to_exit() {
+        use std::sync::atomic::Ordering;
+        let (entry, exited) = stub_runner();
+        let reg = ModelRegistry::single("m", entry);
+        let out = unload_model(&reg, "m", WAIT).unwrap();
+        assert!(out.joined, "{out:?}");
+        assert!(
+            exited.load(Ordering::SeqCst),
+            "joined means the thread had really exited"
+        );
+        assert!(
+            reg.get("m").is_none(),
+            "new requests must no longer find it"
+        );
+        assert!(
+            unload_model(&reg, "m", WAIT).is_err(),
+            "a second unload is an error"
+        );
+    }
+
+    #[test]
+    fn a_request_holding_a_sender_keeps_the_runner_alive_and_unload_says_so() {
+        use std::sync::atomic::Ordering;
+        let (entry, exited) = stub_runner();
+        let in_flight = entry.inference_tx.clone().unwrap(); // a running request's clone
+        let reg = ModelRegistry::single("m", entry);
+        let out = unload_model(&reg, "m", std::time::Duration::from_millis(150)).unwrap();
+        assert!(!out.joined && out.released.is_none(), "{out:?}");
+        assert!(reg.get("m").is_none(), "the entry is gone either way");
+        assert!(
+            !exited.load(Ordering::SeqCst),
+            "control: the thread is still up"
+        );
+        drop(in_flight);
+        let t = std::time::Instant::now();
+        while !exited.load(Ordering::SeqCst) && t.elapsed() < WAIT {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(
+            exited.load(Ordering::SeqCst),
+            "it exits once the request ends"
+        );
+    }
+
+    #[test]
+    fn unloading_a_model_that_is_not_loaded_is_an_error() {
+        let reg = ModelRegistry::default();
+        assert!(unload_model(&reg, "nope", WAIT).is_err());
+    }
+
+    #[test]
+    fn an_entry_with_no_runner_thread_unloads_without_a_join() {
+        let reg = ModelRegistry::single("m", ModelEntry::default());
+        let out = unload_model(&reg, "m", WAIT).unwrap();
+        assert!(!out.joined && out.released.is_none());
+        assert!(reg.get("m").is_none());
     }
 }

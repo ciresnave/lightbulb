@@ -153,6 +153,7 @@ async fn serve_the_fixed_prompt(path: &Path) -> (StatusCode, serde_json::Value) 
                 inference_tx: Some(tx),
                 cache_control: Some(ctrl_tx),
                 chat_template: chat_template::resolve_for_serving(path),
+                ..Default::default()
             },
         ),
         eos_monitor: Default::default(),

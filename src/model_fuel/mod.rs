@@ -93,6 +93,7 @@
 
 pub mod decoder;
 pub mod device;
+pub mod device_pool;
 pub mod engine_model;
 pub mod generate;
 pub mod loader;

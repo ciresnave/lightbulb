@@ -88,6 +88,7 @@ mod tests {
                     inference_tx: None,
                     cache_control: None,
                     chat_template: None,
+                    ..Default::default()
                 },
             ),
             eos_monitor: std::sync::Arc::new(crate::engine::eos_monitor::EosMonitor::default()),
