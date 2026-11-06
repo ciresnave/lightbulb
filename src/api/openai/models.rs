@@ -240,6 +240,21 @@ mod tests {
         b
     }
 
+    /// `(id, lightbulb_loaded)` of each listed model.
+    fn id_and_loaded(body: &serde_json::Value) -> Vec<(String, bool)> {
+        body["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| {
+                (
+                    m["id"].as_str().unwrap().to_string(),
+                    m["lightbulb_loaded"].as_bool().unwrap(),
+                )
+            })
+            .collect()
+    }
+
     struct NoLoad;
     impl crate::api::manager::ModelLoader for NoLoad {
         fn needed_bytes(&self, n: &str) -> Result<u64, crate::api::manager::LoadError> {
@@ -286,17 +301,7 @@ mod tests {
             std::time::Duration::from_secs(1),
         )));
         let (_, body) = call(st.clone(), Method::GET, "/v1/models").await;
-        let rows: Vec<(String, bool)> = body["data"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|m| {
-                (
-                    m["id"].as_str().unwrap().to_string(),
-                    m["lightbulb_loaded"].as_bool().unwrap(),
-                )
-            })
-            .collect();
+        let rows = id_and_loaded(&body);
         // Not the hidden file, the text file, the directory, the unreadable file or the
         // architectures with no loader (qwen35, gpt2); sorted; loaded flag per model.
         assert_eq!(
