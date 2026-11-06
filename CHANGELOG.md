@@ -1,9 +1,19 @@
 # Changelog
 
-## 0.23.39
+## 0.23.42
 
 ### Added
 - **F2 P3: `lightbulb-cli list` and `lightbulb-cli run <model>`.** `list` prints the server's `GET /v1/models` (a `*` marks loaded models, with the weights size); it sends the API key only if one is given, so it works against a `--no-auth` server. `run <model>` is the existing chat REPL with `--model` set; the server loads the model on demand. With no subcommand the CLI behaves as before. There is deliberately no CLI-side weight loading (a second serving path).
+
+## 0.23.41
+
+### Added
+- **F2: `POST /v1/lightbulb/admin/models/{name}/unload` unloads a model on request.** Admin-role only (it is merged into the admin routes). 200 with `runner_joined` and `device_memory_returned`; 404 if the model is not loaded; 409 if a request is running on it (the same never-evict-a-busy-model rule the LRU follows); 501 when the server has no model manager. `ModelManager::unload` is the call behind it. The next request for the model loads it again.
+
+## 0.23.38
+
+### Added
+- **F2 P3: `/v1/models` lists every model a request can name.** With a model manager (a models directory is configured) the list is every servable `.gguf` file directly under `LIGHTBULB_MODELS_DIR` (readable, architecture `llama` or `qwen3`; hidden, unreadable and other-architecture files are omitted rather than listed to fail), sorted, each with a new `lightbulb_loaded` field (true when the model is in memory; a request for an unloaded one loads it). `GET /v1/models/{id}` answers 200 for any of them. Without a manager the list is unchanged (the loaded model only, `lightbulb_loaded: true`). `lightbulb_device` is now reported only for loaded models.
 
 ## 0.23.37
 

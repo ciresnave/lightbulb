@@ -39,6 +39,18 @@ pub(crate) fn weights_lower_bound(path: &Path) -> Option<u64> {
     })
 }
 
+/// Whether the GGUF at `path` is one lightbulb can serve: it reads, and declares an
+/// architecture with a loader (`llama`, `qwen3`). `qwen35` has none yet (Fuel ROADMAP
+/// F10), and a file that cannot be read cannot be served.
+pub fn gguf_is_servable(path: &Path) -> bool {
+    use crate::gguf::{Content, GgufArchitecture, detect_architecture};
+    path.is_file()
+        && Content::read(path)
+            .ok()
+            .and_then(|c| detect_architecture(c.metadata()).ok())
+            .is_some_and(|a| a != GgufArchitecture::Qwen35)
+}
+
 /// GGML type code of `Q4_0`, the one dtype Fuel's GGUF loader keeps quantized.
 const GGML_Q4_0: u32 = 2;
 
