@@ -131,3 +131,17 @@ P1 is done as designed and **changes no behaviour**: `AppState.inference_tx`, `c
 4. The eviction order (least recently used among the idle, never an in-flight entry) is pure logic and gets unit tests with fake sizes before any GPU run.
 
 **Out of scope for P2:** request-name resolution and load on demand (P3), `keep_alive`, and the admin route shape (the PM defaults above stand).
+
+## P2a measurements (2026-11-06, branch f2-p2a, RTX 4070 Laptop, cuda:0, ctx 512, `examples/unload_two_models_bench`, n=3 trials + control per pair)
+
+Baseline (CUDA context + release handle, nothing loaded): 238 MiB.
+
+| Pair (A unloaded, B stays) | both resident | freed by unloading A | B latency before / after (8 tokens) | unloading both |
+|---|---|---|---|---|
+| A Qwen3-0.6B Q8_0, B SmolLM2-135M f16 | 2859-2923 MiB | 1598-1662 MiB | 3.8-4.9 s / 3.9-4.4 s | 238 MiB (0 left over) |
+| A TinyLlama-1.1B Q8_0, B Qwen3-0.6B Q8_0 | 2913-2945 MiB | **278-310 MiB** | 53-62 s / 51-57 s | 238 MiB (0 left over) |
+
+- Unload takes 0.2-0.4 s; the runner thread joined every time. Control (a request's sender clone retained): `joined: false`, memory stayed up.
+- **No re-reserve cost** seen: B's first three requests after the unload are no slower than the three before.
+- **A unload does not always free the model's size.** With Qwen3 resident, `trim_to(0)` left the pool reserving ~2.2 GB for 448 MiB in use, so TinyLlama's unload freed ~300 MiB, not ~1.1 GB. Cause not established. Consequence for P2: after each eviction the caller must re-read free memory before deciding whether another model must go; the B9 estimate is not a promise.
+- Real server process (`lightbulb --no-auth`, fuel-cuda release, Qwen3-0.6B Q8_0, ctx 512): `/v1/models` reports `lightbulb_device: cuda:0`, 359 MiB at readiness, 2183 MiB after the model loads, chat requests return 200 (~105 s for 8 tokens: the known slow paged path, GAP-359), 3887 MiB during serving, 0 MiB after the process exits. The server does not call unload anywhere yet. At the default context the B9 preflight refused the load (KV 14 GB), as designed.

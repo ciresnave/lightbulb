@@ -60,8 +60,7 @@ mod imp {
         if guard.is_some() {
             return Ok(());
         }
-        let device =
-            Device::get(index as i32).map_err(|e| anyhow!("cuda device {index}: {e:?}"))?;
+        let device = Device::get(index).map_err(|e| anyhow!("cuda device {index}: {e:?}"))?;
         let context =
             Context::new(&device).map_err(|e| anyhow!("creating a cuda context: {e:?}"))?;
         let pool = default_pool(&context, &device)
