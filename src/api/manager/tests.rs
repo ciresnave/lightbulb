@@ -71,6 +71,32 @@ fn rig(
     (mgr, fake)
 }
 
+#[test]
+fn an_idle_model_can_be_unloaded_on_request_and_is_loaded_again_when_asked_for() {
+    let (m, fake) = rig(&[("a", 4)], 10, None);
+    drop(m.acquire("a").unwrap());
+    let out = m.unload("a").unwrap();
+    assert!(out.joined);
+    assert!(names(&m).is_empty());
+    drop(m.acquire("a").unwrap());
+    assert_eq!(fake.loads.load(Ordering::SeqCst), 2);
+}
+
+#[test]
+fn unloading_a_model_that_is_not_loaded_or_is_busy_is_refused() {
+    let (m, _) = rig(&[("a", 4), ("b", 4)], 10, None);
+    assert_eq!(m.unload("a").unwrap_err(), UnloadError::NotLoaded);
+    let lease = m.acquire("a").unwrap();
+    assert_eq!(m.unload("a").unwrap_err(), UnloadError::Busy);
+    assert_eq!(
+        names(&m),
+        vec!["a".to_string()],
+        "a busy model stays loaded"
+    );
+    drop(lease);
+    assert!(m.unload("a").is_ok());
+}
+
 fn names(m: &ModelManager) -> Vec<String> {
     m.registry.names()
 }

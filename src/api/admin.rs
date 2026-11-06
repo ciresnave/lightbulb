@@ -73,6 +73,7 @@ pub fn routes() -> Router<AppState> {
             "/v1/lightbulb/admin/api-keys/{id}/rotate",
             post(rotate_api_key),
         )
+        .merge(super::admin_models::routes())
         .layer(middleware::from_fn(admin_check_middleware))
 }
 

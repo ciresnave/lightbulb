@@ -14,7 +14,7 @@
 //! Device access is behind [`ModelLoader`] and a free-memory closure, so the logic here
 //! is tested without a GPU. Not yet called by a request handler.
 
-use super::registry::{ModelRegistry, unload_model};
+use super::registry::{ModelRegistry, Unloaded, unload_model};
 use crate::engine::eviction::{CannotMakeRoom, Plan, Resident, plan_eviction};
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
@@ -28,6 +28,17 @@ pub enum LoadError {
     /// The idle models together do not free enough (the caller answers 503).
     NoRoom(CannotMakeRoom),
     /// The loader failed (the caller answers 500).
+    Failed(String),
+}
+
+/// Why an explicit unload did not happen.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UnloadError {
+    /// The model is not loaded (the caller answers 404).
+    NotLoaded,
+    /// A request is running on it (the caller answers 409; try again when it ends).
+    Busy,
+    /// The unload itself failed (the caller answers 500).
     Failed(String),
 }
 
@@ -178,6 +189,35 @@ impl ModelManager {
         self.adopt(name, needed);
         self.lease_if_loaded(name)
             .ok_or_else(|| LoadError::Failed(format!("model '{name}' vanished after loading")))
+    }
+
+    /// Unload `name` now, on an operator's request. Refuses a model with a request in
+    /// flight (the same rule eviction follows) rather than cutting that request off.
+    pub fn unload(&self, name: &str) -> Result<Unloaded, UnloadError> {
+        let _gate = self
+            .gate
+            .lock()
+            .map_err(|_| UnloadError::Failed("model manager lock poisoned".into()))?;
+        {
+            let mut book = self
+                .book
+                .lock()
+                .map_err(|_| UnloadError::Failed("model manager lock poisoned".into()))?;
+            if !book.models.contains_key(name) {
+                return Err(UnloadError::NotLoaded);
+            }
+            if !book.claim_for_eviction(name) {
+                return Err(UnloadError::Busy);
+            }
+        }
+        let out = unload_model(&self.registry, name, self.unload_wait)
+            .map_err(|e| UnloadError::Failed(format!("unloading '{name}': {e}")))?;
+        tracing::info!(
+            "unloaded model '{name}' on request (runner joined: {}, device memory returned: {})",
+            out.joined,
+            out.released.is_some()
+        );
+        Ok(out)
     }
 
     /// Evict idle models, least recently used first and one at a time, until `needed`
