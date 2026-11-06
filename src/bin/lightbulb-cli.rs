@@ -3,8 +3,10 @@
 //!
 //! Usage:
 //!   lightbulb-cli --api-key <key> --url <base-url> [--stream]
+//!   lightbulb-cli list                 # the models the server can serve
+//!   lightbulb-cli run <model>          # chat with <model>; the server loads it on demand
 
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use std::io::{self, Write};
@@ -14,6 +16,9 @@ use std::io::{self, Write};
 #[command(name = "lightbulb-cli", version)]
 #[command(about = "Chat with models running on Lightbulb", long_about = None)]
 struct Args {
+    #[command(subcommand)]
+    command: Option<Command>,
+
     /// API key for authentication
     #[arg(long)]
     api_key: Option<String>,
@@ -41,6 +46,37 @@ struct Args {
     /// Maximum tokens to generate
     #[arg(long, default_value = "512")]
     max_tokens: u32,
+}
+
+#[derive(Subcommand, Debug)]
+enum Command {
+    /// List the models the server can serve and whether each is loaded
+    List,
+    /// Chat with a model (the server loads it if it is not loaded)
+    Run {
+        /// Model name, as `list` prints it
+        model: String,
+    },
+}
+
+/// One row of `GET /v1/models`, the fields `list` shows.
+#[derive(Debug, Deserialize)]
+struct ModelRow {
+    id: String,
+    #[serde(default)]
+    lightbulb_loaded: Option<bool>,
+    #[serde(default)]
+    lightbulb_memory: Option<ModelMemory>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ModelMemory {
+    weights_bytes_on_disk: u64,
+}
+
+#[derive(Debug, Deserialize)]
+struct ModelList {
+    data: Vec<ModelRow>,
 }
 
 #[derive(Debug, Serialize)]
@@ -116,16 +152,75 @@ fn main() -> anyhow::Result<()> {
 }
 
 #[tokio::main]
-async fn run(args: Args) -> anyhow::Result<()> {
-    // Get API key from arg or environment
-    let api_key = args
+async fn run(mut args: Args) -> anyhow::Result<()> {
+    let key = args
         .api_key
-        .or_else(|| std::env::var("LIGHTBULB_API_KEY").ok())
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "API key required. Provide via --api-key or LIGHTBULB_API_KEY environment variable"
-            )
-        })?;
+        .clone()
+        .or_else(|| std::env::var("LIGHTBULB_API_KEY").ok());
+    match args.command.take() {
+        Some(Command::List) => {
+            // A server started with --no-auth needs no key, so `list` does not insist.
+            let rows = fetch_models(&reqwest::Client::new(), &args.url, key.as_deref()).await?;
+            print!("{}", format_models(&rows));
+            Ok(())
+        }
+        Some(Command::Run { model }) => {
+            args.model = model;
+            chat(args, key).await
+        }
+        None => chat(args, key).await,
+    }
+}
+
+async fn fetch_models(
+    client: &reqwest::Client,
+    base_url: &str,
+    api_key: Option<&str>,
+) -> anyhow::Result<Vec<ModelRow>> {
+    let mut req = client.get(format!("{base_url}/v1/models"));
+    if let Some(key) = api_key {
+        req = req.header("Authorization", format!("Bearer {key}"));
+    }
+    let response = req.send().await?;
+    let status = response.status();
+    let body = response.text().await?;
+    if !status.is_success() {
+        anyhow::bail!("HTTP {status}: {body}");
+    }
+    Ok(serde_json::from_str::<ModelList>(&body)?.data)
+}
+
+/// The `list` output: one line per model, `*` marking the loaded ones.
+fn format_models(rows: &[ModelRow]) -> String {
+    if rows.is_empty() {
+        return "No models available on this server.\n".to_string();
+    }
+    let width = rows.iter().map(|r| r.id.len()).max().unwrap_or(0);
+    let mut out = String::new();
+    for r in rows {
+        let mark = if r.lightbulb_loaded.unwrap_or(false) {
+            "*"
+        } else {
+            " "
+        };
+        let size = r.lightbulb_memory.as_ref().map_or(String::new(), |m| {
+            format!("{:.1} MiB", m.weights_bytes_on_disk as f64 / 1_048_576.0)
+        });
+        let line = format!("{mark} {:width$}  {size}", r.id);
+        out.push_str(line.trim_end());
+        out.push('\n');
+    }
+    out.push_str("(* = loaded in memory)\n");
+    out
+}
+
+async fn chat(args: Args, key: Option<String>) -> anyhow::Result<()> {
+    // Get API key from arg or environment
+    let api_key = key.ok_or_else(|| {
+        anyhow::anyhow!(
+            "API key required. Provide via --api-key or LIGHTBULB_API_KEY environment variable"
+        )
+    })?;
 
     println!("🔦 Lightbulb CLI");
     println!("Connected to: {}", args.url);
@@ -383,6 +478,54 @@ mod tests {
             max_tokens: Some(16),
             stream: false,
         }
+    }
+
+    #[tokio::test]
+    async fn list_reads_the_models_and_marks_the_loaded_ones() {
+        let router = Router::new().route(
+            "/v1/models",
+            axum::routing::get(|| async {
+                Json(serde_json::json!({"object": "list", "data": [
+                    {"id": "a.gguf", "lightbulb_loaded": true,
+                     "lightbulb_memory": {"weights_bytes_on_disk": 2097152}},
+                    {"id": "long-name.gguf", "lightbulb_loaded": false},
+                    {"id": "legacy.gguf"}
+                ]}))
+            }),
+        );
+        let base = spawn_server(router).await;
+        let rows = fetch_models(&reqwest::Client::new(), &base, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            format_models(&rows),
+            "* a.gguf          2.0 MiB\n  long-name.gguf\n  legacy.gguf\n(* = loaded in memory)\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn list_surfaces_an_http_error_and_an_empty_roster() {
+        let router = Router::new().route(
+            "/v1/models",
+            axum::routing::get(|| async { (axum::http::StatusCode::UNAUTHORIZED, "no key") }),
+        );
+        let base = spawn_server(router).await;
+        let err = fetch_models(&reqwest::Client::new(), &base, None)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("401") && err.contains("no key"), "{err}");
+        assert_eq!(format_models(&[]), "No models available on this server.\n");
+    }
+
+    #[test]
+    fn run_takes_a_model_and_list_takes_nothing() {
+        let a = Args::try_parse_from(["lightbulb-cli", "run", "m.gguf"]).unwrap();
+        assert!(matches!(a.command, Some(Command::Run { model }) if model == "m.gguf"));
+        let a = Args::try_parse_from(["lightbulb-cli", "list"]).unwrap();
+        assert!(matches!(a.command, Some(Command::List)));
+        let a = Args::try_parse_from(["lightbulb-cli", "-m", "x"]).unwrap();
+        assert!(a.command.is_none() && a.model == "x");
     }
 
     #[tokio::test]

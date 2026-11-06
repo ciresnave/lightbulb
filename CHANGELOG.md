@@ -5,6 +5,11 @@
 ### Fixed
 - **A model whose runner thread has exited is no longer served forever.** A model that fails to load inside its runner thread (for example a preflight refusal) stayed registered and answered every request with the runner's error. `ModelManager::acquire` now notices the exited thread, unloads the entry and starts a fresh load, so the model works again once the cause (memory, a replaced file) is gone. A model that keeps failing is retried per request rather than wedged.
 
+## 0.23.42
+
+### Added
+- **F2 P3: `lightbulb-cli list` and `lightbulb-cli run <model>`.** `list` prints the server's `GET /v1/models` (a `*` marks loaded models, with the weights size); it sends the API key only if one is given, so it works against a `--no-auth` server. `run <model>` is the existing chat REPL with `--model` set; the server loads the model on demand. With no subcommand the CLI behaves as before. There is deliberately no CLI-side weight loading (a second serving path).
+
 ## 0.23.41
 
 ### Added
