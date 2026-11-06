@@ -166,6 +166,7 @@ async fn fuel_runner_serves_a_coherent_completion_over_http() {
                 inference_tx: Some(tx),
                 cache_control: Some(ctrl_tx),
                 chat_template: chat_template_for(&dir),
+                ..Default::default()
             },
         ),
         // Default window (20): these harnesses make a handful of requests, so
@@ -330,6 +331,7 @@ async fn fuel_runner_serves_a_default_temperature_completion() {
                 inference_tx: Some(tx),
                 cache_control: Some(ctrl_tx),
                 chat_template: chat_template_for(&dir),
+                ..Default::default()
             },
         ),
         // Default window (20): these harnesses make a handful of requests, so

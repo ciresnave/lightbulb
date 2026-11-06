@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.23.35
+
+### Added
+- **F2 P2a: the pieces of unloading a model** (no request path uses them yet, so serving is unchanged).
+  - `engine::eviction::plan_eviction`: pure LRU planner (fits -> evict nothing; else oldest idle first, only as many as needed; never a model with a request in flight; a shortfall is reported, nothing is half-evicted).
+  - `model_fuel::device_pool`: the ONE module that imports `baracuda-driver` (a stopgap; Fuel should own this). `init` makes a CUDA context and takes the default pool at device selection, before any model loads, and keeps them for the process lifetime. **Its context costs about 113 MiB of VRAM** (the no-hold baseline in the 2026-11-05 probe). `release_unused_device_memory` is `trim_to(0)`. No-op on CPU and without `fuel-cuda`.
+  - `ModelEntry.join` (the runner thread's handle, from `start_with_handle`, now used at startup), `ModelRegistry::take`, and `api::registry::unload_model(registry, name, wait)`: remove the entry, drop its senders, wait for the thread, then release. A request still holding a sender keeps the thread alive; the call reports `joined: false` instead of blocking forever.
+  - `examples/unload_two_models_bench.rs`: the two-model measurement harness that gates the P2 PR. `examples/vram_return_probe.rs` now goes through `device_pool` (the only baracuda importer rule).
+
 ## 0.23.34
 
 ### Changed

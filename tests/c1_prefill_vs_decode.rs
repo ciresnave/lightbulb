@@ -111,6 +111,7 @@ async fn complete_raw(path: &Path, prompt: &str, max_tokens: usize) -> serde_jso
                 inference_tx: Some(tx),
                 cache_control: Some(ctrl_tx),
                 chat_template: None,
+                ..Default::default()
             },
         ),
         eos_monitor: Default::default(),

@@ -72,6 +72,7 @@ fn app_on_the_checkpoint() -> axum::Router {
                 inference_tx: Some(tx),
                 cache_control: Some(ctrl_tx),
                 chat_template: chat_template::resolve_for_serving(&path),
+                ..Default::default()
             },
         ),
         eos_monitor: Default::default(),
