@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.23.36
+
+### Added
+- **F2 P2b-1: `api::manager::ModelManager`**, load a model on demand and evict idle ones to make room. `acquire(name)` returns a `Lease` (in-flight count; a leased model is never evicted) and loads the model if needed, unloading least-recently-used idle models **one at a time, re-reading free device memory after each unload** (an unload can free less than the estimate: issue #298). Device access is behind `ModelLoader` and a free-memory closure, so it is tested without a GPU (10 tests, including a stuck-bytes case and its control). Not called by any handler yet, so serving is unchanged.
+
 ## 0.23.35
 
 ### Added
