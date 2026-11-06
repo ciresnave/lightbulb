@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.23.34
+
+### Changed
+- Docs only: F2 design note, the P2 decision (who calls `trim_to(0)` after an unload: Lightbulb through `baracuda-driver` now, a Fuel call later; the unload sequence; what is not yet measured and gates the P2 code).
+
 ## 0.23.33
 
 ### Changed
