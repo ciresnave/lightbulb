@@ -739,7 +739,7 @@ fn try_start_model_runner(state: &mut AppState) {
         return;
     }
 
-    match ModelRunner::start_with_options(
+    match ModelRunner::start_with_handle(
         &model_path,
         state.config.model_max_batch_size,
         state.config.model_context_length,
@@ -752,11 +752,12 @@ fn try_start_model_runner(state: &mut AppState) {
             allow_oversize_model: state.config.model_allow_oversize,
         },
     ) {
-        Ok((sender, ctrl_sender)) => {
+        Ok((sender, ctrl_sender, join)) => {
             let model_name = state.config.default_model.clone();
             state.models.update(&model_name, |e| {
                 e.inference_tx = Some(sender);
                 e.cache_control = Some(ctrl_sender);
+                e.join = Some(std::sync::Arc::new(std::sync::Mutex::new(Some(join))));
             });
 
             // Resolve the chat template HERE and only here. Both
@@ -868,6 +869,7 @@ impl ApiServer {
                     inference_tx: None,
                     cache_control: None,
                     chat_template: None,
+                    ..Default::default()
                 },
             ),
             eos_monitor: Arc::new(crate::engine::eos_monitor::EosMonitor::default()),
@@ -1632,6 +1634,7 @@ mod tests {
                     inference_tx,
                     cache_control: None,
                     chat_template: None,
+                    ..Default::default()
                 },
             ),
             eos_monitor: Arc::new(crate::engine::eos_monitor::EosMonitor::default()),

@@ -2368,6 +2368,7 @@ mod tests {
                     inference_tx,
                     cache_control: None,
                     chat_template,
+                    ..Default::default()
                 },
             ),
             eos_monitor,

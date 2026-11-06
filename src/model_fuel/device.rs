@@ -280,6 +280,15 @@ fn open(choice: Choice, selector: &Selector) -> Result<Device> {
             Ok(d) => {
                 tracing::info!("model_fuel: CUDA device {index} selected");
                 record_chosen(format!("cuda:{index}"));
+                // The release handle is made HERE, at selection, before any model
+                // loads: its context needs VRAM, and after an eviction the card may
+                // have none to spare (see `device_pool`). A failure must not stop
+                // serving; it only means a later unload cannot return memory to the OS.
+                if let Err(e) = super::device_pool::init(index) {
+                    tracing::warn!(
+                        "model_fuel: no device-memory release handle ({e:#}); unloading a model will not return its memory to the OS"
+                    );
+                }
                 return Ok(Device::from(d));
             }
             Err(e) if *selector == Selector::Auto => {

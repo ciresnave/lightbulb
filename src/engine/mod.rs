@@ -11,6 +11,7 @@ pub mod context_injection;
 pub mod conversation_history;
 pub mod decomposition;
 pub mod eos_monitor;
+pub mod eviction;
 pub mod knowledge_base;
 pub mod memory_aware_scheduler;
 pub mod metadata_scheduling;

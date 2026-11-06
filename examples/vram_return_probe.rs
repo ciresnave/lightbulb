@@ -118,49 +118,35 @@ fn wait_back_to(target: i64, wait: Duration) -> (i64, f64) {
     }
 }
 
-/// The driver's default memory pool for device 0 (`LB_TRIM=1`), made BEFORE
-/// the baseline so its context is part of the baseline, not of what is measured.
-#[cfg(feature = "fuel-cuda")]
-type TrimPool = baracuda_driver::mempool::MemoryPool;
-#[cfg(not(feature = "fuel-cuda"))]
+/// `LB_TRIM=1`: the release handle from `model_fuel::device_pool` (the one module that
+/// talks to the driver), made BEFORE the baseline so its context is part of the
+/// baseline, not of what is measured.
 type TrimPool = ();
 
-#[cfg(feature = "fuel-cuda")]
 fn make_trim_pool() -> Option<TrimPool> {
-    let device = baracuda_driver::Device::get(0).expect("cuda device 0");
-    let context = baracuda_driver::Context::new(&device).expect("cuda context");
-    let pool = baracuda_driver::mempool::default_pool(&context, &device).expect("default pool");
-    std::mem::forget(context); // keep the context alive for the whole run
-    Some(pool)
-}
-#[cfg(not(feature = "fuel-cuda"))]
-fn make_trim_pool() -> Option<TrimPool> {
-    panic!("LB_TRIM needs --features fuel-cuda")
+    lightbulb::model_fuel::device_pool::init(0).expect("device pool handle for device 0");
+    Some(())
 }
 
 /// After a RELEASE that did not return memory: print the pool's own used and
-/// reserved bytes, `trim_to(0)`, print them again, and wait for the device to
-/// fall back. Returns whether memory came back.
-#[cfg(feature = "fuel-cuda")]
-fn trim_and_report(pool: &TrimPool, i: usize, wait: Duration, baseline: i64, tol: i64) -> bool {
+/// reserved bytes, release the unused reserve, print them again, and wait for the
+/// device to fall back. Returns whether memory came back.
+fn trim_and_report(_: &TrimPool, i: usize, wait: Duration, baseline: i64, tol: i64) -> bool {
+    use lightbulb::model_fuel::device_pool;
     let mib = |b: u64| b as i64 / (1 << 20);
-    let (u0, r0) = (pool.used_bytes().unwrap(), pool.reserved_bytes().unwrap());
     let smi0 = used_mib();
-    pool.trim_to(0).expect("trim_to(0)");
-    let (u1, r1) = (pool.used_bytes().unwrap(), pool.reserved_bytes().unwrap());
+    let r = device_pool::release_unused_device_memory()
+        .expect("release")
+        .expect("a device pool handle (LB_TRIM needs --features fuel-cuda)");
     let (after, secs) = wait_back_to(baseline + tol, wait);
     println!(
-        "trial {i}: TRIM pool used {} -> {} MiB, reserved {} -> {} MiB; nvidia-smi {smi0} ->          {after} MiB in {secs:.1}s",
-        mib(u0),
-        mib(u1),
-        mib(r0),
-        mib(r1)
+        "trial {i}: TRIM pool used {} -> {} MiB, reserved {} -> {} MiB; nvidia-smi {smi0} -> {after} MiB in {secs:.1}s",
+        mib(r.before.used),
+        mib(r.after.used),
+        mib(r.before.reserved),
+        mib(r.after.reserved)
     );
     after <= baseline + tol
-}
-#[cfg(not(feature = "fuel-cuda"))]
-fn trim_and_report(_: &TrimPool, _: usize, _: Duration, _: i64, _: i64) -> bool {
-    false
 }
 
 /// One RELEASE + CONTROL trial; returns (released, control_held).
