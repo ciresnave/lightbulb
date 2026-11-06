@@ -104,3 +104,30 @@ Probe: `examples/vram_return_probe.rs` with `LB_TRIM=1`. Same protocol as above 
 ## Update 2026-11-05 (P1 landed, 0.23.33)
 
 P1 is done as designed and **changes no behaviour**: `AppState.inference_tx`, `cache_control` and `chat_template` became `AppState.models: ModelRegistry` (`src/api/registry.rs`), a name -> `ModelEntry` map holding at most one entry, read through `AppState::model()`. The three pieces stay independently optional (a test server has a template and no runner; a control sender exists only with a runner). Two simplifications against the design above, on purpose: the entry has no `join` handle yet (P2 adds it with unload, when something joins), and `eos_monitor` / `cache_stats` stay in `AppState` (the runner takes `cache_stats` at start, so it moves with P2). The size note above overstated the work: of the "about 274 references", about 12 production sites and 14 `AppState` literals needed a change; most `chat_template` hits are the module path. Not built: resolving `request.model` to an entry (the handlers still compare against `config.default_model`), load on demand, eviction.
+
+## P2 decision: how Lightbulb unloads a model (2026-11-05, for PM review; then code)
+
+**Decision asked:** who calls `trim_to(0)` after an unload, given the measured route (drop senders, join the runner thread, `trim_to(0)` on the device's default pool: 6 of 6 back to baseline, SmolLM2-135M only).
+
+| | Option | For | Against |
+|---|---|---|---|
+| A | Lightbulb calls `baracuda-driver` directly, behind `fuel-cuda`, through one small module | Unblocks P2 now; `baracuda-driver` is already an optional dependency since 0.23.30 (it rides on `fuel-cuda`); the surface is one function | Lightbulb holds its own CUDA context for the pool handle (see below); duplicates a call Fuel could own |
+| B | Fuel exposes a release call on `CudaDevice` | No second context, one owner of the pool; Fuel's own source lists `trim_to` as an unbuilt follow-up (`device.rs:531`) | Waits on Fuel's queue (GAP-359 is first); a Fuel release before P2 can ship |
+| C | One worker process per model | The OS guarantees release; isolates CUDA faults | A supervisor and IPC or a proxy; far larger than the problem now shown |
+
+**Recommendation: A now, B as a follow-up that deletes A.** Keep the Lightbulb side to one function, `release_unused_device_memory()`, so replacing it with Fuel's call later is a one-line change. C is not needed for the measured model.
+
+**Facts that shape A (read from source, not run):**
+- Fuel creates its own context with `Context::new` (not the device's primary context; `fuel-cuda-backend 0.36.7 device.rs:521`) and sets the pool's release threshold to `u64::MAX`. The pool is per device, and the probe trimmed it from a separate handle, so a separate handle works.
+- The handle's context costs VRAM: the probe's no-hold arm had a 113 MiB baseline that was that context. **Create the handle once, at device selection, before any model is loaded** (so it is paid while VRAM is empty) and keep it for the process lifetime. Creating it at unload time can fail: right after an eviction the freed memory is held by the pool, not returned to the OS, and the card may have no 113 MiB left for a new context.
+- CPU builds and CPU runs have no pool: unload is drop plus join only. `release_unused_device_memory()` is a no-op there.
+
+**Unload sequence (the one P2 implements):** remove the entry from the registry (new requests for it are refused or reload it); drop its `inference_tx` and `cache_control` (the runner thread exits on `Disconnected`); join the thread (`start_with_handle`, 0.23.22); then `release_unused_device_memory()`. Never evict an entry with a request in flight. The entry gains the `join` handle in P2, and `eos_monitor` and `cache_stats` move into it.
+
+**Not shown, and the gate for the P2 code (a GPU slot is needed):**
+1. **Two models resident.** `trim_to(0)` frees only the pool's unused reserve, so with model B still serving it should free A's blocks and also B's cached free blocks. Unmeasured: how much B's next request pays to re-reserve, and whether `trim_to(keep)` with a non-zero keep is better. P2 starts with `trim_to(0)`, measures B's next-request latency, and changes only if that number is bad.
+2. **A larger model** than the 135M tested (a 0.6B or 1.5B corpus model is enough to see whether the returned amount scales).
+3. **A server process**, not the probe: unload through the real registry while a second model answers requests.
+4. The eviction order (least recently used among the idle, never an in-flight entry) is pure logic and gets unit tests with fake sizes before any GPU run.
+
+**Out of scope for P2:** request-name resolution and load on demand (P3), `keep_alive`, and the admin route shape (the PM defaults above stand).
