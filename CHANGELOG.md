@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.23.38
+
+### Added
+- **F2 P3: `/v1/models` lists every model a request can name.** With a model manager (a models directory is configured) the list is every `.gguf` file directly under `LIGHTBULB_MODELS_DIR`, sorted, hidden files excluded, each with a new `lightbulb_loaded` field (true when the model is in memory; a request for an unloaded one loads it). `GET /v1/models/{id}` answers 200 for any of them. Without a manager the list is unchanged (the loaded model only, `lightbulb_loaded: true`). `lightbulb_device` is now reported only for loaded models.
+
 ## 0.23.37
 
 ### Added
