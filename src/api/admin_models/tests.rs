@@ -120,3 +120,59 @@ async fn a_non_admin_key_cannot_unload() {
         "still loaded"
     );
 }
+
+/// The refusal arms matter most on an admin endpoint: whatever the caller, the unload must
+/// not run. No credential at all -> 401, model still loaded.
+#[tokio::test]
+async fn a_request_with_no_credential_is_401_and_unloads_nothing() {
+    let state = managed();
+    drop(state.manager.as_ref().unwrap().acquire("m.gguf").unwrap());
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/lightbulb/admin/models/m.gguf/unload")
+        .body(Body::empty())
+        .unwrap();
+    let resp = admin::routes()
+        .with_state(state.clone())
+        .oneshot(req)
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        state.models.names(),
+        vec!["m.gguf".to_string()],
+        "still loaded"
+    );
+}
+
+/// A `--no-auth` server (no database, so the auth layer attaches no key) through the REAL
+/// router with its whole middleware stack: the unload is 401 there too, never run.
+#[tokio::test]
+async fn on_a_no_auth_server_the_real_router_answers_401_and_unloads_nothing() {
+    let mut state = managed();
+    state.config.no_auth = true;
+    assert!(
+        state.pg_backend.is_none(),
+        "no database: the --no-auth shape"
+    );
+    drop(state.manager.as_ref().unwrap().acquire("m.gguf").unwrap());
+    let router = crate::api::ApiServer {
+        state: state.clone(),
+    }
+    .build_router()
+    .with_state(state.clone());
+    let peer: std::net::SocketAddr = "127.0.0.1:50000".parse().unwrap();
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/lightbulb/admin/models/m.gguf/unload")
+        .extension(axum::extract::ConnectInfo(peer))
+        .body(Body::empty())
+        .unwrap();
+    let resp = router.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        state.models.names(),
+        vec!["m.gguf".to_string()],
+        "still loaded"
+    );
+}
