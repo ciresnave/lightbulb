@@ -88,8 +88,9 @@ fn model_info(id: String, models_dir: Option<&str>, loaded: bool) -> ModelInfo {
     }
 }
 
-/// The `.gguf` files directly under `dir`, sorted (hidden files are not models: the
-/// loader refuses a name that starts with '.').
+/// The servable `.gguf` files directly under `dir`, sorted. Hidden files are not models
+/// (the loader refuses a name that starts with '.'), and a file lightbulb cannot serve
+/// (unreadable, or an architecture with no loader) is omitted rather than listed to fail.
 fn gguf_names(dir: &str) -> Vec<String> {
     let mut names: Vec<String> = std::fs::read_dir(dir)
         .into_iter()
@@ -98,6 +99,9 @@ fn gguf_names(dir: &str) -> Vec<String> {
         .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
         .filter_map(|e| e.file_name().into_string().ok())
         .filter(|n| !n.starts_with('.') && n.to_ascii_lowercase().ends_with(".gguf"))
+        .filter(|n| {
+            crate::model_fuel::preflight::gguf_is_servable(&std::path::Path::new(dir).join(n))
+        })
         .collect();
     names.sort();
     names
@@ -221,6 +225,21 @@ mod tests {
         (status, serde_json::from_slice(&bytes).unwrap())
     }
 
+    /// A GGUF v3 with no tensors whose only metadata is `general.architecture`.
+    fn tiny_gguf(arch: &str) -> Vec<u8> {
+        let mut b = b"GGUF".to_vec();
+        b.extend(3u32.to_le_bytes());
+        b.extend(0u64.to_le_bytes());
+        b.extend(1u64.to_le_bytes());
+        let key = "general.architecture";
+        b.extend((key.len() as u64).to_le_bytes());
+        b.extend(key.as_bytes());
+        b.extend(8u32.to_le_bytes());
+        b.extend((arch.len() as u64).to_le_bytes());
+        b.extend(arch.as_bytes());
+        b
+    }
+
     struct NoLoad;
     impl crate::api::manager::ModelLoader for NoLoad {
         fn needed_bytes(&self, n: &str) -> Result<u64, crate::api::manager::LoadError> {
@@ -238,9 +257,17 @@ mod tests {
     #[tokio::test]
     async fn with_a_manager_every_gguf_in_the_directory_is_listed_with_its_loaded_flag() {
         let dir = tempfile::tempdir().unwrap();
-        for f in ["b.gguf", "a.GGUF", ".hidden.gguf", "notes.txt"] {
-            std::fs::write(dir.path().join(f), b"x").unwrap();
+        for (f, arch) in [
+            ("b.gguf", "llama"),
+            ("a.GGUF", "qwen3"),
+            (".hidden.gguf", "llama"),
+            ("hybrid.gguf", "qwen35"),
+            ("other.gguf", "gpt2"),
+        ] {
+            std::fs::write(dir.path().join(f), tiny_gguf(arch)).unwrap();
         }
+        std::fs::write(dir.path().join("notes.txt"), b"x").unwrap();
+        std::fs::write(dir.path().join("broken.gguf"), b"not a gguf").unwrap();
         std::fs::create_dir(dir.path().join("sub.gguf")).unwrap();
         let mut st = state(false);
         st.config.models_dir = Some(dir.path().to_string_lossy().into_owned());
@@ -270,7 +297,8 @@ mod tests {
                 )
             })
             .collect();
-        // Not the hidden file, the text file or the directory; sorted; loaded flag per model.
+        // Not the hidden file, the text file, the directory, the unreadable file or the
+        // architectures with no loader (qwen35, gpt2); sorted; loaded flag per model.
         assert_eq!(
             rows,
             vec![("a.GGUF".to_string(), false), ("b.gguf".to_string(), true)],
