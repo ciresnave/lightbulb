@@ -5,6 +5,11 @@
 ### Fixed
 - `tests/gguf_serving_e2e.rs` (ignored; needs `LIGHTBULB_GGUF`) sent `model: "tinyllama"` to a server whose `default_model` was the config default, so it got the unknown-model 400 before any generation. It now sets `default_model` to the name it requests. Verified on CPU with TinyLlama-1.1B-Chat Q8_0: `a_gguf_is_served_with_its_own_template` passes (14 s).
 
+## 0.23.43
+
+### Fixed
+- **A model whose runner thread has exited is no longer served forever.** A model that fails to load inside its runner thread (for example a preflight refusal) stayed registered and answered every request with the runner's error. `ModelManager::acquire` now notices the exited thread, unloads the entry and starts a fresh load, so the model works again once the cause (memory, a replaced file) is gone. A model that keeps failing is retried per request rather than wedged.
+
 ## 0.23.42
 
 ### Added

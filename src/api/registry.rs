@@ -85,6 +85,20 @@ impl ModelRegistry {
         self.entries.read().ok()?.get(name).cloned()
     }
 
+    /// Whether `name`'s runner thread has already exited (its model failed to load, or the
+    /// thread died): such an entry can never answer a request. `false` when there is no
+    /// entry or no join handle to ask.
+    pub fn runner_exited(&self, name: &str) -> bool {
+        self.get(name)
+            .and_then(|e| e.join)
+            .and_then(|slot| {
+                slot.lock()
+                    .ok()
+                    .map(|g| g.as_ref().is_some_and(|h| h.is_finished()))
+            })
+            .unwrap_or(false)
+    }
+
     /// Remove and return the entry for `name`. Requests that arrive afterwards no
     /// longer find it; requests already running keep the sender clones they took.
     pub fn take(&self, name: &str) -> Option<ModelEntry> {
