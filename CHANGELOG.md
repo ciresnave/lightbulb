@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.23.46
+
+### Changed
+- Fuel crates 0.36.7 -> 0.43.2 (the first release carrying GAP-359, Qwen3 plan-once). No source changes were needed. Measured on Qwen3-0.6B-Q8_0 (RTX 4070 Laptop, n=1 per arm): the served paged driver on CPU went from 169 s to 14 s for the 61-token prefill step and from 2.5 s to about 0.2 s per decode step. **CUDA is not fixed**: the served driver on cuda:0 ends its session after step 0 with no token emitted, and `examples/decode_step_bench.rs` panics on cuda:0 (`no backend supports write_slice on [F32, F32]`). Reported to Fuel.
+
 ## 0.23.45
 
 ### Changed
