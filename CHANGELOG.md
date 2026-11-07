@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.23.45
+
+### Changed
+- ROADMAP rows B5 and F1 updated from mlmf's 2026-11-07 answers: the stale crate name `mlmf-source-hf` is `mlmf-source-hub`, and sharded GGUF needs mlmf's merged reader (the helpers in mlmf#187 cover only lightbulb's own shard handling, not Fuel's single-path weight load). Documentation only.
+
 ## 0.23.44
 
 ### Fixed
