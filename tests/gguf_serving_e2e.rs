@@ -143,9 +143,15 @@ async fn serve_the_fixed_prompt(path: &Path) -> (StatusCode, serde_json::Value) 
         scheduler.clone(),
     )
     .expect("starting the model runner");
+    // The request names the loaded model, as the server requires (a name other than
+    // `default_model` is a 400 before any generation).
+    let config = ApiConfig {
+        default_model: "tinyllama".to_string(),
+        ..ApiConfig::default()
+    };
     let state = AppState {
         scheduler,
-        config: ApiConfig::default(),
+        config: config.clone(),
         pg_backend: None,
         manager: None,
         models: lightbulb::api::ModelRegistry::single(
@@ -167,7 +173,7 @@ async fn serve_the_fixed_prompt(path: &Path) -> (StatusCode, serde_json::Value) 
     };
     let app = lightbulb::api::openai::routes().with_state(state);
     let body = serde_json::json!({
-        "model": "tinyllama",
+        "model": config.default_model,
         "messages": [{"role": "user", "content": "Name the capital of France."}],
         "max_tokens": 24,
         "temperature": 0.0,
