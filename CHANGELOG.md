@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.23.47
+
+### Changed
+Fuel crates 0.43.2 -> 0.46.2 (fuel#640: the first realize in a process no longer snapshots the topology before the CUDA kernels are installed). mlmf moved 0.5.x -> 0.7.26 transitively. No source change.
+
 ## 0.23.46
 
 ### Changed
