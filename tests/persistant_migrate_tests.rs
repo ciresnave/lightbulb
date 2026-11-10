@@ -16,9 +16,7 @@ mod persistant_migrate_tests {
     // them at a shared instance by default would be unsafe on a machine where
     // 5432 is already in use for something else.
     fn test_db_url() -> String {
-        std::env::var("LIGHTBULB_TEST_DATABASE_URL").unwrap_or_else(|_| {
-            "postgresql://lightbulb:vKTbmBA5RXIauMrNHxzs@localhost:5432/lightbulb".to_string()
-        })
+        std::env::var("LIGHTBULB_TEST_DATABASE_URL").expect("LIGHTBULB_TEST_DATABASE_URL must be set to a throwaway PostgreSQL URL; these tests write to it")
     }
 
     /// Simulates a PRE-Step-5 deployment: `ApiServer::new` ran refinery's
