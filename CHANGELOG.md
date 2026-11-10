@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.23.48
+
+### Changed
+ROADMAP A2 marked done: the twelve `/v1/lightbulb/*` stub handlers were already replaced by one 501 handler on 2026-10-25; only the row still said open. Docs only, no code change.
+
 ## 0.23.46
 
 ### Changed
