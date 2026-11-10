@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.23.49
+
+### Added
+Test `test_an_expired_api_key_is_rejected_and_a_future_expiry_is_accepted` (ROADMAP C3, API-key expiry; `#[ignore]`, needs PostgreSQL): a key past its `expires_at` gets 401, and the same key with a future expiry authenticates. Checked to fail when the `expires_at` clause is removed from the key lookup (401 became 403). No source change.
+
 ## 0.23.48
 
 ### Changed
