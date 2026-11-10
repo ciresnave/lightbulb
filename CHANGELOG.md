@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.23.50
+
+### Changed
+The three database-backed tests that fell back to a hard-coded `postgresql://lightbulb:<password>@localhost:5432/lightbulb` when `LIGHTBULB_TEST_DATABASE_URL` was unset (`tests/api_integration_tests.rs`, `tests/persistant_migrate_tests.rs`, and `check_database_reports_unreachable_when_a_live_backend_goes_away` in `src/api/mod.rs`) now fail with a message naming the variable. No password is left in the source. The tests stay `#[ignore]` and still need a throwaway PostgreSQL.
+
 ## 0.23.48
 
 ### Changed

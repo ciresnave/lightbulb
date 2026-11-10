@@ -3400,7 +3400,7 @@ dependencies = [
 
 [[package]]
 name = "lightbulb"
-version = "0.23.48"
+version = "0.23.50"
 dependencies = [
  "ahash",
  "anyhow",

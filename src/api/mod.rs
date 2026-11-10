@@ -1848,9 +1848,7 @@ mod tests {
     #[tokio::test]
     #[ignore] // Requires PostgreSQL
     async fn check_database_reports_unreachable_when_a_live_backend_goes_away() {
-        let db_url = std::env::var("LIGHTBULB_TEST_DATABASE_URL").unwrap_or_else(|_| {
-            "postgresql://lightbulb:vKTbmBA5RXIauMrNHxzs@localhost:5432/lightbulb".to_string()
-        });
+        let db_url = std::env::var("LIGHTBULB_TEST_DATABASE_URL").expect("LIGHTBULB_TEST_DATABASE_URL must be set to a throwaway PostgreSQL URL; these tests write to it");
         let (proxy_addr, abort_tx, proxy_task) = start_severable_proxy(&db_url).await;
         let proxied_url = proxied_db_url(&db_url, proxy_addr);
 
