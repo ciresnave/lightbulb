@@ -3,7 +3,7 @@
 ## 0.23.48
 
 ### Changed
-ROADMAP A2 marked done: the twelve `/v1/lightbulb/*` stub handlers were already replaced by one 501 handler on 2026-10-25; only the row still said open. Docs only, no code change.
+ROADMAP A2 and A3 marked done (A3: `OutputContractSpec::Json` parsing shipped in 0.19.25, #236): the twelve `/v1/lightbulb/*` stub handlers were already replaced by one 501 handler on 2026-10-25; only the rows still said open. Docs only, no code change.
 
 ## 0.23.47
 
