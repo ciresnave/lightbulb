@@ -641,6 +641,68 @@ mod api_tests {
         );
     }
 
+    /// ROADMAP C3 (API-key expiry): `auth_middleware`'s lookup filters on
+    /// `expires_at IS NULL OR expires_at > NOW()`, and nothing tested that
+    /// an expired key is refused. A key whose `expires_at` is in the past
+    /// must get 401 on its very first request; the same key with its
+    /// expiry moved into the future must then authenticate (403, as a
+    /// non-admin on an admin route), so the 401 is the expiry and not a
+    /// bad token or a missing row.
+    #[tokio::test]
+    #[ignore] // Requires PostgreSQL
+    async fn test_an_expired_api_key_is_rejected_and_a_future_expiry_is_accepted() {
+        let db_url = test_db_url();
+        let server = create_test_server().await;
+        let key_id =
+            provision_test_api_key_returning_id(&db_url, "expiry-target-token", "user").await;
+        let (client, connection) = tokio_postgres::connect(&db_url, tokio_postgres::NoTls)
+            .await
+            .expect("connect to the test database");
+        tokio::spawn(async move {
+            let _ = connection.await;
+        });
+        let app = server.build_router().with_state(server.state().clone());
+        let status_of = |app: axum::Router| async move {
+            app.oneshot(with_fake_peer_at(
+                Request::builder()
+                    .uri("/v1/lightbulb/admin/cache/stats")
+                    .header("authorization", "Bearer expiry-target-token")
+                    .body(Body::empty())
+                    .unwrap(),
+                [10, 0, 0, 12],
+            ))
+            .await
+            .unwrap()
+            .status()
+        };
+
+        client
+            .execute(
+                "UPDATE api_keys SET expires_at = NOW() - INTERVAL '1 hour' WHERE id = $1",
+                &[&key_id],
+            )
+            .await
+            .expect("expire the key");
+        assert_eq!(
+            status_of(app.clone()).await,
+            StatusCode::UNAUTHORIZED,
+            "a key past its expires_at must be rejected"
+        );
+
+        client
+            .execute(
+                "UPDATE api_keys SET expires_at = NOW() + INTERVAL '1 hour' WHERE id = $1",
+                &[&key_id],
+            )
+            .await
+            .expect("move the expiry into the future");
+        assert_eq!(
+            status_of(app).await,
+            StatusCode::FORBIDDEN,
+            "the same key with a future expiry must authenticate (user role, admin route: 403)"
+        );
+    }
+
     /// PM condition 2: revoking the caller's OWN key must be refused unless
     /// another unexpired, unrevoked admin key exists -- otherwise this
     /// endpoint is the request that locks every admin out of every admin
