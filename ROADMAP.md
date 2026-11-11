@@ -88,17 +88,15 @@ longer external brief CireSnave was handed ("Forked-Agent Orchestration: Archite
 Board item 86 in `CIRESNAVE-DECISIONS.md` tracks this; project placement in that brief puts Fuel on KV-
 cache mechanics and OverMind on orchestration policy, with Lightbulb owning the model-facing pieces below.
 
-1. **Wire the existing prefix-matching logic into the serving path — DETECTION half DONE 2026-10-22
-   (board PM task), EXPLOITATION half still open.** This project's own review (2026-09-30) confirmed the
+1. **Wire the existing prefix-matching logic into the serving path — DETECTION DONE 2026-10-22
+   (board PM task); EXPLOITATION WIRED, OFF BY DEFAULT (PR #224, 2026-10-24; slice plan below, rows 3 and 6).** This project's own review (2026-09-30) confirmed the
    donor-must-stay-open copy-on-write mechanism is correct and real, and that a content-addressed matching
    layer already exists on top of it — but with zero callers outside its own tests at the time. `ServingDriver`
    (`src/model_fuel/scheduled_llama_engine.rs`) now wires a generalized `BlockPrefixIndexFor<SessionId>` into
    the live `try_admit` path: every admitted prompt's token prefix is recorded and looked up, giving
-   `cache_stats` real hit/miss/entry counts (`CACHE_METRICS_LIVE = true`). **Detection is not exploitation**:
-   a hit is not yet spliced into KV blocks or used to skip prefill — that needs
-   `fuel_inference::multi_session::PagedSessionScheduler`, a different scheduler than the one wired today, and
-   switching to it is a real separate port (see `docs/FUEL-GAPS-FROM-CANDLE-REMOVAL.md` entry #1). Donor-must-
-   stay-open COW splicing (the TTFT win this item originally named) is still unwired.
+   `cache_stats` real hit/miss/entry counts (`CACHE_METRICS_LIVE = true`). As of 2026-10-22 a hit was only detected. Since PR #224 (2026-10-24; serving already on
+   `PagedSessionScheduler`) a hit is spliced (`register_prefix` + `add_session_sharing_prefix`) and the
+   donor's prefill skipped when `LIGHTBULB_PREFIX_SHARING=1`; default off until measured (row 6).
    **`cache_clear`'s real implementation landed alongside this (board PM task, 2026-10-22):** it now sends a
    real `ControlMsg::ClearPrefixCache` to the serving thread, which rebuilds the index and zeroes the stats
    mirror — superseding the old V1_ROADMAP-era note below (§"MemoryAwareScheduler Integration" slice 4) that
@@ -123,6 +121,47 @@ cache mechanics and OverMind on orchestration policy, with Lightbulb owning the 
    patent search first** — this is the one technique in the whole brief where "nothing found" is weak
    evidence of safety, not strong evidence.
    Added 2026-10-27 (CireSnave: "Add it to what Lightbulb will look into when that point comes."): the closest KV-cache-transfer-across-model-families prior art is Cache-to-Cache (Fu et al., Tsinghua, arXiv:2510.03215 v2 2026-03-02), which fuses a Sharer's KV cache into a Receiver's with a small trained per-pair fuser (both LLMs frozen), reporting +6.4-14.2% accuracy over the single model and ~2.5x lower latency than text on Qwen/Llama/Gemma pairs of 0.6B-14B, limited by per-pair training, white-box access to both models, and a weak Sharer hurting; read its claims-side/patent status together with Interlat and LatentMAS when the track opens.
+4. **Background-minds Phase 0, serving side (PM [TASK] 2026-11-11; source `C:\Projects\background-minds-design-2026-11-11.md` section 15).**
+   Findings at lightbulb origin/main `2b1b3b0` and Fuel `v0.46.2`; **code read only: nothing was run for the fork or adapter parts.**
+   - **P0-1 prefix reuse (design requirements 1 and 3): wired, off by default; the gaps are these.**
+     `ServingDriver::try_admit` (`src/model_fuel/scheduled_llama_engine.rs:376`) always runs `prefix_index.lookup` (:402); with the switch on
+     (`LIGHTBULB_PREFIX_SHARING`, `src/api/mod.rs:127`, default false at :240; forced off on hybrid models, `memory_shape.rs:87`) it calls
+     `try_admit_sharing_or_fallback` (:280): shares `min(hit.blocks, (len-1)/block_size)` whole blocks (:296), `register_prefix` (:328, Fuel
+     `multi_session.rs:1968`), `add_session_sharing_prefix` (`scheduler_driver_paged.rs:140`, Fuel :2017), cold `plain_admit` on any refusal.
+     Measured (2026-10-25, local-patched Fuel `ab97c5c21`, SmolLM2-135M Q8_0, CPU, ~1149-token prefix, live donor, **n=1 per run, 2 runs, same
+     method**): sharer TTFT 60.4 s OFF -> 2.3 s ON; completions bit-identical. **No GPU number exists**; default stays off (row 6).
+     Open: (a) **no reuse after the donor finishes**: `mirror_departure` (:199-223) forgets the donor (`forget_donor`, `policies.rs:637`) and
+     releases its registration, although Fuel keeps registered blocks resident after the donor is reaped (`multi_session.rs` doc at :1961);
+     a persistent, evictable prefix cache is unbuilt. (b) the index records only the admitted **prompt** (`record_prefix`, :247), never the
+     tokens the session then generates, so nothing can match beyond a parent's prompt. (c) the key is the token chain alone
+     (`policies.rs:524-541`, seed `lightbulb.block-prefix.v1`): no adapter, model or template dimension. (d) whole blocks only; the tail
+     (< `KV_BLOCK_SIZE`) is re-prefilled. (e) the doc comment at `scheduled_llama_engine.rs:115-121` still says "detection only": stale, fix
+     with the next code change to that file.
+   - **P0-2 fork admission: possible for whole blocks with Fuel's existing API; needs a fork entry point in Lightbulb.**
+     Fuel's `register_prefix` takes the first N fully-filled blocks of a LIVE session, and the pool is token-agnostic, so blocks of tokens the
+     parent generated register like prompt blocks; `add_session_sharing_prefix` (and `_with_params`, :2096, unused by Lightbulb) admits a
+     session whose prefill starts at `shared_tokens`; several forks may splice one `PrefixId`. Needed: (1) a fork entry on `ServingDriver`
+     (parent id + branch suffix); `SchedulerDriver::try_admit` (`scheduled_runner.rs:92`) takes only prompt tokens; (2) a per-session token
+     vector (`sessions` maps id -> String only, `scheduled_llama_engine.rs:131`); (3) pin the parent's registration until its forks are
+     admitted (today it dies with the parent, :204-223); (4) per-fork sampling params (today a fresh seed, `scheduler_driver_paged.rs:140`);
+     (5) no mid-block copy-on-write: a fork shares `floor(filled/block_size)` blocks and re-prefills the rest. **First deliverable:** a test
+     that forks from mid-decode and is bit-identical to a cold prefill of the same tokens with `prefill_start` equal to the shared tokens.
+     The "merge" and "return trip" (requirements 4 and 5) are an ordinary new admission whose prompt is the primary's prefix plus the
+     fork's output; they reuse the primary's blocks only through P0-1 (a) and (b).
+   - **P0-3 per-request adapter: nothing exists in Lightbulb (`git grep -i lora src/` at `2b1b3b0` finds only the word "exploration", twice); blocked on Fuel for anything beyond one adapter per driver.**
+     Fuel has `LoraLinear` (`fuel-nn/src/modules/lora.rs:27`) but `PagedDecodeModel` (`multi_session.rs:185`) takes no adapter: the adapter is
+     a property of the model object a scheduler borrows (`PagedSessionScheduler<'m, M>`, :1538), and `step_batched` groups sessions by
+     position only (:2137-2150). Where an adapter id would enter: request field = an `X-Lightbulb-Adapter` header, the precedent being
+     `priority_from_headers` (`src/api/openai/chat.rs:640`) and `docs/API-EXTENSIONS.md` ("a header, never the JSON body"); job =
+     a new `InferenceJob` field (`src/engine/model_runner.rs:104`); admission = a new `try_admit` argument; **admission key = adapter id
+     (plus a content hash of its weights) in the prefix-index hash seed** (`policies.rs:530`), so a base prefix is never shared with an
+     adapter fork; batching rule = **one adapter per batch** until Fuel takes a per-session adapter in `forward_paged_step_batched`.
+     Cheapest first step, no Fuel change: one `ServingDriver` per (model, adapter). Ask fuel (separately) for the per-session adapter.
+   - **Patent screen:** `docs/PATENT-SWEEP.md` "Update 2026-11-11", ideas 15-17. No patent found on fork/branch-and-merge of a KV prefix.
+     **Two `needs-review` hits on adapters**, both pending applications (Baidu: independents 1, 11, 13 read; Qiming: claim 1 only): Baidu CN121189489A
+     (groups requests by adapter, runs base and adapter separately, merges per request: relevant to any mixed-adapter batch) and
+     Qiming CN119473318A (add LoRA weights, load and infer, delete weights: relevant to runtime load/unload). Not legal advice; the
+     search surface 503'd on four queries; a clearance it is not.
 
 ---
 
