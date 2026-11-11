@@ -5,6 +5,11 @@
 ### Changed
 Docs only. ROADMAP research-track item 4 records the serving-side findings for background-minds Phase 0 (prefix reuse, fork admission, per-request adapters, each with file:line and the gaps as rows); item 1's stale claim that prefix-sharing exploitation is unwired is replaced (it has been wired, off by default, since PR #224). `docs/PATENT-SWEEP.md` gains ideas 15-17, the 2026-11-11 queries and hits 16-24; two are `needs-review` (both per-request-adapter applications). No code change.
 
+## 0.23.53
+
+### Changed
+The advisory `portfolio` job's reusable workflow is repinned from coderipper `ee9c3950` (0.9.24) to `4bcf55e4cd5c171a88f021c0c4e563e47ef4bb7d` (coderipper#303, which installs coderipper 0.43.41). CI only; no code change.
+
 ## 0.23.52
 
 ### Changed
