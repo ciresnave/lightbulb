@@ -5573,7 +5573,7 @@ it is not).
 |---|---|---|
 | C1 | Wire the ~43 "PLUMBING" `#[ignore]` tests to the synthetic checkpoint/GGUF generator (`src/test_models.rs`); 60+ ignores still gated on a real checkpoint. | open |
 | C2 | Re-derive the deleted batch-correctness and FlashAttention parity tests on Fuel (FUEL-GAPS #11). | open |
-| C3 | Missing coverage: ~~API-key expiry~~ (DONE 0.23.49, `#[ignore]` test, needs PostgreSQL), ~~SSE framing / streaming error frame~~ (already covered: `chat.rs` `data: [DONE]` tests, `api_result_metadata.rs` error-frame check; verified 2026-11-10), MemoryLeakDetector on non-Linux, `load_stress_tests` still simulates requests. | open |
+| C3 | Missing coverage: ~~API-key expiry~~ (DONE 0.23.49, `#[ignore]` test, needs PostgreSQL), ~~SSE framing / streaming error frame~~ (already covered: `chat.rs` `data: [DONE]` tests, `api_result_metadata.rs` error-frame check; verified 2026-11-10), ~~MemoryLeakDetector on non-Linux~~ (DONE 0.23.51, `sysinfo` RSS), `load_stress_tests` still simulates requests. | open |
 | C4 | M3.5 validation framework (cross-feature matrix, determinism, `lightbulb::set_seed`, perplexity/MMLU, benchmark DB) has rows but no code. | open |
 | C5 | `tests/gpu_paged_vs_contiguous.rs`: blocked on Fuel (`fuel-model-llama/cuda` does not build on 0.25.10, `host_buffer_to_bytes` is `pub(crate)`). | held (Fuel) |
 
