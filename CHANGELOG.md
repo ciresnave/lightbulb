@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.23.51
+
+### Fixed
+The load-test `MemoryLeakDetector` (`tests/load_stress_tests.rs`) read process memory only on Linux and returned a dummy 0 elsewhere, so leak detection was a silent no-op on Windows and macOS. It now reads the process RSS through `sysinfo` (already a dependency) on every platform; new test `memory_detector_reads_real_rss_and_tracks_an_allocation` fails if the reading is 0 or does not follow a touched 64 MB allocation. ROADMAP C3: this leftover is done; `load_stress_tests` still simulates requests.
+
 ## 0.23.50
 
 ### Changed

@@ -412,29 +412,25 @@ impl MemoryLeakDetector {
         Ok(slope_kb_per_hour > leak_threshold_kb_per_hour)
     }
 
-    /// Get current process memory usage in KB
+    /// Get current process resident memory in KB, on every platform.
+    ///
+    /// `sysinfo` is already a regular dependency (it feeds the admin metrics),
+    /// so this reads the same RSS on Linux, Windows and macOS instead of the
+    /// former Linux-only `/proc/self/status` parse and a dummy 0 elsewhere.
     fn get_current_memory_usage() -> Result<usize> {
-        #[cfg(target_os = "linux")]
-        {
-            use std::fs;
-            let status = fs::read_to_string("/proc/self/status")?;
-            for line in status.lines() {
-                if line.starts_with("VmRSS:") {
-                    let parts: Vec<&str> = line.split_whitespace().collect();
-                    if parts.len() >= 2 {
-                        return Ok(parts[1].parse()?);
-                    }
-                }
-            }
-            anyhow::bail!("Could not find VmRSS in /proc/self/status");
-        }
-
-        #[cfg(not(target_os = "linux"))]
-        {
-            // TODO: Implement for Windows/macOS
-            // For now, return dummy value (memory leak detection will be skipped)
-            Ok(0)
-        }
+        use sysinfo::{ProcessesToUpdate, System, get_current_pid};
+        let pid = get_current_pid().map_err(|e| anyhow::anyhow!("current pid: {e}"))?;
+        let mut sys = System::new();
+        sys.refresh_processes(ProcessesToUpdate::Some(&[pid]), true);
+        let bytes = sys
+            .process(pid)
+            .ok_or_else(|| anyhow::anyhow!("own process {pid} not found"))?
+            .memory();
+        anyhow::ensure!(
+            bytes > 0,
+            "sysinfo reported 0 bytes of RSS for this process"
+        );
+        Ok((bytes / 1024) as usize)
     }
 
     /// Print memory usage report
@@ -464,6 +460,31 @@ impl MemoryLeakDetector {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The detector must read a real RSS on every platform (it was a dummy 0
+    /// off Linux, which made leak detection a silent no-op), and the reading
+    /// must follow a held, touched allocation.
+    #[test]
+    fn memory_detector_reads_real_rss_and_tracks_an_allocation() -> Result<()> {
+        let mut detector = MemoryLeakDetector::new()?;
+        assert!(
+            detector.initial_memory_kb > 0,
+            "RSS must not be the dummy 0"
+        );
+        let mut held = vec![0u8; 64 * 1024 * 1024];
+        for (i, b) in held.iter_mut().enumerate().step_by(4096) {
+            *b = (i % 251) as u8 + 1;
+        }
+        detector.sample(Duration::from_secs(1))?;
+        let after = detector.samples.last().map(|s| s.1).unwrap_or(0);
+        assert!(
+            after >= detector.initial_memory_kb + 32 * 1024,
+            "RSS {after} KB did not grow by >=32 MB over {} KB after touching 64 MB",
+            detector.initial_memory_kb
+        );
+        assert!(held.iter().step_by(4096).all(|b| *b != 0));
+        Ok(())
+    }
 
     #[tokio::test]
     async fn test_light_load() -> Result<()> {
