@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.23.53
+
+### Changed
+The advisory `portfolio` job's reusable workflow is repinned from coderipper `ee9c3950` (0.9.24) to `4bcf55e4cd5c171a88f021c0c4e563e47ef4bb7d` (coderipper#303, which installs coderipper 0.43.41). CI only; no code change.
+
 ## 0.23.52
 
 ### Changed
