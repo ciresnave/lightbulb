@@ -7,6 +7,14 @@
 // 2. **Edge Case Validator**: 128k token contexts, 128+ batch sizes, mixed workloads
 // 3. **Soak Test Harness**: 48hr+ continuous operation, memory leak detection
 //
+// **Live server required.** Requests are real `POST /v1/chat/completions`
+// calls (HTTPAnt client) against the server named by `LIGHTBULB_LOAD_TEST_URL`
+// (base URL, e.g. `http://127.0.0.1:8080`). Optional: `LIGHTBULB_LOAD_TEST_API_KEY`
+// (bearer token) and `LIGHTBULB_LOAD_TEST_MODEL` (default: first id from
+// `GET /v1/models`). With the URL unset the load tests FAIL naming it: they are
+// not `#[ignore]`d (CireSnave's standing rule, EXPECTATIONS 5.1g/5.1h); the
+// hosted CI job skips them by name and a self-hosted job sets the variable.
+//
 // **Success Criteria**:
 // - Stable under 100+ concurrent requests
 // - No memory leaks over 48 hours
@@ -14,12 +22,98 @@
 // - <1% error rate under normal load (100 concurrent)
 // - <5% error rate under 2× capacity (200 concurrent)
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
+use httpant_client::Client;
+use serde_json::{Value, json};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use tokio::sync::{RwLock, Semaphore};
 use tokio::task::JoinHandle;
+
+/// Env var naming the live server's base URL.
+const URL_VAR: &str = "LIGHTBULB_LOAD_TEST_URL";
+/// Env var holding an optional bearer token.
+const KEY_VAR: &str = "LIGHTBULB_LOAD_TEST_API_KEY";
+/// Env var naming an optional model id (default: first of `/v1/models`).
+const MODEL_VAR: &str = "LIGHTBULB_LOAD_TEST_MODEL";
+
+/// Where and how to send load: resolved once per run.
+#[derive(Debug, Clone)]
+struct LiveTarget {
+    base_url: String,
+    api_key: Option<String>,
+    model: Option<String>,
+}
+
+impl LiveTarget {
+    /// Pure so a test can drive it without mutating the process environment.
+    fn from_values(
+        url: Option<String>,
+        api_key: Option<String>,
+        model: Option<String>,
+    ) -> Result<Self> {
+        let base_url = url
+            .map(|u| u.trim().trim_end_matches('/').to_string())
+            .filter(|u| !u.is_empty())
+            .ok_or_else(|| {
+                anyhow!(
+                    "{URL_VAR} is not set: the load tests need a live Lightbulb server; \
+                     set it to its base URL (e.g. http://127.0.0.1:8080) on the runner job \
+                     that runs them"
+                )
+            })?;
+        Ok(Self {
+            base_url,
+            api_key: api_key.filter(|k| !k.is_empty()),
+            model: model.filter(|m| !m.is_empty()),
+        })
+    }
+
+    fn from_env() -> Result<Self> {
+        Self::from_values(
+            std::env::var(URL_VAR).ok(),
+            std::env::var(KEY_VAR).ok(),
+            std::env::var(MODEL_VAR).ok(),
+        )
+    }
+}
+
+/// A deterministic prompt of roughly `range.0..=range.1` words, varied per request.
+fn build_prompt(request_id: u64, range: (usize, usize)) -> String {
+    let span = range.1.saturating_sub(range.0) + 1;
+    let words = range.0 + (request_id as usize % span);
+    let mut prompt = format!("Request {request_id}. Summarise the following text:");
+    for i in 0..words {
+        prompt.push_str(if i % 2 == 0 { " alpha" } else { " beta" });
+    }
+    prompt
+}
+
+/// Ask the server which model to use when none was configured.
+async fn discover_model(client: &Client, target: &LiveTarget) -> Result<String> {
+    let mut req = client.get(format!("{}/v1/models", target.base_url));
+    if let Some(key) = &target.api_key {
+        req = req.bearer(key);
+    }
+    let resp = req
+        .send()
+        .await
+        .map_err(|e| anyhow!("GET /v1/models failed: {e}"))?;
+    let status = resp.status();
+    let text = resp
+        .text()
+        .await
+        .map_err(|e| anyhow!("reading /v1/models failed: {e}"))?;
+    if !status.is_success() {
+        return Err(anyhow!("GET /v1/models returned {status}: {text}"));
+    }
+    let v: Value = serde_json::from_str(&text).context("/v1/models body is not JSON")?;
+    v["data"][0]["id"]
+        .as_str()
+        .map(str::to_string)
+        .ok_or_else(|| anyhow!("/v1/models listed no model; set {MODEL_VAR}"))
+}
 
 /// Load test configuration
 #[derive(Debug, Clone)]
@@ -199,6 +293,17 @@ impl LoadTestRunner {
         println!("  Prompt length: {:?}", self.config.prompt_length_range);
         println!("  Generation length: {}", self.config.generation_length);
 
+        let target = LiveTarget::from_env()?;
+        let client = Client::builder()
+            .timeout(self.config.request_timeout)
+            .build()
+            .map_err(|e| anyhow!("building the HTTP client failed: {e}"))?;
+        let model = match &target.model {
+            Some(m) => m.clone(),
+            None => discover_model(&client, &target).await?,
+        };
+        println!("  Target: {} (model {model})", target.base_url);
+
         let start_time = Instant::now();
         let semaphore = Arc::new(Semaphore::new(self.config.concurrent_requests));
         let mut handles: Vec<JoinHandle<()>> = Vec::new();
@@ -222,9 +327,11 @@ impl LoadTestRunner {
             let stats = self.stats.clone();
             let latencies = self.latencies.clone();
             let config = self.config.clone();
+            let (client, target, model) = (client.clone(), target.clone(), model.clone());
 
             let handle = tokio::spawn(async move {
-                let result = Self::execute_request(request_id, &config).await;
+                let result =
+                    Self::execute_request(request_id, &config, &client, &target, &model).await;
 
                 // Update statistics
                 stats.total_requests.fetch_add(1, Ordering::SeqCst);
@@ -234,10 +341,19 @@ impl LoadTestRunner {
                     stats
                         .total_tokens_generated
                         .fetch_add(result.tokens_generated as u64, Ordering::SeqCst);
-                } else if result.timeout {
-                    stats.timeout_requests.fetch_add(1, Ordering::SeqCst);
                 } else {
-                    stats.failed_requests.fetch_add(1, Ordering::SeqCst);
+                    let counter = if result.timeout {
+                        &stats.timeout_requests
+                    } else {
+                        &stats.failed_requests
+                    };
+                    // Show the first few reasons so a live failure is diagnosable.
+                    if counter.fetch_add(1, Ordering::SeqCst) < 3 {
+                        eprintln!(
+                            "request {request_id} failed: {}",
+                            result.error_message.as_deref().unwrap_or("unknown")
+                        );
+                    }
                 }
 
                 // Record latency
@@ -264,38 +380,57 @@ impl LoadTestRunner {
         self.compute_final_stats(elapsed).await
     }
 
-    /// Execute a single request (mock for now, replace with actual inference)
-    async fn execute_request(request_id: u64, config: &LoadTestConfig) -> RequestResult {
+    /// Execute one real chat-completion request against the live server.
+    async fn execute_request(
+        request_id: u64,
+        config: &LoadTestConfig,
+        client: &Client,
+        target: &LiveTarget,
+        model: &str,
+    ) -> RequestResult {
         let start = Instant::now();
-
-        // TODO: Replace with actual inference call
-        // For now, simulate request with random latency
-        use rand::Rng;
-        // Draw both values and drop the RNG **before** the await. `rand`'s
-        // thread RNG is `Rc`-backed and therefore not `Send`; holding it across
-        // `.await` makes the whole future non-`Send`, and `tokio::spawn`
-        // requires `Send`. Scoping it here is what keeps the spawn legal — the
-        // previous code drew the latency, awaited, then drew `success` from the
-        // same live RNG.
-        let (latency_ms, success) = {
-            let mut rng = rand::rng();
-            (rng.random_range(10..500), rng.random_bool(0.98)) // 10-500ms; 2% failures
-        };
-        tokio::time::sleep(Duration::from_millis(latency_ms)).await;
-
-        let tokens_generated = if success { config.generation_length } else { 0 };
-
+        let body = json!({
+            "model": model,
+            "messages": [{
+                "role": "user",
+                "content": build_prompt(request_id, config.prompt_length_range),
+            }],
+            "max_tokens": config.generation_length,
+            "stream": false,
+        });
+        let mut req = client
+            .post(format!("{}/v1/chat/completions", target.base_url))
+            .header("content-type", "application/json")
+            .body(body.to_string());
+        if let Some(key) = &target.api_key {
+            req = req.bearer(key);
+        }
+        let outcome = async {
+            let resp = req.send().await.map_err(|e| e.to_string())?;
+            let status = resp.status();
+            let text = resp.text().await.map_err(|e| e.to_string())?;
+            if !status.is_success() {
+                return Err(format!("HTTP {status}: {text}"));
+            }
+            let v: Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+            Ok(v["usage"]["completion_tokens"].as_u64().unwrap_or(0) as usize)
+        }
+        .await;
         let latency = start.elapsed();
-
-        RequestResult {
-            success,
-            timeout: latency > config.request_timeout,
-            tokens_generated,
-            latency,
-            error_message: if !success {
-                Some("Simulated error".to_string())
-            } else {
-                None
+        match outcome {
+            Ok(tokens_generated) => RequestResult {
+                success: true,
+                timeout: false,
+                tokens_generated,
+                latency,
+                error_message: None,
+            },
+            Err(message) => RequestResult {
+                success: false,
+                timeout: latency >= config.request_timeout,
+                tokens_generated: 0,
+                latency,
+                error_message: Some(message),
             },
         }
     }
@@ -460,6 +595,39 @@ impl MemoryLeakDetector {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_unset_url_fails_naming_the_variable() {
+        let err = LiveTarget::from_values(None, None, None)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("LIGHTBULB_LOAD_TEST_URL"), "{err}");
+        let blank = LiveTarget::from_values(Some("  ".into()), None, None).unwrap_err();
+        assert!(blank.to_string().contains("LIGHTBULB_LOAD_TEST_URL"));
+    }
+
+    #[test]
+    fn a_set_url_is_trimmed_and_empty_optionals_are_none() -> Result<()> {
+        let t = LiveTarget::from_values(
+            Some("http://127.0.0.1:8080/".into()),
+            Some(String::new()),
+            Some(String::new()),
+        )?;
+        assert_eq!(t.base_url, "http://127.0.0.1:8080");
+        assert!(t.api_key.is_none() && t.model.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn prompts_follow_the_configured_length_range() {
+        for id in 0..50 {
+            let words = build_prompt(id, (32, 40)).split(' ').count();
+            // header is 6 words ("Request N. Summarise the following text:")
+            let body = words - 6;
+            assert!((32..=40).contains(&body), "id {id}: {body} words");
+        }
+        assert_ne!(build_prompt(0, (32, 512)), build_prompt(1, (32, 512)));
+    }
 
     /// The detector must read a real RSS on every platform (it was a dummy 0
     /// off Linux, which made leak detection a silent no-op), and the reading

@@ -344,7 +344,9 @@ jobs:
         run: |
           cargo test --tests \
             -- --skip cache_index_reused_by_a_later_unrelated_request_is_not_corrupted \
-               --skip a_cancelled_request_leaks_its_cache_slot_and_the_next_request_panics
+               --skip a_cancelled_request_leaks_its_cache_slot_and_the_next_request_panics \
+               --skip load_stress_tests::tests::test_light_load \
+               --skip load_stress_tests::tests::test_normal_load
           echo test >> .gates-ran
 
       # THE FOUR EMPTY BINARIES ABOVE ARE NOT MERELY UNRUN -- THEY ARE UNCOMPILED.

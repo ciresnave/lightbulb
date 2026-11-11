@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased (version allocated at gate)
+
+### Changed
+`tests/load_stress_tests.rs` no longer simulates requests: each one is a real `POST /v1/chat/completions` (HTTPAnt client, new dev-dependency `httpant-client`) against the server at `LIGHTBULB_LOAD_TEST_URL` (optional `LIGHTBULB_LOAD_TEST_API_KEY`, `LIGHTBULB_LOAD_TEST_MODEL`; model defaults to the first of `GET /v1/models`). Tokens come from the response's `usage.completion_tokens`. With the URL unset `test_light_load` and `test_normal_load` FAIL naming the variable (not `#[ignore]`d); the hosted CI job skips them by name until a self-hosted job sets it. Heavy and 48 h soak runs keep their own `#[ignore]` opt-in. Run against a local stub server only (200 gave 0% errors; a stub answering 500 failed the test); not yet run against a real Lightbulb server.
+
 ## 0.23.51
 
 ### Fixed

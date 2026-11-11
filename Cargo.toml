@@ -275,6 +275,8 @@ postgres-types = { version = "0.2", features = ["with-uuid-1"] }
 kiss-ref-core  = "0.4.0"
 kiss-ops-vocab = "0.4.0"
 tempfile       = "3"
+# Live-server load/stress tests (tests/load_stress_tests.rs): ant-first HTTP client.
+httpant-client = "0.7.1"
 tower          = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
 base64         = "0.22"

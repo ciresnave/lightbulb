@@ -2768,6 +2768,37 @@ dependencies = [
 ]
 
 [[package]]
+name = "httpant-client"
+version = "0.7.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "80281245cb3a0d26a2e411bfd51ec4d670cb3efb0676524acdaaa7ae3ed19646"
+dependencies = [
+ "bytes",
+ "http-body",
+ "httpant-core",
+ "hyper",
+ "hyper-util",
+ "tokio",
+ "tower 0.5.3",
+]
+
+[[package]]
+name = "httpant-core"
+version = "0.7.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "20893fd9232ed158ba410bd7f1520b7b7d65c8a8a5186ddcf40982601bb992b7"
+dependencies = [
+ "bytes",
+ "http",
+ "http-body",
+ "http-body-util",
+ "serde",
+ "serde_urlencoded",
+ "thiserror 2.0.19",
+ "tower 0.5.3",
+]
+
+[[package]]
 name = "httparse"
 version = "1.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3427,6 +3458,7 @@ dependencies = [
  "ggml-quants",
  "hex",
  "http-body-util",
+ "httpant-client",
  "hyper",
  "hyper-util",
  "instant-acme",
