@@ -380,15 +380,14 @@ impl LoadTestRunner {
         self.compute_final_stats(elapsed).await
     }
 
-    /// Execute one real chat-completion request against the live server.
-    async fn execute_request(
+    /// Send one chat completion; `Ok` is the completion token count.
+    async fn send_chat(
         request_id: u64,
         config: &LoadTestConfig,
         client: &Client,
         target: &LiveTarget,
         model: &str,
-    ) -> RequestResult {
-        let start = Instant::now();
+    ) -> std::result::Result<usize, String> {
         let body = json!({
             "model": model,
             "messages": [{
@@ -405,17 +404,26 @@ impl LoadTestRunner {
         if let Some(key) = &target.api_key {
             req = req.bearer(key);
         }
-        let outcome = async {
-            let resp = req.send().await.map_err(|e| e.to_string())?;
-            let status = resp.status();
-            let text = resp.text().await.map_err(|e| e.to_string())?;
-            if !status.is_success() {
-                return Err(format!("HTTP {status}: {text}"));
-            }
-            let v: Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
-            Ok(v["usage"]["completion_tokens"].as_u64().unwrap_or(0) as usize)
+        let resp = req.send().await.map_err(|e| e.to_string())?;
+        let status = resp.status();
+        let text = resp.text().await.map_err(|e| e.to_string())?;
+        if !status.is_success() {
+            return Err(format!("HTTP {status}: {text}"));
         }
-        .await;
+        let v: Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+        Ok(v["usage"]["completion_tokens"].as_u64().unwrap_or(0) as usize)
+    }
+
+    /// Execute one real chat-completion request against the live server.
+    async fn execute_request(
+        request_id: u64,
+        config: &LoadTestConfig,
+        client: &Client,
+        target: &LiveTarget,
+        model: &str,
+    ) -> RequestResult {
+        let start = Instant::now();
+        let outcome = Self::send_chat(request_id, config, client, target, model).await;
         let latency = start.elapsed();
         match outcome {
             Ok(tokens_generated) => RequestResult {
