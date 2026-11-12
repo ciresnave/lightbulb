@@ -1,0 +1,4 @@
+kind: **BREAKING**: persistant-* 0.9.24 -> 0.17.1
+---
+### Changed
+Every `persistant-*` pin moves from 0.9.24 to 0.17.1 (`persistant`, `persistant-sqlx`, `persistant-relational`; the lock also takes persistant-core 0.17.1, unisql-core 0.27.10 and the new capant 0.1.0). `ConnectOptions` is `#[non_exhaustive]` in 0.17, so `try_connect_once` (`src/api/mod.rs`) builds it with `ConnectOptions::default().with_tls(..).with_max_connections(16).with_acquire_timeout(..).with_application_name("lightbulb")` instead of a struct literal (the connection now identifies itself as `lightbulb`). `tests/persistant_migrate_tests.rs` drops a `Migrates` import that 0.17 no longer needs. No `Endpoint::Url` use in this repo. Verified: `cargo check --all-targets` compiles with no persistant deprecation warnings; Postgres-backed tests run in CI `postgres_integration`.

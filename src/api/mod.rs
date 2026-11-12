@@ -607,11 +607,11 @@ async fn try_connect_once(
     timeout: std::time::Duration,
 ) -> Result<persistant_sqlx::PgBackend, persistant_relational::RelError> {
     let secret = persistant_relational::ConnectionSecret::literal(database_url);
-    let options = persistant_sqlx::ConnectOptions {
-        tls: tls_policy_for(database_url),
-        max_connections: 16,
-        acquire_timeout: timeout,
-    };
+    let options = persistant_sqlx::ConnectOptions::default()
+        .with_tls(tls_policy_for(database_url))
+        .with_max_connections(16)
+        .with_acquire_timeout(timeout)
+        .with_application_name("lightbulb");
     persistant_sqlx::PgBackend::connect_with(&secret, &options).await
 }
 

@@ -692,6 +692,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3d7c8918969267b2932ffd5655509bbbea0833823058c378876953217f5fc50e"
 
 [[package]]
+name = "capant"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0a276d9a8a4688e5689b3e232555476930e3ff4cef61bb358028de5504e0778f"
+
+[[package]]
 name = "cast"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4446,9 +4452,9 @@ checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 
 [[package]]
 name = "persistant"
-version = "0.9.24"
+version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b85ec72740426fb5670d54ea3d950022fdc71f8a9e75230c577e79f0a935f7c4"
+checksum = "7d2735f3df00d8423aa2397b3d1deea9d45c28e2bf2226b795ffde13e70b2ad5"
 dependencies = [
  "futures-util",
  "opendal",
@@ -4459,15 +4465,19 @@ dependencies = [
 
 [[package]]
 name = "persistant-core"
-version = "0.9.24"
+version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7fc0416f5502583b7fd0b6c57817bb7d2f2441fdf9caddbdc2da48456db0735a"
+checksum = "8d2a648bb90e9d44959847f7c7f69f9546d33062e7d2aa9a3a853bdf8e3a18a8"
+dependencies = [
+ "capant",
+ "windows-sys 0.61.2",
+]
 
 [[package]]
 name = "persistant-relational"
-version = "0.9.24"
+version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "65a2493296b714be07b22dfda08ad343454e214e5890ec14fb68f9362dda0835"
+checksum = "d7b2c4c8a1ee201b470b026f3be6167460ad463498e441ff8d34fc1ba19afe8a"
 dependencies = [
  "persistant-core",
  "unisql-core",
@@ -4475,10 +4485,11 @@ dependencies = [
 
 [[package]]
 name = "persistant-sqlx"
-version = "0.9.24"
+version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a305a4190f6d8378eacf4f788f1dd8b6a9375ae88386d2f0608b4435489e09fa"
+checksum = "35331892600e288cac5c64436e653884dbe9e944812ca5934f0c1bb25cb6ebc0"
 dependencies = [
+ "chrono",
  "persistant-core",
  "persistant-relational",
  "sqlx",
@@ -5860,6 +5871,7 @@ dependencies = [
  "base64 0.22.1",
  "bytes",
  "cfg-if",
+ "chrono",
  "crc",
  "crossbeam-queue",
  "either",
@@ -5880,7 +5892,6 @@ dependencies = [
  "sha2 0.10.9",
  "smallvec",
  "thiserror 2.0.19",
- "time",
  "tokio",
  "tokio-stream",
  "tracing",
@@ -5935,6 +5946,7 @@ dependencies = [
  "bitflags 2.13.1",
  "byteorder",
  "bytes",
+ "chrono",
  "crc",
  "digest 0.11.3",
  "dotenvy",
@@ -5949,7 +5961,6 @@ dependencies = [
  "sha2 0.11.0",
  "sqlx-core",
  "thiserror 2.0.19",
- "time",
  "tracing",
 ]
 
@@ -5963,6 +5974,7 @@ dependencies = [
  "base64 0.22.1",
  "bitflags 2.13.1",
  "byteorder",
+ "chrono",
  "crc",
  "dotenvy",
  "etcetera",
@@ -5984,7 +5996,6 @@ dependencies = [
  "sqlx-core",
  "stringprep",
  "thiserror 2.0.19",
- "time",
  "tracing",
  "whoami",
 ]
@@ -5996,6 +6007,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "488e99c397a62007e4229aec669a179816339afc6d2620ca6fa420dbee2e982c"
 dependencies = [
  "atoi",
+ "chrono",
  "flume",
  "form_urlencoded",
  "futures-channel",
@@ -6009,7 +6021,6 @@ dependencies = [
  "serde",
  "sqlx-core",
  "thiserror 2.0.19",
- "time",
  "tracing",
  "url",
 ]
@@ -6873,9 +6884,9 @@ checksum = "39ec24b3121d976906ece63c9daad25b85969647682eee313cb5779fdd69e14e"
 
 [[package]]
 name = "unisql-core"
-version = "0.25.8"
+version = "0.27.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b70d7ebec6bdf5a46aa8af9e708fcf34e9437df648801f3335ce5052d82bc25f"
+checksum = "7a579a07847cc27fe5bd99e690021b2bb87ecbe2987c12ca6d99efc7d761502f"
 dependencies = [
  "serde",
  "serde_json",
