@@ -212,18 +212,24 @@ pub fn pull(
         })
         .collect();
     let unit = select_unit(&gguf_units(&listed)?, spec.quant.as_deref())?;
+    let sha = &listing.resolved_revision;
     let mut out = Vec::new();
     for lf in &unit.files {
-        let remote = listing.files.iter().find(|f| f.path == lf.path);
-        let remote =
-            remote.ok_or_else(|| anyhow::anyhow!("{} vanished from the listing", lf.path))?;
+        let remote = find_listed(&listing.files, &lf.path)?;
         let dest = models_dir.join(safe_relative(&lf.path)?);
-        let sha = &listing.resolved_revision;
         out.push(pull_file(hub, &spec.repo, sha, remote, &dest, &mut |p| {
             on_progress(&lf.path, p)
         })?);
     }
     Ok(out)
+}
+
+/// The listing entry for `path`, which the chosen unit was built from and so must still contain.
+fn find_listed<'a>(files: &'a [RemoteFile], path: &str) -> Result<&'a RemoteFile> {
+    files
+        .iter()
+        .find(|f| f.path == path)
+        .ok_or_else(|| anyhow::anyhow!("{path} vanished from the listing"))
 }
 
 #[cfg(test)]
