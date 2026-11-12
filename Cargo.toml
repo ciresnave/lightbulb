@@ -37,7 +37,8 @@
     # JSON Schema validation for `response_format: json_schema` (A5).
     jsonschema         = { version = "0.60", default-features = false }
     memmap2            = "0.9"
-    mlmf-hf-layout     = "0.7.26"
+    mlmf-gguf          = "0.11.29"
+    mlmf-hf-layout     = "0.11.29"
     # Chat-template rendering. HuggingFace `chat_template` values are Jinja.
     # minijinja is pure Rust with no C dependencies, which keeps the CUDA build
     # unaffected.

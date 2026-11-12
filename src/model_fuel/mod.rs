@@ -96,6 +96,7 @@ pub mod device;
 pub mod device_pool;
 pub mod engine_model;
 pub mod generate;
+pub mod gguf_shards;
 pub mod loader;
 pub mod loader_f32;
 pub mod loader_gguf;
