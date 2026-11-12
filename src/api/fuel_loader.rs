@@ -7,7 +7,8 @@
 use super::chat_template;
 use super::manager::{LoadError, ModelLoader};
 use super::registry::{ModelEntry, ModelRegistry};
-use crate::engine::model_runner::{EngineOptions, ModelRunner, SharedCacheStats, SharedScheduler};
+use crate::engine::ModelRunner;
+use crate::engine::model_runner::{EngineOptions, SharedCacheStats, SharedScheduler};
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
 

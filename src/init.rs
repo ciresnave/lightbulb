@@ -21,7 +21,7 @@
 //! println!("Optimized for: {} slots", config.slot_pool_size);
 //! ```
 
-use crate::engine::speculative::SpeculativeConfig;
+use crate::engine::SpeculativeConfig;
 use crate::hardware::{HardwareProfile, batch_sizing::*};
 use anyhow::{Context, Result};
 
