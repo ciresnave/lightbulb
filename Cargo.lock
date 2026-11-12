@@ -2061,8 +2061,8 @@ dependencies = [
  "fuel-quantized",
  "memmap2",
  "mlmf-awq",
- "mlmf-core",
- "mlmf-gguf",
+ "mlmf-core 0.7.26",
+ "mlmf-gguf 0.7.26",
  "mlmf-safetensors",
  "mlmf-source-file",
  "safetensors",
@@ -3437,7 +3437,7 @@ dependencies = [
 
 [[package]]
 name = "lightbulb"
-version = "0.23.57"
+version = "0.23.58"
 dependencies = [
  "ahash",
  "anyhow",
@@ -3476,6 +3476,7 @@ dependencies = [
  "metrics-exporter-prometheus",
  "minijinja",
  "minijinja-contrib",
+ "mlmf-gguf 0.11.29",
  "mlmf-hf-layout",
  "mocopr",
  "parking_lot",
@@ -3755,7 +3756,7 @@ version = "0.7.26"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "826dcdb79bf42375c978bc8da58cb84c68c1b2324e017417e2e9d88b5abf62b4"
 dependencies = [
- "mlmf-core",
+ "mlmf-core 0.7.26",
  "serde_json",
 ]
 
@@ -3771,12 +3772,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "mlmf-core"
+version = "0.11.29"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3057e748abf6a64d8191ac8a3507b9389dac3cac3e0d0ea58e98f1022b039932"
+dependencies = [
+ "bytemuck",
+ "smallvec",
+ "thiserror 2.0.19",
+]
+
+[[package]]
 name = "mlmf-ggml"
 version = "0.7.26"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9602a3df93e8d38a432c3cd61c7962b203e130c912352d1fddb33e3658d2456b"
 dependencies = [
- "mlmf-core",
+ "mlmf-core 0.7.26",
+]
+
+[[package]]
+name = "mlmf-ggml"
+version = "0.11.29"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bb8b169a54381866aeb14f71ec40a60384964129edc95665865ba4d86596aa28"
+dependencies = [
+ "mlmf-core 0.11.29",
 ]
 
 [[package]]
@@ -3785,17 +3806,27 @@ version = "0.7.26"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9e53ed051f3787596f39e8595e5b1b8d9590f85e8451d3149e2583238968a7e1"
 dependencies = [
- "mlmf-core",
- "mlmf-ggml",
+ "mlmf-core 0.7.26",
+ "mlmf-ggml 0.7.26",
+]
+
+[[package]]
+name = "mlmf-gguf"
+version = "0.11.29"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bc454506d840801c2327193f7ed39a0e8b0095007767538ddf0c7727a70e0759"
+dependencies = [
+ "mlmf-core 0.11.29",
+ "mlmf-ggml 0.11.29",
 ]
 
 [[package]]
 name = "mlmf-hf-layout"
-version = "0.7.26"
+version = "0.11.29"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b94411517479912274bd37e6b27e62a86722a866e11a3913e758950223c55784"
+checksum = "1991f11ad6c82d6547370c21d60d6531e43c3bf5017d94673e0d7aa3f871cce8"
 dependencies = [
- "mlmf-core",
+ "mlmf-core 0.11.29",
  "serde_json",
 ]
 
@@ -3805,7 +3836,7 @@ version = "0.7.26"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "34393079a5f717f3fa393b813d7376b331362e45b944fe8002f656e029db0f37"
 dependencies = [
- "mlmf-core",
+ "mlmf-core 0.7.26",
  "serde_json",
 ]
 
@@ -3816,7 +3847,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "713b2af7c11fe742338b5ae9d892e88131fe3c6d381f97223d0cea2f5787d8e7"
 dependencies = [
  "memmap2",
- "mlmf-core",
+ "mlmf-core 0.7.26",
 ]
 
 [[package]]

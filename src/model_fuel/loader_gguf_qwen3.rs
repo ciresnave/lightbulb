@@ -131,6 +131,7 @@ fn warn_if_no_eos(path: &Path, no_eos: bool) {
 /// cache across all three. Mutating the file while any is alive is undefined
 /// behaviour. Mirrors `load_quantized_llama_gguf`'s own safety note exactly.
 pub fn load_quantized_qwen3_gguf(path: &Path) -> Result<LoadedQuantizedQwen3> {
+    super::gguf_shards::refuse_split(path)?;
     let content = crate::gguf::Content::read(path)
         .with_context(|| format!("reading GGUF metadata from {}", path.display()))?;
     require_qwen3_architecture(content.metadata())?;

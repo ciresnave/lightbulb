@@ -128,6 +128,7 @@ pub(crate) fn bos_eos_from_metadata(
 /// shares page cache across all three. Mutating the file while any is alive
 /// is undefined behaviour.
 pub fn load_quantized_llama_gguf(path: &Path) -> Result<LoadedQuantizedLlama> {
+    super::gguf_shards::refuse_split(path)?;
     let content = crate::gguf::Content::read(path)
         .with_context(|| format!("reading GGUF metadata from {}", path.display()))?;
 
