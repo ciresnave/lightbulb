@@ -5,6 +5,7 @@
 //!   lightbulb-cli --api-key <key> --url <base-url> [--stream]
 //!   lightbulb-cli list                 # the models the server can serve
 //!   lightbulb-cli run <model>          # chat with <model>; the server loads it on demand
+//!   lightbulb-cli pull <repo[:quant]>  # download a GGUF from the Hugging Face Hub into LIGHTBULB_MODELS_DIR
 
 use clap::{Parser, Subcommand};
 use futures_util::StreamExt;
@@ -56,6 +57,15 @@ enum Command {
     Run {
         /// Model name, as `list` prints it
         model: String,
+    },
+    /// Download a GGUF (or a complete split set) from the Hugging Face Hub, verified by hash.
+    /// Runs locally and writes files; it does not talk to the server.
+    Pull {
+        /// `owner/name` or `owner/name:QUANT` (for example `Qwen/Qwen3-0.6B-GGUF:Q8_0`)
+        spec: String,
+        /// Where to write (default: $LIGHTBULB_MODELS_DIR)
+        #[arg(long)]
+        models_dir: Option<std::path::PathBuf>,
     },
 }
 
@@ -151,6 +161,35 @@ fn main() -> anyhow::Result<()> {
     run(Args::parse())
 }
 
+/// `pull`: resolve `repo[:quant]`, download into the models directory, print progress at each 10%.
+fn run_pull(spec: &str, models_dir: Option<std::path::PathBuf>) -> anyhow::Result<()> {
+    use lightbulb::model_fuel::pull::{FileOutcome, parse_spec, pull};
+    let dir = models_dir
+        .or_else(|| std::env::var_os("LIGHTBULB_MODELS_DIR").map(Into::into))
+        .ok_or_else(|| {
+            anyhow::anyhow!("no models directory: pass --models-dir or set LIGHTBULB_MODELS_DIR")
+        })?;
+    let mut hub = mlmf_source_hub::HubSource::new(dir.join(".hub-cache"));
+    if let Ok(token) = std::env::var("HF_TOKEN") {
+        hub = hub.with_token(token);
+    }
+    let mut last = (String::new(), 101u64);
+    let outcomes = pull(&hub, &parse_spec(spec)?, &dir, &mut |name, p| {
+        let pct = p.total.map_or(0, |t| p.downloaded * 100 / t.max(1)) / 10 * 10;
+        if (name, pct) != (last.0.as_str(), last.1) {
+            eprintln!("{name}: {pct}% ({} bytes)", p.downloaded);
+            last = (name.to_string(), pct);
+        }
+    })?;
+    for o in outcomes {
+        match o {
+            FileOutcome::Present(p) => println!("already present, hash ok: {}", p.display()),
+            FileOutcome::Downloaded(p) => println!("downloaded, hash ok: {}", p.display()),
+        }
+    }
+    Ok(())
+}
+
 #[tokio::main]
 async fn run(mut args: Args) -> anyhow::Result<()> {
     let key = args
@@ -167,6 +206,9 @@ async fn run(mut args: Args) -> anyhow::Result<()> {
         Some(Command::Run { model }) => {
             args.model = model;
             chat(args, key).await
+        }
+        Some(Command::Pull { spec, models_dir }) => {
+            tokio::task::spawn_blocking(move || run_pull(&spec, models_dir)).await?
         }
         None => chat(args, key).await,
     }
