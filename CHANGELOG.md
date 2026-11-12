@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.23.55
+
+### Changed
+Adopts the portfolio fragment-and-stamp flow: `tools/stamp-version.py`, `tools/check-fragment.py`, the `changelog-fragment` workflow and `changelog.d/README.md`. From here a PR carries one `changelog.d/<topic>.md` fragment and no version edit; the PM stamps the version at merge. CI/tooling only; no code change. Verified with `stamp-version.py 99.99.99 --dry-run` (lists Cargo.toml, Cargo.lock, CHANGELOG.md).
+
 ## 0.23.54
 
 ### Changed
