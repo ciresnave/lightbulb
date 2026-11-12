@@ -11,7 +11,7 @@
 //! it does not open or merge shards. Loading a shard set needs a merged
 //! reader that Fuel can consume, which is an open Fuel question.
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use mlmf_gguf::split::{parse_split_file_name, shard_file_names};
 use std::path::Path;
 
