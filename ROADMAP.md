@@ -5666,8 +5666,8 @@ Measured 2026-11-12 at main f01b123 with coderipper 0.43.54 (`coderipper check <
 
 | # | Item | Status |
 |---|---|---|
-| G1 | **MOD-002 (Low): api <-> contracts cycle** (10 modules). Closing edge: `contracts/executor.rs:93` calls `api::openai::chat::build_prompt_from_raw`, and `:63` names `api::chat_template::ResolvedTemplate`. Fix: the executor takes a prompt-builder function (or the prompt/template types move below both). Waived in `.coderipper.toml` until 2027-02-28. | open (design) |
-| G2 | **MOD-002 (Low): engine <-> model_fuel cycle** (6 modules). Closing edge: `engine/model_runner.rs:465` calls `model_fuel::scheduled_llama_engine::run_fuel_engine`. Fix: the runner takes the engine factory as a parameter, wired in `init`/`server`. Waived until 2027-02-28. | open (design) |
+| G1 | **MOD-002 (Low): api <-> contracts cycle** (10 modules). Closing edge: `contracts/executor.rs:93` calls `api::openai::chat::build_prompt_from_raw`, and `:63` names `api::chat_template::ResolvedTemplate`. Fix: the executor takes a prompt-builder function (or the prompt/template types move below both). Waived in `.coderipper.toml` until 2027-02-28. **Owner: lightbulb lane.** | open (design) |
+| G2 | **MOD-002 (Low): engine <-> model_fuel cycle** (6 modules). Closing edge: `engine/model_runner.rs:465` calls `model_fuel::scheduled_llama_engine::run_fuel_engine`. Fix: the runner takes the engine factory as a parameter, wired in `init`/`server`. Waived until 2027-02-28. **Owner: lightbulb lane.** | open (design) |
 | G3 | MOD-002 (Info): `engine::decomposition` <-> `engine::state_persistence`; `multi_gpu::config` <-> `multi_gpu::topology`. | open |
 | G4 | MOD-005 (Info) outliers: `api/mod.rs` names 16 modules (threshold 14); `api/openai/chat.rs` 1279 code lines (1035); `engine/mod.rs` names 19; `model_fuel/scheduled_llama_engine.rs` names 15. Split `chat.rs` first (it also carries most of G1's surface). | open |
 | G5 | MOD-001 (Info): 163 of 1138 public items lack documentation (14%), the first at `src/api/admin_models.rs:16`. | open (ratchet) |
