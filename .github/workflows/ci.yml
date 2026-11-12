@@ -220,7 +220,7 @@ jobs:
   portfolio:
     permissions:
       contents: read
-    uses: ciresnave/coderipper/.github/workflows/portfolio.yml@4bcf55e4cd5c171a88f021c0c4e563e47ef4bb7d # coderipper#303, installs coderipper 0.43.41
+    uses: ciresnave/coderipper/.github/workflows/portfolio.yml@33cc3b7e4ab9305b5244092842fc7f6f6b686983 # coderipper#307, installs coderipper 0.43.49
 
   gates:
     # `gates` is the one required status context on this repo's `main`, so
