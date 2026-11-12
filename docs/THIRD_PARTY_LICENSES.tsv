@@ -291,6 +291,7 @@ mlmf-gguf@0.7.26		X									X
 mlmf-hf-layout@0.11.29		X									X					
 mlmf-safetensors@0.7.26		X									X					
 mlmf-source-file@0.7.26		X									X					
+mlmf-source-hub@0.11.29		X									X					
 mocopr@0.1.0		X									X					
 mocopr-client@0.1.0		X									X					
 mocopr-core@0.1.0		X									X					
@@ -447,6 +448,7 @@ serde_urlencoded@0.7.1		X									X
 serde_yaml_ng@0.10.0											X					
 servo_arc@0.4.3		X									X					
 sha1@0.10.7		X									X					
+sha1@0.11.0		X									X					
 sha2@0.10.9		X									X					
 sha2@0.11.0		X									X					
 sharded-slab@0.1.7											X					
@@ -460,7 +462,6 @@ sketches-ddsketch@0.3.1		X
 slab@0.4.12											X					
 smallvec@1.15.2		X									X					
 socket2@0.6.5		X									X					
-socks@0.3.4		X									X					
 spm_precompiled@0.1.4		X														
 sqlx@0.9.0		X									X					
 sqlx-core@0.9.0		X									X					
@@ -544,8 +545,8 @@ unisql-core@0.27.10		X									X
 unit-prefix@0.5.2											X					
 unsafe-libyaml@0.2.11											X					
 untrusted@0.9.0									X							
-ureq@3.3.0		X									X					
-ureq-proto@0.6.0		X									X					
+ureq@3.5.2		X									X					
+ureq-proto@0.7.1		X									X					
 url@2.5.8		X									X					
 utf-8@0.7.6		X									X					
 utf8-zero@0.8.1		X									X					
