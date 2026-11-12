@@ -4,7 +4,7 @@
     license     = "MIT OR Apache-2.0"
     name        = "lightbulb"
     repository  = "https://github.com/ciresnave/lightbulb"
-    version     = "0.23.56"
+    version     = "0.23.57"
 
 [features]
     # CUDA, via Fuel only. Was `["candlelight/cuda", "fuel/cuda"]`; candlelight
@@ -79,7 +79,7 @@
     # Thin persistence layer over OpenDAL (crates.io, not git/path — CIRESNAVE-EXPECTATIONS §6.8).
     # Backs `cache::tiered_storage::FileDiskStore`'s disk tier; declares the needs it uses
     # (read/write/delete/atomic-replace) and is refused at open if the backend can't give them.
-    persistant         = "0.9.24"
+    persistant         = "0.17.1"
     rand               = "0.9"
     rayon              = "1.10"
     regex              = "1"
@@ -103,8 +103,8 @@
     futures-util       = "0.3"
     hex                = "0.4"
     reqwest            = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls-manual-roots"] }
-    persistant-sqlx       = "0.9.24"
-    persistant-relational = "0.9.24"
+    persistant-sqlx       = "0.17.1"
+    persistant-relational = "0.17.1"
     # Only to pick a `TlsPolicy` for `PgBackend::connect_with` from
     # `DATABASE_URL`'s own `sslmode` (and to recognize a loopback host) --
     # see `tls_policy_for` in `api/mod.rs`. `connect_with`'s pool bounds

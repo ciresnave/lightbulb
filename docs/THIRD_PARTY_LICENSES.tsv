@@ -44,6 +44,7 @@ byteorder@1.5.0											X				X
 byteorder-lite@0.1.0											X				X	
 bytes@1.12.1											X					
 bytesize@2.4.2		X														
+capant@0.1.0		X									X					
 castaway@0.2.4											X					
 cc@1.4.0		X									X					
 cfg-if@1.0.4		X									X					
@@ -344,10 +345,10 @@ pathdiff@0.2.3		X									X
 pem@3.0.6											X					
 pem-rfc7468@1.0.0		X									X					
 percent-encoding@2.3.2		X									X					
-persistant@0.9.24		X									X					
-persistant-core@0.9.24		X									X					
-persistant-relational@0.9.24		X									X					
-persistant-sqlx@0.9.24		X									X					
+persistant@0.17.1		X									X					
+persistant-core@0.17.1		X									X					
+persistant-relational@0.17.1		X									X					
+persistant-sqlx@0.17.1		X									X					
 pest@2.8.8		X									X					
 pest_derive@2.8.8		X									X					
 pest_generator@2.8.8		X									X					
@@ -536,7 +537,7 @@ unicode-properties@0.1.4		X									X
 unicode-segmentation@1.13.3		X									X					
 unicode-width@0.2.2		X									X					
 unicode_categories@0.1.1		X									X					
-unisql-core@0.25.8		X									X					
+unisql-core@0.27.10		X									X					
 unit-prefix@0.5.2											X					
 unsafe-libyaml@0.2.11											X					
 untrusted@0.9.0									X							

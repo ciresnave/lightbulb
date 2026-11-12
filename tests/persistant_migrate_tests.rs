@@ -8,7 +8,6 @@
 #[cfg(test)]
 mod persistant_migrate_tests {
     use lightbulb::api::persistant_migrate::migrations;
-    use persistant_relational::Migrates;
     use persistant_sqlx::PgBackend;
 
     // Same override pattern as tests/api_integration_tests.rs's `test_db_url` --
