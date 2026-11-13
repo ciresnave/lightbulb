@@ -57,9 +57,9 @@ use crate::engine::model_runner::{CompletionResult, FinishReason};
 /// server resolves once at startup, and a caller here should pass the same
 /// value rather than re-deriving a possibly different one.
 ///
-/// [`ModelRunner`]: crate::engine::model_runner::ModelRunner
+/// [`ModelRunner`]: crate::engine::ModelRunner
 pub async fn execute_contract_with_runner(
-    tx: std::sync::mpsc::SyncSender<crate::engine::model_runner::InferenceJob>,
+    tx: std::sync::mpsc::SyncSender<crate::engine::InferenceJob>,
     template: Option<std::sync::Arc<crate::api::chat_template::ResolvedTemplate>>,
     messages: &[RawMessage],
     model_id: &str,
@@ -92,7 +92,8 @@ pub async fn execute_contract_with_runner(
             let prompt =
                 crate::api::openai::chat::build_prompt_from_raw(template.as_deref(), &msgs);
             async move {
-                use crate::engine::model_runner::{InferenceJob, ResponseMode};
+                use crate::engine::InferenceJob;
+                use crate::engine::model_runner::ResponseMode;
                 let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
                 let job = InferenceJob {
                     id: uuid::Uuid::new_v4().to_string(),

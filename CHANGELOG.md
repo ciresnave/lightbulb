@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.23.60 — MOD-003 reach-throughs removed
+
+### Changed
+CodeRipper MOD-003 (reaching through a sibling module's inner modules for items its entry point re-exports) went from 7 findings (17 reach-throughs) to 0 (coderipper 0.43.54, `check MOD-003`). Seven files now import `InferenceJob`, `ModelRunner`, `SpeculativeConfig`, `SlotPoolRequest`, `H2OPolicy`, `SegmentedEvictionPolicy` and the span types from `crate::engine` / `crate::cache` instead of `engine::model_runner::`, `engine::speculative::`, `engine::slot_pool::`, `cache::cache_span::`. Paths only; no behaviour change. Verified: `cargo check --all-targets` compiles, `scripts/clippy_gate.py` exits 0.
+
+## 0.23.62 — model pull (ROADMAP F1)
+
+### Added
+`lightbulb-cli pull <owner/name[:QUANT]> [--models-dir DIR]` downloads one GGUF, or every shard of a complete split set, from the Hugging Face Hub into `LIGHTBULB_MODELS_DIR`, verified by the Hub's sha256 (or git blob sha1). The choice of file is `model_fuel/pull.rs` (`parse_spec`, `gguf_units`, `select_unit`): quant matched as a whole token (`Q4_K` does not match `Q4_K_M`), ambiguity and absence name the choices, an incomplete split set is an error, listed paths are refused if they would leave the directory. The revision is resolved once and every file fetched at that SHA; a verified file already present is not fetched again; a file that fails verification is removed. New dependency `mlmf-source-hub` 0.11.29 (its four additions that F1 waited on now exist). Verified: 9 unit tests incl. a localhost stub Hub (download, skip-present, tampered download removed); `cargo check --bins`; clippy gate exit 0. NOT verified against the real Hub; the admin route is still open (ROADMAP F1).
+
+## 0.23.59 — docs: PATENT-SWEEP reads
+
+### Changed
+Docs only. `docs/PATENT-SWEEP.md`: every candidate previously `unread` was fetched and its independent claim 1 read (rows 25-47), the four 503-blocked queries and the idea-2 and idea-6 queries were run (2026-11-12). One new `needs-review` (CN122387552A, tiered adapter cache) and three `watch` rows (CN122019408B granted, US20260211813A1, CN121934771A); five idea-2 hits stay `unread`. Not a clearance, not legal advice. No code change.
+
 ## 0.23.58 — sharded GGUF refused up front; mlmf crates 0.11.29
 
 ### Changed

@@ -24,7 +24,8 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, RwLock};
 
 use crate::api::chat_template::ResolvedTemplate;
-use crate::engine::model_runner::{ControlSender, InferenceJob};
+use crate::engine::InferenceJob;
+use crate::engine::model_runner::ControlSender;
 
 /// What the server holds for one model.
 #[derive(Clone, Default)]

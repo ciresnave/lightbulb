@@ -52,13 +52,14 @@ use fuel_inference::multi_session::{KvBudget, PagedSchedulePolicy};
 use super::engine_model::effective_generation_budget;
 use super::policies::BlockPrefixIndexFor;
 use super::scheduler_driver_paged::{FuelPagedSchedulerDriver, SERVING_SCHEDULE_POLICY};
+use crate::engine::InferenceJob;
+use crate::engine::SlotPoolRequest as SlotRequest;
 use crate::engine::model_runner::{
-    ControlMsg, InferenceJob, SharedCacheStats, SharedScheduler, drain_with_error,
+    ControlMsg, SharedCacheStats, SharedScheduler, drain_with_error,
 };
 use crate::engine::scheduled_runner::{
     AdmitError, FinishOutcome, SchedulerDriver, run_scheduled_jobs,
 };
-use crate::engine::slot_pool::Request as SlotRequest;
 use crate::gguf::{GgufArchitecture, detect_architecture};
 
 /// The checkpoint's full EOS set, in fuel's `eos_ids: Option<Vec<u32>>`

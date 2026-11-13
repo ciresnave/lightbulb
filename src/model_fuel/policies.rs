@@ -148,10 +148,10 @@ use fuel::kv_block_pool::{
 };
 use fuel::kv_block_pool_device::{BlockKind, DeviceKvPool};
 
-use crate::cache::cache_span::{EvictionImpact, SpanId, SpanRegistry, SpanState};
-use crate::cache::h2o_policy::H2OPolicy;
-use crate::cache::segmented_eviction_policy::SegmentedEvictionPolicy;
 use crate::cache::tiered_storage::DiskStore;
+use crate::cache::{
+    EvictionImpact, H2OPolicy, SegmentedEvictionPolicy, SpanId, SpanRegistry, SpanState,
+};
 
 // ===========================================================================
 // Errors
@@ -1630,8 +1630,8 @@ fn le_bytes_to_f32s(b: &[u8]) -> Vec<f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cache::cache_span::{CacheSpan, CacheTag};
     use crate::cache::h2o_policy::H2OConfig;
+    use crate::cache::{CacheSpan, CacheTag};
 
     fn geom(num_blocks: usize, block_size: usize) -> PagedGeometry {
         PagedGeometry::from_kv(KvGeometry {

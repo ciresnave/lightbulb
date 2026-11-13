@@ -1518,7 +1518,7 @@ async fn create_chat_completion(
 /// function has no way to know which implementation is on the other end
 /// of `tx`.
 pub(crate) async fn run_inference_once(
-    tx: &std::sync::mpsc::SyncSender<crate::engine::model_runner::InferenceJob>,
+    tx: &std::sync::mpsc::SyncSender<crate::engine::InferenceJob>,
     queue_depth: &crate::engine::model_runner::SharedQueueDepth,
     prompt: BuiltPrompt,
     max_new_tokens: usize,
@@ -1535,7 +1535,7 @@ pub(crate) async fn run_inference_once(
     let _queue_depth_guard = crate::engine::model_runner::QueueDepthGuard::new(queue_depth.clone());
 
     let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
-    let job = crate::engine::model_runner::InferenceJob {
+    let job = crate::engine::InferenceJob {
         id: uuid::Uuid::new_v4().to_string(),
         prompt: prompt.text,
         max_new_tokens,
@@ -1573,7 +1573,7 @@ pub(crate) async fn run_inference_once(
 /// Owned-sender variant used by the `execute_contract` closure (which must
 /// be `Fn`, so it clones `tx` on each call rather than borrowing).
 pub(crate) async fn run_inference_once_owned(
-    tx: std::sync::mpsc::SyncSender<crate::engine::model_runner::InferenceJob>,
+    tx: std::sync::mpsc::SyncSender<crate::engine::InferenceJob>,
     queue_depth: crate::engine::model_runner::SharedQueueDepth,
     prompt: BuiltPrompt,
     max_new_tokens: usize,
@@ -1818,7 +1818,7 @@ fn create_chat_stream(
     if let Some(tx) = model_entry.inference_tx {
         let (stream_tx, stream_rx) = tokio::sync::mpsc::unbounded_channel();
 
-        let job = crate::engine::model_runner::InferenceJob {
+        let job = crate::engine::InferenceJob {
             id: uuid::Uuid::new_v4().to_string(),
             prompt: prompt.text,
             max_new_tokens,
@@ -2323,9 +2323,7 @@ mod tests {
 
     fn state_with_runner(
         chat_template: Option<std::sync::Arc<crate::api::chat_template::ResolvedTemplate>>,
-        inference_tx: Option<
-            std::sync::mpsc::SyncSender<crate::engine::model_runner::InferenceJob>,
-        >,
+        inference_tx: Option<std::sync::mpsc::SyncSender<crate::engine::InferenceJob>>,
     ) -> AppState {
         state_with_monitor(
             chat_template,
@@ -2347,9 +2345,7 @@ mod tests {
 
     fn state_with_monitor(
         chat_template: Option<std::sync::Arc<crate::api::chat_template::ResolvedTemplate>>,
-        inference_tx: Option<
-            std::sync::mpsc::SyncSender<crate::engine::model_runner::InferenceJob>,
-        >,
+        inference_tx: Option<std::sync::mpsc::SyncSender<crate::engine::InferenceJob>>,
         eos_monitor: std::sync::Arc<EosMonitor>,
     ) -> AppState {
         use crate::engine::{MemoryAwareConfig, MemoryAwareScheduler};
@@ -2613,7 +2609,7 @@ mod tests {
     /// which is why each caller below lets the value holding the sender go out
     /// of scope before `join`ing.
     fn stub_runner() -> (
-        std::sync::mpsc::SyncSender<crate::engine::model_runner::InferenceJob>,
+        std::sync::mpsc::SyncSender<crate::engine::InferenceJob>,
         std::thread::JoinHandle<Vec<(String, bool)>>,
     ) {
         stub_runner_with(FinishReason::Stop)
@@ -2634,7 +2630,7 @@ mod tests {
     fn stub_runner_with(
         finish_reason: FinishReason,
     ) -> (
-        std::sync::mpsc::SyncSender<crate::engine::model_runner::InferenceJob>,
+        std::sync::mpsc::SyncSender<crate::engine::InferenceJob>,
         std::thread::JoinHandle<Vec<(String, bool)>>,
     ) {
         use crate::engine::model_runner::{
@@ -4499,7 +4495,7 @@ mod tests {
         text: &str,
         finish_reason: FinishReason,
     ) -> (
-        std::sync::mpsc::SyncSender<crate::engine::model_runner::InferenceJob>,
+        std::sync::mpsc::SyncSender<crate::engine::InferenceJob>,
         std::thread::JoinHandle<()>,
     ) {
         use crate::engine::model_runner::{CompletionResult, InferenceJob, ResponseMode};
@@ -4570,7 +4566,7 @@ mod tests {
     fn slow_unparseable_runner(
         delay_ms: u64,
     ) -> (
-        std::sync::mpsc::SyncSender<crate::engine::model_runner::InferenceJob>,
+        std::sync::mpsc::SyncSender<crate::engine::InferenceJob>,
         std::thread::JoinHandle<()>,
     ) {
         use crate::engine::model_runner::{CompletionResult, InferenceJob, ResponseMode};
@@ -5231,7 +5227,7 @@ mod tests {
     /// `RequestTimeoutError`, not hang the test (or a real request) forever.
     #[tokio::test]
     async fn run_inference_once_times_out_when_the_runner_never_answers() {
-        use crate::engine::model_runner::InferenceJob;
+        use crate::engine::InferenceJob;
         let (tx, rx) = std::sync::mpsc::sync_channel::<InferenceJob>(1);
         // Received but deliberately never answered -- `_job`'s `resp_tx`
         // half is simply dropped at the end of this closure's scope, same
