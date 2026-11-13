@@ -235,14 +235,15 @@ impl std::error::Error for InsufficientSpace {}
 /// Free bytes on the disk that holds `path` (the nearest existing ancestor, so a directory that does not exist yet
 /// works). `None` when no disk can be matched, in which case the caller does not refuse.
 pub fn available_space(path: &Path) -> Option<u64> {
+    const VERBATIM_PREFIX: &str = "\\\\?\\";
     let mut probe = path;
     while !probe.exists() {
         probe = probe.parent()?;
     }
     let full = probe.canonicalize().ok()?;
-    // Windows canonicalisation prefixes `\\?\`, which no mount point carries.
+    // Windows canonicalisation adds a verbatim prefix, which no mount point carries.
     let text = full.to_string_lossy();
-    let plain = PathBuf::from(text.strip_prefix(r"\\?\").unwrap_or(&text));
+    let plain = PathBuf::from(text.strip_prefix(VERBATIM_PREFIX).unwrap_or(&text));
     let disks = sysinfo::Disks::new_with_refreshed_list();
     disks
         .list()
@@ -253,7 +254,7 @@ pub fn available_space(path: &Path) -> Option<u64> {
 }
 
 /// Bytes of `unit` not already on disk under `models_dir` (a file that is there is counted as present; its hash is
-/// checked later by [`pull_file`]).
+/// checked later, when the file is downloaded or skipped).
 pub fn bytes_needed(unit: &Unit, models_dir: &Path) -> Result<u64> {
     let mut needed = 0;
     for f in &unit.files {
