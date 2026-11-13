@@ -46,3 +46,125 @@ reason = "history only or placeholder: history only (deleted at HEAD): commit 98
 check = "SEC-002"
 file = "docs/papers/markdown/reassessinglayerpruninginllmsnewinsightsandmethods.md"
 reason = "history only or placeholder: history only (deleted at HEAD): commit 98acb6ae holds a paper's table of numbers (0.2940 +- 0.0204) that the generic-api-key rule takes for a key. Owner: lightbulb lane. Remove when history is rewritten or the commit ages out."
+
+# ---------------------------------------------------------------------------------------------------------------------------------
+# The `[architecture]` declaration (ARC/MOD programme, CireSnave 2026-11-12). NORMATIVE: it says where things should sit; where the
+# code disagrees, the edge is either a finding or a dated waiver below. Components are the top-level modules of the one crate.
+# Layer order is bottom first; a component may depend on its own layer or any layer below it.
+# Measured 2026-11-12 at main f01b123 by scanning `crate::<top>::` paths (not a type-resolved graph): 22 top-level modules, the
+# only upward edges are the ones waived at the end. Owner: the lightbulb lane.
+[architecture]
+style = "layered"
+
+[[architecture.component]]
+name = "gguf"
+paths = ["src/gguf/**"]
+role = "adapter"
+volatility = "stable"
+[[architecture.component]]
+name = "cache"
+paths = ["src/cache/**"]
+role = "policy"
+[[architecture.component]]
+name = "sampling"
+paths = ["src/sampling.rs"]
+role = "policy"
+volatility = "stable"
+[[architecture.component]]
+name = "memory"
+paths = ["src/memory/**"]
+role = "policy"
+[[architecture.component]]
+name = "hardware"
+paths = ["src/hardware/**"]
+role = "infrastructure"
+[[architecture.component]]
+name = "quantization"
+paths = ["src/quantization/**"]
+role = "policy"
+[[architecture.component]]
+name = "pruning"
+paths = ["src/pruning/**"]
+role = "policy"
+[[architecture.component]]
+name = "kernels"
+paths = ["src/kernels.rs"]
+role = "infrastructure"
+[[architecture.component]]
+name = "backend"
+paths = ["src/backend/**"]
+role = "infrastructure"
+[[architecture.component]]
+name = "multi_gpu"
+paths = ["src/multi_gpu/**"]
+role = "infrastructure"
+[[architecture.component]]
+name = "logging"
+paths = ["src/logging.rs"]
+role = "infrastructure"
+[[architecture.component]]
+name = "tls"
+paths = ["src/tls.rs"]
+role = "infrastructure"
+[[architecture.component]]
+name = "test_notice"
+paths = ["src/test_notice.rs"]
+role = "test-support"
+[[architecture.component]]
+name = "engine"
+paths = ["src/engine/**"]
+role = "policy"
+[[architecture.component]]
+name = "contracts"
+paths = ["src/contracts/**"]
+role = "policy"
+[[architecture.component]]
+name = "model_fuel"
+paths = ["src/model_fuel/**"]
+role = "adapter"
+volatility = "volatile"
+[[architecture.component]]
+name = "api"
+paths = ["src/api/**"]
+role = "adapter"
+volatility = "volatile"
+[[architecture.component]]
+name = "server"
+paths = ["src/server.rs"]
+role = "composition"
+[[architecture.component]]
+name = "init"
+paths = ["src/init.rs"]
+role = "composition"
+[[architecture.component]]
+name = "tools"
+paths = ["src/tools/**"]
+role = "adapter"
+[[architecture.component]]
+name = "test_models"
+paths = ["src/test_models.rs"]
+role = "test-support"
+
+[[architecture.layer]]
+name = "foundation"
+components = ["gguf", "cache", "sampling", "memory", "hardware", "quantization", "pruning", "kernels", "backend", "multi_gpu", "logging", "tls", "test_notice"]
+[[architecture.layer]]
+name = "core"
+components = ["engine", "contracts"]
+[[architecture.layer]]
+name = "backends"
+components = ["model_fuel"]
+[[architecture.layer]]
+name = "surface"
+components = ["api", "server", "init", "tools", "test_models"]
+
+[[architecture.waiver]]
+edge = ["engine", "model_fuel"]
+reason = "engine/model_runner.rs:465 calls model_fuel::scheduled_llama_engine::run_fuel_engine; closes the engine<->model_fuel cycle (MOD-002). Fix: the runner takes the engine factory as a parameter. ROADMAP row ARC-1."
+owner = "lightbulb lane"
+until = "2027-02-28"
+[[architecture.waiver]]
+edge = ["contracts", "api"]
+reason = "contracts/executor.rs:93 calls api::openai::chat::build_prompt_from_raw and :63 names api::chat_template::ResolvedTemplate; closes the api<->contracts cycle (MOD-002). Fix: the executor takes a prompt-builder function. ROADMAP row ARC-2."
+owner = "lightbulb lane"
+until = "2027-02-28"
