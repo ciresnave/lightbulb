@@ -192,26 +192,115 @@ fn pull_file(
     Ok(FileOutcome::Downloaded(dest.to_path_buf()))
 }
 
-/// Resolve `spec` on `hub`, pick one unit and download every file of it into `models_dir`. The revision is resolved once
-/// and every file is fetched at that SHA, so a push to the repo mid-pull cannot mix two revisions.
-pub fn pull(
-    hub: &HubSource,
-    spec: &PullSpec,
-    models_dir: &Path,
-    on_progress: &mut dyn FnMut(&str, Progress),
-) -> Result<Vec<FileOutcome>> {
-    let listing = hub
-        .list_files(&spec.repo, &Revision::Ref("main".into()))
-        .map_err(|e| anyhow::anyhow!("listing {}: {e}", spec.repo))?;
-    let listed: Vec<ListedFile> = listing
-        .files
+/// The Hub client for a models directory: its cache lives in `<dir>/.hub-cache`, and `HF_TOKEN` (if set) is sent, for gated repos.
+pub fn hub_in(models_dir: &Path) -> HubSource {
+    let hub = HubSource::new(models_dir.join(".hub-cache"));
+    match std::env::var("HF_TOKEN") {
+        Ok(token) => hub.with_token(token),
+        Err(_) => hub,
+    }
+}
+
+/// The repo has no `.gguf` the spec names, or several (the message says which): the caller's request is wrong, not the Hub.
+#[derive(Debug)]
+pub struct Selection(pub String);
+
+impl std::fmt::Display for Selection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for Selection {}
+
+/// The models directory's disk cannot hold what is still to be downloaded. Raised before any byte is fetched.
+#[derive(Debug)]
+pub struct InsufficientSpace {
+    pub needed: u64,
+    pub free: u64,
+}
+
+impl std::fmt::Display for InsufficientSpace {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "not enough disk space: {} bytes still to download, {} bytes free",
+            self.needed, self.free
+        )
+    }
+}
+
+impl std::error::Error for InsufficientSpace {}
+
+/// Free bytes on the disk that holds `path` (the nearest existing ancestor, so a directory that does not exist yet
+/// works). `None` when no disk can be matched, in which case the caller does not refuse.
+pub fn available_space(path: &Path) -> Option<u64> {
+    let mut probe = path;
+    while !probe.exists() {
+        probe = probe.parent()?;
+    }
+    let full = probe.canonicalize().ok()?;
+    // Windows canonicalisation prefixes `\\?\`, which no mount point carries.
+    let text = full.to_string_lossy();
+    let plain = PathBuf::from(text.strip_prefix(r"\\?\").unwrap_or(&text));
+    let disks = sysinfo::Disks::new_with_refreshed_list();
+    disks
+        .list()
+        .iter()
+        .filter(|d| plain.starts_with(d.mount_point()))
+        .max_by_key(|d| d.mount_point().as_os_str().len())
+        .map(|d| d.available_space())
+}
+
+/// Bytes of `unit` not already on disk under `models_dir` (a file that is there is counted as present; its hash is
+/// checked later by [`pull_file`]).
+pub fn bytes_needed(unit: &Unit, models_dir: &Path) -> Result<u64> {
+    let mut needed = 0;
+    for f in &unit.files {
+        if !models_dir.join(safe_relative(&f.path)?).is_file() {
+            needed += f.size;
+        }
+    }
+    Ok(needed)
+}
+
+fn ensure_space(unit: &Unit, models_dir: &Path, free: &dyn Fn(&Path) -> Option<u64>) -> Result<()> {
+    let needed = bytes_needed(unit, models_dir)?;
+    match free(models_dir) {
+        Some(free) if free < needed => Err(InsufficientSpace { needed, free }.into()),
+        _ => Ok(()),
+    }
+}
+
+/// The unit `spec` names among the listed files; a wrong spec is a [`Selection`] error.
+fn choose(spec: &PullSpec, files: &[RemoteFile]) -> Result<Unit> {
+    let listed: Vec<ListedFile> = files
         .iter()
         .map(|f| ListedFile {
             path: f.path.clone(),
             size: f.size,
         })
         .collect();
-    let unit = select_unit(&gguf_units(&listed)?, spec.quant.as_deref())?;
+    gguf_units(&listed)
+        .and_then(|units| select_unit(&units, spec.quant.as_deref()))
+        .map_err(|e| Selection(e.to_string()).into())
+}
+
+/// Resolve `spec` on `hub`, pick one unit, check the disk can hold it (`free_space` says how many bytes are free where
+/// `models_dir` is; `None` skips the check) and download every file of it into `models_dir`. The revision is resolved once
+/// and every file is fetched at that SHA, so a push to the repo mid-pull cannot mix two revisions.
+pub fn pull(
+    hub: &HubSource,
+    spec: &PullSpec,
+    models_dir: &Path,
+    free_space: &dyn Fn(&Path) -> Option<u64>,
+    on_progress: &mut dyn FnMut(&str, Progress),
+) -> Result<Vec<FileOutcome>> {
+    let listing = hub
+        .list_files(&spec.repo, &Revision::Ref("main".into()))
+        .map_err(|e| anyhow::anyhow!("listing {}: {e}", spec.repo))?;
+    let unit = choose(spec, &listing.files)?;
+    ensure_space(&unit, models_dir, free_space)?;
     let sha = &listing.resolved_revision;
     let mut out = Vec::new();
     for lf in &unit.files {
@@ -233,7 +322,7 @@ fn find_listed<'a>(files: &'a [RemoteFile], path: &str) -> Result<&'a RemoteFile
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     fn lf(path: &str, size: u64) -> ListedFile {
@@ -327,7 +416,7 @@ mod tests {
     }
 
     /// A one-file Hub on localhost: `body` is what it serves, `claimed` is the bytes whose sha256 the listing announces.
-    fn serve_hub(
+    pub(crate) fn serve_hub(
         body: &'static [u8],
         claimed: &'static [u8],
     ) -> (String, std::thread::JoinHandle<()>) {
@@ -376,7 +465,7 @@ Connection: close
         (url, handle)
     }
 
-    fn hub_for(url: &str, dir: &Path) -> HubSource {
+    pub(crate) fn hub_for(url: &str, dir: &Path) -> HubSource {
         HubSource::new(dir.join(".cache")).with_endpoint(url)
     }
 
@@ -386,13 +475,13 @@ Connection: close
         let dir = tempfile::tempdir().unwrap();
         let hub = hub_for(&url, dir.path());
         let spec = parse_spec("o/n:Q8_0").unwrap();
-        let first = pull(&hub, &spec, dir.path(), &mut |_, _| {}).unwrap();
+        let first = pull(&hub, &spec, dir.path(), &|_| None, &mut |_, _| {}).unwrap();
         assert!(matches!(first.as_slice(), [FileOutcome::Downloaded(_)]));
         assert_eq!(
             std::fs::read(dir.path().join("m-Q8_0.gguf")).unwrap(),
             b"GGUFdata"
         );
-        let again = pull(&hub, &spec, dir.path(), &mut |_, _| {}).unwrap();
+        let again = pull(&hub, &spec, dir.path(), &|_| None, &mut |_, _| {}).unwrap();
         assert!(
             matches!(again.as_slice(), [FileOutcome::Present(_)]),
             "control: a verified file is not fetched again"
@@ -408,6 +497,7 @@ Connection: close
             &hub,
             &parse_spec("o/n").unwrap(),
             dir.path(),
+            &|_| None,
             &mut |_, _| {},
         )
         .unwrap_err();
@@ -416,5 +506,52 @@ Connection: close
             !dir.path().join("m-Q8_0.gguf").exists(),
             "a bad file must not stay under its final name"
         );
+    }
+
+    #[test]
+    fn too_little_disk_refuses_before_any_download() {
+        let (url, _srv) = serve_hub(b"GGUFdata", b"GGUFdata");
+        let dir = tempfile::tempdir().unwrap();
+        let hub = hub_for(&url, dir.path());
+        let spec = parse_spec("o/n:Q8_0").unwrap();
+        let err = pull(&hub, &spec, dir.path(), &|_| Some(3), &mut |_, _| {}).unwrap_err();
+        let space = err.downcast_ref::<InsufficientSpace>().expect("typed");
+        assert_eq!((space.needed, space.free), (8, 3));
+        assert!(!dir.path().join("m-Q8_0.gguf").exists());
+        let ok = pull(&hub, &spec, dir.path(), &|_| Some(8), &mut |_, _| {}).unwrap();
+        assert!(
+            matches!(ok.as_slice(), [FileOutcome::Downloaded(_)]),
+            "control: exactly enough space downloads"
+        );
+    }
+
+    #[test]
+    fn a_present_file_is_not_counted_as_still_to_download() {
+        let dir = tempfile::tempdir().unwrap();
+        let unit = Unit {
+            label: "m".into(),
+            files: vec![lf("a.gguf", 100), lf("b.gguf", 50)],
+        };
+        assert_eq!(bytes_needed(&unit, dir.path()).unwrap(), 150);
+        std::fs::write(dir.path().join("a.gguf"), b"x").unwrap();
+        assert_eq!(bytes_needed(&unit, dir.path()).unwrap(), 50);
+    }
+
+    #[test]
+    fn a_wrong_quant_is_a_selection_error() {
+        let (url, _srv) = serve_hub(b"GGUFdata", b"GGUFdata");
+        let dir = tempfile::tempdir().unwrap();
+        let hub = hub_for(&url, dir.path());
+        let spec = parse_spec("o/n:Q2_K").unwrap();
+        let err = pull(&hub, &spec, dir.path(), &|_| None, &mut |_, _| {}).unwrap_err();
+        assert!(err.downcast_ref::<Selection>().is_some(), "{err}");
+    }
+
+    #[test]
+    fn free_space_is_found_for_a_directory_that_does_not_exist_yet() {
+        let dir = tempfile::tempdir().unwrap();
+        let later = dir.path().join("not").join("yet");
+        let free = available_space(&later);
+        assert!(free.is_some_and(|b| b > 0), "{free:?}");
     }
 }

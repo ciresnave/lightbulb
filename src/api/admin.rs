@@ -74,6 +74,7 @@ pub fn routes() -> Router<AppState> {
             post(rotate_api_key),
         )
         .merge(super::admin_models::routes())
+        .merge(super::admin_pull::routes())
         .layer(middleware::from_fn(admin_check_middleware))
 }
 

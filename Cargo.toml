@@ -221,7 +221,7 @@
     # Fuel's device inventory (name, total memory) for `model_fuel::device`; only
     # the CUDA arm is read today, so it rides on `fuel-cuda`.
     fuel-hardware = { version = "0.46.2", optional = true }
-sysinfo = { version = "0.39.6", default-features = false, features = ["system"] }
+sysinfo = { version = "0.39.6", default-features = false, features = ["system", "disk"] }
     # `metrics` is a pure facade (the `gauge!`/`counter!` macros record
     # against a global recorder, with no dependencies of their own beyond
     # that). `metrics-exporter-prometheus` default-features pulls in its

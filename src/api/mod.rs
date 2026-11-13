@@ -28,6 +28,7 @@
 
 pub mod admin;
 pub mod admin_models;
+pub mod admin_pull;
 pub mod auth_middleware;
 pub mod chat_template;
 pub mod fuel_loader;
