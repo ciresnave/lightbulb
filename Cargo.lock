@@ -3437,7 +3437,7 @@ dependencies = [
 
 [[package]]
 name = "lightbulb"
-version = "0.23.58"
+version = "0.23.62"
 dependencies = [
  "ahash",
  "anyhow",
@@ -3478,6 +3478,7 @@ dependencies = [
  "minijinja-contrib",
  "mlmf-gguf 0.11.29",
  "mlmf-hf-layout",
+ "mlmf-source-hub",
  "mocopr",
  "parking_lot",
  "persistant",
@@ -3848,6 +3849,19 @@ checksum = "713b2af7c11fe742338b5ae9d892e88131fe3c6d381f97223d0cea2f5787d8e7"
 dependencies = [
  "memmap2",
  "mlmf-core 0.7.26",
+]
+
+[[package]]
+name = "mlmf-source-hub"
+version = "0.11.29"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d0eb66d31d2904fadc11481e06293d8b767ac61d4f6d0fb27c4fe89a2e2fdf62"
+dependencies = [
+ "mlmf-core 0.11.29",
+ "serde_json",
+ "sha1 0.11.0",
+ "sha2 0.11.0",
+ "ureq",
 ]
 
 [[package]]
@@ -5849,17 +5863,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "socks"
-version = "0.3.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f0c3dbbd9ae980613c6dd8e28a9407b50509d3803b57624d5dfe8315218cd58b"
-dependencies = [
- "byteorder",
- "libc",
- "winapi",
-]
-
-[[package]]
 name = "spin"
 version = "0.9.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6953,11 +6956,11 @@ checksum = "8ecb6da28b8a351d773b68d5825ac39017e680750f980f3a1a85cd8dd28a47c1"
 
 [[package]]
 name = "ureq"
-version = "3.3.0"
+version = "3.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dea7109cdcd5864d4eeb1b58a1648dc9bf520360d7af16ec26d0a9354bafcfc0"
+checksum = "3ac5cecf619ca81f66a96482db09687c9f7465af65f4300a8c30cca05bd5a59d"
 dependencies = [
- "base64 0.22.1",
+ "base64 0.23.1",
  "cookie_store",
  "der",
  "flate2",
@@ -6968,7 +6971,6 @@ dependencies = [
  "rustls-pki-types",
  "serde",
  "serde_json",
- "socks",
  "ureq-proto",
  "utf8-zero",
  "webpki-root-certs",
@@ -6977,11 +6979,11 @@ dependencies = [
 
 [[package]]
 name = "ureq-proto"
-version = "0.6.0"
+version = "0.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e994ba84b0bd1b1b0cf92878b7ef898a5c1760108fe7b6010327e274917a808c"
+checksum = "622dce33c252115466d83f63e9744a18f12b4406aae51a01c15ad8fcf1185eb3"
 dependencies = [
- "base64 0.22.1",
+ "base64 0.23.1",
  "http",
  "httparse",
  "log",
