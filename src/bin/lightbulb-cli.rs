@@ -163,24 +163,27 @@ fn main() -> anyhow::Result<()> {
 
 /// `pull`: resolve `repo[:quant]`, download into the models directory, print progress at each 10%.
 fn run_pull(spec: &str, models_dir: Option<std::path::PathBuf>) -> anyhow::Result<()> {
-    use lightbulb::model_fuel::pull::{FileOutcome, parse_spec, pull};
+    use lightbulb::model_fuel::pull::{FileOutcome, available_space, hub_in, parse_spec, pull};
     let dir = models_dir
         .or_else(|| std::env::var_os("LIGHTBULB_MODELS_DIR").map(Into::into))
         .ok_or_else(|| {
             anyhow::anyhow!("no models directory: pass --models-dir or set LIGHTBULB_MODELS_DIR")
         })?;
-    let mut hub = mlmf_source_hub::HubSource::new(dir.join(".hub-cache"));
-    if let Ok(token) = std::env::var("HF_TOKEN") {
-        hub = hub.with_token(token);
-    }
+    let hub = hub_in(&dir);
     let mut last = (String::new(), 101u64);
-    let outcomes = pull(&hub, &parse_spec(spec)?, &dir, &mut |name, p| {
-        let pct = p.total.map_or(0, |t| p.downloaded * 100 / t.max(1)) / 10 * 10;
-        if (name, pct) != (last.0.as_str(), last.1) {
-            eprintln!("{name}: {pct}% ({} bytes)", p.downloaded);
-            last = (name.to_string(), pct);
-        }
-    })?;
+    let outcomes = pull(
+        &hub,
+        &parse_spec(spec)?,
+        &dir,
+        &available_space,
+        &mut |name, p| {
+            let pct = p.total.map_or(0, |t| p.downloaded * 100 / t.max(1)) / 10 * 10;
+            if (name, pct) != (last.0.as_str(), last.1) {
+                eprintln!("{name}: {pct}% ({} bytes)", p.downloaded);
+                last = (name.to_string(), pct);
+            }
+        },
+    )?;
     for o in outcomes {
         match o {
             FileOutcome::Present(p) => println!("already present, hash ok: {}", p.display()),
