@@ -133,6 +133,14 @@ async fn run(cli: Cli) -> Result<()> {
         })
         .unwrap_or_default();
 
+    // A bad value stops startup: silently keeping (or dropping) audit rows is the wrong way to be wrong.
+    let audit_retention_days = match lightbulb::api::audit_retention::parse_retention_days(
+        &env::var("LIGHTBULB_AUDIT_RETENTION_DAYS").unwrap_or_default(),
+    ) {
+        Ok(days) => days,
+        Err(e) => anyhow::bail!("LIGHTBULB_AUDIT_RETENTION_DAYS: {e}"),
+    };
+
     // Create API configuration
     let config = ApiConfig {
         database_url: database_url.clone(),
@@ -159,6 +167,7 @@ async fn run(cli: Cli) -> Result<()> {
         max_auth_failures_per_minute_per_ip,
         security_alert_email,
         cors_allowed_origins,
+        audit_retention_days,
     };
 
     tracing::info!("Starting Lightbulb API server");
