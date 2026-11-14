@@ -29,6 +29,7 @@
 pub mod admin;
 pub mod admin_models;
 pub mod admin_pull;
+pub mod audit_retention;
 pub mod auth_middleware;
 pub mod chat_template;
 pub mod fuel_loader;
@@ -219,6 +220,10 @@ pub struct ApiConfig {
     /// origin; a non-empty list allows exactly those origins. `main.rs` sets
     /// it from the comma-separated `LIGHTBULB_CORS_ORIGINS`.
     pub cors_allowed_origins: Vec<String>,
+
+    /// Delete `audit_logs` rows older than this many days (hourly). `None` (the default) keeps every row; `main.rs` sets it
+    /// from `LIGHTBULB_AUDIT_RETENTION_DAYS`.
+    pub audit_retention_days: Option<u32>,
 }
 
 impl Default for ApiConfig {
@@ -248,6 +253,7 @@ impl Default for ApiConfig {
             max_auth_failures_per_minute_per_ip: 10,
             security_alert_email: None,
             cors_allowed_origins: Vec::new(),
+            audit_retention_days: None,
         }
     }
 }
@@ -834,6 +840,7 @@ impl ApiServer {
         };
 
         spawn_auth_attempt_counts_cleanup(pg_backend.clone());
+        audit_retention::spawn_cleanup(pg_backend.clone(), config.audit_retention_days);
 
         // Install the Prometheus recorder NOW, not lazily on the first
         // `/metrics` request. `request_metrics_middleware` (Phase 4
