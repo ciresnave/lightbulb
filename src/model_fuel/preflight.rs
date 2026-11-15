@@ -25,11 +25,18 @@ use crate::memory::format_bytes;
 use crate::memory::preflight::{Preflight, check_with};
 
 /// On-disk weight bytes of the model at `path`: the file itself for a
-/// `.gguf`, the sum of the shard files for a SafeTensors directory. `None`
-/// when it cannot be read; the loader then reports its own error.
+/// `.gguf`, the sum of the shard files for a split GGUF or a SafeTensors
+/// directory. `None` when it cannot be read; the loader then reports its own error.
 pub(crate) fn weights_lower_bound(path: &Path) -> Option<u64> {
     if path.is_file() {
-        return std::fs::metadata(path).ok().map(|m| m.len());
+        let files = super::gguf_shards::shard_set(path)
+            .ok()?
+            .unwrap_or_else(|| vec![path.to_path_buf()]);
+        return files.iter().try_fold(0u64, |sum, f| {
+            std::fs::metadata(f)
+                .ok()
+                .map(|m| sum.saturating_add(m.len()))
+        });
     }
     let files = super::loader::safetensors_files(path).ok()?;
     files.iter().try_fold(0u64, |sum, f| {
@@ -41,10 +48,12 @@ pub(crate) fn weights_lower_bound(path: &Path) -> Option<u64> {
 
 /// Whether the GGUF at `path` is one lightbulb can serve: it reads, and declares an
 /// architecture with a loader (`llama`, `qwen3`). `qwen35` has none yet (Fuel ROADMAP
-/// F10), and a file that cannot be read cannot be served.
+/// F10), and a file that cannot be read cannot be served. Of a split set only shard 1
+/// of a complete set counts (it holds the metadata).
 pub fn gguf_is_servable(path: &Path) -> bool {
     use crate::gguf::{Content, GgufArchitecture, detect_architecture};
     path.is_file()
+        && super::gguf_shards::is_listable(path)
         && Content::read(path)
             .ok()
             .and_then(|c| detect_architecture(c.metadata()).ok())
@@ -72,17 +81,23 @@ pub(crate) fn gguf_resident_bytes(tensors: impl IntoIterator<Item = (u64, u32)>)
     })
 }
 
-/// [`gguf_resident_bytes`] over the tensor directory of the GGUF at `path`;
-/// `None` when the directory cannot be read.
+/// [`gguf_resident_bytes`] over the tensor directory of the GGUF at `path`, summed over
+/// every shard of a split set; `None` when a directory cannot be read.
 fn gguf_resident_bytes_of(path: &Path) -> Option<u64> {
-    let content = crate::gguf::Content::read(path).ok()?;
-    let infos = content.lightning_tensor_infos().ok()?;
-    Some(gguf_resident_bytes(infos.iter().map(|t| {
-        (
-            t.dimensions.iter().fold(1u64, |n, d| n.saturating_mul(*d)),
-            t.tensor_type,
-        )
-    })))
+    let files = super::gguf_shards::shard_set(path)
+        .ok()?
+        .unwrap_or_else(|| vec![path.to_path_buf()]);
+    files.iter().try_fold(0u64, |sum, f| {
+        let content = crate::gguf::Content::read(f).ok()?;
+        let infos = content.lightning_tensor_infos().ok()?;
+        let bytes = gguf_resident_bytes(infos.iter().map(|t| {
+            (
+                t.dimensions.iter().fold(1u64, |n, d| n.saturating_mul(*d)),
+                t.tensor_type,
+            )
+        }));
+        Some(sum.saturating_add(bytes))
+    })
 }
 
 /// Bytes the weights at `path` will occupy on the serving device: for a
@@ -809,5 +824,76 @@ mod tests {
             }
         );
         assert_eq!(basis, "available");
+    }
+
+    /// A minimal GGUF v3 file: string/u16 key-values, then f32 tensors of the given element counts.
+    fn tiny_split_gguf(kvs: &[(&str, KvValue)], tensor_elements: &[u64]) -> Vec<u8> {
+        fn string(out: &mut Vec<u8>, s: &str) {
+            out.extend((s.len() as u64).to_le_bytes());
+            out.extend(s.as_bytes());
+        }
+        let mut out = b"GGUF".to_vec();
+        out.extend(3u32.to_le_bytes());
+        out.extend((tensor_elements.len() as u64).to_le_bytes());
+        out.extend((kvs.len() as u64).to_le_bytes());
+        for (key, value) in kvs {
+            string(&mut out, key);
+            match value {
+                KvValue::Str(v) => {
+                    out.extend(8u32.to_le_bytes());
+                    string(&mut out, v);
+                }
+                KvValue::U16(v) => {
+                    out.extend(2u32.to_le_bytes());
+                    out.extend(v.to_le_bytes());
+                }
+            }
+        }
+        let mut offset = 0u64;
+        for (n, elements) in tensor_elements.iter().enumerate() {
+            string(&mut out, &format!("t{n}"));
+            out.extend(1u32.to_le_bytes());
+            out.extend(elements.to_le_bytes());
+            out.extend(0u32.to_le_bytes()); // GGML f32
+            out.extend(offset.to_le_bytes());
+            offset += elements * 4;
+        }
+        while !out.len().is_multiple_of(32) {
+            out.push(0);
+        }
+        out.extend(vec![0u8; offset as usize]);
+        out
+    }
+
+    enum KvValue {
+        Str(&'static str),
+        U16(u16),
+    }
+
+    #[test]
+    fn a_split_set_is_sized_over_every_shard() {
+        let dir = tempfile::tempdir().unwrap();
+        let split = |no: u16| {
+            vec![
+                ("split.no", KvValue::U16(no)),
+                ("split.count", KvValue::U16(2)),
+            ]
+        };
+        let mut first = vec![("general.architecture", KvValue::Str("llama"))];
+        first.extend(split(0));
+        let one = dir.path().join("m-00001-of-00002.gguf");
+        let two = dir.path().join("m-00002-of-00002.gguf");
+        std::fs::write(&one, tiny_split_gguf(&first, &[4])).unwrap();
+        std::fs::write(&two, tiny_split_gguf(&split(1), &[8])).unwrap();
+        let on_disk =
+            std::fs::metadata(&one).unwrap().len() + std::fs::metadata(&two).unwrap().len();
+        assert_eq!(weights_lower_bound(&one), Some(on_disk));
+        assert_eq!(weights_lower_bound(&two), Some(on_disk));
+        // (4 + 8) f32 elements: shard 1 alone would say 16 bytes.
+        assert_eq!(gguf_resident_bytes_of(&one), Some(48));
+        // With shard 2 gone the set is incomplete and nothing is estimated.
+        std::fs::remove_file(&two).unwrap();
+        assert_eq!(gguf_resident_bytes_of(&one), None);
+        assert!(!gguf_is_servable(&one));
     }
 }
