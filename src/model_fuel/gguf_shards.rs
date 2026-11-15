@@ -52,19 +52,29 @@ pub fn shard_set(path: &Path) -> Result<Option<Vec<PathBuf>>> {
             number,
             count,
             missing,
-        } if !missing.is_empty() => bail!(
+        } => complete_set(path, number, count, &missing).map(Some),
+    }
+}
+
+/// The shard files in order, or the error for a set with `missing` siblings.
+fn complete_set(path: &Path, number: u32, count: u32, missing: &[String]) -> Result<Vec<PathBuf>> {
+    if !missing.is_empty() {
+        bail!(
             "{} is shard {number} of {count} of a split GGUF and these are missing: {}",
             path.display(),
             missing.join(", ")
-        ),
-        SplitStatus::Split { count, .. } => {
-            let parsed = parse_split_file_name(name)
-                .ok_or_else(|| anyhow::anyhow!("{} is not a split GGUF name", path.display()))?;
-            let names = shard_file_names(&parsed.prefix, count)
-                .map_err(|e| anyhow::anyhow!("{}: {e}", path.display()))?;
-            Ok(Some(names.into_iter().map(|n| dir.join(n)).collect()))
-        }
+        );
     }
+    let dir = path.parent().unwrap_or_else(|| Path::new("."));
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or_default();
+    let parsed = parse_split_file_name(name)
+        .ok_or_else(|| anyhow::anyhow!("{} is not a split GGUF name", path.display()))?;
+    let names = shard_file_names(&parsed.prefix, count)
+        .map_err(|e| anyhow::anyhow!("{}: {e}", path.display()))?;
+    Ok(names.into_iter().map(|n| dir.join(n)).collect())
 }
 
 /// The path to load for `path`: itself for a single-file GGUF, shard 1 for a complete split set (any shard may be
