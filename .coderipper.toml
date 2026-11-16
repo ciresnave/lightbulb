@@ -55,6 +55,8 @@ reason = "history only or placeholder: history only (deleted at HEAD): commit 98
 # only upward edges are the ones waived at the end. Owner: the lightbulb lane.
 [architecture]
 style = "layered"
+# No component is declared pure: `sampling` names `rand` (seeded StdRng), so `pure = true` would be false; the others were not audited.
+none = ["pure"]
 
 [[architecture.component]]
 name = "gguf"
@@ -128,6 +130,7 @@ name = "api"
 paths = ["src/api/**"]
 role = "adapter"
 volatility = "volatile"
+owns_data = ["api_keys", "audit_logs", "user_sessions", "api_key_usage", "auth_attempt_counts", "auth_failure_counts"] # tables src/api/persistant_migrate.rs creates; only api names them
 [[architecture.component]]
 name = "server"
 paths = ["src/server.rs"]
@@ -168,3 +171,12 @@ edge = ["contracts", "api"]
 reason = "contracts/executor.rs:93 calls api::openai::chat::build_prompt_from_raw and :63 names api::chat_template::ResolvedTemplate; closes the api<->contracts cycle (MOD-002). Fix: the executor takes a prompt-builder function. ROADMAP row ARC-2."
 owner = "lightbulb lane"
 until = "2027-02-28"
+
+# Volatile details the stable policy component (`sampling`) must not name: the wrapped inference and driver crates.
+[architecture.volatile]
+namespaces = ["fuel", "fuel_core", "baracuda_driver", "mlmf"]
+
+# ARC-006 budget for `sampling`. At 0.47.5 the rule does not judge module-path components (it reads 0 items), so this is a hand count:
+# 4 `pub` lines in src/sampling.rs at 7eb911a, ceiling 5. Re-measure with the rule when it judges module groups.
+[architecture.api_budget]
+sampling = 5
