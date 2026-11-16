@@ -2093,6 +2093,7 @@ version = "0.47.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a5ef05b47b750fdab676f33bbd22843622e2a2379117c3657f8701accebe3643"
 dependencies = [
+ "fuel-cuda-backend",
  "fuel-dispatch",
  "fuel-graph",
  "fuel-ir",

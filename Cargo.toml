@@ -19,7 +19,7 @@
     # removal) -- kept as a separate name because call sites and CI already
     # name it; collapse into `cuda` in a later cleanup if nothing still
     # distinguishes them.
-    fuel-cuda = ["fuel/cuda", "dep:fuel-cuda-backend", "dep:baracuda-driver", "dep:fuel-hardware", "fuel-hardware/cuda"]
+    fuel-cuda = ["fuel/cuda", "fuel-model-llama/cuda", "dep:fuel-cuda-backend", "dep:baracuda-driver", "dep:fuel-hardware", "fuel-hardware/cuda"]
     # Vulkan, via Fuel.
     vulkan = ["fuel/vulkan"]
     # Was the opt-in flag selecting Fuel over candlelight as the serving path.
