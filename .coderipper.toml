@@ -70,6 +70,7 @@ name = "sampling"
 paths = ["src/sampling.rs"]
 role = "policy"
 volatility = "stable"
+pure = true # token sampling over logits: names no file, network, env, process, clock, randomness or thread API (EFX-001 reads it)
 [[architecture.component]]
 name = "memory"
 paths = ["src/memory/**"]
@@ -128,6 +129,7 @@ name = "api"
 paths = ["src/api/**"]
 role = "adapter"
 volatility = "volatile"
+owns_data = ["api_keys", "audit_logs", "user_sessions", "api_key_usage", "auth_attempt_counts", "auth_failure_counts"] # tables src/api/persistant_migrate.rs creates; only api names them
 [[architecture.component]]
 name = "server"
 paths = ["src/server.rs"]
@@ -168,3 +170,11 @@ edge = ["contracts", "api"]
 reason = "contracts/executor.rs:93 calls api::openai::chat::build_prompt_from_raw and :63 names api::chat_template::ResolvedTemplate; closes the api<->contracts cycle (MOD-002). Fix: the executor takes a prompt-builder function. ROADMAP row ARC-2."
 owner = "lightbulb lane"
 until = "2027-02-28"
+
+# Volatile details the stable policy component (`sampling`) must not name: the wrapped inference and driver crates.
+[architecture.volatile]
+namespaces = ["fuel", "fuel_core", "baracuda_driver", "mlmf"]
+
+# Public-item budget for `sampling` (ARC-006): measured with the rule's own output on 2026-11-16, ceiling about 10% above it.
+[architecture.api_budget]
+sampling = 0
