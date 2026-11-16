@@ -55,6 +55,8 @@ reason = "history only or placeholder: history only (deleted at HEAD): commit 98
 # only upward edges are the ones waived at the end. Owner: the lightbulb lane.
 [architecture]
 style = "layered"
+# No component is declared pure: `sampling` names `rand` (seeded StdRng), so `pure = true` would be false; the others were not audited.
+none = ["pure"]
 
 [[architecture.component]]
 name = "gguf"
@@ -70,7 +72,6 @@ name = "sampling"
 paths = ["src/sampling.rs"]
 role = "policy"
 volatility = "stable"
-pure = true # token sampling over logits: names no file, network, env, process, clock, randomness or thread API (EFX-001 reads it)
 [[architecture.component]]
 name = "memory"
 paths = ["src/memory/**"]
@@ -175,6 +176,7 @@ until = "2027-02-28"
 [architecture.volatile]
 namespaces = ["fuel", "fuel_core", "baracuda_driver", "mlmf"]
 
-# Public-item budget for `sampling` (ARC-006): measured with the rule's own output on 2026-11-16, ceiling about 10% above it.
+# ARC-006 budget for `sampling`. At 0.47.5 the rule does not judge module-path components (it reads 0 items), so this is a hand count:
+# 4 `pub` lines in src/sampling.rs at 7eb911a, ceiling 5. Re-measure with the rule when it judges module groups.
 [architecture.api_budget]
-sampling = 0
+sampling = 5
