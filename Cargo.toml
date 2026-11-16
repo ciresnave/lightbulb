@@ -217,7 +217,7 @@
     fuel-cuda-backend = { version = "0.47.32", optional = true }
     # The GPU probe `vram_return_probe` calls `MemoryPool::trim_to` on the driver's
     # default pool (F2 P2 measurement). Same version Fuel's CUDA backend resolves.
-    baracuda-driver = { version = "0.1.0-alpha.80", optional = true }
+    baracuda-driver = { version = "0.1.0-alpha.148", optional = true }
     # Fuel's device inventory (name, total memory) for `model_fuel::device`; only
     # the CUDA arm is read today, so it rides on `fuel-cuda`.
     fuel-hardware = { version = "0.47.32", optional = true }
