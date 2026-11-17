@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.23.70 — docs: environment-variable reference (ROADMAP D2)
+
+Adds `docs/CONFIGURATION.md`, a table of every `LIGHTBULB_*` variable read under `src/` (35 names; 14 were documented before), with defaults and which values refuse to start, and links it from QUICKSTART. Checked by diffing `git grep -o LIGHTBULB_[A-Z0-9_]+ -- src` against the file both ways: 0 missing, 0 extra (the same diff against the old docs found 21 missing). Docs only; no code changed.
+
 ## 0.23.69 — baracuda 0.1.0-alpha.148
 
 Repins `baracuda-driver` (optional, `fuel-cuda`) to `0.1.0-alpha.148`, the newest on crates.io, and moves the 17 baracuda crates in `Cargo.lock` from alpha.95 to alpha.148. The `fuel-cuda` feature now also enables `fuel-model-llama/cuda`: without it `tests/gpu_paged_vs_contiguous.rs` did not compile (`forward_with_kv_context_captured` is gated on that feature). `cargo check --locked --features fuel-cuda --all-targets` passes.
