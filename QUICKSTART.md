@@ -161,7 +161,7 @@ LIGHTBULB_REQUEST_TIMEOUT_MS=300000
 LIGHTBULB_CORS_ORIGINS=https://app.example   # unset = any origin
 ```
 
-The full list (all 35 `LIGHTBULB_*` variables, with defaults and what refuses to start) is `docs/CONFIGURATION.md`.
+The full list (all 36 `LIGHTBULB_*` variables, with defaults and what refuses to start) is `docs/CONFIGURATION.md`.
 
 ## Troubleshooting
 

@@ -1,0 +1,3 @@
+kind: **BREAKING**: `ApiConfig::max_request_body_bytes` added; `LIGHTBULB_MAX_REQUEST_BODY_BYTES` (ROADMAP A7)
+---
+The request-body cap (still 2 MiB by default, 413 above it) is now configurable: `ApiConfig` gains a public field `max_request_body_bytes`, set from `LIGHTBULB_MAX_REQUEST_BODY_BYTES` (whole number of bytes of at least 1; `0` or a non-number refuses to start, as `LIGHTBULB_AUDIT_RETENTION_DAYS` does). A struct literal of `ApiConfig` without `..Default::default()` stops compiling. Tests: the parser (blank, number, 0, text, negative) and one route answering 200 under a larger cap and 413 under a smaller one with the same body. `docs/CONFIGURATION.md` lists the variable (36 names, 0 missing, 0 extra against `git grep` of `src/`).

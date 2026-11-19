@@ -3,8 +3,8 @@
 
 `lightbulb` has no config file and no `--config` flag; the only CLI flag is `--no-auth`. Everything is an
 environment variable, read once at startup in `src/main.rs` unless a row says otherwise.
-**Verified against `origin/main` at `f51b200` (2026-11-17):** every `LIGHTBULB_*` name that appears under `src/`
-(35 names) is in one of the tables below. `DATABASE_URL` and `SECURITY_ALERT_EMAIL` are the two non-prefixed names.
+**Verified against `origin/main` at `64fe1d5` plus the `LIGHTBULB_MAX_REQUEST_BODY_BYTES` change (2026-11-19):** every `LIGHTBULB_*` name that appears under `src/`
+(36 names) is in one of the tables below. `DATABASE_URL` and `SECURITY_ALERT_EMAIL` are the two non-prefixed names.
 
 A numeric variable that fails to parse silently falls back to its default, **except** where the row says
 "refuses". `LIGHTBULB_MAX_MEMORY_BYTES` logs a warning and falls back; `LIGHTBULB_AUDIT_RETENTION_DAYS` and the
@@ -20,6 +20,7 @@ device selectors refuse to start.
 | `LIGHTBULB_DEFAULT_MODEL` | `default` | Model id served when a request names none. |
 | `LIGHTBULB_REQUEST_TIMEOUT_MS` | `300000` | Per-request timeout. |
 | `LIGHTBULB_CORS_ORIGINS` | unset (any origin) | Comma-separated allowed origins. |
+| `LIGHTBULB_MAX_REQUEST_BODY_BYTES` | `2097152` (2 MiB) | Largest request body accepted; larger is 413. Whole number of at least 1; `0` or a non-number **refuses to start**. |
 | `LIGHTBULB_LOG_FORMAT` | text | `json` switches the server and `lightbulb-probe` to JSON logs; anything else is text. |
 | `LIGHTBULB_API_KEY` | unset | Key `lightbulb-cli` sends when `--api-key` is not given (a client setting, not read by the server). |
 
