@@ -4689,14 +4689,18 @@ mod tests {
         (tx, handle)
     }
 
-    /// The attempts share ONE `request_timeout_ms`. Each answers in ~150ms and never
-    /// parses; with a 200ms budget the second attempt runs out of time. Per-attempt
-    /// budgets would run all three (~450ms) before refusing.
+    /// The attempts share ONE `request_timeout_ms`. Each answers after 500ms and never
+    /// parses; with a 900ms budget the first attempt finishes (400ms to spare) and the
+    /// second runs out of time. A sleep only ever runs long, never short, so the second
+    /// attempt cannot sneak in under the deadline; the only thing a loaded box can break
+    /// is the first attempt's 400ms of slack, which is what this margin buys (the earlier
+    /// 150ms/200ms figures left 50ms and failed 1 full run in 4). Per-attempt budgets
+    /// would run all three (~1500ms) before refusing, so the bound below sits between.
     #[tokio::test]
     async fn response_format_attempts_share_one_deadline() {
-        let (tx, runner) = slow_unparseable_runner(150);
+        let (tx, runner) = slow_unparseable_runner(500);
         let mut state = state_with_runner(None, Some(tx));
-        state.config.request_timeout_ms = 200;
+        state.config.request_timeout_ms = 900;
         let mut req = request();
         req.response_format = Some(serde_json::json!({"type": "json_object"}));
         let started = std::time::Instant::now();
@@ -4712,7 +4716,7 @@ mod tests {
         assert!(e.downcast_ref::<FormatUnmet>().is_some(), "{e}");
         assert_eq!(queue_error_response(e).status(), StatusCode::BAD_GATEWAY);
         assert!(
-            elapsed < std::time::Duration::from_millis(400),
+            elapsed < std::time::Duration::from_millis(1400),
             "one shared deadline, not one per attempt: took {elapsed:?}"
         );
     }
