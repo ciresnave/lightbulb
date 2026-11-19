@@ -4664,43 +4664,56 @@ mod tests {
         assert_eq!(queue_error_response(e).status(), StatusCode::BAD_GATEWAY);
     }
 
-    /// A runner that answers every job after `delay_ms` with text that is not JSON.
+    /// A runner that answers every job after `delay_ms` with text that is not JSON. Joining it gives, per job
+    /// in arrival order, whether the answer was still wanted (`true`) or the requester had already given up
+    /// and dropped its receiver (`false`).
     fn slow_unparseable_runner(
         delay_ms: u64,
     ) -> (
         std::sync::mpsc::SyncSender<crate::engine::InferenceJob>,
-        std::thread::JoinHandle<()>,
+        std::thread::JoinHandle<Vec<bool>>,
     ) {
         use crate::engine::model_runner::{CompletionResult, InferenceJob, ResponseMode};
         let (tx, rx) = std::sync::mpsc::sync_channel::<InferenceJob>(32);
         let handle = std::thread::spawn(move || {
+            let mut delivered = Vec::new();
             while let Ok(job) = rx.recv() {
                 std::thread::sleep(std::time::Duration::from_millis(delay_ms));
                 if let ResponseMode::Complete(resp) = job.response_mode {
-                    let _ = resp.send(Ok(CompletionResult {
-                        text: "no json here".to_string(),
-                        prompt_tokens: 1,
-                        completion_tokens: 1,
-                        finish_reason: FinishReason::Stop,
-                    }));
+                    delivered.push(
+                        resp.send(Ok(CompletionResult {
+                            text: "no json here".to_string(),
+                            prompt_tokens: 1,
+                            completion_tokens: 1,
+                            finish_reason: FinishReason::Stop,
+                        }))
+                        .is_ok(),
+                    );
                 }
             }
+            delivered
         });
         (tx, handle)
     }
 
-    /// The attempts share ONE `request_timeout_ms`. Each answers after 500ms and never
-    /// parses; with a 900ms budget the first attempt finishes (400ms to spare) and the
-    /// second runs out of time. A sleep only ever runs long, never short, so the second
-    /// attempt cannot sneak in under the deadline; the only thing a loaded box can break
-    /// is the first attempt's 400ms of slack, which is what this margin buys (the earlier
-    /// 150ms/200ms figures left 50ms and failed 1 full run in 4). Per-attempt budgets
-    /// would run all three (~1500ms) before refusing, so the bound below sits between.
+    /// The attempts share ONE `request_timeout_ms`. Each answers after 800ms and never parses; the budget is
+    /// 1200ms. Attempt 1 therefore finishes (400ms to spare) and attempt 2 has 400ms left, so it is cut off at
+    /// the deadline while its runner is still asleep (400ms more): the runner's reply finds the receiver gone.
+    ///
+    /// Two independent observations, both of which a per-attempt budget changes:
+    /// * the runner's delivery log is `[true, false]` -- with a fresh budget per attempt attempt 2 would be
+    ///   waited for and delivered (`[true, true]`), even though the loop's own `left.is_zero()` check would
+    ///   still stop after two attempts and return the same error (the mutant that survived the earlier,
+    ///   elapsed-time-only version of this test);
+    /// * total time stays under 1800ms, where three full budgets would take about 2400ms.
+    ///
+    /// A sleep only ever runs long, never short, so neither side can pass by luck; a loaded box can only eat
+    /// into the 400ms margins, and the earlier 50ms margin is what made this test fail 1 full run in 4.
     #[tokio::test]
     async fn response_format_attempts_share_one_deadline() {
-        let (tx, runner) = slow_unparseable_runner(500);
+        let (tx, runner) = slow_unparseable_runner(800);
         let mut state = state_with_runner(None, Some(tx));
-        state.config.request_timeout_ms = 900;
+        state.config.request_timeout_ms = 1200;
         let mut req = request();
         req.response_format = Some(serde_json::json!({"type": "json_object"}));
         let started = std::time::Instant::now();
@@ -4712,11 +4725,18 @@ mod tests {
         .await
         .expect_err("a model that never produces JSON must be refused");
         let elapsed = started.elapsed();
-        drop(runner);
+        // `state` (and with it the only sender) went into the call above, so the runner ends once its
+        // second, abandoned job has finished sleeping.
+        let delivered = runner.join().expect("stub runner panicked");
         assert!(e.downcast_ref::<FormatUnmet>().is_some(), "{e}");
         assert_eq!(queue_error_response(e).status(), StatusCode::BAD_GATEWAY);
+        assert_eq!(
+            delivered,
+            [true, false],
+            "attempt 2 must be cut off at the shared deadline, not waited for in full"
+        );
         assert!(
-            elapsed < std::time::Duration::from_millis(1400),
+            elapsed < std::time::Duration::from_millis(1800),
             "one shared deadline, not one per attempt: took {elapsed:?}"
         );
     }
