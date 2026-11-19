@@ -106,6 +106,10 @@ pub struct InferenceJob {
     pub prompt: String,
     pub max_new_tokens: usize,
     pub temperature: f64,
+    /// Per-request sampling seed (OpenAI `seed`). `Some` makes a temperature > 0 request reproducible: the
+    /// same seed, prompt and sampling settings give the same tokens on the same build and device. `None` takes
+    /// the driver's own per-admission counter. Ignored at `temperature <= 0` (greedy has no randomness).
+    pub seed: Option<u64>,
     /// Whether the backend must ask its tokenizer to add special tokens when
     /// prefilling `prompt`.
     ///

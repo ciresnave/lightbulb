@@ -33,6 +33,12 @@ pub struct CompletionRequest {
     #[serde(default = "default_temperature")]
     pub temperature: f32,
 
+    /// Sampling seed (OpenAI `seed`). With `temperature > 0`, the same seed, prompt and settings reproduce the
+    /// same output on the same build and device (best effort, as OpenAI documents it). Ignored when greedy.
+    /// Negative values are accepted and reinterpreted as `u64`.
+    #[serde(default)]
+    pub seed: Option<i64>,
+
     /// Top-p sampling. `1.0` (the default) is a no-op; any other value is
     /// rejected with a 400 — nucleus sampling is not implemented on either
     /// decode path. (A `top_p_filter` function existed in `src/sampling.rs`
@@ -250,7 +256,10 @@ async fn create_completion(
         &state.queue_depth,
         crate::api::openai::chat::BuiltPrompt::raw(prompt_text.clone()),
         max_new_tokens,
-        temperature,
+        crate::api::openai::chat::Sampling {
+            temperature,
+            seed: request.seed.map(|s| s as u64),
+        },
         state.config.request_timeout_ms,
         priority,
     )
@@ -444,6 +453,41 @@ mod tests {
             .await
             .into_response();
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// The request's `seed` reaches the enqueued job; absent, none is sent (the driver's counter decides).
+    #[tokio::test]
+    async fn the_request_seed_reaches_the_enqueued_completion_job() {
+        use crate::engine::model_runner::{
+            CompletionResult, FinishReason, InferenceJob, ResponseMode,
+        };
+        let run = |seed: Option<i64>| async move {
+            let (tx, rx) = std::sync::mpsc::sync_channel::<InferenceJob>(32);
+            let runner = std::thread::spawn(move || {
+                let mut seen = Vec::new();
+                while let Ok(job) = rx.recv() {
+                    seen.push(job.seed);
+                    if let ResponseMode::Complete(resp) = job.response_mode {
+                        let _ = resp.send(Ok(CompletionResult {
+                            text: "ok".to_string(),
+                            prompt_tokens: 1,
+                            completion_tokens: 1,
+                            finish_reason: FinishReason::Stop,
+                        }));
+                    }
+                }
+                seen
+            });
+            let mut req = request();
+            req.seed = seed;
+            let state = state_with_runner(Some(tx));
+            create_completion(state, req, crate::engine::Priority::Normal)
+                .await
+                .expect("stub generation must not error");
+            runner.join().expect("stub runner panicked")
+        };
+        assert_eq!(run(None).await, [None]);
+        assert_eq!(run(Some(5)).await, [Some(5)]);
     }
 
     #[tokio::test]

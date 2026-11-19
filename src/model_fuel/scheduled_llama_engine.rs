@@ -263,11 +263,14 @@ impl<'m> ServingDriver<'m> {
         prompt: &[u32],
         max_new: usize,
         temperature: f64,
+        seed: Option<u64>,
     ) -> Result<fuel_inference::multi_session::SessionId, AdmitError> {
         match &mut self.inner {
-            ServingDriverInner::F32(d) => d.try_admit(prompt, max_new, temperature),
-            ServingDriverInner::QuantizedGguf(d) => d.try_admit(prompt, max_new, temperature),
-            ServingDriverInner::QuantizedGgufQwen3(d) => d.try_admit(prompt, max_new, temperature),
+            ServingDriverInner::F32(d) => d.try_admit(prompt, max_new, temperature, seed),
+            ServingDriverInner::QuantizedGguf(d) => d.try_admit(prompt, max_new, temperature, seed),
+            ServingDriverInner::QuantizedGgufQwen3(d) => {
+                d.try_admit(prompt, max_new, temperature, seed)
+            }
         }
     }
 
@@ -284,9 +287,10 @@ impl<'m> ServingDriver<'m> {
         prompt: &[u32],
         max_new: usize,
         temperature: f64,
+        seed: Option<u64>,
     ) -> Result<fuel_inference::multi_session::SessionId, AdmitError> {
         let Some(hit) = hit else {
-            return self.plain_admit(prompt, max_new, temperature);
+            return self.plain_admit(prompt, max_new, temperature, seed);
         };
         // Fuel rejects a share that leaves no suffix (`prompt.len() <=
         // shared_tokens`): the first generated token needs logits from at
@@ -296,20 +300,20 @@ impl<'m> ServingDriver<'m> {
             .blocks
             .min(prompt.len().saturating_sub(1) / self.prefix_index.block_size());
         if blocks == 0 {
-            return self.plain_admit(prompt, max_new, temperature);
+            return self.plain_admit(prompt, max_new, temperature, seed);
         }
         let Some(prefix) = self.ensure_prefix_registered(hit.donor, blocks) else {
-            return self.plain_admit(prompt, max_new, temperature);
+            return self.plain_admit(prompt, max_new, temperature, seed);
         };
         let shared = match &mut self.inner {
             ServingDriverInner::F32(d) => {
-                d.try_admit_sharing_prefix(prefix, prompt, max_new, temperature)
+                d.try_admit_sharing_prefix(prefix, prompt, max_new, temperature, seed)
             }
             ServingDriverInner::QuantizedGguf(d) => {
-                d.try_admit_sharing_prefix(prefix, prompt, max_new, temperature)
+                d.try_admit_sharing_prefix(prefix, prompt, max_new, temperature, seed)
             }
             ServingDriverInner::QuantizedGgufQwen3(d) => {
-                d.try_admit_sharing_prefix(prefix, prompt, max_new, temperature)
+                d.try_admit_sharing_prefix(prefix, prompt, max_new, temperature, seed)
             }
         };
         match shared {
@@ -317,7 +321,7 @@ impl<'m> ServingDriver<'m> {
                 self.prefix_shared_admissions += 1;
                 Ok(id)
             }
-            Err(_) => self.plain_admit(prompt, max_new, temperature),
+            Err(_) => self.plain_admit(prompt, max_new, temperature, seed),
         }
     }
 
@@ -379,6 +383,7 @@ impl<'m> SchedulerDriver for ServingDriver<'m> {
         prompt: &[u32],
         max_new: usize,
         temperature: f64,
+        seed: Option<u64>,
     ) -> Result<Self::Id, AdmitError> {
         let (effective_max_new, truncated) =
             effective_generation_budget(prompt.len(), max_new, self.context_length);
@@ -403,9 +408,9 @@ impl<'m> SchedulerDriver for ServingDriver<'m> {
         let hit = self.prefix_index.lookup(prompt);
 
         let admitted = if self.prefix_sharing_enabled {
-            self.try_admit_sharing_or_fallback(hit, prompt, effective_max_new, temperature)
+            self.try_admit_sharing_or_fallback(hit, prompt, effective_max_new, temperature, seed)
         } else {
-            self.plain_admit(prompt, effective_max_new, temperature)
+            self.plain_admit(prompt, effective_max_new, temperature, seed)
         };
         if let Ok(id) = admitted {
             self.mirror_admission(id, prompt, effective_max_new, temperature);
@@ -898,7 +903,7 @@ mod tests {
 
         // Two whole blocks (block_size 2): long enough to be indexed.
         let shared_prompt = [1u32, 2, 3, 4];
-        d.try_admit(&shared_prompt, 1, 0.0)
+        d.try_admit(&shared_prompt, 1, 0.0, None)
             .expect("first admission must fit in the generous budget");
         assert_eq!(
             d.cache_stats.lock().unwrap().hits,
@@ -908,7 +913,7 @@ mod tests {
         );
 
         // Same tokens again: must hit against the first admission's record.
-        d.try_admit(&shared_prompt, 1, 0.0)
+        d.try_admit(&shared_prompt, 1, 0.0, None)
             .expect("second admission must also fit");
         let stats_after_repeat = d.cache_stats.lock().unwrap().clone();
         assert_eq!(
@@ -922,7 +927,7 @@ mod tests {
 
         // A genuinely different prompt: must miss, not hit.
         let distinct_prompt = [9u32, 10, 11, 12];
-        d.try_admit(&distinct_prompt, 1, 0.0)
+        d.try_admit(&distinct_prompt, 1, 0.0, None)
             .expect("third admission must also fit");
         let stats_after_distinct = d.cache_stats.lock().unwrap().clone();
         assert_eq!(
@@ -948,9 +953,9 @@ mod tests {
         let mut d = serving_driver(&model, false);
 
         let prompt = [1u32, 2, 3, 4];
-        d.try_admit(&prompt, 1, 0.0)
+        d.try_admit(&prompt, 1, 0.0, None)
             .expect("first admission must fit");
-        d.try_admit(&prompt, 1, 0.0)
+        d.try_admit(&prompt, 1, 0.0, None)
             .expect("second admission must also fit");
         let stats_before_clear = d.cache_stats.lock().unwrap().clone();
         assert_eq!(
@@ -969,7 +974,7 @@ mod tests {
         // proving the live index was actually rebuilt, not just the stats
         // mirror zeroed out from underneath it (which would desync the two
         // and make a later real hit under-report).
-        d.try_admit(&prompt, 1, 0.0)
+        d.try_admit(&prompt, 1, 0.0, None)
             .expect("third admission must also fit");
         let stats_after_repeat = d.cache_stats.lock().unwrap().clone();
         assert_eq!(
@@ -1014,7 +1019,7 @@ mod tests {
     fn cold_completion(model: &LlamaModel, prompt: &[u32], max_new: usize) -> Vec<u32> {
         let mut d = serving_driver(model, false);
         let id = d
-            .try_admit(prompt, max_new, 0.0)
+            .try_admit(prompt, max_new, 0.0, None)
             .expect("cold admission must succeed");
         drive_to_completion(&mut d, id)
     }
@@ -1028,7 +1033,7 @@ mod tests {
     ) -> (ServingDriver<'m>, fuel_inference::multi_session::SessionId) {
         let mut d = serving_driver(model, true);
         let donor = d
-            .try_admit(donor_prompt, 32, 0.0)
+            .try_admit(donor_prompt, 32, 0.0, None)
             .expect("donor must admit");
         // `prefill_pass` feeds a session's whole prompt in one `step()`.
         let _ = d.step().expect("donor's prefill tick must not error");
@@ -1055,7 +1060,9 @@ mod tests {
         let (mut d, donor) = driver_with_live_donor(&model, &prompt);
         assert!(d.registered_prefixes.is_empty() && d.prefix_shared_admissions == 0);
 
-        let sharer = d.try_admit(&prompt, 3, 0.0).expect("sharer must admit");
+        let sharer = d
+            .try_admit(&prompt, 3, 0.0, None)
+            .expect("sharer must admit");
         assert_eq!(d.prefix_shared_admissions, 1, "must be a real splice");
         assert!(d.registered_prefixes.contains_key(&(donor, 2)));
         assert_eq!(
@@ -1074,7 +1081,9 @@ mod tests {
         let prompt = [1u32, 2, 3, 4];
         let (mut d, donor) = driver_with_live_donor(&model, &prompt);
 
-        let sharer = d.try_admit(&prompt, 3, 0.0).expect("sharer must admit");
+        let sharer = d
+            .try_admit(&prompt, 3, 0.0, None)
+            .expect("sharer must admit");
         assert_eq!(d.prefix_shared_admissions, 1, "must be a real splice");
         assert!(d.registered_prefixes.contains_key(&(donor, 1)));
         assert!(!d.registered_prefixes.contains_key(&(donor, 2)));
@@ -1108,7 +1117,7 @@ mod tests {
         };
         let short_prompt = [1u32, 2, 3, 4, 9, 9, 9];
         let id = d
-            .try_admit_sharing_or_fallback(Some(hit), &short_prompt, 3, 0.0)
+            .try_admit_sharing_or_fallback(Some(hit), &short_prompt, 3, 0.0, None)
             .expect("short sharer must admit");
 
         assert_eq!(d.prefix_shared_admissions, 1, "must be a real splice");
@@ -1137,9 +1146,11 @@ mod tests {
         let prompt = [1u32, 2, 3, 4, 5];
         let shared_admissions = |hybrid: bool| {
             let mut d = serving_driver(&model, effective_prefix_sharing(true, hybrid));
-            d.try_admit(&prompt, 3, 0.0).expect("donor must admit");
+            d.try_admit(&prompt, 3, 0.0, None)
+                .expect("donor must admit");
             let _ = d.step().expect("donor's prefill tick must not error");
-            d.try_admit(&prompt, 3, 0.0).expect("repeat must admit");
+            d.try_admit(&prompt, 3, 0.0, None)
+                .expect("repeat must admit");
             d.prefix_shared_admissions
         };
         assert_eq!(shared_admissions(false), 1, "control: non-hybrid splices");
@@ -1166,14 +1177,14 @@ mod tests {
 
         let mut off_driver = serving_driver(&model, false);
         let _donor_id = off_driver
-            .try_admit(&prompt, max_new, 0.0)
+            .try_admit(&prompt, max_new, 0.0, None)
             .expect("donor must admit");
         let _ = off_driver
             .step()
             .expect("donor's prefill tick must not error");
 
         let repeat_id = off_driver
-            .try_admit(&prompt, max_new, 0.0)
+            .try_admit(&prompt, max_new, 0.0, None)
             .expect("identical-prompt admission must still succeed");
         assert!(
             off_driver.registered_prefixes.is_empty(),
@@ -1184,7 +1195,7 @@ mod tests {
 
         let mut fresh_driver = serving_driver(&model, false);
         let fresh_id = fresh_driver
-            .try_admit(&prompt, max_new, 0.0)
+            .try_admit(&prompt, max_new, 0.0, None)
             .expect("a driver with no donor at all must admit the same prompt identically");
         let fresh_tokens = drive_to_completion(&mut fresh_driver, fresh_id);
 

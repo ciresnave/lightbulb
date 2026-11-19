@@ -100,6 +100,7 @@ pub async fn execute_contract_with_runner(
                     prompt: prompt.text,
                     max_new_tokens,
                     temperature,
+                    seed: None,
                     add_special_tokens: prompt.add_special_tokens,
                     // This wrapper has no HTTP request to read a priority
                     // header from (see `chat::priority_from_headers`) --

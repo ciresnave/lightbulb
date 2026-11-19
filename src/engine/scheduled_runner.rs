@@ -94,6 +94,7 @@ pub(crate) trait SchedulerDriver {
         prompt: &[u32],
         max_new: usize,
         temperature: f64,
+        seed: Option<u64>,
     ) -> Result<Self::Id, AdmitError>;
 
     /// Advance every active session by at most one step. Returns `(id, token)`
@@ -216,7 +217,12 @@ pub(crate) fn run_scheduled_jobs<D: SchedulerDriver>(
                 }
             };
             let priority = job.priority;
-            match driver.try_admit(&prompt_tokens, job.max_new_tokens, job.temperature) {
+            match driver.try_admit(
+                &prompt_tokens,
+                job.max_new_tokens,
+                job.temperature,
+                job.seed,
+            ) {
                 Ok(id) => {
                     // M4 slice 5.4c (Option B) wiring: best-effort only --
                     // a driver with no priority concept returns `Ok(())`
@@ -375,6 +381,8 @@ mod tests {
         /// `run_scheduled_jobs` takes ownership of the driver and never hands
         /// it back; a clone taken before the call survives to assert on.
         priority_log: std::rc::Rc<std::cell::RefCell<Vec<(u64, i32)>>>,
+        /// The `seed` each admission was offered, in order -- proves `InferenceJob::seed` reaches `try_admit`.
+        seed_log: std::rc::Rc<std::cell::RefCell<Vec<Option<u64>>>>,
     }
 
     impl FakeDriver {
@@ -384,6 +392,7 @@ mod tests {
                 next_id: 0,
                 sessions: HashMap::new(),
                 priority_log: Default::default(),
+                seed_log: Default::default(),
             }
         }
     }
@@ -396,7 +405,9 @@ mod tests {
             prompt: &[u32],
             max_new: usize,
             _temperature: f64,
+            seed: Option<u64>,
         ) -> Result<u64, AdmitError> {
+            self.seed_log.borrow_mut().push(seed);
             if self.sessions.len() >= self.capacity {
                 return Err(AdmitError::NoCapacity);
             }
@@ -511,6 +522,7 @@ mod tests {
             prompt: prompt.to_string(),
             max_new_tokens: max_new,
             temperature: 0.0,
+            seed: None,
             add_special_tokens: true,
             priority: crate::engine::Priority::Normal,
             response_mode: ResponseMode::Complete(tx),
@@ -543,11 +555,37 @@ mod tests {
             prompt: prompt.to_string(),
             max_new_tokens: max_new,
             temperature: 0.0,
+            seed: None,
             add_special_tokens: true,
             priority: crate::engine::Priority::Normal,
             response_mode: ResponseMode::Streaming(tx),
         };
         (job, rx)
+    }
+
+    #[test]
+    fn a_jobs_seed_is_offered_to_the_driver_at_admission() {
+        let (tx, rx) = mpsc::channel();
+        let (seeded, _seeded_rx) = complete_job("hello", 2);
+        let (unseeded, _unseeded_rx) = complete_job("world", 2);
+        tx.send(InferenceJob {
+            seed: Some(1234),
+            ..seeded
+        })
+        .unwrap();
+        tx.send(unseeded).unwrap();
+        drop(tx);
+
+        let driver = FakeDriver::new(4);
+        let seed_log = driver.seed_log.clone();
+
+        run_scheduled_jobs(driver, rx, no_control(), fake_encode, fake_decode);
+
+        assert_eq!(
+            *seed_log.borrow(),
+            vec![Some(1234), None],
+            "the job's own seed, and only that job's, must reach try_admit"
+        );
     }
 
     #[test]
@@ -761,7 +799,13 @@ mod tests {
     impl SchedulerDriver for ControlRecordingDriver {
         type Id = u64;
 
-        fn try_admit(&mut self, _: &[u32], _: usize, _: f64) -> Result<u64, AdmitError> {
+        fn try_admit(
+            &mut self,
+            _: &[u32],
+            _: usize,
+            _: f64,
+            _: Option<u64>,
+        ) -> Result<u64, AdmitError> {
             Err(AdmitError::Rejected("not under test here".to_string()))
         }
         fn step(&mut self) -> Result<Vec<(u64, u32)>, String> {

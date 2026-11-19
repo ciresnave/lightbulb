@@ -95,6 +95,7 @@ fn start_loaded(
         prompt: "The quick brown fox".into(),
         max_new_tokens: 2,
         temperature: 0.0,
+        seed: None,
         add_special_tokens: true,
         priority: Priority::Normal,
         response_mode: ResponseMode::Complete(otx),

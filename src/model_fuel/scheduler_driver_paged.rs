@@ -106,6 +106,23 @@ impl<'m, M: PagedDecodeModel> FuelPagedSchedulerDriver<'m, M> {
         })
     }
 
+    /// The sampling strategy for one admission. A request-supplied `seed` is used as given; otherwise the
+    /// driver's own counter supplies one (so two unseeded requests still differ). The counter advances on every
+    /// admission, seeded or not, so the unseeded sequence depends on admission order only. Greedy
+    /// (`temperature <= 0`) ignores the seed: there is nothing random to seed.
+    fn strategy_for(&mut self, temperature: f64, seed: Option<u64>) -> SamplingStrategy {
+        let counter = self.next_seed;
+        self.next_seed = self.next_seed.wrapping_add(1);
+        if temperature <= 0.0 {
+            SamplingStrategy::Greedy
+        } else {
+            SamplingStrategy::Temperature {
+                temp: temperature as f32,
+                seed: seed.unwrap_or(counter),
+            }
+        }
+    }
+
     /// Register donor `id`'s first `blocks` fully-filled blocks as a shared
     /// prefix other sessions can later splice from — the pool-level
     /// counterpart to `BlockPrefixIndexFor::lookup` already having decided
@@ -143,17 +160,9 @@ impl<'m, M: PagedDecodeModel> FuelPagedSchedulerDriver<'m, M> {
         prompt: &[u32],
         max_new: usize,
         temperature: f64,
+        seed: Option<u64>,
     ) -> Result<SessionId, AdmitError> {
-        let seed = self.next_seed;
-        self.next_seed = self.next_seed.wrapping_add(1);
-        let strategy = if temperature <= 0.0 {
-            SamplingStrategy::Greedy
-        } else {
-            SamplingStrategy::Temperature {
-                temp: temperature as f32,
-                seed,
-            }
-        };
+        let strategy = self.strategy_for(temperature, seed);
         self.scheduler
             .add_session_sharing_prefix(prefix, prompt, strategy, self.eos_ids.clone(), max_new)
             .map_err(|e| AdmitError::Rejected(e.to_string()))
@@ -168,17 +177,9 @@ impl<'m, M: PagedDecodeModel> SchedulerDriver for FuelPagedSchedulerDriver<'m, M
         prompt: &[u32],
         max_new: usize,
         temperature: f64,
+        seed: Option<u64>,
     ) -> Result<SessionId, AdmitError> {
-        let seed = self.next_seed;
-        self.next_seed = self.next_seed.wrapping_add(1);
-        let strategy = if temperature <= 0.0 {
-            SamplingStrategy::Greedy
-        } else {
-            SamplingStrategy::Temperature {
-                temp: temperature as f32,
-                seed,
-            }
-        };
+        let strategy = self.strategy_for(temperature, seed);
 
         // See this struct's doc comment: admission here is optimistic, so
         // every `Err` is a structural rejection (empty prompt / zero
@@ -343,13 +344,53 @@ mod tests {
         .expect("tiny model's uniform per-head KV must satisfy ModelDims::from_model")
     }
 
+    /// The tokens one fresh driver generates for a single request: same model, same prompt, only
+    /// `temperature` and `seed` vary.
+    fn tokens_for(temperature: f64, seed: Option<u64>) -> Vec<u32> {
+        let model = tiny_model(1);
+        let mut d = driver(&model, generous_budget(), None);
+        d.try_admit(&[1, 2, 3], 24, temperature, seed)
+            .expect("generous budget admits");
+        let mut out = Vec::new();
+        while d.has_active_sessions() {
+            out.extend(
+                d.step()
+                    .expect("healthy session")
+                    .into_iter()
+                    .map(|(_, t)| t),
+            );
+        }
+        out
+    }
+
+    /// A request `seed` reaches the sampler: the same seed reproduces the same tokens, and (positive control,
+    /// same model, prompt and temperature) other seeds do not all collapse onto it. Without the plumbing both
+    /// arms would use the driver's counter and the second assertion fails.
+    #[test]
+    fn a_request_seed_reproduces_and_distinguishes_sampled_output() {
+        let a = tokens_for(1.0, Some(7));
+        assert_eq!(a.len(), 24, "the control run must generate its full budget");
+        assert_eq!(a, tokens_for(1.0, Some(7)), "same seed must reproduce");
+        assert!(
+            (100..108).any(|other| tokens_for(1.0, Some(other)) != a),
+            "eight other seeds all matched seed 7's 24 tokens: the seed is not reaching the sampler"
+        );
+    }
+
+    /// Greedy has nothing random to seed, so a seed must not change it.
+    #[test]
+    fn a_seed_does_not_change_greedy_output() {
+        assert_eq!(tokens_for(0.0, Some(1)), tokens_for(0.0, Some(2)));
+        assert_eq!(tokens_for(0.0, Some(1)), tokens_for(0.0, None));
+    }
+
     #[test]
     fn admits_a_session_and_step_emits_every_token_exactly_once_until_budget() {
         let model = tiny_model(1);
         let mut d = driver(&model, generous_budget(), None);
 
         let id = d
-            .try_admit(&[1, 2, 3], 3, 0.0)
+            .try_admit(&[1, 2, 3], 3, 0.0, None)
             .expect("must admit: capacity is generous");
         assert!(d.has_active_sessions());
 
@@ -412,7 +453,7 @@ mod tests {
         };
         let mut d = driver(&model, tight, None);
 
-        let id = d.try_admit(&[1, 2, 3, 4, 5], 1, 0.0).expect(
+        let id = d.try_admit(&[1, 2, 3, 4, 5], 1, 0.0, None).expect(
             "optimistic admission must accept a structurally valid prompt regardless of fit",
         );
 
@@ -442,7 +483,7 @@ mod tests {
     fn try_admit_rejects_a_structurally_invalid_request() {
         let model = tiny_model(2);
         let mut d = driver(&model, generous_budget(), None);
-        let zero_budget = d.try_admit(&[1, 2, 3], 0, 0.0);
+        let zero_budget = d.try_admit(&[1, 2, 3], 0, 0.0, None);
         assert!(
             matches!(zero_budget, Err(AdmitError::Rejected(_))),
             "zero max_new must be a permanent rejection — got {zero_budget:?}",
@@ -455,7 +496,7 @@ mod tests {
 
         let mut probe = driver(&model, generous_budget(), None);
         probe
-            .try_admit(&[1, 2, 3], 1, 0.0)
+            .try_admit(&[1, 2, 3], 1, 0.0, None)
             .expect("probe admission must fit");
         let advanced = probe.step().expect("probe step must not error");
         let [(_, discovered_token)] = advanced[..] else {
@@ -467,7 +508,7 @@ mod tests {
 
         let mut d = driver(&model, generous_budget(), Some(vec![discovered_token]));
         let id = d
-            .try_admit(&[1, 2, 3], 10, 0.0)
+            .try_admit(&[1, 2, 3], 10, 0.0, None)
             .expect("admission must fit");
         d.step().expect("step must not error");
         let reaped = d.reap_finished();
@@ -516,8 +557,8 @@ mod tests {
                 None,
             )
             .expect("tiny model must build");
-            let low = d.try_admit(&[1, 2, 3], 4, 0.0).expect("low admits");
-            let high = d.try_admit(&[4, 5, 6], 4, 0.0).expect("high admits");
+            let low = d.try_admit(&[1, 2, 3], 4, 0.0, None).expect("low admits");
+            let high = d.try_admit(&[4, 5, 6], 4, 0.0, None).expect("high admits");
             d.set_priority(low, 0).unwrap();
             d.set_priority(high, 10).unwrap();
             let report = d.scheduler.step_batched(1);
@@ -549,8 +590,8 @@ mod tests {
         )
         .expect("tiny model must build");
 
-        let id_a = d.try_admit(&[1, 2, 3], 2, 0.0).expect("a must admit");
-        let id_b = d.try_admit(&[4, 5, 6], 2, 0.0).expect("b must admit");
+        let id_a = d.try_admit(&[1, 2, 3], 2, 0.0, None).expect("a must admit");
+        let id_b = d.try_admit(&[4, 5, 6], 2, 0.0, None).expect("b must admit");
         assert_ne!(id_a, id_b);
 
         let mut emitted: HashMap<SessionId, usize> = HashMap::new();
@@ -624,7 +665,7 @@ mod bench_served_driver_steps {
             None,
         )
         .unwrap();
-        if d.try_admit(&ids, 6, 0.0).is_err() {
+        if d.try_admit(&ids, 6, 0.0, None).is_err() {
             panic!("the driver refused to admit the bench prompt");
         }
         let mut i = 0;
