@@ -2277,6 +2277,45 @@ mod tests {
                 StatusCode::PAYLOAD_TOO_LARGE
             );
         }
+
+        /// The wiring, not just the layer: a real `ApiServer` built with a small `max_request_body_bytes` must
+        /// answer an oversize body with 413 from its own `build_router()`, and a small body must not be 413
+        /// (positive control: same server, same route, only the body size differs).
+        #[tokio::test]
+        async fn api_server_router_enforces_the_configured_cap() {
+            use super::super::{ApiConfig, ApiServer};
+            use crate::engine::{MemoryAwareConfig, MemoryAwareScheduler};
+            use std::sync::{Arc, Mutex};
+
+            let scheduler = Arc::new(Mutex::new(MemoryAwareScheduler::new(
+                MemoryAwareConfig::default(),
+            )));
+            let config = ApiConfig {
+                no_auth: true,
+                bind_address: "127.0.0.1:0".to_string(),
+                models_dir: None,
+                max_request_body_bytes: 2048,
+                ..ApiConfig::default()
+            };
+            let server = ApiServer::new(config, scheduler).await.expect("server");
+            let app = server.build_router().with_state(server.state().clone());
+            let post = |app: axum::Router, n: usize| async move {
+                let body = format!(r#"{{"model":"m","messages":[],"p":"{}"}}"#, "x".repeat(n));
+                // The pre-auth limiter reads the peer address, which `oneshot` has no socket to supply.
+                let peer = std::net::SocketAddr::from(([127, 0, 0, 1], 9));
+                let mut req = Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap();
+                req.extensions_mut()
+                    .insert(axum::extract::ConnectInfo(peer));
+                app.oneshot(req).await.unwrap().status()
+            };
+            assert_eq!(post(app.clone(), 4096).await, StatusCode::PAYLOAD_TOO_LARGE);
+            assert_ne!(post(app, 16).await, StatusCode::PAYLOAD_TOO_LARGE);
+        }
     }
 
     mod layer_ordering {
