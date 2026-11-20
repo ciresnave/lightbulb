@@ -60,6 +60,8 @@ fn serve(tx: &lightbulb::engine::model_runner::InferenceRequestSender, i: usize)
         prompt: format!("Name a colour, number {i}."),
         max_new_tokens: 8,
         temperature: 0.0,
+        seed: None,
+        extras: Default::default(),
         add_special_tokens: true,
         priority: Priority::Normal,
         response_mode: ResponseMode::Complete(otx),

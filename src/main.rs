@@ -141,6 +141,14 @@ async fn run(cli: Cli) -> Result<()> {
         Err(e) => anyhow::bail!("LIGHTBULB_AUDIT_RETENTION_DAYS: {e}"),
     };
 
+    // A bad value stops startup: a typo'd cap silently reverting to the default is the wrong way to be wrong.
+    let max_request_body_bytes = match lightbulb::api::parse_max_request_body_bytes(
+        &env::var("LIGHTBULB_MAX_REQUEST_BODY_BYTES").unwrap_or_default(),
+    ) {
+        Ok(bytes) => bytes,
+        Err(e) => anyhow::bail!("LIGHTBULB_MAX_REQUEST_BODY_BYTES: {e}"),
+    };
+
     // Create API configuration
     let config = ApiConfig {
         database_url: database_url.clone(),
@@ -168,6 +176,7 @@ async fn run(cli: Cli) -> Result<()> {
         security_alert_email,
         cors_allowed_origins,
         audit_retention_days,
+        max_request_body_bytes,
     };
 
     tracing::info!("Starting Lightbulb API server");

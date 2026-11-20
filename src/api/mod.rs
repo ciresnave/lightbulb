@@ -224,6 +224,10 @@ pub struct ApiConfig {
     /// Delete `audit_logs` rows older than this many days (hourly). `None` (the default) keeps every row; `main.rs` sets it
     /// from `LIGHTBULB_AUDIT_RETENTION_DAYS`.
     pub audit_retention_days: Option<u32>,
+
+    /// Largest request body accepted, in bytes (413 above it). Defaults to `MAX_REQUEST_BODY_BYTES` (2 MiB);
+    /// `main.rs` sets it from `LIGHTBULB_MAX_REQUEST_BODY_BYTES`.
+    pub max_request_body_bytes: usize,
 }
 
 impl Default for ApiConfig {
@@ -254,6 +258,7 @@ impl Default for ApiConfig {
             security_alert_email: None,
             cors_allowed_origins: Vec::new(),
             audit_retention_days: None,
+            max_request_body_bytes: MAX_REQUEST_BODY_BYTES,
         }
     }
 }
@@ -375,6 +380,21 @@ pub(crate) fn with_cors_trace_request_id<S: Clone + Send + Sync + 'static>(
 }
 
 pub(crate) const MAX_REQUEST_BODY_BYTES: usize = 2 * 1024 * 1024;
+
+/// Parse `LIGHTBULB_MAX_REQUEST_BODY_BYTES` (ROADMAP A7): blank means the default (`MAX_REQUEST_BODY_BYTES`),
+/// otherwise a whole number of bytes of at least 1. Zero would reject every request, so it is refused, as is
+/// anything that is not a number.
+pub fn parse_max_request_body_bytes(raw: &str) -> Result<usize, String> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Ok(MAX_REQUEST_BODY_BYTES);
+    }
+    match raw.parse::<usize>() {
+        Ok(0) => Err("must be at least 1 byte (unset the variable for the default)".to_string()),
+        Ok(bytes) => Ok(bytes),
+        Err(_) => Err(format!("{raw:?} is not a whole number of bytes")),
+    }
+}
 
 /// Sourcery review of #155: `tokio::time::timeout` with a zero duration
 /// expires immediately, so `request_timeout_ms: 0` (e.g. a typo'd
@@ -990,8 +1010,10 @@ impl ApiServer {
             // `metrics_endpoint`'s own doc comment). CORS and tracing below
             // still apply to all three.
             .merge(unauthenticated_router)
-            // Explicit request-body cap (see `MAX_REQUEST_BODY_BYTES`).
-            .layer(axum::extract::DefaultBodyLimit::max(MAX_REQUEST_BODY_BYTES))
+            // Request-body cap (see `MAX_REQUEST_BODY_BYTES`; configurable through `max_request_body_bytes`).
+            .layer(axum::extract::DefaultBodyLimit::max(
+                self.state.config.max_request_body_bytes,
+            ))
             // CORS, tracing, request id: see with_cors_trace_request_id
             ;
         let router = with_cors_trace_request_id(router, &self.state.config.cors_allowed_origins);
@@ -2164,7 +2186,7 @@ mod tests {
     }
 
     mod body_limit {
-        use super::super::MAX_REQUEST_BODY_BYTES;
+        use super::super::{MAX_REQUEST_BODY_BYTES, parse_max_request_body_bytes};
         use axum::body::Body;
         use axum::extract::DefaultBodyLimit;
         use axum::http::{Request, StatusCode};
@@ -2197,6 +2219,37 @@ mod tests {
                 .layer(DefaultBodyLimit::max(MAX_REQUEST_BODY_BYTES))
         }
 
+        #[test]
+        fn body_limit_variable_parses_blank_number_and_refuses_the_rest() {
+            assert_eq!(parse_max_request_body_bytes(""), Ok(MAX_REQUEST_BODY_BYTES));
+            assert_eq!(
+                parse_max_request_body_bytes("  "),
+                Ok(MAX_REQUEST_BODY_BYTES)
+            );
+            assert_eq!(parse_max_request_body_bytes(" 4096 "), Ok(4096));
+            assert!(parse_max_request_body_bytes("0").is_err());
+            assert!(parse_max_request_body_bytes("2MiB").is_err());
+            assert!(parse_max_request_body_bytes("-1").is_err());
+        }
+
+        /// A configured cap is the one the layer enforces: the same body is 200 under a larger cap and 413 under a
+        /// smaller one (positive control: the same route and body, only the cap differs).
+        #[tokio::test]
+        async fn configured_cap_is_the_one_enforced() {
+            let capped = |cap: usize| {
+                axum::Router::new()
+                    .route("/t", post(echo_len))
+                    .layer(DefaultBodyLimit::max(
+                        parse_max_request_body_bytes(&cap.to_string()).unwrap(),
+                    ))
+            };
+            assert_eq!(status_for(capped(8192), 4096).await, StatusCode::OK);
+            assert_eq!(
+                status_for(capped(2048), 4096).await,
+                StatusCode::PAYLOAD_TOO_LARGE
+            );
+        }
+
         /// Over the cap is 413; under it passes (the positive control: the
         /// same route and body shape succeed when small).
         #[tokio::test]
@@ -2223,6 +2276,45 @@ mod tests {
                 status_for(bare, MAX_REQUEST_BODY_BYTES + 1024).await,
                 StatusCode::PAYLOAD_TOO_LARGE
             );
+        }
+
+        /// The wiring, not just the layer: a real `ApiServer` built with a small `max_request_body_bytes` must
+        /// answer an oversize body with 413 from its own `build_router()`, and a small body must not be 413
+        /// (positive control: same server, same route, only the body size differs).
+        #[tokio::test]
+        async fn api_server_router_enforces_the_configured_cap() {
+            use super::super::{ApiConfig, ApiServer};
+            use crate::engine::{MemoryAwareConfig, MemoryAwareScheduler};
+            use std::sync::{Arc, Mutex};
+
+            let scheduler = Arc::new(Mutex::new(MemoryAwareScheduler::new(
+                MemoryAwareConfig::default(),
+            )));
+            let config = ApiConfig {
+                no_auth: true,
+                bind_address: "127.0.0.1:0".to_string(),
+                models_dir: None,
+                max_request_body_bytes: 2048,
+                ..ApiConfig::default()
+            };
+            let server = ApiServer::new(config, scheduler).await.expect("server");
+            let app = server.build_router().with_state(server.state().clone());
+            let post = |app: axum::Router, n: usize| async move {
+                let body = format!(r#"{{"model":"m","messages":[],"p":"{}"}}"#, "x".repeat(n));
+                // The pre-auth limiter reads the peer address, which `oneshot` has no socket to supply.
+                let peer = std::net::SocketAddr::from(([127, 0, 0, 1], 9));
+                let mut req = Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap();
+                req.extensions_mut()
+                    .insert(axum::extract::ConnectInfo(peer));
+                app.oneshot(req).await.unwrap().status()
+            };
+            assert_eq!(post(app.clone(), 4096).await, StatusCode::PAYLOAD_TOO_LARGE);
+            assert_ne!(post(app, 16).await, StatusCode::PAYLOAD_TOO_LARGE);
         }
     }
 

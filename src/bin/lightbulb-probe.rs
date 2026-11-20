@@ -483,6 +483,8 @@ async fn generate(tx: &InferenceRequestSender, prompt: String) -> anyhow::Result
         // Greedy. Immaterial on the default backend, which argmaxes regardless,
         // but it is what makes the `fuel-engine` build measure the same thing.
         temperature: 0.0,
+        seed: None,
+        extras: Default::default(),
         // What the server passes for every `ResolvedTemplate::render` output,
         // and matching it is the entire reason a probe result is comparable
         // with what the server will then do. NOT justified by "the template

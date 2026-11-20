@@ -46,15 +46,24 @@ pub struct ChatCompletionRequest {
     #[serde(default = "default_temperature")]
     pub temperature: f32,
 
-    /// Top-p sampling. `1.0` (the default) is a no-op; any other value is
-    /// rejected with a 400 — nucleus sampling is not implemented on either
-    /// decode path. Same reasoning as `completions::CompletionRequest::top_p`;
-    /// this struct never had the field at all, so a caller sending `top_p`
-    /// here got it silently dropped by serde and a clean 200 back — the
-    /// same accepted-and-discarded defect board item 71 closed for `n`/
-    /// `stop`/completions' `top_p`, just missed on this endpoint.
+    /// Nucleus sampling mass in `(0, 1]`. `1.0` (the default) keeps the whole distribution. Anything outside the
+    /// range is a 400.
     #[serde(default = "default_top_p")]
     pub top_p: f32,
+
+    /// OpenAI `presence_penalty`, `-2.0..=2.0`: subtracted once from the logit of any token already generated.
+    #[serde(default)]
+    pub presence_penalty: f32,
+
+    /// OpenAI `frequency_penalty`, `-2.0..=2.0`: subtracted from a token's logit per occurrence so far.
+    #[serde(default)]
+    pub frequency_penalty: f32,
+
+    /// Sampling seed (OpenAI `seed`). With `temperature > 0`, the same seed, prompt and settings reproduce the
+    /// same output on the same build and device (best effort, as OpenAI documents it). Ignored when greedy.
+    /// Negative values are accepted and reinterpreted as `u64`.
+    #[serde(default)]
+    pub seed: Option<i64>,
 
     /// Maximum tokens to generate
     #[serde(default)]
@@ -473,19 +482,14 @@ async fn chat_completions_scoped(
             .into_response();
     }
 
-    // Same reasoning as completions' `top_p` rejection: nucleus sampling is
-    // not wired into either decode path, so anything but the no-op default
-    // is rejected rather than silently ignored.
-    if request.top_p != 1.0 {
+    if let Err(msg) = validate_sampling_extras(
+        request.top_p,
+        request.presence_penalty,
+        request.frequency_penalty,
+    ) {
         return (
             StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({
-                "error": format!(
-                    "top_p={} is not supported: nucleus sampling is not wired into either \
-                     decode path. Send top_p=1.0 (the default) or omit the field.",
-                    request.top_p
-                )
-            })),
+            Json(serde_json::json!({"error": msg})),
         )
             .into_response();
     }
@@ -1065,8 +1069,12 @@ async fn create_n_completions(
     request: ChatCompletionRequest,
     priority: crate::engine::Priority,
 ) -> anyhow::Result<ChatCompletionResponse> {
-    let runs = (0..request.n.max(1)).map(|_| {
-        create_chat_completion_honouring_tool_choice(state.clone(), request.clone(), priority)
+    // With a `seed`, run `i` takes `seed + i`: the choices differ from each other (the same seed would give `n`
+    // identical ones) and the whole set reproduces. Without one, each run draws from the driver's own counter.
+    let runs = (0..request.n.max(1)).map(|i| {
+        let mut run = request.clone();
+        run.seed = request.seed.map(|s| s.wrapping_add(i as i64));
+        create_chat_completion_honouring_tool_choice(state.clone(), run, priority)
     });
     Ok(merge_choices(futures::future::try_join_all(runs).await?))
 }
@@ -1362,6 +1370,12 @@ async fn create_chat_completion(
 
     let max_new_tokens = request.max_tokens.unwrap_or(100);
     let temperature = request.temperature as f64;
+    let seed = request.seed.map(|s| s as u64);
+    let extras = sampling_extras(
+        request.top_p,
+        request.presence_penalty,
+        request.frequency_penalty,
+    );
 
     // If a model runner is available, enqueue the request and wait for generated text.
     let model_entry = state.model();
@@ -1371,7 +1385,11 @@ async fn create_chat_completion(
             &state.queue_depth,
             prompt,
             max_new_tokens,
-            temperature,
+            Sampling {
+                temperature,
+                seed,
+                extras,
+            },
             state.config.request_timeout_ms,
             priority,
         )
@@ -1497,6 +1515,53 @@ async fn create_chat_completion(
     })
 }
 
+/// How one generation samples: the request's `temperature`, optional `seed`, and the `top_p` / penalty extras.
+/// Bundled because they always travel together from a request to its `InferenceJob`, and as separate arguments
+/// they push the runners over clippy's argument limit.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Sampling {
+    pub temperature: f64,
+    pub seed: Option<u64>,
+    pub extras: crate::engine::model_runner::SamplingExtras,
+}
+
+/// 400 text for a `top_p` outside `(0, 1]` or a presence/frequency penalty outside `[-2, 2]` (OpenAI's ranges).
+/// NaN fails every comparison, so it is refused too.
+pub(crate) fn validate_sampling_extras(
+    top_p: f32,
+    presence_penalty: f32,
+    frequency_penalty: f32,
+) -> Result<(), String> {
+    if !(top_p > 0.0 && top_p <= 1.0) {
+        return Err(format!(
+            "top_p={top_p} is out of range: it must be in (0, 1]"
+        ));
+    }
+    for (name, v) in [
+        ("presence_penalty", presence_penalty),
+        ("frequency_penalty", frequency_penalty),
+    ] {
+        if !(-2.0..=2.0).contains(&v) {
+            return Err(format!("{name}={v} is out of range: it must be in [-2, 2]"));
+        }
+    }
+    Ok(())
+}
+
+/// The already-validated `top_p` and penalties as the engine's [`SamplingExtras`]. `top_p == 1.0` is the no-op
+/// default and becomes `None`, so a request that sets none of the three takes the plain sampling path.
+pub(crate) fn sampling_extras(
+    top_p: f32,
+    presence_penalty: f32,
+    frequency_penalty: f32,
+) -> crate::engine::model_runner::SamplingExtras {
+    crate::engine::model_runner::SamplingExtras {
+        top_p: (top_p < 1.0).then_some(top_p),
+        presence_penalty,
+        frequency_penalty,
+    }
+}
+
 /// Run a single **complete-mode** inference call by dispatching an
 /// [`InferenceJob`] to the model runner thread and awaiting the result.
 ///
@@ -1522,7 +1587,7 @@ pub(crate) async fn run_inference_once(
     queue_depth: &crate::engine::model_runner::SharedQueueDepth,
     prompt: BuiltPrompt,
     max_new_tokens: usize,
-    temperature: f64,
+    sampling: Sampling,
     timeout_ms: u64,
     priority: crate::engine::Priority,
 ) -> anyhow::Result<crate::engine::model_runner::CompletionResult> {
@@ -1539,7 +1604,9 @@ pub(crate) async fn run_inference_once(
         id: uuid::Uuid::new_v4().to_string(),
         prompt: prompt.text,
         max_new_tokens,
-        temperature,
+        temperature: sampling.temperature,
+        seed: sampling.seed,
+        extras: sampling.extras,
         add_special_tokens: prompt.add_special_tokens,
         priority,
         response_mode: crate::engine::model_runner::ResponseMode::Complete(resp_tx),
@@ -1577,7 +1644,7 @@ pub(crate) async fn run_inference_once_owned(
     queue_depth: crate::engine::model_runner::SharedQueueDepth,
     prompt: BuiltPrompt,
     max_new_tokens: usize,
-    temperature: f64,
+    sampling: Sampling,
     timeout_ms: u64,
     priority: crate::engine::Priority,
 ) -> anyhow::Result<crate::engine::model_runner::CompletionResult> {
@@ -1586,7 +1653,7 @@ pub(crate) async fn run_inference_once_owned(
         &queue_depth,
         prompt,
         max_new_tokens,
-        temperature,
+        sampling,
         timeout_ms,
         priority,
     )
@@ -1620,6 +1687,12 @@ async fn create_chat_completion_with_contract(
 
     let max_new_tokens = request.max_tokens.unwrap_or(200);
     let temperature = request.temperature as f64;
+    let seed = request.seed.map(|s| s as u64);
+    let extras = sampling_extras(
+        request.top_p,
+        request.presence_penalty,
+        request.frequency_penalty,
+    );
 
     // No model runner → error immediately.
     let Some(tx) = state.model().inference_tx else {
@@ -1689,7 +1762,11 @@ async fn create_chat_completion_with_contract(
                     queue_depth,
                     prompt,
                     max_new_tokens,
-                    temperature,
+                    Sampling {
+                        temperature,
+                        seed,
+                        extras,
+                    },
                     remaining_ms,
                     priority,
                 )
@@ -1823,6 +1900,12 @@ fn create_chat_stream(
             prompt: prompt.text,
             max_new_tokens,
             temperature: request.temperature as f64,
+            seed: request.seed.map(|s| s as u64),
+            extras: sampling_extras(
+                request.top_p,
+                request.presence_penalty,
+                request.frequency_penalty,
+            ),
             // Same value the non-streaming path sends, because it comes from
             // the same `build_prompt` call. The two paths carrying separate
             // answers to this is the shape of the defect this file already has
@@ -2961,6 +3044,95 @@ mod tests {
         // `recv` has ended.
         let jobs = runner.join().expect("stub runner panicked");
         assert_two_templated_attempts(&dir, &jobs);
+    }
+
+    /// POSTs `body` to `/v1/chat/completions` against a stub runner and returns the `seed` of every
+    /// `InferenceJob` it enqueued, sorted (the `n` runs race, so arrival order is not meaningful).
+    async fn enqueued_seeds(body: serde_json::Value) -> Vec<Option<u64>> {
+        let mut seeds = enqueued(body, |job| job.seed).await;
+        seeds.sort();
+        seeds
+    }
+
+    /// POSTs `body` to `/v1/chat/completions` against a stub runner and returns `pick(job)` for every `InferenceJob`
+    /// it enqueued, in arrival order.
+    async fn enqueued<T: Send + 'static>(
+        body: serde_json::Value,
+        pick: fn(&crate::engine::model_runner::InferenceJob) -> T,
+    ) -> Vec<T> {
+        use crate::engine::model_runner::{
+            CompletionResult, InferenceJob, ResponseMode, StreamItem,
+        };
+        let (tx, rx) = std::sync::mpsc::sync_channel::<InferenceJob>(32);
+        let runner = std::thread::spawn(move || {
+            let mut seen = Vec::new();
+            while let Ok(job) = rx.recv() {
+                seen.push(pick(&job));
+                match job.response_mode {
+                    ResponseMode::Complete(resp) => {
+                        let _ = resp.send(Ok(CompletionResult {
+                            text: "ok".to_string(),
+                            prompt_tokens: 1,
+                            completion_tokens: 1,
+                            finish_reason: FinishReason::Stop,
+                        }));
+                    }
+                    ResponseMode::Streaming(chunks) => {
+                        let _ = chunks.send(Ok(StreamItem::Done {
+                            finish_reason: FinishReason::Stop,
+                            prompt_tokens: 1,
+                            completion_tokens: 1,
+                        }));
+                    }
+                }
+            }
+            seen
+        });
+        let request: ChatCompletionRequest =
+            serde_json::from_value(body).expect("the request body must deserialize");
+        let state = state_with_runner(None, Some(tx));
+        let response = chat_completions(State(state), axum::http::HeaderMap::new(), Json(request))
+            .await
+            .into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+        drop(response);
+        runner.join().expect("stub runner panicked")
+    }
+
+    /// The request's `seed` reaches the job on every path that enqueues one, and `n` runs take `seed + i` so
+    /// the choices differ yet reproduce. Without a seed nothing is sent (the driver's counter decides).
+    #[tokio::test]
+    async fn the_request_seed_reaches_the_enqueued_job() {
+        let base = |extra: serde_json::Value| {
+            let mut b = serde_json::json!({
+                "model": "lightbulb-default",
+                "messages": [{"role": "user", "content": "hi"}],
+                "max_tokens": 4,
+                "temperature": 0.8
+            });
+            b.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            b
+        };
+        assert_eq!(enqueued_seeds(base(serde_json::json!({}))).await, [None]);
+        assert_eq!(
+            enqueued_seeds(base(serde_json::json!({"seed": 40}))).await,
+            [Some(40)]
+        );
+        assert_eq!(
+            enqueued_seeds(base(serde_json::json!({"seed": 40, "n": 3}))).await,
+            [Some(40), Some(41), Some(42)]
+        );
+        assert_eq!(
+            enqueued_seeds(base(serde_json::json!({"seed": 40, "stream": true}))).await,
+            [Some(40)]
+        );
+        // A negative seed is accepted and reinterpreted, not rejected.
+        assert_eq!(
+            enqueued_seeds(base(serde_json::json!({"seed": -1}))).await,
+            [Some(u64::MAX)]
+        );
     }
 
     /// A template that rejects the system role falls back to the legacy join —
@@ -4562,39 +4734,56 @@ mod tests {
         assert_eq!(queue_error_response(e).status(), StatusCode::BAD_GATEWAY);
     }
 
-    /// A runner that answers every job after `delay_ms` with text that is not JSON.
+    /// A runner that answers every job after `delay_ms` with text that is not JSON. Joining it gives, per job
+    /// in arrival order, whether the answer was still wanted (`true`) or the requester had already given up
+    /// and dropped its receiver (`false`).
     fn slow_unparseable_runner(
         delay_ms: u64,
     ) -> (
         std::sync::mpsc::SyncSender<crate::engine::InferenceJob>,
-        std::thread::JoinHandle<()>,
+        std::thread::JoinHandle<Vec<bool>>,
     ) {
         use crate::engine::model_runner::{CompletionResult, InferenceJob, ResponseMode};
         let (tx, rx) = std::sync::mpsc::sync_channel::<InferenceJob>(32);
         let handle = std::thread::spawn(move || {
+            let mut delivered = Vec::new();
             while let Ok(job) = rx.recv() {
                 std::thread::sleep(std::time::Duration::from_millis(delay_ms));
                 if let ResponseMode::Complete(resp) = job.response_mode {
-                    let _ = resp.send(Ok(CompletionResult {
-                        text: "no json here".to_string(),
-                        prompt_tokens: 1,
-                        completion_tokens: 1,
-                        finish_reason: FinishReason::Stop,
-                    }));
+                    delivered.push(
+                        resp.send(Ok(CompletionResult {
+                            text: "no json here".to_string(),
+                            prompt_tokens: 1,
+                            completion_tokens: 1,
+                            finish_reason: FinishReason::Stop,
+                        }))
+                        .is_ok(),
+                    );
                 }
             }
+            delivered
         });
         (tx, handle)
     }
 
-    /// The attempts share ONE `request_timeout_ms`. Each answers in ~150ms and never
-    /// parses; with a 200ms budget the second attempt runs out of time. Per-attempt
-    /// budgets would run all three (~450ms) before refusing.
+    /// The attempts share ONE `request_timeout_ms`. Each answers after 800ms and never parses; the budget is
+    /// 1200ms. Attempt 1 therefore finishes (400ms to spare) and attempt 2 has 400ms left, so it is cut off at
+    /// the deadline while its runner is still asleep (400ms more): the runner's reply finds the receiver gone.
+    ///
+    /// Two independent observations, both of which a per-attempt budget changes:
+    /// * the runner's delivery log is `[true, false]` -- with a fresh budget per attempt attempt 2 would be
+    ///   waited for and delivered (`[true, true]`), even though the loop's own `left.is_zero()` check would
+    ///   still stop after two attempts and return the same error (the mutant that survived the earlier,
+    ///   elapsed-time-only version of this test);
+    /// * total time stays under 1800ms, where three full budgets would take about 2400ms.
+    ///
+    /// A sleep only ever runs long, never short, so neither side can pass by luck; a loaded box can only eat
+    /// into the 400ms margins, and the earlier 50ms margin is what made this test fail 1 full run in 4.
     #[tokio::test]
     async fn response_format_attempts_share_one_deadline() {
-        let (tx, runner) = slow_unparseable_runner(150);
+        let (tx, runner) = slow_unparseable_runner(800);
         let mut state = state_with_runner(None, Some(tx));
-        state.config.request_timeout_ms = 200;
+        state.config.request_timeout_ms = 1200;
         let mut req = request();
         req.response_format = Some(serde_json::json!({"type": "json_object"}));
         let started = std::time::Instant::now();
@@ -4606,11 +4795,18 @@ mod tests {
         .await
         .expect_err("a model that never produces JSON must be refused");
         let elapsed = started.elapsed();
-        drop(runner);
+        // `state` (and with it the only sender) went into the call above, so the runner ends once its
+        // second, abandoned job has finished sleeping.
+        let delivered = runner.join().expect("stub runner panicked");
         assert!(e.downcast_ref::<FormatUnmet>().is_some(), "{e}");
         assert_eq!(queue_error_response(e).status(), StatusCode::BAD_GATEWAY);
+        assert_eq!(
+            delivered,
+            [true, false],
+            "attempt 2 must be cut off at the shared deadline, not waited for in full"
+        );
         assert!(
-            elapsed < std::time::Duration::from_millis(400),
+            elapsed < std::time::Duration::from_millis(1800),
             "one shared deadline, not one per attempt: took {elapsed:?}"
         );
     }
@@ -4981,16 +5177,77 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
     }
 
+    /// `top_p` outside `(0, 1]` and penalties outside `[-2, 2]` are a 400 (OpenAI's ranges); a value inside is
+    /// not. The in-range arm is the control: without it a blanket 400 would pass the rest.
     #[tokio::test]
-    async fn chat_completions_rejects_top_p_not_equal_one() {
-        let state = state_with(None);
-        let mut req = request();
-        req.top_p = 0.9;
-
-        let response = chat_completions(State(state), axum::http::HeaderMap::new(), Json(req))
+    async fn chat_completions_rejects_out_of_range_sampling_extras() {
+        for (field, value, ok) in [
+            ("top_p", 0.0, false),
+            ("top_p", 1.5, false),
+            ("top_p", 0.9, true),
+            ("presence_penalty", 2.5, false),
+            ("presence_penalty", -2.0, true),
+            ("frequency_penalty", -2.5, false),
+            ("frequency_penalty", 2.0, true),
+        ] {
+            let mut req = request();
+            match field {
+                "top_p" => req.top_p = value,
+                "presence_penalty" => req.presence_penalty = value,
+                _ => req.frequency_penalty = value,
+            }
+            let response = chat_completions(
+                State(state_with(None)),
+                axum::http::HeaderMap::new(),
+                Json(req),
+            )
             .await
             .into_response();
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            let want = if ok {
+                StatusCode::OK
+            } else {
+                StatusCode::BAD_REQUEST
+            };
+            assert_eq!(response.status(), want, "{field}={value}");
+        }
+    }
+
+    /// `top_p` and the penalties reach the enqueued job; absent (or `top_p: 1.0`) the job carries none.
+    #[tokio::test]
+    async fn sampling_extras_reach_the_enqueued_job() {
+        use crate::engine::model_runner::SamplingExtras;
+        let body = |extra: serde_json::Value| {
+            let mut b = serde_json::json!({
+                "model": "lightbulb-default",
+                "messages": [{"role": "user", "content": "hi"}],
+                "max_tokens": 4,
+                "temperature": 0.8
+            });
+            b.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            b
+        };
+        let pick = |j: &crate::engine::model_runner::InferenceJob| j.extras;
+        assert_eq!(
+            enqueued(body(serde_json::json!({})), pick).await,
+            [SamplingExtras::default()]
+        );
+        assert_eq!(
+            enqueued(body(serde_json::json!({"top_p": 1.0})), pick).await,
+            [SamplingExtras::default()]
+        );
+        let want = SamplingExtras {
+            top_p: Some(0.9),
+            presence_penalty: 0.5,
+            frequency_penalty: -0.25,
+        };
+        let sent =
+            serde_json::json!({"top_p": 0.9, "presence_penalty": 0.5, "frequency_penalty": -0.25});
+        assert_eq!(enqueued(body(sent.clone()), pick).await, [want]);
+        let mut streaming = sent;
+        streaming["stream"] = serde_json::json!(true);
+        assert_eq!(enqueued(body(streaming), pick).await, [want]);
     }
 
     #[tokio::test]
@@ -5244,7 +5501,11 @@ mod tests {
             &queue_depth,
             BuiltPrompt::raw("hi".to_string()),
             8,
-            0.0,
+            Sampling {
+                temperature: 0.0,
+                seed: None,
+                extras: Default::default(),
+            },
             20,
             crate::engine::Priority::Normal,
         )
@@ -5278,7 +5539,11 @@ mod tests {
             &queue_depth,
             BuiltPrompt::raw("hi".to_string()),
             8,
-            0.0,
+            Sampling {
+                temperature: 0.0,
+                seed: None,
+                extras: Default::default(),
+            },
             30_000,
             crate::engine::Priority::Normal,
         )

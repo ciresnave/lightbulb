@@ -1585,7 +1585,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3120,7 +3120,7 @@ checksum = "3640c1c38b8e4e43584d8df18be5fc6b0aa314ce6ebf51b53313d4306cca8e46"
 dependencies = [
  "hermit-abi",
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3438,7 +3438,7 @@ dependencies = [
 
 [[package]]
 name = "lightbulb"
-version = "0.23.70"
+version = "0.24.0"
 dependencies = [
  "ahash",
  "anyhow",
@@ -3764,9 +3764,9 @@ dependencies = [
 
 [[package]]
 name = "mlmf-core"
-version = "0.11.29"
+version = "0.11.49"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3057e748abf6a64d8191ac8a3507b9389dac3cac3e0d0ea58e98f1022b039932"
+checksum = "8684808c2c9aec9f85b2f3e6c5cf092fea8d21695fe36f7d330ace9ea84d308e"
 dependencies = [
  "bytemuck",
  "smallvec",
@@ -3775,18 +3775,18 @@ dependencies = [
 
 [[package]]
 name = "mlmf-ggml"
-version = "0.11.29"
+version = "0.11.49"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bb8b169a54381866aeb14f71ec40a60384964129edc95665865ba4d86596aa28"
+checksum = "c6582cf9c75463eafe5095686db74b2bbaa1e5fb9c365c9707c3721d3423349b"
 dependencies = [
  "mlmf-core",
 ]
 
 [[package]]
 name = "mlmf-gguf"
-version = "0.11.29"
+version = "0.11.49"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bc454506d840801c2327193f7ed39a0e8b0095007767538ddf0c7727a70e0759"
+checksum = "78605801a1b44728737d43591910256e6110dfbe7be6a25c88c199a5c6e55b1a"
 dependencies = [
  "mlmf-core",
  "mlmf-ggml",
@@ -3794,9 +3794,9 @@ dependencies = [
 
 [[package]]
 name = "mlmf-hf-layout"
-version = "0.11.29"
+version = "0.11.49"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1991f11ad6c82d6547370c21d60d6531e43c3bf5017d94673e0d7aa3f871cce8"
+checksum = "5278fe3f2e2957f510b4053b92eeb66f1e3352f164f62e60f76f0beb8b1fca68"
 dependencies = [
  "mlmf-core",
  "serde_json",
@@ -3824,9 +3824,9 @@ dependencies = [
 
 [[package]]
 name = "mlmf-source-hub"
-version = "0.11.29"
+version = "0.11.49"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d0eb66d31d2904fadc11481e06293d8b767ac61d4f6d0fb27c4fe89a2e2fdf62"
+checksum = "6c7db628cd0a69a8f332cf42f48897fe020536e8a5297638681b88ddc3b97d66"
 dependencies = [
  "mlmf-core",
  "serde_json",
@@ -4852,7 +4852,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5374,7 +5374,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5442,7 +5442,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -6238,7 +6238,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -7273,7 +7273,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
