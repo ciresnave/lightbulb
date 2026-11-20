@@ -225,7 +225,7 @@ pub struct ApiConfig {
     /// from `LIGHTBULB_AUDIT_RETENTION_DAYS`.
     pub audit_retention_days: Option<u32>,
 
-    /// Largest request body accepted, in bytes (413 above it). Defaults to [`MAX_REQUEST_BODY_BYTES`] (2 MiB);
+    /// Largest request body accepted, in bytes (413 above it). Defaults to `MAX_REQUEST_BODY_BYTES` (2 MiB);
     /// `main.rs` sets it from `LIGHTBULB_MAX_REQUEST_BODY_BYTES`.
     pub max_request_body_bytes: usize,
 }
@@ -381,7 +381,7 @@ pub(crate) fn with_cors_trace_request_id<S: Clone + Send + Sync + 'static>(
 
 pub(crate) const MAX_REQUEST_BODY_BYTES: usize = 2 * 1024 * 1024;
 
-/// Parse `LIGHTBULB_MAX_REQUEST_BODY_BYTES` (ROADMAP A7): blank means the default ([`MAX_REQUEST_BODY_BYTES`]),
+/// Parse `LIGHTBULB_MAX_REQUEST_BODY_BYTES` (ROADMAP A7): blank means the default (`MAX_REQUEST_BODY_BYTES`),
 /// otherwise a whole number of bytes of at least 1. Zero would reject every request, so it is refused, as is
 /// anything that is not a number.
 pub fn parse_max_request_body_bytes(raw: &str) -> Result<usize, String> {
