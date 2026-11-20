@@ -39,15 +39,18 @@ pub struct CompletionRequest {
     #[serde(default)]
     pub seed: Option<i64>,
 
-    /// Top-p sampling. `1.0` (the default) is a no-op; any other value is
-    /// rejected with a 400 — nucleus sampling is not implemented on either
-    /// decode path. (A `top_p_filter` function existed in `src/sampling.rs`
-    /// at one point, dead code called from neither path — deleted alongside
-    /// lightbulb#102's temperature fix rather than left sitting there
-    /// looking like a capability; wiring it in now would silently reopen a
-    /// question this field's rejection already closes.)
+    /// Nucleus sampling mass in `(0, 1]`. `1.0` (the default) keeps the whole distribution. Anything outside the
+    /// range is a 400.
     #[serde(default = "default_top_p")]
     pub top_p: f32,
+
+    /// OpenAI `presence_penalty`, `-2.0..=2.0`: subtracted once from the logit of any token already generated.
+    #[serde(default)]
+    pub presence_penalty: f32,
+
+    /// OpenAI `frequency_penalty`, `-2.0..=2.0`: subtracted from a token's logit per occurrence so far.
+    #[serde(default)]
+    pub frequency_penalty: f32,
 
     /// Number of completions to generate. `1` (the default) is a no-op;
     /// anything else is rejected — see `chat::validate_n`.
@@ -164,7 +167,7 @@ async fn completions_scoped(
     }
 }
 
-/// 400 for the `n` / `top_p` values this server cannot honour.
+/// 400 for `n` / `top_p` / penalty values this server cannot honour.
 fn reject_unsupported(request: &CompletionRequest) -> Option<Response> {
     if let Err(msg) = crate::api::openai::chat::validate_n(request.n) {
         return Some(
@@ -175,15 +178,16 @@ fn reject_unsupported(request: &CompletionRequest) -> Option<Response> {
                 .into_response(),
         );
     }
-    (request.top_p != 1.0).then(|| {
+    crate::api::openai::chat::validate_sampling_extras(
+        request.top_p,
+        request.presence_penalty,
+        request.frequency_penalty,
+    )
+    .err()
+    .map(|msg| {
         (
             StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({
-                "error": format!(
-                    "top_p={} is not supported: nucleus sampling is not wired into either                      decode path. Send top_p=1.0 (the default) or omit the field.",
-                    request.top_p
-                )
-            })),
+            Json(serde_json::json!({"error": msg})),
         )
             .into_response()
     })
@@ -259,6 +263,11 @@ async fn create_completion(
         crate::api::openai::chat::Sampling {
             temperature,
             seed: request.seed.map(|s| s as u64),
+            extras: crate::api::openai::chat::sampling_extras(
+                request.top_p,
+                request.presence_penalty,
+                request.frequency_penalty,
+            ),
         },
         state.config.request_timeout_ms,
         priority,
@@ -397,16 +406,84 @@ mod tests {
         (tx, handle)
     }
 
+    /// Out-of-range `top_p` / penalties are a 400; in-range ones are not (the control).
     #[tokio::test]
-    async fn completions_rejects_top_p_not_equal_one() {
-        let state = state_with_runner(None);
-        let mut req = request();
-        req.top_p = 0.9;
-
-        let response = self::completions(State(state), axum::http::HeaderMap::new(), Json(req))
+    async fn completions_rejects_out_of_range_sampling_extras() {
+        for (field, value, ok) in [
+            ("top_p", 0.0, false),
+            ("top_p", 1.5, false),
+            ("top_p", 0.9, true),
+            ("presence_penalty", 2.5, false),
+            ("presence_penalty", -2.0, true),
+            ("frequency_penalty", -2.5, false),
+            ("frequency_penalty", 2.0, true),
+        ] {
+            let mut req = request();
+            match field {
+                "top_p" => req.top_p = value,
+                "presence_penalty" => req.presence_penalty = value,
+                _ => req.frequency_penalty = value,
+            }
+            let response = self::completions(
+                State(state_with_runner(None)),
+                axum::http::HeaderMap::new(),
+                Json(req),
+            )
             .await
             .into_response();
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            let want = if ok {
+                StatusCode::OK
+            } else {
+                StatusCode::BAD_REQUEST
+            };
+            assert_eq!(response.status(), want, "{field}={value}");
+        }
+    }
+
+    /// `top_p` and the penalties reach the enqueued completion job.
+    #[tokio::test]
+    async fn sampling_extras_reach_the_enqueued_completion_job() {
+        use crate::engine::model_runner::{
+            CompletionResult, FinishReason, InferenceJob, ResponseMode, SamplingExtras,
+        };
+        let (tx, rx) = std::sync::mpsc::sync_channel::<InferenceJob>(32);
+        let runner = std::thread::spawn(move || {
+            let mut seen = Vec::new();
+            while let Ok(job) = rx.recv() {
+                seen.push(job.extras);
+                if let ResponseMode::Complete(resp) = job.response_mode {
+                    let _ = resp.send(Ok(CompletionResult {
+                        text: "ok".to_string(),
+                        prompt_tokens: 1,
+                        completion_tokens: 1,
+                        finish_reason: FinishReason::Stop,
+                    }));
+                }
+            }
+            seen
+        });
+        let state = state_with_runner(Some(tx));
+        create_completion(state.clone(), request(), crate::engine::Priority::Normal)
+            .await
+            .expect("stub generation must not error");
+        let mut req = request();
+        req.top_p = 0.9;
+        req.presence_penalty = 0.5;
+        req.frequency_penalty = -0.25;
+        create_completion(state, req, crate::engine::Priority::Normal)
+            .await
+            .expect("stub generation must not error");
+        assert_eq!(
+            runner.join().expect("stub runner panicked"),
+            [
+                SamplingExtras::default(),
+                SamplingExtras {
+                    top_p: Some(0.9),
+                    presence_penalty: 0.5,
+                    frequency_penalty: -0.25,
+                }
+            ]
+        );
     }
 
     #[tokio::test]

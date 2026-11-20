@@ -40,7 +40,8 @@
 use std::sync::mpsc::Receiver;
 
 use super::model_runner::{
-    CompletionResult, ControlMsg, FinishReason, InferenceJob, ResponseMode, StreamItem,
+    CompletionResult, ControlMsg, FinishReason, InferenceJob, ResponseMode, SamplingExtras,
+    StreamItem,
 };
 
 /// Why a session stopped generating — the information
@@ -95,6 +96,7 @@ pub(crate) trait SchedulerDriver {
         max_new: usize,
         temperature: f64,
         seed: Option<u64>,
+        extras: SamplingExtras,
     ) -> Result<Self::Id, AdmitError>;
 
     /// Advance every active session by at most one step. Returns `(id, token)`
@@ -222,6 +224,7 @@ pub(crate) fn run_scheduled_jobs<D: SchedulerDriver>(
                 job.max_new_tokens,
                 job.temperature,
                 job.seed,
+                job.extras,
             ) {
                 Ok(id) => {
                     // M4 slice 5.4c (Option B) wiring: best-effort only --
@@ -383,6 +386,8 @@ mod tests {
         priority_log: std::rc::Rc<std::cell::RefCell<Vec<(u64, i32)>>>,
         /// The `seed` each admission was offered, in order -- proves `InferenceJob::seed` reaches `try_admit`.
         seed_log: std::rc::Rc<std::cell::RefCell<Vec<Option<u64>>>>,
+        /// The `extras` each admission was offered, in order.
+        extras_log: std::rc::Rc<std::cell::RefCell<Vec<SamplingExtras>>>,
     }
 
     impl FakeDriver {
@@ -393,6 +398,7 @@ mod tests {
                 sessions: HashMap::new(),
                 priority_log: Default::default(),
                 seed_log: Default::default(),
+                extras_log: Default::default(),
             }
         }
     }
@@ -406,8 +412,10 @@ mod tests {
             max_new: usize,
             _temperature: f64,
             seed: Option<u64>,
+            extras: SamplingExtras,
         ) -> Result<u64, AdmitError> {
             self.seed_log.borrow_mut().push(seed);
+            self.extras_log.borrow_mut().push(extras);
             if self.sessions.len() >= self.capacity {
                 return Err(AdmitError::NoCapacity);
             }
@@ -523,6 +531,7 @@ mod tests {
             max_new_tokens: max_new,
             temperature: 0.0,
             seed: None,
+            extras: Default::default(),
             add_special_tokens: true,
             priority: crate::engine::Priority::Normal,
             response_mode: ResponseMode::Complete(tx),
@@ -556,11 +565,38 @@ mod tests {
             max_new_tokens: max_new,
             temperature: 0.0,
             seed: None,
+            extras: Default::default(),
             add_special_tokens: true,
             priority: crate::engine::Priority::Normal,
             response_mode: ResponseMode::Streaming(tx),
         };
         (job, rx)
+    }
+
+    #[test]
+    fn a_jobs_extras_are_offered_to_the_driver_at_admission() {
+        let (tx, rx) = mpsc::channel();
+        let (plain, _plain_rx) = complete_job("hello", 2);
+        let (tuned, _tuned_rx) = complete_job("world", 2);
+        let extras = SamplingExtras {
+            top_p: Some(0.5),
+            presence_penalty: 1.0,
+            frequency_penalty: 0.25,
+        };
+        tx.send(plain).unwrap();
+        tx.send(InferenceJob { extras, ..tuned }).unwrap();
+        drop(tx);
+
+        let driver = FakeDriver::new(4);
+        let extras_log = driver.extras_log.clone();
+
+        run_scheduled_jobs(driver, rx, no_control(), fake_encode, fake_decode);
+
+        assert_eq!(
+            *extras_log.borrow(),
+            vec![SamplingExtras::default(), extras],
+            "each job's own extras, and only that job's, must reach try_admit"
+        );
     }
 
     #[test]
@@ -805,6 +841,7 @@ mod tests {
             _: usize,
             _: f64,
             _: Option<u64>,
+            _: SamplingExtras,
         ) -> Result<u64, AdmitError> {
             Err(AdmitError::Rejected("not under test here".to_string()))
         }

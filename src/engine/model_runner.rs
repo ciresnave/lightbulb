@@ -100,6 +100,26 @@ pub enum ResponseMode {
     Streaming(async_mpsc::UnboundedSender<Result<StreamItem>>),
 }
 
+/// Per-request sampling controls beyond `temperature` and `seed` (OpenAI `top_p`, `presence_penalty`,
+/// `frequency_penalty`). `Default` is "none of them": the plain temperature/greedy path, byte-for-byte what a
+/// request without these fields always got. `logit_bias` has no Fuel type and stays unsupported.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct SamplingExtras {
+    /// Nucleus mass in `(0, 1]`; `None` (or 1.0, normalised by the API layer) keeps the whole distribution.
+    pub top_p: Option<f32>,
+    /// Subtracted once from the logit of a token already in the history.
+    pub presence_penalty: f32,
+    /// Subtracted per occurrence of a token in the history.
+    pub frequency_penalty: f32,
+}
+
+impl SamplingExtras {
+    /// True when no extra control is set, so the driver can take the plain path.
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
 /// Job submitted to the model runner thread
 pub struct InferenceJob {
     pub id: String,
@@ -110,6 +130,8 @@ pub struct InferenceJob {
     /// same seed, prompt and sampling settings give the same tokens on the same build and device. `None` takes
     /// the driver's own per-admission counter. Ignored at `temperature <= 0` (greedy has no randomness).
     pub seed: Option<u64>,
+    /// `top_p` and the presence/frequency penalties; `Default` leaves them all off.
+    pub extras: SamplingExtras,
     /// Whether the backend must ask its tokenizer to add special tokens when
     /// prefilling `prompt`.
     ///

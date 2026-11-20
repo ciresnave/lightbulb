@@ -96,6 +96,7 @@ fn start_loaded(
         max_new_tokens: 2,
         temperature: 0.0,
         seed: None,
+        extras: Default::default(),
         add_special_tokens: true,
         priority: Priority::Normal,
         response_mode: ResponseMode::Complete(otx),

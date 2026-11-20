@@ -86,6 +86,7 @@ fn init_runner() -> RunnerTx {
         max_new_tokens: 1,
         temperature: 0.0,
         seed: None,
+        extras: Default::default(),
         // Raw text, no chat template applied, so the tokenizer supplies BOS.
         add_special_tokens: true,
         priority: lightbulb::engine::Priority::Normal,
@@ -170,6 +171,7 @@ async fn live_smoke_plain_generation() {
         max_new_tokens: 20,
         temperature: 0.0,
         seed: None,
+        extras: Default::default(),
         // Raw text, no chat template applied, so the tokenizer supplies BOS.
         add_special_tokens: true,
         priority: lightbulb::engine::Priority::Normal,
