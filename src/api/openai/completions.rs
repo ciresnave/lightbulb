@@ -44,6 +44,10 @@ pub struct CompletionRequest {
     #[serde(default = "default_top_p")]
     pub top_p: f32,
 
+    /// `top_k`, `min_p` and `repetition_penalty` (see [`crate::api::openai::chat::ExtraSampling`]).
+    #[serde(flatten)]
+    pub extra_sampling: crate::api::openai::chat::ExtraSampling,
+
     /// OpenAI `presence_penalty`, `-2.0..=2.0`: subtracted once from the logit of any token already generated.
     #[serde(default)]
     pub presence_penalty: f32,
@@ -182,6 +186,7 @@ fn reject_unsupported(request: &CompletionRequest) -> Option<Response> {
         request.top_p,
         request.presence_penalty,
         request.frequency_penalty,
+        &request.extra_sampling,
     )
     .err()
     .map(|msg| {
@@ -267,6 +272,7 @@ async fn create_completion(
                 request.top_p,
                 request.presence_penalty,
                 request.frequency_penalty,
+                &request.extra_sampling,
             ),
         },
         state.config.request_timeout_ms,
@@ -481,6 +487,7 @@ mod tests {
                     top_p: Some(0.9),
                     presence_penalty: 0.5,
                     frequency_penalty: -0.25,
+                    ..SamplingExtras::default()
                 }
             ]
         );
