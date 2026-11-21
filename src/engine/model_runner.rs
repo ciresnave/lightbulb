@@ -103,7 +103,7 @@ pub enum ResponseMode {
 /// Per-request sampling controls beyond `temperature` and `seed` (OpenAI `top_p`, `presence_penalty`,
 /// `frequency_penalty`). `Default` is "none of them": the plain temperature/greedy path, byte-for-byte what a
 /// request without these fields always got. `logit_bias` has no Fuel type and stays unsupported.
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SamplingExtras {
     /// Nucleus mass in `(0, 1]`; `None` (or 1.0, normalised by the API layer) keeps the whole distribution.
     pub top_p: Option<f32>,
@@ -111,6 +111,25 @@ pub struct SamplingExtras {
     pub presence_penalty: f32,
     /// Subtracted per occurrence of a token in the history.
     pub frequency_penalty: f32,
+    /// Keep only the `k` most probable tokens (`>= 1`); `None` keeps all.
+    pub top_k: Option<usize>,
+    /// Minimum probability relative to the top token, in `(0, 1]`; `None` is off.
+    pub min_p: Option<f32>,
+    /// Multiplicative penalty on seen tokens; `1.0` is off (so `Default` cannot be derived).
+    pub repetition_penalty: f32,
+}
+
+impl Default for SamplingExtras {
+    fn default() -> Self {
+        Self {
+            top_p: None,
+            presence_penalty: 0.0,
+            frequency_penalty: 0.0,
+            top_k: None,
+            min_p: None,
+            repetition_penalty: 1.0,
+        }
+    }
 }
 
 impl SamplingExtras {

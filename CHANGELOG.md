@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.24.1 — A5 `top_k`, `min_p` and `repetition_penalty` on chat and completions
+
+`/v1/chat/completions` and `/v1/completions` accept `top_k`, `min_p` and `repetition_penalty` (the llama.cpp / vLLM names; not OpenAI fields) and pass them to Fuel's `SamplingParams` through `SamplingExtras` -> `try_admit` -> `add_session_with_params`. `top_k < 0`, `min_p` outside `[0, 1]` and `repetition_penalty <= 0` (or NaN) are a 400; `top_k` 0, `min_p` 0 and `repetition_penalty` 1.0 are off, so a request that sets none of them takes the plain sampling path exactly as before. `SamplingExtras` no longer derives `Default` (its off value for `repetition_penalty` is 1.0, not 0.0); it has a hand-written `Default`. Verified by `extra_sampling_validates_and_maps` and the existing extras-reach-the-job tests on both endpoints. Not covered: real GGUF output under these knobs (needs a GPU slot-go), `logprobs` and `logit_bias` (no Fuel type), still open on A5.
+
 ## 0.24.0 — **BREAKING**: `ApiConfig::max_request_body_bytes`, `InferenceJob::seed`, `InferenceJob::extras` and a `SchedulerDriver::try_admit` argument added; `LIGHTBULB_MAX_REQUEST_BODY_BYTES`; per-request `seed` (ROADMAP A7, A5)
 
 The request-body cap (still 2 MiB by default, 413 above it) is now configurable: `ApiConfig` gains a public field `max_request_body_bytes`, set from `LIGHTBULB_MAX_REQUEST_BODY_BYTES` (whole number of bytes of at least 1; `0` or a non-number refuses to start, as `LIGHTBULB_AUDIT_RETENTION_DAYS` does). A struct literal of `ApiConfig` without `..Default::default()` stops compiling. Tests: the parser (blank, number, 0, text, negative) and one route answering 200 under a larger cap and 413 under a smaller one with the same body. `docs/CONFIGURATION.md` lists the variable (36 names, 0 missing, 0 extra against `git grep` of `src/`).
