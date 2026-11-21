@@ -51,6 +51,10 @@ pub struct ChatCompletionRequest {
     #[serde(default = "default_top_p")]
     pub top_p: f32,
 
+    /// `top_k`, `min_p` and `repetition_penalty` (llama.cpp / vLLM-style extensions, not OpenAI fields).
+    #[serde(flatten)]
+    pub extra_sampling: ExtraSampling,
+
     /// OpenAI `presence_penalty`, `-2.0..=2.0`: subtracted once from the logit of any token already generated.
     #[serde(default)]
     pub presence_penalty: f32,
@@ -486,6 +490,7 @@ async fn chat_completions_scoped(
         request.top_p,
         request.presence_penalty,
         request.frequency_penalty,
+        &request.extra_sampling,
     ) {
         return (
             StatusCode::BAD_REQUEST,
@@ -1375,6 +1380,7 @@ async fn create_chat_completion(
         request.top_p,
         request.presence_penalty,
         request.frequency_penalty,
+        &request.extra_sampling,
     );
 
     // If a model runner is available, enqueue the request and wait for generated text.
@@ -1531,7 +1537,9 @@ pub(crate) fn validate_sampling_extras(
     top_p: f32,
     presence_penalty: f32,
     frequency_penalty: f32,
+    extra: &ExtraSampling,
 ) -> Result<(), String> {
+    extra.validate()?;
     if !(top_p > 0.0 && top_p <= 1.0) {
         return Err(format!(
             "top_p={top_p} is out of range: it must be in (0, 1]"
@@ -1554,11 +1562,51 @@ pub(crate) fn sampling_extras(
     top_p: f32,
     presence_penalty: f32,
     frequency_penalty: f32,
+    extra: &ExtraSampling,
 ) -> crate::engine::model_runner::SamplingExtras {
     crate::engine::model_runner::SamplingExtras {
         top_p: (top_p < 1.0).then_some(top_p),
         presence_penalty,
         frequency_penalty,
+        top_k: extra.top_k.filter(|k| *k > 0).map(|k| k as usize),
+        min_p: extra.min_p.filter(|p| *p > 0.0),
+        repetition_penalty: extra.repetition_penalty.unwrap_or(1.0),
+    }
+}
+
+/// Non-OpenAI sampling knobs accepted on both request types (the names llama.cpp and vLLM use). `top_k` 0 and
+/// `min_p` 0 mean off, like llama.cpp; `repetition_penalty` 1.0 is off.
+#[derive(Debug, Clone, Copy, Default, PartialEq, serde::Deserialize)]
+pub struct ExtraSampling {
+    /// Keep only the `k` most probable tokens; `0` disables. Negative is a 400.
+    #[serde(default)]
+    pub top_k: Option<i64>,
+    /// Drop tokens below `min_p` times the top token's probability, `[0, 1]`; `0` disables.
+    #[serde(default)]
+    pub min_p: Option<f32>,
+    /// Multiplicative penalty on tokens already seen, `> 0`; `1.0` disables.
+    #[serde(default)]
+    pub repetition_penalty: Option<f32>,
+}
+
+impl ExtraSampling {
+    /// 400 text for a value Fuel would refuse. NaN fails every comparison, so it is refused too.
+    pub(crate) fn validate(&self) -> Result<(), String> {
+        if let Some(k) = self.top_k.filter(|k| *k < 0) {
+            return Err(format!("top_k={k} is out of range: it must be >= 0"));
+        }
+        if let Some(p) = self.min_p.filter(|p| !(0.0..=1.0).contains(p)) {
+            return Err(format!("min_p={p} is out of range: it must be in [0, 1]"));
+        }
+        if let Some(r) = self
+            .repetition_penalty
+            .filter(|r| !(*r > 0.0 && r.is_finite()))
+        {
+            return Err(format!(
+                "repetition_penalty={r} is out of range: it must be > 0"
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -1692,6 +1740,7 @@ async fn create_chat_completion_with_contract(
         request.top_p,
         request.presence_penalty,
         request.frequency_penalty,
+        &request.extra_sampling,
     );
 
     // No model runner → error immediately.
@@ -1905,6 +1954,7 @@ fn create_chat_stream(
                 request.top_p,
                 request.presence_penalty,
                 request.frequency_penalty,
+                &request.extra_sampling,
             ),
             // Same value the non-streaming path sends, because it comes from
             // the same `build_prompt` call. The two paths carrying separate
@@ -5241,6 +5291,7 @@ mod tests {
             top_p: Some(0.9),
             presence_penalty: 0.5,
             frequency_penalty: -0.25,
+            ..SamplingExtras::default()
         };
         let sent =
             serde_json::json!({"top_p": 0.9, "presence_penalty": 0.5, "frequency_penalty": -0.25});
@@ -5248,6 +5299,41 @@ mod tests {
         let mut streaming = sent;
         streaming["stream"] = serde_json::json!(true);
         assert_eq!(enqueued(body(streaming), pick).await, [want]);
+    }
+
+    /// `top_k`, `min_p` and `repetition_penalty`: bad values are a 400, 0 / 0 / 1.0 are off, and good ones reach
+    /// the job.
+    #[test]
+    fn extra_sampling_validates_and_maps() {
+        use crate::engine::model_runner::SamplingExtras;
+        let parse = |v: serde_json::Value| -> ExtraSampling { serde_json::from_value(v).unwrap() };
+        for bad in [
+            serde_json::json!({"top_k": -1}),
+            serde_json::json!({"min_p": 1.5}),
+            serde_json::json!({"min_p": -0.1}),
+            serde_json::json!({"repetition_penalty": 0.0}),
+            serde_json::json!({"repetition_penalty": -1.0}),
+        ] {
+            assert!(parse(bad.clone()).validate().is_err(), "{bad}");
+        }
+        let off = parse(serde_json::json!({"top_k": 0, "min_p": 0.0, "repetition_penalty": 1.0}));
+        assert!(off.validate().is_ok());
+        assert_eq!(
+            sampling_extras(1.0, 0.0, 0.0, &off),
+            SamplingExtras::default()
+        );
+        let on = parse(serde_json::json!({"top_k": 40, "min_p": 0.05, "repetition_penalty": 1.1}));
+        assert!(on.validate().is_ok());
+        assert_eq!(
+            sampling_extras(1.0, 0.0, 0.0, &on),
+            SamplingExtras {
+                top_k: Some(40),
+                min_p: Some(0.05),
+                repetition_penalty: 1.1,
+                ..SamplingExtras::default()
+            }
+        );
+        assert_eq!(parse(serde_json::json!({})), ExtraSampling::default());
     }
 
     #[tokio::test]

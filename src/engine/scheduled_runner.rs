@@ -582,6 +582,7 @@ mod tests {
             top_p: Some(0.5),
             presence_penalty: 1.0,
             frequency_penalty: 0.25,
+            ..SamplingExtras::default()
         };
         tx.send(plain).unwrap();
         tx.send(InferenceJob { extras, ..tuned }).unwrap();

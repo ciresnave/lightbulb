@@ -141,6 +141,9 @@ impl<'m, M: PagedDecodeModel> FuelPagedSchedulerDriver<'m, M> {
             top_p: extras.top_p,
             presence_penalty: extras.presence_penalty,
             frequency_penalty: extras.frequency_penalty,
+            top_k: extras.top_k,
+            min_p: extras.min_p,
+            repetition_penalty: extras.repetition_penalty,
             seed: seed.unwrap_or(counter),
             ..SamplingParams::default()
         }
