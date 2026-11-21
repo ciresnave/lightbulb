@@ -153,8 +153,8 @@ impl ChatTemplate {
     /// tools list" without actually rendering it with one. False positives
     /// (a template that merely mentions the word without a real branch) are
     /// possible but unseen in this codebase's Hub sample and cost nothing
-    /// today, since nothing currently WIRES a `tools` value into `render`'s
-    /// context (see `api::openai::chat::create_chat_completion`) — this
+    /// today, since the only caller that binds `tools` (`render_with_tools`)
+    /// is the native-template arm of `api::openai::chat::tool_prompt_strategy` — this
     /// predicate exists only to keep Lightbulb's own injected-prompt fallback
     /// from being the only path in the code, per the portfolio PM's
     /// tool-calls-design-pivot ruling, condition 2: a real deployment on a
@@ -195,6 +195,20 @@ impl ChatTemplate {
     pub fn render(
         &self,
         messages: &[RawMessage],
+        bos_token: &str,
+        eos_token: &str,
+    ) -> anyhow::Result<String> {
+        self.render_with_tools(messages, None, bos_token, eos_token)
+    }
+
+    /// [`render`](Self::render) with the OpenAI/HF-shaped `tools` list bound as the template's `tools` variable
+    /// (`[{"type": "function", "function": {name, description, parameters}}]`, what `transformers`' own
+    /// `apply_chat_template(tools=...)` takes). `None` leaves `tools` UNDEFINED, not none: the context is then
+    /// exactly what `render` always built, so a request without tools renders byte-for-byte as before.
+    pub fn render_with_tools(
+        &self,
+        messages: &[RawMessage],
+        tools: Option<&[serde_json::Value]>,
         bos_token: &str,
         eos_token: &str,
     ) -> anyhow::Result<String> {
@@ -286,12 +300,19 @@ impl ChatTemplate {
         // tokenizer with a `TemplateProcessing` post_processor prepends BOS a
         // second time. See the module docs; the flag is carried by
         // `openai/chat.rs`'s `BuiltPrompt`.
-        let out = tmpl.render(minijinja::context! {
+        let base = minijinja::context! {
             messages => msgs,
             bos_token => bos_token,
             eos_token => eos_token,
             add_generation_prompt => true,
-        })?;
+        };
+        let out = match tools {
+            Some(t) => tmpl.render(minijinja::context! {
+                tools => minijinja::Value::from_serialize(t),
+                ..base
+            })?,
+            None => tmpl.render(base)?,
+        };
         Ok(out)
     }
 }
@@ -1173,6 +1194,17 @@ impl ResolvedTemplate {
     pub fn render(&self, messages: &[RawMessage]) -> anyhow::Result<String> {
         self.template
             .render(messages, &self.tokens.bos, &self.tokens.eos)
+    }
+
+    /// [`render`](Self::render) with `tools` bound as the template's `tools` variable; see
+    /// [`ChatTemplate::render_with_tools`].
+    pub fn render_with_tools(
+        &self,
+        messages: &[RawMessage],
+        tools: &[serde_json::Value],
+    ) -> anyhow::Result<String> {
+        self.template
+            .render_with_tools(messages, Some(tools), &self.tokens.bos, &self.tokens.eos)
     }
 
     /// Which tier produced the template.
