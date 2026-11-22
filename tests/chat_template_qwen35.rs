@@ -159,7 +159,10 @@ fn the_cases_are_distinguishable() {
     assert_eq!(outs.len(), RENDERS.len());
 }
 
-fn render_tools(msgs: &[(&str, &str)], tools: Option<&[serde_json::Value]>) -> anyhow::Result<String> {
+fn render_tools(
+    msgs: &[(&str, &str)],
+    tools: Option<&[serde_json::Value]>,
+) -> anyhow::Result<String> {
     let t = ChatTemplate {
         source: TEMPLATE.to_string(),
         resolved_by: Resolution::GgufMetadata,
@@ -201,19 +204,40 @@ You have access to the following functions:
 <tools>
 {";
     assert!(with.starts_with(head), "{with}");
-    assert!(with.contains("get_weather") && with.contains("Weather for a city"), "{with}");
-    assert!(with.contains("</tools>
+    assert!(
+        with.contains("get_weather") && with.contains("Weather for a city"),
+        "{with}"
+    );
+    assert!(
+        with.contains(
+            "</tools>
 
-If you choose to call a function ONLY reply in the following format"), "{with}");
+If you choose to call a function ONLY reply in the following format"
+        ),
+        "{with}"
+    );
     assert!(with.contains("<function=example_function_name>"), "{with}");
-    assert!(with.contains("<|im_start|>user
-Weather in Paris?<|im_end|>"), "{with}");
-    assert!(with.ends_with("<|im_start|>assistant
+    assert!(
+        with.contains(
+            "<|im_start|>user
+Weather in Paris?<|im_end|>"
+        ),
+        "{with}"
+    );
+    assert!(
+        with.ends_with(
+            "<|im_start|>assistant
 <think>
 
 </think>
 
-"), "{with}");
+"
+        ),
+        "{with}"
+    );
     let without = render_tools(&msgs, None).unwrap();
-    assert!(!without.contains("# Tools") && !without.contains("get_weather"), "{without}");
+    assert!(
+        !without.contains("# Tools") && !without.contains("get_weather"),
+        "{without}"
+    );
 }

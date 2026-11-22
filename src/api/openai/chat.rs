@@ -5017,6 +5017,109 @@ mod tests {
         assert_eq!(calls[0].function.name, "get_weather");
     }
 
+    /// [`stub_runner_with_text`] that also returns every prompt it was handed.
+    fn recording_runner_with_text(
+        text: &str,
+    ) -> (
+        std::sync::mpsc::SyncSender<crate::engine::InferenceJob>,
+        std::thread::JoinHandle<Vec<String>>,
+    ) {
+        use crate::engine::model_runner::{CompletionResult, InferenceJob, ResponseMode};
+        let (tx, rx) = std::sync::mpsc::sync_channel::<InferenceJob>(32);
+        let text = text.to_string();
+        let handle = std::thread::spawn(move || {
+            let mut prompts = Vec::new();
+            while let Ok(job) = rx.recv() {
+                prompts.push(job.prompt.clone());
+                if let ResponseMode::Complete(resp) = job.response_mode {
+                    let _ = resp.send(Ok(CompletionResult {
+                        text: text.clone(),
+                        prompt_tokens: 1,
+                        completion_tokens: 1,
+                        finish_reason: FinishReason::Stop,
+                    }));
+                }
+            }
+            prompts
+        });
+        (tx, handle)
+    }
+
+    /// One `get_weather` tool, enough for the native-path tests.
+    fn weather_tools() -> Vec<Tool> {
+        vec![Tool::Function {
+            function: ToolFunctionDef {
+                name: "get_weather".to_string(),
+                description: None,
+                parameters: None,
+            },
+        }]
+    }
+
+    const PYTHON_TAG_REPLY: &str =
+        "<|python_tag|>{\"name\": \"get_weather\", \"parameters\": {\"city\": \"Paris\"}}";
+
+    /// A template that renders `tools` itself (names appear only through the `tools` variable).
+    const TOOLS_RENDERING_TEMPLATE: &str = "{% for m in messages %}<|{{ m['role'] }}|>{{ m['content'] }}{% endfor %}{% if tools %}<|tools|>{% for t in tools %}{{ t['function']['name'] }};{% endfor %}{% endif %}";
+
+    /// A template that mentions `tools` (so it counts as native) but never renders them.
+    const TOOLS_IGNORING_TEMPLATE: &str = "{% for m in messages %}<|{{ m['role'] }}|>{{ m['content'] }}{% endfor %}{% if tools %}{% endif %}";
+
+    async fn run_tools_request(
+        template: &str,
+        name: &str,
+    ) -> (ChatCompletionResponse, Vec<String>) {
+        let dir = checkpoint_with_template(name, template);
+        let resolved = crate::api::chat_template::resolve_for_serving(&dir)
+            .expect("fixture must resolve a template");
+        let (tx, runner) = recording_runner_with_text(PYTHON_TAG_REPLY);
+        let state = state_with_runner(Some(resolved), Some(tx));
+        let mut req = request();
+        req.tools = Some(weather_tools());
+        let response = create_chat_completion(state, req, crate::engine::Priority::Normal)
+            .await
+            .expect("tools request must not error");
+        let prompts = runner.join().expect("runner thread");
+        (response, prompts)
+    }
+
+    #[tokio::test]
+    async fn native_template_carries_the_tools_and_parses_a_family_reply() {
+        let (response, prompts) = run_tools_request(TOOLS_RENDERING_TEMPLATE, "native-tools").await;
+        assert_eq!(prompts.len(), 1);
+        assert!(
+            prompts[0].contains("<|tools|>get_weather;"),
+            "the template must have rendered the tools: {:?}",
+            prompts[0]
+        );
+        assert!(
+            !prompts[0].contains("<tool_call>"),
+            "the injected instruction must not ride along: {:?}",
+            prompts[0]
+        );
+        assert_eq!(response.choices[0].finish_reason, "tool_calls");
+        let calls = response.choices[0]
+            .message
+            .tool_calls
+            .as_ref()
+            .expect("tool_calls");
+        assert_eq!(calls[0].function.name, "get_weather");
+        assert!(calls[0].function.arguments.contains("Paris"));
+    }
+
+    #[tokio::test]
+    async fn a_template_that_ignores_tools_falls_back_to_the_injected_instruction() {
+        let (response, prompts) = run_tools_request(TOOLS_IGNORING_TEMPLATE, "ignored-tools").await;
+        assert!(
+            prompts[0].contains("<tool_call>") && prompts[0].contains("get_weather"),
+            "fallback must inject Lightbulb's instruction: {:?}",
+            prompts[0]
+        );
+        // Not native, so the family format is NOT parsed: the reply stays prose.
+        assert_eq!(response.choices[0].finish_reason, "stop");
+        assert!(response.choices[0].message.tool_calls.is_none());
+    }
+
     #[tokio::test]
     async fn create_chat_completion_without_tools_never_parses_the_tag() {
         // The same generated text, but the request never offered `tools` —
