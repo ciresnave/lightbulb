@@ -206,6 +206,71 @@ async fn a_q4_0_synthetic_gguf_is_served_and_decodes_the_same_token() {
     assert!(first["logprob"].as_f64().expect("logprob") > -5e-2, "{v}");
 }
 
+/// Q6_K, a K-quant (256-value super-blocks, 6-bit values, 8-bit group scales): the loader's K-quant path serves it
+/// and the fixed token survives. The bound is the loosest of the three: the group scales are 8-bit and the weights
+/// are 6-bit.
+#[tokio::test]
+async fn a_q6_k_synthetic_gguf_is_served_and_decodes_the_same_token() {
+    let body = chat_body(4, serde_json::json!({"logprobs": true, "top_logprobs": 1}));
+    let bytes = post_chat_gguf(gguf_writer::constant_output_gguf_q6_k_bytes(7), body).await;
+    let v: serde_json::Value = serde_json::from_slice(&bytes).expect("response was not JSON");
+    assert_eq!(v["choices"][0]["finish_reason"], "length", "{v}");
+    assert_eq!(v["choices"][0]["message"]["content"], "&&&&", "{v}");
+    let first = &v["choices"][0]["logprobs"]["content"][0];
+    assert!(first["logprob"].as_f64().expect("logprob") > -5e-2, "{v}");
+}
+
+/// The Q6_K encoder against an independent reading of llama.cpp's `dequantize_row_q6_K`: varied values (not the
+/// fixture's constants, which any layout slip would still decode) come back within the quantisation step. A wrong
+/// nibble, high-bit or scale placement moves values by far more than the bound.
+#[test]
+fn the_q6_k_encoder_round_trips_through_the_reference_layout() {
+    let values: Vec<f32> = (0..512)
+        .map(|i| ((i * 37 % 101) as f32 - 50.0) / 50.0)
+        .collect();
+    let bytes = gguf_writer::quantize_q6_k(&values);
+    assert_eq!(bytes.len(), 2 * 210);
+    for (b, block) in bytes.chunks(210).zip(values.chunks(256)) {
+        let (ql, rest) = b.split_at(128);
+        let (qh, rest) = rest.split_at(64);
+        let (sc, d) = rest.split_at(16);
+        let d = half_to_f32(u16::from_le_bytes([d[0], d[1]]));
+        for half in 0..2 {
+            for l in 0..32 {
+                let (lo, hi) = (ql[half * 64 + l], ql[half * 64 + l + 32]);
+                let h = qh[half * 32 + l];
+                let q = [
+                    (lo & 0xF) | ((h & 3) << 4),
+                    (hi & 0xF) | (((h >> 2) & 3) << 4),
+                    (lo >> 4) | (((h >> 4) & 3) << 4),
+                    (hi >> 4) | (((h >> 6) & 3) << 4),
+                ];
+                for (k, q) in q.iter().enumerate() {
+                    let scale = f32::from(sc[half * 8 + 2 * k + l / 16] as i8);
+                    let got = d * scale * (f32::from(*q) - 32.0);
+                    let want = block[half * 128 + k * 32 + l];
+                    assert!(
+                        (got - want).abs() < 0.05,
+                        "{got} vs {want} (half {half} k {k} l {l})"
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// An f16 (normal range) to f32.
+fn half_to_f32(bits: u16) -> f32 {
+    let exp = i32::from((bits >> 10) & 0x1f);
+    let mant = f32::from(bits & 0x3ff);
+    let magnitude = (1.0 + mant / 1024.0) * 2f32.powi(exp - 15);
+    if bits & 0x8000 != 0 {
+        -magnitude
+    } else {
+        magnitude
+    }
+}
+
 /// The quantisers are not no-ops: the Q8_0 file is under half the F32 one (34 bytes per 32 values against 128 for
 /// the matrices) and the Q4_0 file smaller still (18), so the tests above ran different files, not the F32 one under
 /// other names.
@@ -216,6 +281,9 @@ fn the_quantised_files_are_smaller_than_the_f32_one() {
     let q4_len = gguf_writer::constant_output_gguf_q4_0_bytes(7).len();
     assert!(q8_len * 2 < f32_len, "q8_0 {q8_len} vs f32 {f32_len} bytes");
     assert!(q4_len < q8_len, "q4_0 {q4_len} vs q8_0 {q8_len} bytes");
+    let q6_len = gguf_writer::constant_output_gguf_q6_k_bytes(7).len();
+    assert!(q6_len < q8_len, "q6_k {q6_len} vs q8_0 {q8_len} bytes");
+    assert!(q4_len < q6_len, "q4_0 {q4_len} vs q6_k {q6_len} bytes");
 }
 
 /// A chat template within the synthetic vocabulary (printable ASCII and spaces): not the legacy `role: content`
