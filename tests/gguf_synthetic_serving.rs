@@ -187,14 +187,27 @@ async fn a_q8_0_synthetic_gguf_is_served_and_decodes_the_same_token() {
     assert!(first["logprob"].as_f64().expect("logprob") > -1e-2, "{v}");
 }
 
-/// The quantiser is not a no-op: the Q8_0 file is smaller than the F32 one (34 bytes per 32 values against 128),
-/// so the test above ran a different file, not the F32 one under another name.
+/// Q4_0, the format of this repo's own real TinyLlama file: same file, 4-bit matrices, still the same fixed token
+/// (the dominant row survives 4-bit quantisation; the logprob is looser than Q8_0's, so the bound is too).
+#[tokio::test]
+async fn a_q4_0_synthetic_gguf_is_served_and_decodes_the_same_token() {
+    let body = chat_body(4, serde_json::json!({"logprobs": true, "top_logprobs": 1}));
+    let bytes = post_chat_gguf(gguf_writer::constant_output_gguf_q4_0_bytes(7), body).await;
+    let v: serde_json::Value = serde_json::from_slice(&bytes).expect("response was not JSON");
+    assert_eq!(v["choices"][0]["finish_reason"], "length", "{v}");
+    assert_eq!(v["choices"][0]["message"]["content"], "&&&&", "{v}");
+    let first = &v["choices"][0]["logprobs"]["content"][0];
+    assert!(first["logprob"].as_f64().expect("logprob") > -5e-2, "{v}");
+}
+
+/// The quantisers are not no-ops: the Q8_0 file is under half the F32 one (34 bytes per 32 values against 128 for
+/// the matrices) and the Q4_0 file smaller still (18), so the tests above ran different files, not the F32 one under
+/// other names.
 #[test]
-fn the_q8_0_file_is_smaller_than_the_f32_one() {
+fn the_quantised_files_are_smaller_than_the_f32_one() {
     let f32_len = gguf_writer::constant_output_gguf_bytes(7).len();
     let q8_len = gguf_writer::constant_output_gguf_q8_0_bytes(7).len();
-    assert!(
-        q8_len * 2 < f32_len,
-        "q8_0 {q8_len} bytes vs f32 {f32_len} bytes"
-    );
+    let q4_len = gguf_writer::constant_output_gguf_q4_0_bytes(7).len();
+    assert!(q8_len * 2 < f32_len, "q8_0 {q8_len} vs f32 {f32_len} bytes");
+    assert!(q4_len < q8_len, "q4_0 {q4_len} vs q8_0 {q8_len} bytes");
 }

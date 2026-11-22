@@ -143,15 +143,17 @@ pub fn synthetic_gguf_tokens() -> Vec<String> {
 }
 
 const GGML_F32: u32 = 0;
+const GGML_Q4_0: u32 = 2;
 const GGML_Q8_0: u32 = 8;
 
-/// IEEE half-precision bits of `x`, for the positive normal values a Q8_0 scale takes here (`0.0` is `0`).
+/// IEEE half-precision bits of `x`, for the normal-range values a block scale takes here (`0.0` is `0`).
 fn f16_bits(x: f32) -> u16 {
     if x == 0.0 {
         return 0;
     }
-    assert!(x > 0.0 && x.is_normal(), "only positive normal scales");
-    let bits = x.to_bits();
+    assert!(x.is_normal(), "only normal scales");
+    let sign = if x < 0.0 { 0x8000u16 } else { 0 };
+    let bits = x.abs().to_bits();
     let mut exp = ((bits >> 23) & 0xff) as i32 - 127 + 15;
     let mut mant = ((bits & 0x7f_ffff) + 0x1000) >> 13; // round to nearest
     if mant == 0x400 {
@@ -162,7 +164,7 @@ fn f16_bits(x: f32) -> u16 {
         (1..=30).contains(&exp),
         "scale {x} outside the half normal range"
     );
-    ((exp as u16) << 10) | mant as u16
+    sign | ((exp as u16) << 10) | mant as u16
 }
 
 /// Q8_0: per block of 32 values, an f16 scale `max|x| / 127` then 32 signed bytes `round(x / scale)`.
@@ -189,26 +191,63 @@ fn quantize_q8_0(values: &[f32]) -> Vec<u8> {
     out
 }
 
-/// Append one tensor: its info record, and its data padded to the 32-byte alignment. `values` are encoded as
-/// Q8_0 when `quantised`, else stored as F32.
+/// Q4_0: per block of 32 values, an f16 scale `d = (the value of largest magnitude) / -8` then 16 bytes packing
+/// 32 nibbles `q = clamp(round(x / d) + 8, 0, 15)`, element `i` in the low nibble of byte `i` and element
+/// `i + 16` in its high nibble (llama.cpp's layout); a value reads back as `(q - 8) * d`.
+fn quantize_q4_0(values: &[f32]) -> Vec<u8> {
+    assert!(
+        values.len().is_multiple_of(32),
+        "Q4_0 rows are whole blocks of 32"
+    );
+    let mut out = Vec::with_capacity(values.len() / 32 * 18);
+    for block in values.chunks(32) {
+        let extreme = block
+            .iter()
+            .fold(0.0f32, |m, &v| if v.abs() > m.abs() { v } else { m });
+        let scale = extreme / -8.0;
+        out.extend_from_slice(&f16_bits(scale).to_le_bytes());
+        let nibble = |v: f32| -> u8 {
+            let q = if scale == 0.0 {
+                8.0
+            } else {
+                (v / scale).round() + 8.0
+            };
+            q.clamp(0.0, 15.0) as u8
+        };
+        for i in 0..16 {
+            out.push(nibble(block[i]) | (nibble(block[i + 16]) << 4));
+        }
+    }
+    out
+}
+
+/// How a tensor is stored in the synthetic file.
+#[derive(Clone, Copy, PartialEq)]
+pub enum Storage {
+    F32,
+    Q8_0,
+    Q4_0,
+}
+
+/// Append one tensor: its info record, and its data padded to the 32-byte alignment, encoded per `storage`.
 fn push_tensor(
     infos: &mut Vec<u8>,
     data: &mut Vec<u8>,
     (name, dims, values): (&str, &[u64], &[f32]),
-    quantised: bool,
+    storage: Storage,
 ) {
     put_str(infos, name);
     infos.extend_from_slice(&(dims.len() as u32).to_le_bytes());
     for d in dims {
         infos.extend_from_slice(&d.to_le_bytes());
     }
-    let (code, bytes) = if quantised {
-        (GGML_Q8_0, quantize_q8_0(values))
-    } else {
-        (
+    let (code, bytes) = match storage {
+        Storage::Q8_0 => (GGML_Q8_0, quantize_q8_0(values)),
+        Storage::Q4_0 => (GGML_Q4_0, quantize_q4_0(values)),
+        Storage::F32 => (
             GGML_F32,
             values.iter().flat_map(|v| v.to_le_bytes()).collect(),
-        )
+        ),
     };
     infos.extend_from_slice(&code.to_le_bytes());
     infos.extend_from_slice(&(data.len() as u64).to_le_bytes()); // offset in the data region
@@ -298,16 +337,21 @@ fn synthetic_tensors(token: u32, vocab: usize) -> Vec<(String, Vec<u64>, Vec<f32
 
 /// The whole file, all tensors F32: header, metadata, tensor infos, padding to the 32-byte alignment, tensor data.
 pub fn constant_output_gguf_bytes(token: u32) -> Vec<u8> {
-    constant_output_gguf_bytes_with(token, false)
+    constant_output_gguf_bytes_with(token, Storage::F32)
 }
 
 /// The same file with every matrix quantised to Q8_0 (the norm vectors stay F32, as in llama.cpp's own files), so
 /// the quantised load and matmul path runs.
 pub fn constant_output_gguf_q8_0_bytes(token: u32) -> Vec<u8> {
-    constant_output_gguf_bytes_with(token, true)
+    constant_output_gguf_bytes_with(token, Storage::Q8_0)
 }
 
-fn constant_output_gguf_bytes_with(token: u32, quantised: bool) -> Vec<u8> {
+/// The same file with every matrix quantised to Q4_0 (norms F32).
+pub fn constant_output_gguf_q4_0_bytes(token: u32) -> Vec<u8> {
+    constant_output_gguf_bytes_with(token, Storage::Q4_0)
+}
+
+fn constant_output_gguf_bytes_with(token: u32, matrices: Storage) -> Vec<u8> {
     let tokens = synthetic_gguf_tokens();
     let vocab = tokens.len();
     assert!((token as usize) < vocab, "token out of vocabulary");
@@ -315,12 +359,8 @@ fn constant_output_gguf_bytes_with(token: u32, quantised: bool) -> Vec<u8> {
     let (mut infos, mut data) = (Vec::new(), Vec::new());
     for (name, dims, values) in &tensors {
         let is_norm = name.ends_with("norm.weight");
-        push_tensor(
-            &mut infos,
-            &mut data,
-            (name, dims, values),
-            quantised && !is_norm,
-        );
+        let storage = if is_norm { Storage::F32 } else { matrices };
+        push_tensor(&mut infos, &mut data, (name, dims, values), storage);
     }
     let mut out = gguf_bytes(&synthetic_kvs(tokens), tensors.len() as u64);
     out.extend_from_slice(&infos);
