@@ -302,7 +302,11 @@ mod tests {
             .map_err(|e| anyhow::anyhow!("encode: {e}"))?
             .get_ids()
             .to_vec();
-        assert_eq!(ids, vec![5, 6], "tokenizer must round-trip the fixture's words");
+        assert_eq!(
+            ids,
+            vec![5, 6],
+            "tokenizer must round-trip the fixture's words"
+        );
         assert!(!ids.is_empty(), "tokenizer produced no ids");
         Ok(())
     }

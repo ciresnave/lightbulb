@@ -40,16 +40,17 @@ pub(crate) fn validate_completions(logprobs: Option<u32>) -> Result<Option<usize
     }
 }
 
-/// The entries that belong to `text`: stop-sequence truncation shortens the text but not what was generated, so
-/// logprobs for tokens wholly past the cut are dropped.
+/// The entries that lie wholly inside `text` (the generated text, shortened by a stop sequence or a tool call):
+/// an entry for a token that is cut in two or lies past the cut is dropped, so the kept tokens never describe text
+/// the caller was not given. Lengths are the runner's `text_len`, not the token's own decoded length.
 pub(crate) fn within_text<'a>(logprobs: &'a [TokenLogprob], text: &str) -> &'a [TokenLogprob] {
     let mut consumed = 0usize;
     let mut keep = 0usize;
     for lp in logprobs {
-        if consumed >= text.len() {
+        consumed += lp.text_len;
+        if consumed > text.len() {
             break;
         }
-        consumed += lp.token.len();
         keep += 1;
     }
     &logprobs[..keep]
@@ -80,7 +81,7 @@ pub(crate) fn completions_json(logprobs: &[TokenLogprob]) -> Value {
     let mut offsets = Vec::with_capacity(logprobs.len());
     for lp in logprobs {
         offsets.push(offset);
-        offset += lp.token.len();
+        offset += lp.text_len;
     }
     json!({
         "tokens": logprobs.iter().map(|l| l.token.as_str()).collect::<Vec<_>>(),
@@ -99,6 +100,7 @@ mod tests {
     fn lp(token: &str, logprob: f32, top: &[(&str, f32)]) -> TokenLogprob {
         TokenLogprob {
             token: token.to_string(),
+            text_len: token.len(),
             logprob,
             top: top.iter().map(|(t, p)| (t.to_string(), *p)).collect(),
         }
@@ -133,8 +135,31 @@ mod tests {
         ];
         assert_eq!(within_text(&all, "Hello there").len(), 3);
         assert_eq!(within_text(&all, "Hello").len(), 2);
-        assert_eq!(within_text(&all, "He").len(), 1);
+        assert_eq!(within_text(&all, "He").len(), 0, "`Hel` is cut by the stop");
         assert_eq!(within_text(&all, "").len(), 0);
+    }
+
+    /// A stop sequence inside a token: only entries wholly inside the returned text stay.
+    #[test]
+    fn within_text_drops_a_token_the_cut_falls_inside() {
+        let all = [lp("Hel", -0.1, &[]), lp("lo", -0.2, &[])];
+        let kept = within_text(&all, "H");
+        assert!(kept.is_empty(), "`Hel` is not inside `H`: {kept:?}");
+        assert_eq!(within_text(&all, "Hel").len(), 1);
+    }
+
+    /// `caf` + two halves of `é` (each decodes alone to U+FFFD): all three entries are inside `café`, and the
+    /// offsets follow the text, not the lossy per-token strings.
+    #[test]
+    fn a_character_split_across_tokens_is_counted_by_its_bytes() {
+        let split = |token: &str, text_len: usize| TokenLogprob {
+            text_len,
+            ..lp(token, -0.1, &[])
+        };
+        let all = [split("caf", 3), split("\u{FFFD}", 0), split("\u{FFFD}", 2)];
+        assert_eq!(within_text(&all, "café").len(), 3);
+        assert_eq!(completions_json(&all)["text_offset"], json!([0, 3, 3]));
+        assert_eq!(within_text(&all, "caf").len(), 2);
     }
 
     #[test]

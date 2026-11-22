@@ -449,12 +449,12 @@ mod tests {
         (tx, handle)
     }
 
-    /// `logprobs: N` reaches the job as the alternatives count and comes back in the completions shape
-    /// (parallel arrays, `top_logprobs` as token -> logprob maps, `text_offset` into the generated text); a stop
-    /// sequence cuts the entries with the text; `echo` with `logprobs` and an out-of-range count are a 400; a
-    /// request that did not ask gets `null`.
-    #[tokio::test]
-    async fn completions_logprobs_round_trip_and_refusals() {
+    /// A stub runner that answers every job with "Hello" as two logprob entries (when the job asked) and returns
+    /// the `extras.logprobs` each job carried.
+    fn logprob_runner() -> (
+        std::sync::mpsc::SyncSender<crate::engine::model_runner::InferenceJob>,
+        std::thread::JoinHandle<Vec<Option<usize>>>,
+    ) {
         use crate::engine::model_runner::{
             CompletionResult, FinishReason, InferenceJob, ResponseMode, TokenLogprob,
         };
@@ -465,6 +465,7 @@ mod tests {
                 asked.push(job.extras.logprobs);
                 let entry = |t: &str, lp: f32| TokenLogprob {
                     token: t.to_string(),
+                    text_len: t.len(),
                     logprob: lp,
                     top: vec![(t.to_string(), lp)],
                 };
@@ -484,19 +485,29 @@ mod tests {
             }
             asked
         });
+        (tx, runner)
+    }
+
+    fn ask_completion(extra: serde_json::Value) -> CompletionRequest {
+        let mut b = serde_json::json!({"model": "test-model", "prompt": "hi"});
+        b.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        serde_json::from_value::<CompletionRequest>(b).unwrap()
+    }
+
+    /// `logprobs: N` reaches the job as the alternatives count and comes back in the completions shape
+    /// (parallel arrays, `top_logprobs` as token -> logprob maps, `text_offset` into the generated text); a stop
+    /// sequence cuts the entries with the text; a request that did not ask gets `null`.
+    #[tokio::test]
+    async fn completions_logprobs_round_trip() {
+        let (tx, runner) = logprob_runner();
         let state = state_with_runner(Some(tx));
-        let ask = |extra: serde_json::Value| {
-            let mut b = serde_json::json!({"model": "test-model", "prompt": "hi"});
-            b.as_object_mut()
-                .unwrap()
-                .extend(extra.as_object().unwrap().clone());
-            serde_json::from_value::<CompletionRequest>(b).unwrap()
-        };
         let priority = crate::engine::Priority::Normal;
 
         let r = create_completion(
             state.clone(),
-            ask(serde_json::json!({"logprobs": 1})),
+            ask_completion(serde_json::json!({"logprobs": 1})),
             priority,
         )
         .await
@@ -509,7 +520,7 @@ mod tests {
 
         let r = create_completion(
             state.clone(),
-            ask(serde_json::json!({"logprobs": 0, "stop": "lo"})),
+            ask_completion(serde_json::json!({"logprobs": 0, "stop": "lo"})),
             priority,
         )
         .await
@@ -522,24 +533,32 @@ mod tests {
             "cut with the stop sequence"
         );
 
-        let r = create_completion(state.clone(), ask(serde_json::json!({})), priority)
-            .await
-            .unwrap();
+        let r = create_completion(
+            state.clone(),
+            ask_completion(serde_json::json!({})),
+            priority,
+        )
+        .await
+        .unwrap();
         assert!(r.choices[0].logprobs.is_none());
 
+        drop(state);
+        assert_eq!(runner.join().unwrap(), [Some(1), Some(0), None]);
+    }
+
+    /// `echo` with `logprobs` and an out-of-range count are a 400; an in-range count is not (the control).
+    #[test]
+    fn completions_logprobs_refusals() {
         for (why, extra) in [
             ("echo", serde_json::json!({"logprobs": 1, "echo": true})),
             ("out of range", serde_json::json!({"logprobs": 21})),
         ] {
             assert!(
-                reject_unsupported(&ask(extra)).is_some(),
+                reject_unsupported(&ask_completion(extra)).is_some(),
                 "{why} must be a 400"
             );
         }
-        assert!(reject_unsupported(&ask(serde_json::json!({"logprobs": 20}))).is_none());
-
-        drop(state);
-        assert_eq!(runner.join().unwrap(), [Some(1), Some(0), None]);
+        assert!(reject_unsupported(&ask_completion(serde_json::json!({"logprobs": 20}))).is_none());
     }
 
     /// Out-of-range `top_p` / penalties are a 400; in-range ones are not (the control).

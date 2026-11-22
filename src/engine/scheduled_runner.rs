@@ -354,6 +354,26 @@ pub(crate) fn run_scheduled_jobs<D: SchedulerDriver>(
     }
 }
 
+/// How many tokens before token `i` the byte accounting decodes with it (so a multi-byte character split across
+/// tokens is seen whole, at a cost of a constant number of decodes per token).
+const TEXT_LEN_WINDOW: usize = 16;
+
+/// Bytes token `i` adds to the decoded text: the settled length (a trailing U+FFFD, the decoder's mark for an
+/// unfinished character, is not counted yet) of the window ending at `i` minus that ending before it.
+fn text_len_at(
+    generated: &[u32],
+    i: usize,
+    decode: &impl Fn(&[u32], bool) -> anyhow::Result<String>,
+) -> usize {
+    let start = i.saturating_sub(TEXT_LEN_WINDOW);
+    let settled = |end: usize| {
+        decode(&generated[start..end], false)
+            .map(|s| s.trim_end_matches('\u{FFFD}').len())
+            .unwrap_or(0)
+    };
+    settled(i + 1).saturating_sub(settled(i))
+}
+
 /// Attach token text to the driver's id-keyed logprobs. `generated` is the session's generated token ids, one per
 /// entry of `raw` (when `raw` is non-empty). A token that fails to decode on its own gets the empty string
 /// rather than failing the request.
@@ -365,8 +385,10 @@ fn logprobs_with_text(
     let text = |t: u32| decode(&[t], false).unwrap_or_default();
     raw.iter()
         .zip(generated)
-        .map(|(lp, &tok)| TokenLogprob {
+        .enumerate()
+        .map(|(i, (lp, &tok))| TokenLogprob {
             token: text(tok),
+            text_len: text_len_at(generated, i, decode),
             logprob: lp.logprob,
             top: lp.top.iter().map(|&(t, p)| (text(t), p)).collect(),
         })
@@ -379,6 +401,24 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::mpsc;
     use tokio::sync::oneshot;
+
+    /// Tokens that are bytes, decoded lossily like a real tokenizer: `caf` then the two halves of `é`. The first
+    /// half decodes alone to U+FFFD, so the byte accounting must come from the window, not the token.
+    #[test]
+    fn text_len_follows_the_decoded_text_across_a_split_character() {
+        let decode = |ids: &[u32], _: bool| {
+            Ok(
+                String::from_utf8_lossy(&ids.iter().map(|&i| i as u8).collect::<Vec<_>>())
+                    .into_owned(),
+            )
+        };
+        let generated = [b'c' as u32, b'a' as u32, b'f' as u32, 0xC3, 0xA9];
+        let lens: Vec<usize> = (0..generated.len())
+            .map(|i| text_len_at(&generated, i, &decode))
+            .collect();
+        assert_eq!(lens, [1, 1, 1, 0, 2]);
+        assert_eq!(lens.iter().sum::<usize>(), "café".len());
+    }
 
     /// Treats each byte of the prompt as a token (lossy for non-ASCII, fine
     /// for these fixtures) so tests don't need a real tokenizer.
@@ -687,11 +727,13 @@ mod tests {
             vec![
                 TokenLogprob {
                     token: "e".into(),
+                    text_len: 1,
                     logprob: -1.0,
                     top: vec![("e".into(), 0.0)],
                 },
                 TokenLogprob {
                     token: "f".into(),
+                    text_len: 1,
                     logprob: -2.0,
                     top: vec![("f".into(), 0.0)],
                 },

@@ -54,6 +54,9 @@ pub struct CompletionResult {
 #[derive(Debug, Clone, PartialEq)]
 pub struct TokenLogprob {
     pub token: String,
+    /// Bytes this token adds to the decoded generated text (`0` for a token that only begins a multi-byte
+    /// character, which the token completing it accounts for): `token` is decoded on its own and cannot say.
+    pub text_len: usize,
     pub logprob: f32,
     pub top: Vec<(String, f32)>,
 }

@@ -1545,9 +1545,6 @@ async fn create_chat_completion(
         // caller's own prior assistant turn can contain literal `<tool_call>`
         // text being quoted), and `wants_tools` is the one signal that says
         // Lightbulb itself asked for this format on THIS request.
-        let logprobs = extras.logprobs.map(|_| {
-            super::logprobs::chat_json(super::logprobs::within_text(&result.logprobs, &text))
-        });
         let (content, finish_reason, tool_calls) = if wants_tools {
             match extract_calls(&text, tools, native_tools) {
                 Some((leading, calls)) => (
@@ -1560,6 +1557,10 @@ async fn create_chat_completion(
         } else {
             (text, stopped_reason, None)
         };
+        // Built from the content actually returned: a tool call's markup is not content, nor are its tokens.
+        let logprobs = extras.logprobs.map(|_| {
+            super::logprobs::chat_json(super::logprobs::within_text(&result.logprobs, &content))
+        });
 
         return Ok(ChatCompletionResponse {
             id: format!("chatcmpl-{}", uuid::Uuid::new_v4()),
@@ -5557,6 +5558,17 @@ mod tests {
         std::sync::mpsc::SyncSender<crate::engine::InferenceJob>,
         std::thread::JoinHandle<Vec<Option<usize>>>,
     ) {
+        logprob_runner_with("Hello", &["Hel", "lo"])
+    }
+
+    /// As [`logprob_runner`], answering with `text` whose logprob entries are `tokens` (one per element).
+    fn logprob_runner_with(
+        text: &'static str,
+        tokens: &'static [&'static str],
+    ) -> (
+        std::sync::mpsc::SyncSender<crate::engine::InferenceJob>,
+        std::thread::JoinHandle<Vec<Option<usize>>>,
+    ) {
         use crate::engine::model_runner::{
             CompletionResult, InferenceJob, ResponseMode, TokenLogprob,
         };
@@ -5569,16 +5581,21 @@ mod tests {
                 if let ResponseMode::Complete(resp) = job.response_mode {
                     let entry = |t: &str, lp: f32| TokenLogprob {
                         token: t.to_string(),
+                        text_len: t.len(),
                         logprob: lp,
                         top: vec![(t.to_string(), lp), ("x".to_string(), lp - 1.0)],
                     };
                     let _ = resp.send(Ok(CompletionResult {
-                        text: "Hello".to_string(),
+                        text: text.to_string(),
                         prompt_tokens: 1,
                         completion_tokens: 2,
                         finish_reason: FinishReason::Stop,
                         logprobs: if asked {
-                            vec![entry("Hel", -0.5), entry("lo", -0.25)]
+                            tokens
+                                .iter()
+                                .enumerate()
+                                .map(|(i, t)| entry(t, -0.5 + 0.25 * i as f32))
+                                .collect()
                         } else {
                             Vec::new()
                         },
@@ -5662,6 +5679,41 @@ mod tests {
         assert_eq!(v["choices"][0]["message"]["content"], "Hel");
         let content = v["choices"][0]["logprobs"]["content"].as_array().unwrap();
         assert_eq!(content.len(), 1, "the 'lo' token lies past the cut: {v}");
+    }
+
+    /// With tools offered and a tool call in the reply, the returned `content` is only the text before the call,
+    /// and the logprob tokens are exactly that content, not the call's markup tokens.
+    #[tokio::test]
+    async fn chat_logprobs_describe_the_returned_content_when_a_tool_call_is_extracted() {
+        let (tx, _runner) = logprob_runner_with(
+            r#"Sure.<tool_call>{"name": "f", "arguments": {}}</tool_call>"#,
+            &[
+                "Sure.",
+                r#"<tool_call>{"name": "f", "arguments": {}}</tool_call>"#,
+            ],
+        );
+        let state = state_with_runner(None, Some(tx));
+        let (status, v) = post_chat(
+            state,
+            logprob_body(serde_json::json!({
+                "logprobs": true,
+                "tools": [{"type": "function", "function": {"name": "f", "parameters": {"type": "object"}}}]
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(v["choices"][0]["finish_reason"], "tool_calls", "{v}");
+        let content = v["choices"][0]["message"]["content"].as_str().unwrap();
+        let tokens: String = v["choices"][0]["logprobs"]["content"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["token"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            tokens, content,
+            "logprobs must cover only the returned content: {v}"
+        );
     }
 
     /// The shapes that cannot carry logprobs are a 400 each; the control (a valid request) is a 200.
