@@ -1236,20 +1236,51 @@ fn build_native_tools_prompt(
             &owned
         }
     };
-    let raw: Vec<crate::contracts::validation::RawMessage> = messages
-        .iter()
-        .map(|m| crate::contracts::validation::RawMessage {
-            role: m.role.clone(),
-            content: m.content.clone(),
-        })
-        .collect();
     let text = template
-        .render_with_tools(&raw, &super::tool_parsers::tools_for_template(tools))
+        .render_json_with_tools(
+            &template_messages(messages),
+            &super::tool_parsers::tools_for_template(tools),
+        )
         .ok()?;
     let names_every_tool = tools
         .iter()
         .all(|Tool::Function { function }| text.contains(&function.name));
     names_every_tool.then(|| built_from_rendered(template, text))
+}
+
+/// The conversation in the HF shape the checkpoint's template reads: `role` and `content`, and, where the message
+/// has them, an assistant's `tool_calls` (arguments as an object, as `transformers` passes them, falling back to
+/// the string when it is not JSON) and a tool result's `tool_call_id` and `name`.
+fn template_messages(messages: &[ChatMessage]) -> Vec<serde_json::Value> {
+    messages
+        .iter()
+        .map(|m| {
+            let mut v = serde_json::json!({ "role": m.role, "content": m.content });
+            if let Some(calls) = &m.tool_calls {
+                v["tool_calls"] = calls
+                    .iter()
+                    .map(|c| {
+                        let arguments =
+                            serde_json::from_str(&c.function.arguments).unwrap_or_else(|_| {
+                                serde_json::Value::String(c.function.arguments.clone())
+                            });
+                        serde_json::json!({
+                            "id": c.id,
+                            "type": c.kind,
+                            "function": { "name": c.function.name, "arguments": arguments },
+                        })
+                    })
+                    .collect();
+            }
+            if let Some(id) = &m.tool_call_id {
+                v["tool_call_id"] = serde_json::json!(id);
+            }
+            if let Some(name) = &m.name {
+                v["name"] = serde_json::json!(name);
+            }
+            v
+        })
+        .collect()
 }
 
 /// Tool calls in a reply: Lightbulb's own `<tool_call>{json}</tool_call>` tag always, and, when the tools were
@@ -4669,6 +4700,62 @@ mod tests {
         }]);
         req.tool_choice = Some(serde_json::json!("none"));
         assert!(!request_wants_tools(&req));
+    }
+
+    /// A conversation that already used a tool reaches the checkpoint's own template whole: the assistant's
+    /// `tool_calls` (arguments as an object) and the tool result's `tool_call_id` / `name`, not just their `role`
+    /// and `content`. The control is the same template over a history without tool turns.
+    #[test]
+    fn native_tools_prompt_carries_tool_call_history() {
+        use crate::api::chat_template::{
+            ChatTemplate, Resolution, ResolvedTemplate, SpecialTokens,
+        };
+        let template = ResolvedTemplate {
+            template: ChatTemplate {
+                source: "{% for m in messages %}{{ m.role }}:{{ m.content }}{% if m.tool_calls %}[calls:{% for c in m.tool_calls %}{{ c.function.name }}({{ c.function.arguments | tojson }}){% endfor %}]{% endif %}{% if m.tool_call_id %}[id:{{ m.tool_call_id }}]{% endif %}|{% endfor %}tools:{% for t in tools %}{{ t.function.name }}{% endfor %}"
+                    .to_string(),
+                resolved_by: Resolution::Sidecar,
+            },
+            tokens: SpecialTokens { bos: String::new(), eos: String::new() },
+        };
+        let tools = vec![Tool::Function {
+            function: ToolFunctionDef {
+                name: "get_weather".to_string(),
+                description: None,
+                parameters: None,
+            },
+        }];
+        let message = |role: &str, content: &str| ChatMessage {
+            role: role.to_string(),
+            content: content.to_string(),
+            name: None,
+            tool_calls: None,
+            tool_call_id: None,
+        };
+        let mut assistant = message("assistant", "");
+        assistant.tool_calls = Some(vec![ToolCall {
+            id: "call_1".to_string(),
+            kind: "function".to_string(),
+            function: ToolCallFunction {
+                name: "get_weather".to_string(),
+                arguments: r#"{"city":"Paris"}"#.to_string(),
+            },
+        }]);
+        let mut result = message("tool", "sunny");
+        result.tool_call_id = Some("call_1".to_string());
+
+        let with_history = [message("user", "weather?"), assistant, result];
+        let built = build_native_tools_prompt(&template, &with_history, &tools, &ToolDemand::Free)
+            .expect("renders");
+        assert_eq!(
+            built.text,
+            "user:weather?|assistant:[calls:get_weather({\"city\":\"Paris\"})]|tool:sunny[id:call_1]|tools:get_weather"
+        );
+
+        let plain = [message("user", "hi")];
+        let built = build_native_tools_prompt(&template, &plain, &tools, &ToolDemand::Free)
+            .expect("renders");
+        assert_eq!(built.text, "user:hi|tools:get_weather");
     }
 
     #[test]
