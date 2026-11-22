@@ -86,8 +86,20 @@ async fn post_chat(token: u32, body: serde_json::Value) -> Vec<u8> {
     post_chat_gguf(gguf_writer::constant_output_gguf_bytes(token), body).await
 }
 
-/// [`post_chat`] over the given GGUF file contents.
+/// [`post_chat`] over the given GGUF file contents (200 asserted).
 async fn post_chat_gguf(gguf: Vec<u8>, body: serde_json::Value) -> Vec<u8> {
+    let (status, bytes) = post_chat_gguf_status(gguf, body).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&bytes)
+    );
+    bytes
+}
+
+/// The status and body of `body` posted to a server over the given GGUF file contents.
+async fn post_chat_gguf_status(gguf: Vec<u8>, body: serde_json::Value) -> (StatusCode, Vec<u8>) {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("synthetic.gguf");
     std::fs::write(&path, gguf).expect("writing the gguf");
@@ -107,13 +119,7 @@ async fn post_chat_gguf(gguf: Vec<u8>, body: serde_json::Value) -> Vec<u8> {
     let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20)
         .await
         .unwrap();
-    assert_eq!(
-        status,
-        StatusCode::OK,
-        "{}",
-        String::from_utf8_lossy(&bytes)
-    );
-    bytes.to_vec()
+    (status, bytes.to_vec())
 }
 
 /// A GGUF whose model never emits the EOS runs to its cap and is served as such: `finish_reason: "length"`,
@@ -272,4 +278,20 @@ async fn the_ggufs_chat_template_reaches_the_prompt_on_both_paths() {
         .find_map(|c| c.get("usage").filter(|u| !u.is_null()).cloned())
         .expect("a usage chunk");
     assert_eq!(usage["prompt_tokens"], expected, "streaming: {text}");
+}
+
+/// ROADMAP B12, re-verified on Fuel 0.47.32: a Q8_1 matrix is REFUSED at model load with an error that names the
+/// dtype, not served as garbage. Pins the typed refusal (`GAP-125`: `BlockQ8_1::to_float` has no body upstream); if
+/// Fuel gains Q8_1 dequantisation this fails and the row should be closed, not the test silenced.
+#[tokio::test]
+async fn a_q8_1_gguf_is_refused_by_name_not_served() {
+    let body = chat_body(2, serde_json::json!({}));
+    let (status, bytes) =
+        post_chat_gguf_status(gguf_writer::constant_output_gguf_q8_1_bytes(7), body).await;
+    let text = String::from_utf8_lossy(&bytes);
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{text}");
+    assert!(
+        text.contains("Q8_1") && text.contains("GAP-125"),
+        "the refusal must name the dtype and the upstream gap: {text}"
+    );
 }

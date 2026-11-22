@@ -145,6 +145,7 @@ pub fn synthetic_gguf_tokens() -> Vec<String> {
 const GGML_F32: u32 = 0;
 const GGML_Q4_0: u32 = 2;
 const GGML_Q8_0: u32 = 8;
+const GGML_Q8_1: u32 = 9;
 
 /// IEEE half-precision bits of `x`, for the normal-range values a block scale takes here (`0.0` is `0`).
 fn f16_bits(x: f32) -> u16 {
@@ -221,11 +222,39 @@ fn quantize_q4_0(values: &[f32]) -> Vec<u8> {
     out
 }
 
+/// Q8_1: per block of 32 values, an f16 scale `d = max|x| / 127`, an f16 `s = d * sum(q)`, then 32 signed bytes.
+fn quantize_q8_1(values: &[f32]) -> Vec<u8> {
+    assert!(
+        values.len().is_multiple_of(32),
+        "Q8_1 rows are whole blocks of 32"
+    );
+    let mut out = Vec::with_capacity(values.len() / 32 * 36);
+    for block in values.chunks(32) {
+        let scale = block.iter().fold(0.0f32, |m, v| m.max(v.abs())) / 127.0;
+        let q: Vec<i8> = block
+            .iter()
+            .map(|v| {
+                if scale == 0.0 {
+                    0
+                } else {
+                    (v / scale).round() as i8
+                }
+            })
+            .collect();
+        let sum: i32 = q.iter().map(|&x| i32::from(x)).sum();
+        out.extend_from_slice(&f16_bits(scale).to_le_bytes());
+        out.extend_from_slice(&f16_bits(scale * sum as f32).to_le_bytes());
+        out.extend(q.iter().map(|&x| x as u8));
+    }
+    out
+}
+
 /// How a tensor is stored in the synthetic file.
 #[derive(Clone, Copy, PartialEq)]
 pub enum Storage {
     F32,
     Q8_0,
+    Q8_1,
     Q4_0,
 }
 
@@ -244,6 +273,7 @@ fn push_tensor(
     let (code, bytes) = match storage {
         Storage::Q8_0 => (GGML_Q8_0, quantize_q8_0(values)),
         Storage::Q4_0 => (GGML_Q4_0, quantize_q4_0(values)),
+        Storage::Q8_1 => (GGML_Q8_1, quantize_q8_1(values)),
         Storage::F32 => (
             GGML_F32,
             values.iter().flat_map(|v| v.to_le_bytes()).collect(),
@@ -356,6 +386,11 @@ pub fn constant_output_gguf_q8_0_bytes(token: u32) -> Vec<u8> {
 /// The same file with every matrix quantised to Q4_0 (norms F32).
 pub fn constant_output_gguf_q4_0_bytes(token: u32) -> Vec<u8> {
     constant_output_gguf_bytes_with(token, Storage::Q4_0)
+}
+
+/// The same file with every matrix quantised to Q8_1 (norms F32).
+pub fn constant_output_gguf_q8_1_bytes(token: u32) -> Vec<u8> {
+    constant_output_gguf_bytes_with(token, Storage::Q8_1)
 }
 
 fn constant_output_gguf_bytes_with(token: u32, matrices: Storage) -> Vec<u8> {
