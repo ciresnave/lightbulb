@@ -293,6 +293,11 @@ pub fn write_synthetic_checkpoint(dir: &Path, arch: &SyntheticArchitecture) -> a
         vocab * dim,
     );
 
+    write_safetensors(dir, &data)
+}
+
+// Serialise collected tensors as `model.safetensors` in `dir`.
+fn write_safetensors(dir: &Path, data: &[(String, Vec<usize>, Vec<u8>)]) -> anyhow::Result<()> {
     let views: Vec<(String, TensorView)> = data
         .iter()
         .map(|(name, shape, bytes)| {
@@ -309,4 +314,67 @@ pub fn write_synthetic_checkpoint(dir: &Path, arch: &SyntheticArchitecture) -> a
     )?;
 
     Ok(())
+}
+
+/// Writes a synthetic checkpoint of the same layout whose output does not depend on its input: greedy decoding
+/// emits `token` at every position, so a request either always runs to its `max_tokens` (`token` is not the EOS)
+/// or stops on its first token (`token` is the EOS). That is what the finish-reason and usage tests need, and a
+/// randomly-weighted model cannot promise either.
+///
+/// How: every embedding row is the same constant vector and every projection is zero, so the residual stream is
+/// that vector at every position and layer; the final norm turns it into a constant `c` (all ones); the
+/// `lm_head` row for `token` is all ones, so its logit is `hidden_size`, and every other row is random in
+/// `[-0.1, 0.1]`, so theirs is at most `0.1 * hidden_size`.
+pub fn write_constant_output_checkpoint(
+    dir: &Path,
+    arch: &SyntheticArchitecture,
+    token: u32,
+) -> anyhow::Result<()> {
+    std::fs::write(dir.join("config.json"), arch.config_json())?;
+    std::fs::write(dir.join("tokenizer.json"), arch.tokenizer_json())?;
+    anyhow::ensure!(
+        (token as usize) < arch.vocab_size,
+        "token out of vocabulary"
+    );
+
+    let (dim, vocab) = (arch.hidden_size, arch.vocab_size);
+    let mut rng = Xorshift64::new(0x5EED_0000_F00D_0002);
+    let mut data: Vec<(String, Vec<usize>, Vec<u8>)> = Vec::new();
+    let mut put = |name: String, shape: Vec<usize>, values: Vec<f32>| {
+        data.push((name, shape, f32_bytes(&values)));
+    };
+
+    put(
+        "model.embed_tokens.weight".into(),
+        vec![vocab, dim],
+        vec![0.5; vocab * dim],
+    );
+    for i in 0..arch.num_hidden_layers {
+        let kv = arch.kv_dim();
+        for (suffix, shape) in [
+            ("self_attn.q_proj.weight", vec![dim, dim]),
+            ("self_attn.k_proj.weight", vec![kv, dim]),
+            ("self_attn.v_proj.weight", vec![kv, dim]),
+            ("self_attn.o_proj.weight", vec![dim, dim]),
+            ("mlp.gate_proj.weight", vec![arch.intermediate_size, dim]),
+            ("mlp.up_proj.weight", vec![arch.intermediate_size, dim]),
+            ("mlp.down_proj.weight", vec![dim, arch.intermediate_size]),
+        ] {
+            let len = shape.iter().product();
+            put(format!("model.layers.{i}.{suffix}"), shape, vec![0.0; len]);
+        }
+        for norm in ["input_layernorm.weight", "post_attention_layernorm.weight"] {
+            put(
+                format!("model.layers.{i}.{norm}"),
+                vec![dim],
+                vec![1.0; dim],
+            );
+        }
+    }
+    put("model.norm.weight".into(), vec![dim], vec![1.0; dim]);
+    let mut head = random_vec(&mut rng, vocab * dim);
+    head[token as usize * dim..(token as usize + 1) * dim].fill(1.0);
+    put("lm_head.weight".into(), vec![vocab, dim], head);
+
+    write_safetensors(dir, &data)
 }

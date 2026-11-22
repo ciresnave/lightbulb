@@ -384,6 +384,9 @@ jobs:
           out="$(cargo test --features fuel-engine --test fuel_engine_http -- fuel_runner_serves_a_default_temperature_completion 2>&1)"
           echo "$out"
           echo "$out" | grep -q "test result: ok. 1 passed; 0 failed" || { echo "::error::the synthetic-checkpoint test did not run and pass exactly once"; exit 1; }
+          out="$(cargo test --features fuel-engine --test api_result_metadata -- constant_model 2>&1)"
+          echo "$out"
+          echo "$out" | grep -q "test result: ok. 2 passed; 0 failed" || { echo "::error::the two constant-output tests did not run and pass"; exit 1; }
           echo synthetic >> .gates-ran
 
       # NAMED, not ambient. The clippy gate is a Python script, and relying on
@@ -475,4 +478,4 @@ jobs:
           # PRINTED ON SUCCESS, DELIBERATELY. A green run is exactly when
           # someone is about to over-read what was checked, so the limits go
           # where the green is, not in a doc they would have to think to open.
-          echo "::warning::CI NEVER RUNS Lightbulb's behavioural acceptance tests. chat_template_e2e (a chat model answers AND stops), fuel_engine_http (the completion is coherent English; only its default-temperature test runs, on a synthetic checkpoint) and gguf_serving_e2e (a real GGUF served end to end) require a GPU and a ~2.2 GB checkpoint. There is no GPU runner, by decision (2026-08-27, cost). They are COMPILED here so they cannot rot, and executed only by a person on a GPU box. 'Nobody ran it this month' and 'it passes' look identical from this log — see scripts/check.sh for the command."
+          echo "::warning::CI NEVER RUNS Lightbulb's behavioural acceptance tests. chat_template_e2e (a chat model answers AND stops), fuel_engine_http (the completion is coherent English; only its default-temperature test runs, on a synthetic checkpoint; api_result_metadata: only its two constant_model tests) and gguf_serving_e2e (a real GGUF served end to end) require a GPU and a ~2.2 GB checkpoint. There is no GPU runner, by decision (2026-08-27, cost). They are COMPILED here so they cannot rot, and executed only by a person on a GPU box. 'Nobody ran it this month' and 'it passes' look identical from this log — see scripts/check.sh for the command."
