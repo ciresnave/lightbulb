@@ -235,9 +235,21 @@ Weather in Paris?<|im_end|>"
         ),
         "{with}"
     );
+}
+
+/// The control for the test above, with its own positive arm: no `tools`, no tools block; with `tools`, one.
+#[test]
+fn without_tools_none_of_the_tools_block_appears() {
+    let tools = [serde_json::json!({"type": "function", "function": {"name": "get_weather"}})];
+    let msgs = [("user", "Weather in Paris?")];
     let without = render_tools(&msgs, None).unwrap();
     assert!(
         !without.contains("# Tools") && !without.contains("get_weather"),
         "{without}"
+    );
+    let with = render_tools(&msgs, Some(&tools)).unwrap();
+    assert!(
+        with.contains("# Tools") && with.contains("get_weather"),
+        "{with}"
     );
 }
