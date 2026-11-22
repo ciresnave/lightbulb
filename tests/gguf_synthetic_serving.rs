@@ -63,17 +63,31 @@ fn app_state_for(path: &Path) -> AppState {
 
 /// POST a chat request for a synthetic GGUF whose output token is `token`; return the parsed body.
 async fn chat(token: u32, max_tokens: u32) -> serde_json::Value {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let path = dir.path().join("synthetic.gguf");
-    std::fs::write(&path, gguf_writer::constant_output_gguf_bytes(token))
-        .expect("writing the gguf");
-    let app = lightbulb::api::openai::routes().with_state(app_state_for(&path));
-    let body = serde_json::json!({
+    let body = chat_body(max_tokens, serde_json::json!({}));
+    let bytes = post_chat(token, body).await;
+    serde_json::from_slice(&bytes).expect("response was not JSON")
+}
+
+fn chat_body(max_tokens: u32, extra: serde_json::Value) -> serde_json::Value {
+    let mut body = serde_json::json!({
         "model": "lightbulb-default",
         "messages": [{"role": "user", "content": "ab cd"}],
         "max_tokens": max_tokens,
         "temperature": 0.0,
     });
+    body.as_object_mut()
+        .unwrap()
+        .extend(extra.as_object().unwrap().clone());
+    body
+}
+
+/// The response body (200 asserted) of `body` posted to a server over the synthetic GGUF whose output is `token`.
+async fn post_chat(token: u32, body: serde_json::Value) -> Vec<u8> {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("synthetic.gguf");
+    std::fs::write(&path, gguf_writer::constant_output_gguf_bytes(token))
+        .expect("writing the gguf");
+    let app = lightbulb::api::openai::routes().with_state(app_state_for(&path));
     let resp = app
         .oneshot(
             Request::builder()
@@ -95,7 +109,7 @@ async fn chat(token: u32, max_tokens: u32) -> serde_json::Value {
         "{}",
         String::from_utf8_lossy(&bytes)
     );
-    serde_json::from_slice(&bytes).expect("response was not JSON")
+    bytes.to_vec()
 }
 
 /// A GGUF whose model never emits the EOS runs to its cap and is served as such: `finish_reason: "length"`,
@@ -121,4 +135,35 @@ async fn a_synthetic_gguf_whose_model_emits_eos_is_served_as_stopped() {
         (1..32).contains(&completion),
         "stopped early, not at the cap: {v}"
     );
+}
+
+/// Logprobs end to end through real Fuel on the synthetic GGUF, non-streaming: one entry per generated token, the
+/// token text decoded from the file's own vocabulary, and, because the model's output row for `&` dominates
+/// (logit 16 against at most 0.8), a logprob within a hair of 0 whose top alternative is that token.
+#[tokio::test]
+async fn a_synthetic_gguf_returns_logprobs() {
+    let body = chat_body(4, serde_json::json!({"logprobs": true, "top_logprobs": 2}));
+    let v: serde_json::Value =
+        serde_json::from_slice(&post_chat(7, body).await).expect("response was not JSON");
+    let content = v["choices"][0]["logprobs"]["content"]
+        .as_array()
+        .expect("logprobs.content");
+    assert_eq!(content.len(), 4, "one entry per generated token: {v}");
+    for entry in content {
+        assert_eq!(entry["token"], "&", "{v}");
+        let logprob = entry["logprob"].as_f64().expect("logprob");
+        assert!(
+            (-1e-3..=0.0).contains(&logprob),
+            "a dominant token has logprob ~0: {v}"
+        );
+        assert_eq!(
+            entry["top_logprobs"]
+                .as_array()
+                .expect("top_logprobs")
+                .len(),
+            2,
+            "{v}"
+        );
+        assert_eq!(entry["top_logprobs"][0]["token"], "&", "{v}");
+    }
 }
