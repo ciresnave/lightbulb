@@ -133,6 +133,27 @@ async fn post_raw_in(
     path: &str,
     body: serde_json::Value,
 ) -> (StatusCode, Vec<u8>) {
+    let app = lightbulb::api::openai::routes().with_state(app_state_for(dir));
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(path)
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .expect("router returned no response");
+    let status = resp.status();
+    let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20)
+        .await
+        .unwrap();
+    (status, bytes.to_vec())
+}
+
+/// The application state the server builds, with a real runner over the checkpoint in `dir`.
+fn app_state_for(dir: &std::path::Path) -> AppState {
     let scheduler = Arc::new(std::sync::Mutex::new(MemoryAwareScheduler::new(
         MemoryAwareConfig::default(),
     )));
@@ -148,7 +169,7 @@ async fn post_raw_in(
         scheduler.clone(),
     )
     .expect("starting the model runner");
-    let state = AppState {
+    AppState {
         scheduler,
         config: ApiConfig::default(),
         pg_backend: None,
@@ -172,24 +193,7 @@ async fn post_raw_in(
         )),
         live_system: lightbulb::api::new_shared_system_metrics(),
         queue_depth: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-    };
-    let app = lightbulb::api::openai::routes().with_state(state);
-    let resp = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri(path)
-                .header("content-type", "application/json")
-                .body(Body::from(serde_json::to_vec(&body).unwrap()))
-                .unwrap(),
-        )
-        .await
-        .expect("router returned no response");
-    let status = resp.status();
-    let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20)
-        .await
-        .unwrap();
-    (status, bytes.to_vec())
+    }
 }
 
 /// A freshly written constant-output checkpoint whose greedy output is always `token` (see

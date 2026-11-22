@@ -413,7 +413,7 @@ mod tests {
     /// half decodes alone to U+FFFD, so the byte accounting must come from the window, not the token.
     #[test]
     fn text_len_follows_the_decoded_text_across_a_split_character() {
-        let generated = [b'c' as u32, b'a' as u32, b'f' as u32, 0xC3, 0xA9];
+        let generated = [0x63u32, 0x61, 0x66, 0xC3, 0xA9]; // `caf`, then the two bytes of `é`
         let lens: Vec<usize> = (0..generated.len())
             .map(|i| text_len_at(&generated, i, &lossy_byte_decode))
             .collect();
@@ -425,7 +425,7 @@ mod tests {
     /// text, though its own `token` string is the lossy U+FFFD.
     #[test]
     fn logprob_entries_carry_text_len_for_a_split_character() {
-        let generated = [b'f' as u32, 0xC3, 0xA9];
+        let generated = [0x66u32, 0xC3, 0xA9]; // `f`, then the two bytes of `é`
         let raw: Vec<RawLogprob> = generated
             .iter()
             .map(|_| RawLogprob {
@@ -439,7 +439,8 @@ mod tests {
             [1, 0, 2]
         );
         assert_eq!(
-            got[1].token, "\u{FFFD}",
+            got[1].token,
+            char::REPLACEMENT_CHARACTER.to_string(),
             "the token string itself stays lossy"
         );
     }
