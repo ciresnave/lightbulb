@@ -104,12 +104,9 @@ impl FuelDecoder for fuel_transformers::models::lazy_quantized_llama::QuantizedL
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
-
-    fn tinyllama_dir() -> Option<PathBuf> {
-        // one locator, not twelve copies of an absolute path into one home directory
-        crate::test_models::tinyllama_dir()
-    }
+    use crate::test_models::synthetic_checkpoint::{
+        SyntheticArchitecture, write_synthetic_checkpoint,
+    };
 
     /// `FuelDecoder` (`SessionState` + `forward_decode_step`) against a
     /// hand-threaded `forward_with_kv_context_persistent` loop — the
@@ -140,17 +137,15 @@ mod tests {
     /// Fuel measured a real ~1.7e-3 perturbation that flipped neither greedy
     /// nor seeded-temperature tokens.
     #[test]
-    #[ignore = "needs the TinyLlama checkpoint; slow on CPU"]
     fn stepwise_logits_match_the_reference_loop_exactly() -> anyhow::Result<()> {
         use fuel::inference_context::{DecodeSession, InferenceContext, KvCache};
 
-        let Some(dir) = tinyllama_dir() else {
-            panic!(
-                "no TinyLlama snapshot — this test asserts numerical behaviour, so it fails rather than skipping"
-            );
-        };
-        let loaded = crate::model_fuel::loader_f32::load_llama_f32_from_dir(&dir)?;
-        let prompt: Vec<u32> = vec![1, 450, 7483, 310, 3444, 338];
+        // Two code paths on the same weights: random synthetic weights do (C1), and their token ids stay
+        // inside the fixture's 97-entry vocabulary.
+        let tmp = tempfile::tempdir()?;
+        write_synthetic_checkpoint(tmp.path(), &SyntheticArchitecture::default())?;
+        let loaded = crate::model_fuel::loader_f32::load_llama_f32_from_dir(tmp.path())?;
+        let prompt: Vec<u32> = vec![1, 45, 83, 31, 34, 38];
         let max_seq_len = prompt.len() + 4;
 
         // Reference: the pre-`forward_decode_step` call shape — a separately
@@ -200,6 +195,10 @@ mod tests {
         }
 
         assert_eq!(got.len(), reference.len(), "logit row width changed");
+        assert!(
+            reference.iter().any(|v| *v != reference[0]),
+            "the reference logits are all one value: the comparison would be vacuous"
+        );
         let maxdiff = got
             .iter()
             .zip(reference.iter())
