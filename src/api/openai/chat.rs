@@ -792,6 +792,41 @@ fn build_prompt(state: &AppState, messages: &[ChatMessage]) -> BuiltPrompt {
 /// reason a fifth could not be tolerated, since a call site that renders also
 /// has to restate the flag and `true` is both the wrong answer and the one that
 /// matches every other `encode` call in the codebase.
+/// The [`BuiltPrompt`] for a prompt `t` rendered: the tokenizer-flag decision lives here, once, for every
+/// rendering path (plain, and the native-tools one).
+fn built_from_rendered(
+    t: &crate::api::chat_template::ResolvedTemplate,
+    text: String,
+) -> BuiltPrompt {
+    // THE FLAG MUST ANSWER "DOES *THIS* TEMPLATE EMIT BOS?", NOT
+    // "WAS A TEMPLATE APPLIED?". Those are different questions, and
+    // answering the second removed BOS entirely from every
+    // checkpoint whose template does not emit one.
+    //
+    // Measured on TinyLlama-1.1B-Chat Q4_0, whose template never
+    // references `bos_token`. Prefilled with 22 ids beginning 529,
+    // no `<s>` anywhere, it answered:
+    //     "France| Paris, France</s>"
+    // With BOS present (23 ids, first id 1), same prompt, same
+    // temperature:
+    //     "The French capital of France.</s>"
+    // The leading garbage is gone. A Llama-architecture model
+    // trained with BOS at position 0 degrades without it.
+    //
+    // Testing `text.starts_with(bos)` rather than scanning the
+    // template SOURCE is deliberate: Llama-2's template emits
+    // `bos_token` inside its message loop, so a three-turn
+    // conversation contains three, while a tokenizer post-processor
+    // adds only a leading one. What matters is whether the RENDERED
+    // string already opens with BOS — precisely what a
+    // post-processor would duplicate.
+    let emits_leading_bos = !t.tokens.bos.is_empty() && text.starts_with(t.tokens.bos.as_str());
+    BuiltPrompt {
+        text,
+        add_special_tokens: !emits_leading_bos,
+    }
+}
+
 pub(crate) fn build_prompt_from_raw(
     template: Option<&crate::api::chat_template::ResolvedTemplate>,
     raw: &[crate::contracts::validation::RawMessage],
@@ -805,36 +840,7 @@ pub(crate) fn build_prompt_from_raw(
 
     match template {
         Some(t) => match t.render(raw) {
-            Ok(text) => {
-                // THE FLAG MUST ANSWER "DOES *THIS* TEMPLATE EMIT BOS?", NOT
-                // "WAS A TEMPLATE APPLIED?". Those are different questions, and
-                // answering the second removed BOS entirely from every
-                // checkpoint whose template does not emit one.
-                //
-                // Measured on TinyLlama-1.1B-Chat Q4_0, whose template never
-                // references `bos_token`. Prefilled with 22 ids beginning 529,
-                // no `<s>` anywhere, it answered:
-                //     "France| Paris, France</s>"
-                // With BOS present (23 ids, first id 1), same prompt, same
-                // temperature:
-                //     "The French capital of France.</s>"
-                // The leading garbage is gone. A Llama-architecture model
-                // trained with BOS at position 0 degrades without it.
-                //
-                // Testing `text.starts_with(bos)` rather than scanning the
-                // template SOURCE is deliberate: Llama-2's template emits
-                // `bos_token` inside its message loop, so a three-turn
-                // conversation contains three, while a tokenizer post-processor
-                // adds only a leading one. What matters is whether the RENDERED
-                // string already opens with BOS — precisely what a
-                // post-processor would duplicate.
-                let emits_leading_bos =
-                    !t.tokens.bos.is_empty() && text.starts_with(t.tokens.bos.as_str());
-                BuiltPrompt {
-                    text,
-                    add_special_tokens: !emits_leading_bos,
-                }
-            }
+            Ok(text) => built_from_rendered(t, text),
             // Per-request and rare, so `warn`: a template that resolved at
             // startup and then failed on a particular message list is a real
             // anomaly worth seeing every time it happens.
@@ -1151,16 +1157,109 @@ pub(crate) fn apply_stop_sequences(text: &str, stop_sequences: &[&str]) -> (Stri
 /// branches on a `tools` Jinja variable should eventually be prompted that
 /// way instead of via Lightbulb's injected system message, since talking
 /// over a model's own trained convention with a second, different one is
-/// more likely to confuse it than help. `NativeTemplate` is not implemented
-/// today — no checkpoint on hand has such a template to prove a real
-/// implementation against (`ChatTemplate::supports_native_tools`) — so both
-/// arms currently resolve to the same injected behavior. The point of the
-/// match is that adding real native support later is a new arm's worth of
-/// change, not a rewrite of how this function's caller decides.
+/// more likely to confuse it than help. `NativeTemplate` renders `tools`
+/// through the checkpoint's own template (`build_native_tools_prompt`) and
+/// parses the reply with the per-family parsers; it falls back to `Injected`
+/// when that render fails or does not name the tools.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ToolPromptStrategy {
     NativeTemplate,
     Injected,
+}
+
+/// The prompt for a request, and whether `tools` reached the model through the checkpoint's own template
+/// (`true`) or through Lightbulb's injected instruction (`false`, also the answer when there are no tools).
+/// The reply is parsed to match: native replies also go through the per-family parsers.
+fn build_request_prompt(
+    state: &AppState,
+    request: &ChatCompletionRequest,
+    tools: &[Tool],
+    wants_tools: bool,
+) -> (BuiltPrompt, bool) {
+    if !wants_tools {
+        return (build_prompt(state, &request.messages), false);
+    }
+    let demand = tool_demand(request);
+    let template = state.model().chat_template.clone();
+    if tool_prompt_strategy(template.as_deref()) == ToolPromptStrategy::NativeTemplate {
+        if let Some(prompt) = template
+            .as_deref()
+            .and_then(|t| build_native_tools_prompt(t, &request.messages, tools, &demand))
+        {
+            return (prompt, true);
+        }
+        tracing::warn!(
+            "the chat template mentions `tools` but did not render them; using the injected tool instruction"
+        );
+    }
+    let spliced = inject_tools_instruction(&request.messages, tools, &demand);
+    (build_prompt(state, &spliced), false)
+}
+
+/// Render `tools` through the checkpoint's own template. `None` when it fails to render, or renders a prompt that
+/// does not name every offered tool: `supports_native_tools` is a substring check, so a template that merely
+/// mentions the word would otherwise leave the model never told about its tools.
+fn build_native_tools_prompt(
+    template: &crate::api::chat_template::ResolvedTemplate,
+    messages: &[ChatMessage],
+    tools: &[Tool],
+    demand: &ToolDemand,
+) -> Option<BuiltPrompt> {
+    let owned;
+    let messages = match demand {
+        ToolDemand::Free => messages,
+        ToolDemand::Any => {
+            owned = inject_system_text(
+                messages,
+                "You MUST call a tool; do not answer in prose.".into(),
+            );
+            &owned
+        }
+        ToolDemand::Named(n) => {
+            owned = inject_system_text(
+                messages,
+                format!("You MUST call the tool \"{n}\"; do not answer in prose."),
+            );
+            &owned
+        }
+    };
+    let raw: Vec<crate::contracts::validation::RawMessage> = messages
+        .iter()
+        .map(|m| crate::contracts::validation::RawMessage {
+            role: m.role.clone(),
+            content: m.content.clone(),
+        })
+        .collect();
+    let text = template
+        .render_with_tools(&raw, &super::tool_parsers::tools_for_template(tools))
+        .ok()?;
+    let names_every_tool = tools
+        .iter()
+        .all(|Tool::Function { function }| text.contains(&function.name));
+    names_every_tool.then(|| built_from_rendered(template, text))
+}
+
+/// Tool calls in a reply: Lightbulb's own `<tool_call>{json}</tool_call>` tag always, and, when the tools were
+/// rendered by the checkpoint's own template (`native`), the families' formats too (see `tool_parsers`).
+fn extract_calls(text: &str, tools: &[Tool], native: bool) -> Option<(String, Vec<ToolCall>)> {
+    extract_tool_calls(text).or_else(|| {
+        if !native {
+            return None;
+        }
+        let (leading, calls) = super::tool_parsers::parse_family_calls(text, tools)?;
+        let calls = calls
+            .into_iter()
+            .map(|c| ToolCall {
+                id: format!("call_{}", uuid::Uuid::new_v4()),
+                kind: "function".to_string(),
+                function: ToolCallFunction {
+                    name: c.name,
+                    arguments: c.arguments.to_string(),
+                },
+            })
+            .collect();
+        Some((leading, calls))
+    })
 }
 
 fn tool_prompt_strategy(
@@ -1355,23 +1454,14 @@ async fn create_chat_completion(
         }
     }
 
-    // Tool-calls pivot (board item 71): `tools` never reaches the model via
-    // the checkpoint's own template today (see `ToolPromptStrategy`), so it
-    // is spliced in as a system-message instruction instead, and the
-    // generated text is parsed back for Lightbulb's own tag before the
-    // response is built below.
+    // Tool-calls pivot (board item 71): `tools` reaches the model through the
+    // checkpoint's own template when that template renders them, else it is
+    // spliced in as a system-message instruction (see `ToolPromptStrategy`).
+    // The generated text is parsed back for Lightbulb's own tag, and for the
+    // family formats on the native path, before the response is built below.
     let wants_tools = request_wants_tools(&request);
     let tools: &[Tool] = request.tools.as_deref().unwrap_or(&[]);
-    let prompt = if wants_tools {
-        // `tool_prompt_strategy`'s two arms are identical today — see its
-        // own doc comment — but the call site already asks the question a
-        // real native-template implementation would need answered.
-        let _ = tool_prompt_strategy(state.model().chat_template.as_deref());
-        let spliced = inject_tools_instruction(&request.messages, tools, &tool_demand(&request));
-        build_prompt(&state, &spliced)
-    } else {
-        build_prompt(&state, &request.messages)
-    };
+    let (prompt, native_tools) = build_request_prompt(&state, &request, tools, wants_tools);
 
     let max_new_tokens = request.max_tokens.unwrap_or(100);
     let temperature = request.temperature as f64;
@@ -1442,7 +1532,7 @@ async fn create_chat_completion(
         // text being quoted), and `wants_tools` is the one signal that says
         // Lightbulb itself asked for this format on THIS request.
         let (content, finish_reason, tool_calls) = if wants_tools {
-            match extract_tool_calls(&text) {
+            match extract_calls(&text, tools, native_tools) {
                 Some((leading, calls)) => (
                     leading,
                     crate::engine::model_runner::FinishReason::ToolCalls,
@@ -4925,6 +5015,109 @@ mod tests {
             .expect("tool_calls must be populated when the tag was found");
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].function.name, "get_weather");
+    }
+
+    /// [`stub_runner_with_text`] that also returns every prompt it was handed.
+    fn recording_runner_with_text(
+        text: &str,
+    ) -> (
+        std::sync::mpsc::SyncSender<crate::engine::InferenceJob>,
+        std::thread::JoinHandle<Vec<String>>,
+    ) {
+        use crate::engine::model_runner::{CompletionResult, InferenceJob, ResponseMode};
+        let (tx, rx) = std::sync::mpsc::sync_channel::<InferenceJob>(32);
+        let text = text.to_string();
+        let handle = std::thread::spawn(move || {
+            let mut prompts = Vec::new();
+            while let Ok(job) = rx.recv() {
+                prompts.push(job.prompt.clone());
+                if let ResponseMode::Complete(resp) = job.response_mode {
+                    let _ = resp.send(Ok(CompletionResult {
+                        text: text.clone(),
+                        prompt_tokens: 1,
+                        completion_tokens: 1,
+                        finish_reason: FinishReason::Stop,
+                    }));
+                }
+            }
+            prompts
+        });
+        (tx, handle)
+    }
+
+    /// One `get_weather` tool, enough for the native-path tests.
+    fn weather_tools() -> Vec<Tool> {
+        vec![Tool::Function {
+            function: ToolFunctionDef {
+                name: "get_weather".to_string(),
+                description: None,
+                parameters: None,
+            },
+        }]
+    }
+
+    const PYTHON_TAG_REPLY: &str =
+        "<|python_tag|>{\"name\": \"get_weather\", \"parameters\": {\"city\": \"Paris\"}}";
+
+    /// A template that renders `tools` itself (names appear only through the `tools` variable).
+    const TOOLS_RENDERING_TEMPLATE: &str = "{% for m in messages %}<|{{ m['role'] }}|>{{ m['content'] }}{% endfor %}{% if tools %}<|tools|>{% for t in tools %}{{ t['function']['name'] }};{% endfor %}{% endif %}";
+
+    /// A template that mentions `tools` (so it counts as native) but never renders them.
+    const TOOLS_IGNORING_TEMPLATE: &str = "{% for m in messages %}<|{{ m['role'] }}|>{{ m['content'] }}{% endfor %}{% if tools %}{% endif %}";
+
+    async fn run_tools_request(
+        template: &str,
+        name: &str,
+    ) -> (ChatCompletionResponse, Vec<String>) {
+        let dir = checkpoint_with_template(name, template);
+        let resolved = crate::api::chat_template::resolve_for_serving(&dir)
+            .expect("fixture must resolve a template");
+        let (tx, runner) = recording_runner_with_text(PYTHON_TAG_REPLY);
+        let state = state_with_runner(Some(resolved), Some(tx));
+        let mut req = request();
+        req.tools = Some(weather_tools());
+        let response = create_chat_completion(state, req, crate::engine::Priority::Normal)
+            .await
+            .expect("tools request must not error");
+        let prompts = runner.join().expect("runner thread");
+        (response, prompts)
+    }
+
+    #[tokio::test]
+    async fn native_template_carries_the_tools_and_parses_a_family_reply() {
+        let (response, prompts) = run_tools_request(TOOLS_RENDERING_TEMPLATE, "native-tools").await;
+        assert_eq!(prompts.len(), 1);
+        assert!(
+            prompts[0].contains("<|tools|>get_weather;"),
+            "the template must have rendered the tools: {:?}",
+            prompts[0]
+        );
+        assert!(
+            !prompts[0].contains("<tool_call>"),
+            "the injected instruction must not ride along: {:?}",
+            prompts[0]
+        );
+        assert_eq!(response.choices[0].finish_reason, "tool_calls");
+        let calls = response.choices[0]
+            .message
+            .tool_calls
+            .as_ref()
+            .expect("tool_calls");
+        assert_eq!(calls[0].function.name, "get_weather");
+        assert!(calls[0].function.arguments.contains("Paris"));
+    }
+
+    #[tokio::test]
+    async fn a_template_that_ignores_tools_falls_back_to_the_injected_instruction() {
+        let (response, prompts) = run_tools_request(TOOLS_IGNORING_TEMPLATE, "ignored-tools").await;
+        assert!(
+            prompts[0].contains("<tool_call>") && prompts[0].contains("get_weather"),
+            "fallback must inject Lightbulb's instruction: {:?}",
+            prompts[0]
+        );
+        // Not native, so the family format is NOT parsed: the reply stays prose.
+        assert_eq!(response.choices[0].finish_reason, "stop");
+        assert!(response.choices[0].message.tool_calls.is_none());
     }
 
     #[tokio::test]

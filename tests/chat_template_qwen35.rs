@@ -15,8 +15,8 @@
 //! lstrip_blocks=True)`), an engine independent of minijinja, so agreement here
 //! is not one implementation agreeing with itself.
 //!
-//! **Not covered, because `render` does not pass them:** `tools`,
-//! `enable_thinking`, `add_vision_id`, structured (list) content and
+//! **Not covered by the answer-key cases:** `tools` (see the two `render_with_tools` tests at the end, which
+//! assert structure, not a Python-rendered string), `enable_thinking`, `add_vision_id`, structured (list) content and
 //! `tool_calls` on assistant messages. With `enable_thinking` undefined the
 //! template ends the prompt with an empty closed think block
 //! (`<think>\n\n</think>\n\n`), i.e. non-thinking mode; that is what the cases
@@ -157,4 +157,99 @@ fn every_refusal_case_is_refused_with_the_templates_own_message() {
 fn the_cases_are_distinguishable() {
     let outs: std::collections::HashSet<_> = RENDERS.iter().map(|(_, _, e)| *e).collect();
     assert_eq!(outs.len(), RENDERS.len());
+}
+
+fn render_tools(
+    msgs: &[(&str, &str)],
+    tools: Option<&[serde_json::Value]>,
+) -> anyhow::Result<String> {
+    let t = ChatTemplate {
+        source: TEMPLATE.to_string(),
+        resolved_by: Resolution::GgufMetadata,
+    };
+    let raw: Vec<RawMessage> = msgs
+        .iter()
+        .map(|(role, content)| RawMessage {
+            role: (*role).into(),
+            content: (*content).into(),
+        })
+        .collect();
+    t.render_with_tools(&raw, tools, "<s>", "<|im_end|>")
+}
+
+/// `render_with_tools(.., None, ..)` is `render`: a request without tools is rendered byte for byte as before,
+/// for every case the Python `jinja2` answer key pins.
+#[test]
+fn no_tools_renders_exactly_as_render_does() {
+    for (name, msgs, expected) in RENDERS {
+        assert_eq!(render_tools(msgs, None).unwrap(), *expected, "{name}");
+    }
+}
+
+/// With `tools` the template's own `# Tools` block opens the system turn, lists the tool, and shows the
+/// `<tool_call><function=..>` format a Qwen3.5 model was trained to answer in; the user turn still follows it.
+/// Without `tools` none of that appears (the control: the assertions can fail).
+#[test]
+fn tools_render_into_the_templates_own_system_block() {
+    let tools = [serde_json::json!({"type": "function", "function": {
+        "name": "get_weather", "description": "Weather for a city",
+        "parameters": {"type": "object", "properties": {"city": {"type": "string"}}}}})];
+    let msgs = [("user", "Weather in Paris?")];
+    let with = render_tools(&msgs, Some(&tools)).unwrap();
+    let head = "<|im_start|>system
+# Tools
+
+You have access to the following functions:
+
+<tools>
+{";
+    assert!(with.starts_with(head), "{with}");
+    assert!(
+        with.contains("get_weather") && with.contains("Weather for a city"),
+        "{with}"
+    );
+    assert!(
+        with.contains(
+            "</tools>
+
+If you choose to call a function ONLY reply in the following format"
+        ),
+        "{with}"
+    );
+    assert!(with.contains("<function=example_function_name>"), "{with}");
+    assert!(
+        with.contains(
+            "<|im_start|>user
+Weather in Paris?<|im_end|>"
+        ),
+        "{with}"
+    );
+    assert!(
+        with.ends_with(
+            "<|im_start|>assistant
+<think>
+
+</think>
+
+"
+        ),
+        "{with}"
+    );
+}
+
+/// The control for the test above, with its own positive arm: no `tools`, no tools block; with `tools`, one.
+#[test]
+fn without_tools_none_of_the_tools_block_appears() {
+    let tools = [serde_json::json!({"type": "function", "function": {"name": "get_weather"}})];
+    let msgs = [("user", "Weather in Paris?")];
+    let without = render_tools(&msgs, None).unwrap();
+    assert!(
+        !without.contains("# Tools") && !without.contains("get_weather"),
+        "{without}"
+    );
+    let with = render_tools(&msgs, Some(&tools)).unwrap();
+    assert!(
+        with.contains("# Tools") && with.contains("get_weather"),
+        "{with}"
+    );
 }

@@ -7,6 +7,7 @@
 pub mod chat;
 pub mod completions;
 pub mod models;
+mod tool_parsers;
 
 use axum::{
     Router,

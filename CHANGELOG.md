@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.24.2 — A4 tools through the checkpoint's own chat template
+
+A request with `tools` now renders them through the checkpoint's own chat template (`ChatTemplate::render_with_tools`, tools bound as the template's `tools` variable) when the template uses `tools` and its rendering names every offered tool; otherwise Lightbulb's injected instruction is used as before. Replies from a natively prompted model are parsed per family (`src/api/openai/tool_parsers.rs`: Llama-3.1 `<|python_tag|>`, Mistral `[TOOL_CALLS]`, Qwen3.5 XML typed by the tool schema, bare JSON); only offered tool names count. Verified by parser unit tests, a Qwen3.5 template fixture, and handler-level tests of both the native and fallback arms. Not covered: no real tool-capable GGUF was run on the native path. Known limit: assistant `tool_calls` and `tool`-role history are not passed to the native template (the raw message carries role and content only), so multi-turn tool use degrades as on the injected path.
+
 ## 0.24.1 — A5 `top_k`, `min_p` and `repetition_penalty` on chat and completions
 
 `/v1/chat/completions` and `/v1/completions` accept `top_k`, `min_p` and `repetition_penalty` (the llama.cpp / vLLM names; not OpenAI fields) and pass them to Fuel's `SamplingParams` through `SamplingExtras` -> `try_admit` -> `add_session_with_params`. `top_k < 0`, `min_p` outside `[0, 1]` and `repetition_penalty <= 0` (or NaN) are a 400; `top_k` 0, `min_p` 0 and `repetition_penalty` 1.0 are off, so a request that sets none of them takes the plain sampling path exactly as before. `SamplingExtras` no longer derives `Default` (its off value for `repetition_penalty` is 1.0, not 0.0); it has a hand-written `Default`. Verified by `extra_sampling_validates_and_maps` and the existing extras-reach-the-job tests on both endpoints. Not covered: real GGUF output under these knobs (needs a GPU slot-go), `logprobs` and `logit_bias` (no Fuel type), still open on A5.
