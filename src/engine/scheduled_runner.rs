@@ -402,19 +402,20 @@ mod tests {
     use std::sync::mpsc;
     use tokio::sync::oneshot;
 
+    /// Decodes token ids as raw bytes, lossily like a real tokenizer (a half of a multi-byte character becomes
+    /// U+FFFD).
+    fn lossy_byte_decode(ids: &[u32], _skip_special: bool) -> anyhow::Result<String> {
+        let bytes: Vec<u8> = ids.iter().map(|&i| i as u8).collect();
+        Ok(String::from_utf8_lossy(&bytes).into_owned())
+    }
+
     /// Tokens that are bytes, decoded lossily like a real tokenizer: `caf` then the two halves of `é`. The first
     /// half decodes alone to U+FFFD, so the byte accounting must come from the window, not the token.
     #[test]
     fn text_len_follows_the_decoded_text_across_a_split_character() {
-        let decode = |ids: &[u32], _: bool| {
-            Ok(
-                String::from_utf8_lossy(&ids.iter().map(|&i| i as u8).collect::<Vec<_>>())
-                    .into_owned(),
-            )
-        };
         let generated = [b'c' as u32, b'a' as u32, b'f' as u32, 0xC3, 0xA9];
         let lens: Vec<usize> = (0..generated.len())
-            .map(|i| text_len_at(&generated, i, &decode))
+            .map(|i| text_len_at(&generated, i, &lossy_byte_decode))
             .collect();
         assert_eq!(lens, [1, 1, 1, 0, 2]);
         assert_eq!(lens.iter().sum::<usize>(), "café".len());
@@ -424,12 +425,6 @@ mod tests {
     /// text, though its own `token` string is the lossy U+FFFD.
     #[test]
     fn logprob_entries_carry_text_len_for_a_split_character() {
-        let decode = |ids: &[u32], _: bool| {
-            Ok(
-                String::from_utf8_lossy(&ids.iter().map(|&i| i as u8).collect::<Vec<_>>())
-                    .into_owned(),
-            )
-        };
         let generated = [b'f' as u32, 0xC3, 0xA9];
         let raw: Vec<RawLogprob> = generated
             .iter()
@@ -438,7 +433,7 @@ mod tests {
                 top: Vec::new(),
             })
             .collect();
-        let got = logprobs_with_text(&raw, &generated, &decode);
+        let got = logprobs_with_text(&raw, &generated, &lossy_byte_decode);
         assert_eq!(
             got.iter().map(|l| l.text_len).collect::<Vec<_>>(),
             [1, 0, 2]
