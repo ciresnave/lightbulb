@@ -27,6 +27,60 @@ pub enum Kv {
     U32Array(Vec<u32>),
 }
 
+fn put_str(b: &mut Vec<u8>, s: &str) {
+    b.extend_from_slice(&(s.len() as u64).to_le_bytes());
+    b.extend_from_slice(s.as_bytes());
+}
+
+/// Write a scalar value (type tag, then payload). `false` when `v` is an array, which `put_array` writes.
+fn put_scalar(b: &mut Vec<u8>, v: &Kv) -> bool {
+    match v {
+        Kv::Str(s) => {
+            b.extend_from_slice(&8u32.to_le_bytes());
+            put_str(b, s);
+        }
+        Kv::U32(n) => {
+            b.extend_from_slice(&4u32.to_le_bytes());
+            b.extend_from_slice(&n.to_le_bytes());
+        }
+        Kv::F32(n) => {
+            b.extend_from_slice(&6u32.to_le_bytes());
+            b.extend_from_slice(&n.to_le_bytes());
+        }
+        Kv::U64(n) => {
+            b.extend_from_slice(&10u32.to_le_bytes());
+            b.extend_from_slice(&n.to_le_bytes());
+        }
+        _ => return false,
+    }
+    true
+}
+
+/// Write an array value: type 9, the element type, the count, then the elements.
+fn put_array(b: &mut Vec<u8>, v: &Kv) {
+    b.extend_from_slice(&9u32.to_le_bytes());
+    match v {
+        Kv::StrArray(items) => put_str_elements(b, items.iter().copied()),
+        Kv::OwnedStrArray(items) => put_str_elements(b, items.iter().map(String::as_str)),
+        Kv::U32Array(items) => {
+            b.extend_from_slice(&4u32.to_le_bytes()); // element type: u32
+            b.extend_from_slice(&(items.len() as u64).to_le_bytes());
+            for it in items {
+                b.extend_from_slice(&it.to_le_bytes());
+            }
+        }
+        _ => unreachable!("a scalar goes through put_scalar"),
+    }
+}
+
+fn put_str_elements<'a>(b: &mut Vec<u8>, items: impl ExactSizeIterator<Item = &'a str>) {
+    b.extend_from_slice(&8u32.to_le_bytes()); // element type: string
+    b.extend_from_slice(&(items.len() as u64).to_le_bytes());
+    for it in items {
+        put_str(b, it);
+    }
+}
+
 /// `tensor_count` is a parameter, not a constant, because Task 2 needs a
 /// one-tensor file to reach the unsupported-dtype path. Pass `0` for every
 /// metadata-only fixture; the tensor-info records themselves are appended by
@@ -37,55 +91,10 @@ pub fn gguf_bytes(kvs: &[(&str, Kv)], tensor_count: u64) -> Vec<u8> {
     b.extend_from_slice(&3u32.to_le_bytes()); // version
     b.extend_from_slice(&tensor_count.to_le_bytes());
     b.extend_from_slice(&(kvs.len() as u64).to_le_bytes());
-    // Not `let mut` — this closure captures nothing, so it is `Fn` and a
-    // `mut` binding would only earn an `unused_mut` warning.
-    let put_str = |b: &mut Vec<u8>, s: &str| {
-        b.extend_from_slice(&(s.len() as u64).to_le_bytes());
-        b.extend_from_slice(s.as_bytes());
-    };
     for (k, v) in kvs {
         put_str(&mut b, k);
-        match v {
-            Kv::Str(s) => {
-                b.extend_from_slice(&8u32.to_le_bytes());
-                put_str(&mut b, s);
-            }
-            Kv::U32(n) => {
-                b.extend_from_slice(&4u32.to_le_bytes());
-                b.extend_from_slice(&n.to_le_bytes());
-            }
-            Kv::F32(n) => {
-                b.extend_from_slice(&6u32.to_le_bytes());
-                b.extend_from_slice(&n.to_le_bytes());
-            }
-            Kv::OwnedStrArray(items) => {
-                b.extend_from_slice(&9u32.to_le_bytes());
-                b.extend_from_slice(&8u32.to_le_bytes()); // element type: string
-                b.extend_from_slice(&(items.len() as u64).to_le_bytes());
-                for it in items {
-                    put_str(&mut b, it);
-                }
-            }
-            Kv::U64(n) => {
-                b.extend_from_slice(&10u32.to_le_bytes());
-                b.extend_from_slice(&n.to_le_bytes());
-            }
-            Kv::StrArray(items) => {
-                b.extend_from_slice(&9u32.to_le_bytes());
-                b.extend_from_slice(&8u32.to_le_bytes()); // element type: string
-                b.extend_from_slice(&(items.len() as u64).to_le_bytes());
-                for it in items {
-                    put_str(&mut b, it);
-                }
-            }
-            Kv::U32Array(items) => {
-                b.extend_from_slice(&9u32.to_le_bytes());
-                b.extend_from_slice(&4u32.to_le_bytes()); // element type: u32
-                b.extend_from_slice(&(items.len() as u64).to_le_bytes());
-                for it in items {
-                    b.extend_from_slice(&it.to_le_bytes());
-                }
-            }
+        if !put_scalar(&mut b, v) {
+            put_array(&mut b, v);
         }
     }
     b
@@ -120,15 +129,16 @@ const SYN_LAYERS: usize = 3;
 const SYN_HEADS: usize = 4;
 
 /// The synthetic GGUF's vocabulary: `<s>` (id 0), `</s>` (id 1), then the 94 printable ASCII characters `!`..`~`
-/// (ids 2..=95, which GPT-2's byte-to-unicode map leaves as themselves) and `Ġ`, the byte-level space (id 96).
+/// (ids 2..=95, which GPT-2's byte-to-unicode map leaves as themselves) and the byte-level space (id 96).
 /// 97 entries; a byte-level BPE with no merges encodes text over these characters.
 pub fn synthetic_gguf_tokens() -> Vec<String> {
     let mut tokens = vec!["<s>".to_string(), "</s>".to_string()];
     tokens.extend((b'!'..=b'~').map(|b| (b as char).to_string()));
-    tokens.push("\u{120}".to_string());
+    tokens.push(char::from_u32(0x120).expect("a scalar value").to_string());
     tokens
 }
 
+/// Append one F32 tensor: its info record, and its data padded to the 32-byte alignment.
 fn push_f32_tensor(
     infos: &mut Vec<u8>,
     data: &mut Vec<u8>,
@@ -136,17 +146,13 @@ fn push_f32_tensor(
     dims: &[u64],
     values: &[f32],
 ) {
-    let put_str = |b: &mut Vec<u8>, s: &str| {
-        b.extend_from_slice(&(s.len() as u64).to_le_bytes());
-        b.extend_from_slice(s.as_bytes());
-    };
     put_str(infos, name);
     infos.extend_from_slice(&(dims.len() as u32).to_le_bytes());
     for d in dims {
         infos.extend_from_slice(&d.to_le_bytes());
     }
     infos.extend_from_slice(&0u32.to_le_bytes()); // GGML_TYPE_F32
-    infos.extend_from_slice(&(data.len() as u64).to_le_bytes()); // offset in the data region (32-aligned below)
+    infos.extend_from_slice(&(data.len() as u64).to_le_bytes()); // offset in the data region
     for v in values {
         data.extend_from_slice(&v.to_le_bytes());
     }
@@ -155,12 +161,8 @@ fn push_f32_tensor(
     }
 }
 
-/// The whole file: header, metadata, tensor infos, padding to the 32-byte alignment, tensor data.
-pub fn constant_output_gguf_bytes(token: u32) -> Vec<u8> {
-    let tokens = synthetic_gguf_tokens();
-    let vocab = tokens.len();
-    assert!((token as usize) < vocab, "token out of vocabulary");
-    let kvs = [
+fn synthetic_kvs(tokens: Vec<String>) -> Vec<(&'static str, Kv)> {
+    vec![
         ("general.architecture", Kv::Str("llama")),
         ("general.name", Kv::Str("synthetic-constant-output")),
         ("llama.context_length", Kv::U32(64)),
@@ -171,49 +173,20 @@ pub fn constant_output_gguf_bytes(token: u32) -> Vec<u8> {
         ("llama.attention.head_count_kv", Kv::U32(SYN_HEADS as u32)),
         ("llama.attention.layer_norm_rms_epsilon", Kv::F32(1e-5)),
         ("llama.rope.freq_base", Kv::F32(10000.0)),
-        ("llama.vocab_size", Kv::U32(vocab as u32)),
+        ("llama.vocab_size", Kv::U32(tokens.len() as u32)),
         ("tokenizer.ggml.model", Kv::Str("gpt2")),
         ("tokenizer.ggml.pre", Kv::Str("gpt-2")),
         ("tokenizer.ggml.tokens", Kv::OwnedStrArray(tokens)),
         ("tokenizer.ggml.merges", Kv::OwnedStrArray(Vec::new())),
         ("tokenizer.ggml.bos_token_id", Kv::U32(0)),
         ("tokenizer.ggml.eos_token_id", Kv::U32(1)),
-    ];
+    ]
+}
 
-    let (h, f) = (SYN_HIDDEN, SYN_FFN);
-    let (hd, fd, vd) = (h as u64, f as u64, vocab as u64);
-    let mut infos = Vec::new();
-    let mut data = Vec::new();
-    let mut count = 0u64;
-    let mut tensor = |name: &str, dims: &[u64], values: &[f32]| {
-        push_f32_tensor(&mut infos, &mut data, name, dims, values);
-        count += 1;
-    };
-    tensor("token_embd.weight", &[hd, vd], &vec![0.5; h * vocab]);
-    for i in 0..SYN_LAYERS {
-        tensor(&format!("blk.{i}.attn_norm.weight"), &[hd], &vec![1.0; h]);
-        for n in ["attn_q", "attn_k", "attn_v", "attn_output"] {
-            tensor(&format!("blk.{i}.{n}.weight"), &[hd, hd], &vec![0.0; h * h]);
-        }
-        tensor(&format!("blk.{i}.ffn_norm.weight"), &[hd], &vec![1.0; h]);
-        tensor(
-            &format!("blk.{i}.ffn_gate.weight"),
-            &[hd, fd],
-            &vec![0.0; h * f],
-        );
-        tensor(
-            &format!("blk.{i}.ffn_up.weight"),
-            &[hd, fd],
-            &vec![0.0; h * f],
-        );
-        tensor(
-            &format!("blk.{i}.ffn_down.weight"),
-            &[fd, hd],
-            &vec![0.0; f * h],
-        );
-    }
-    tensor("output_norm.weight", &[hd], &vec![1.0; h]);
-    // Other rows: small deterministic values in [-0.05, 0.05) (an LCG; no `rand`), so they cannot win.
+/// The output matrix: small deterministic values in [-0.05, 0.05) (an LCG; no `rand`), so they cannot win, with
+/// the row for `token` all ones.
+fn output_matrix(token: u32, vocab: usize) -> Vec<f32> {
+    let h = SYN_HIDDEN;
     let mut state = 0x2545_F491u32;
     let mut head: Vec<f32> = (0..h * vocab)
         .map(|_| {
@@ -222,9 +195,61 @@ pub fn constant_output_gguf_bytes(token: u32) -> Vec<u8> {
         })
         .collect();
     head[token as usize * h..(token as usize + 1) * h].fill(1.0);
-    tensor("output.weight", &[hd, vd], &head);
+    head
+}
 
-    let mut out = gguf_bytes(&kvs, count);
+/// Every tensor of the model as `(name, dims, values)`, in file order.
+fn synthetic_tensors(token: u32, vocab: usize) -> Vec<(String, Vec<u64>, Vec<f32>)> {
+    let (h, f) = (SYN_HIDDEN, SYN_FFN);
+    let (hd, fd, vd) = (h as u64, f as u64, vocab as u64);
+    let mut t = vec![(
+        "token_embd.weight".to_string(),
+        vec![hd, vd],
+        vec![0.5; h * vocab],
+    )];
+    for i in 0..SYN_LAYERS {
+        t.push((format!("blk.{i}.attn_norm.weight"), vec![hd], vec![1.0; h]));
+        for n in ["attn_q", "attn_k", "attn_v", "attn_output"] {
+            t.push((
+                format!("blk.{i}.{n}.weight"),
+                vec![hd, hd],
+                vec![0.0; h * h],
+            ));
+        }
+        t.push((format!("blk.{i}.ffn_norm.weight"), vec![hd], vec![1.0; h]));
+        for n in ["ffn_gate", "ffn_up"] {
+            t.push((
+                format!("blk.{i}.{n}.weight"),
+                vec![hd, fd],
+                vec![0.0; h * f],
+            ));
+        }
+        t.push((
+            format!("blk.{i}.ffn_down.weight"),
+            vec![fd, hd],
+            vec![0.0; f * h],
+        ));
+    }
+    t.push(("output_norm.weight".to_string(), vec![hd], vec![1.0; h]));
+    t.push((
+        "output.weight".to_string(),
+        vec![hd, vd],
+        output_matrix(token, vocab),
+    ));
+    t
+}
+
+/// The whole file: header, metadata, tensor infos, padding to the 32-byte alignment, tensor data.
+pub fn constant_output_gguf_bytes(token: u32) -> Vec<u8> {
+    let tokens = synthetic_gguf_tokens();
+    let vocab = tokens.len();
+    assert!((token as usize) < vocab, "token out of vocabulary");
+    let tensors = synthetic_tensors(token, vocab);
+    let (mut infos, mut data) = (Vec::new(), Vec::new());
+    for (name, dims, values) in &tensors {
+        push_f32_tensor(&mut infos, &mut data, name, dims, values);
+    }
+    let mut out = gguf_bytes(&synthetic_kvs(tokens), tensors.len() as u64);
     out.extend_from_slice(&infos);
     while !out.len().is_multiple_of(32) {
         out.push(0);
