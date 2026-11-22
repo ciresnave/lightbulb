@@ -251,10 +251,7 @@ fn push_layer_tensors(
 /// (`model.embed_tokens.weight`, `model.layers.{i}.self_attn.*`,
 /// `model.layers.{i}.mlp.*`, `model.layers.{i}.*_layernorm.weight`,
 /// `model.norm.weight`, `lm_head.weight`).
-pub fn write_synthetic_checkpoint(
-    dir: &Path,
-    arch: &SyntheticArchitecture,
-) -> anyhow::Result<()> {
+pub fn write_synthetic_checkpoint(dir: &Path, arch: &SyntheticArchitecture) -> anyhow::Result<()> {
     std::fs::write(dir.join("config.json"), arch.config_json())?;
     std::fs::write(dir.join("tokenizer.json"), arch.tokenizer_json())?;
 
@@ -281,7 +278,13 @@ pub fn write_synthetic_checkpoint(
         push_layer_tensors(&mut data, &mut rng, i, dim, ffn_dim, kv_dim);
     }
 
-    push_tensor(&mut data, &mut rng, "model.norm.weight".into(), vec![dim], dim);
+    push_tensor(
+        &mut data,
+        &mut rng,
+        "model.norm.weight".into(),
+        vec![dim],
+        dim,
+    );
     push_tensor(
         &mut data,
         &mut rng,
@@ -299,7 +302,11 @@ pub fn write_synthetic_checkpoint(
         })
         .collect();
 
-    serialize_to_file(views, None::<HashMap<String, String>>, &dir.join("model.safetensors"))?;
+    serialize_to_file(
+        views,
+        None::<HashMap<String, String>>,
+        &dir.join("model.safetensors"),
+    )?;
 
     Ok(())
 }
