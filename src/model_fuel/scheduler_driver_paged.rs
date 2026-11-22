@@ -772,6 +772,66 @@ mod tests {
         assert_eq!(who, low, "contrast arm: admission order ignores priority");
     }
 
+    /// Every session's generated tokens, by admission order, from one driver run over `prompts` (greedy, 12 new
+    /// tokens each, up to 8 sessions per step).
+    fn batched_tokens(prompts: &[&[u32]]) -> Vec<Vec<u32>> {
+        let model = tiny_model(5);
+        let mut d = FuelPagedSchedulerDriver::new(
+            &model,
+            generous_budget(),
+            fuel::DType::F32,
+            &Device::cpu(),
+            PagedSchedulePolicy::AdmissionOrder,
+            8,
+            None,
+        )
+        .expect("tiny model must build");
+        let ids: Vec<SessionId> = prompts
+            .iter()
+            .map(|p| {
+                d.try_admit(p, 12, 0.0, None, Default::default())
+                    .expect("generous budget admits")
+            })
+            .collect();
+        let mut by_id: HashMap<SessionId, Vec<u32>> = HashMap::new();
+        while d.has_active_sessions() {
+            for (id, tok) in d.step().expect("step must not error") {
+                by_id.entry(id).or_default().push(tok);
+            }
+        }
+        ids.iter()
+            .map(|id| by_id.remove(id).unwrap_or_default())
+            .collect()
+    }
+
+    /// Batch isolation and cross-batch-size consistency (re-derived from the deleted
+    /// `enhanced_correctness_tests.rs`, ROADMAP C2): a session's greedy tokens are the same alone, batched with
+    /// one other, and batched with three, and different prompts do not collapse to one answer (the control: a
+    /// driver that returned one session's tokens for all would pass the equalities).
+    #[test]
+    fn a_session_emits_the_same_tokens_alone_and_batched_with_others() {
+        let a: &[u32] = &[1, 2, 3];
+        let b: &[u32] = &[4, 5, 6, 7];
+        let c: &[u32] = &[9, 9];
+        let d: &[u32] = &[3, 1, 4, 1, 5];
+
+        let alone = batched_tokens(&[a]).remove(0);
+        assert_eq!(alone.len(), 12, "the session must generate its budget");
+        assert_eq!(batched_tokens(&[a, b])[0], alone, "A batched with B");
+        assert_eq!(batched_tokens(&[b, a])[1], alone, "A batched after B");
+        assert_eq!(
+            batched_tokens(&[a, b, c, d])[0],
+            alone,
+            "A batched with three others"
+        );
+
+        let all = batched_tokens(&[a, b, c, d]);
+        assert_ne!(
+            all[0], all[1],
+            "two different prompts produced one answer: the equalities above would be vacuous"
+        );
+    }
+
     #[test]
     fn two_concurrent_sessions_each_emit_their_own_tokens_under_batching() {
         let model = tiny_model(5);
