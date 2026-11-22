@@ -257,8 +257,11 @@ fn push_tensor(
     }
 }
 
-fn synthetic_kvs(tokens: Vec<String>) -> Vec<(&'static str, Kv)> {
-    vec![
+fn synthetic_kvs(
+    tokens: Vec<String>,
+    chat_template: Option<&'static str>,
+) -> Vec<(&'static str, Kv)> {
+    let mut kvs = vec![
         ("general.architecture", Kv::Str("llama")),
         ("general.name", Kv::Str("synthetic-constant-output")),
         ("llama.context_length", Kv::U32(64)),
@@ -276,7 +279,11 @@ fn synthetic_kvs(tokens: Vec<String>) -> Vec<(&'static str, Kv)> {
         ("tokenizer.ggml.merges", Kv::OwnedStrArray(Vec::new())),
         ("tokenizer.ggml.bos_token_id", Kv::U32(0)),
         ("tokenizer.ggml.eos_token_id", Kv::U32(1)),
-    ]
+    ];
+    if let Some(t) = chat_template {
+        kvs.push(("tokenizer.chat_template", Kv::Str(t)));
+    }
+    kvs
 }
 
 /// The output matrix: small deterministic values in [-0.05, 0.05) (an LCG; no `rand`), so they cannot win, with
@@ -352,6 +359,16 @@ pub fn constant_output_gguf_q4_0_bytes(token: u32) -> Vec<u8> {
 }
 
 fn constant_output_gguf_bytes_with(token: u32, matrices: Storage) -> Vec<u8> {
+    gguf_bytes_full(token, matrices, None)
+}
+
+/// The F32 file with `tokenizer.chat_template` set to `template` (it must stay within the synthetic vocabulary:
+/// printable ASCII and spaces, no newline).
+pub fn constant_output_gguf_with_template_bytes(token: u32, template: &'static str) -> Vec<u8> {
+    gguf_bytes_full(token, Storage::F32, Some(template))
+}
+
+fn gguf_bytes_full(token: u32, matrices: Storage, chat_template: Option<&'static str>) -> Vec<u8> {
     let tokens = synthetic_gguf_tokens();
     let vocab = tokens.len();
     assert!((token as usize) < vocab, "token out of vocabulary");
@@ -362,7 +379,7 @@ fn constant_output_gguf_bytes_with(token: u32, matrices: Storage) -> Vec<u8> {
         let storage = if is_norm { Storage::F32 } else { matrices };
         push_tensor(&mut infos, &mut data, (name, dims, values), storage);
     }
-    let mut out = gguf_bytes(&synthetic_kvs(tokens), tensors.len() as u64);
+    let mut out = gguf_bytes(&synthetic_kvs(tokens, chat_template), tensors.len() as u64);
     out.extend_from_slice(&infos);
     while !out.len().is_multiple_of(32) {
         out.push(0);

@@ -211,3 +211,65 @@ fn the_quantised_files_are_smaller_than_the_f32_one() {
     assert!(q8_len * 2 < f32_len, "q8_0 {q8_len} vs f32 {f32_len} bytes");
     assert!(q4_len < q8_len, "q4_0 {q4_len} vs q8_0 {q8_len} bytes");
 }
+
+/// A chat template within the synthetic vocabulary (printable ASCII and spaces): not the legacy `role: content`
+/// join, so a prompt built from it has a different token count.
+const TEMPLATE: &str = "{% for m in messages %}<|{{ m.role }}|> {{ m.content }} {% endfor %}{% if add_generation_prompt %}<|assistant|>{% endif %}";
+
+/// The GGUF's own chat template reaches the prompt on BOTH the non-streaming and the streaming path
+/// (`chat.rs` has two prompt-building sites; fixing one leaves the other green-looking and wrong). Observed
+/// through `usage.prompt_tokens`: it must equal the token count of the template rendered over the messages and
+/// encoded with the tokenizer rebuilt from the same file, and (the control) differ from the legacy
+/// `user: <content>` join's count, so a handler that ignored the template would fail.
+#[tokio::test]
+async fn the_ggufs_chat_template_reaches_the_prompt_on_both_paths() {
+    let gguf = gguf_writer::constant_output_gguf_with_template_bytes(7, TEMPLATE);
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("synthetic.gguf");
+    std::fs::write(&path, &gguf).expect("writing the gguf");
+
+    let tokenizer = lightbulb::gguf::Content::read(&path)
+        .expect("reading the gguf")
+        .extract_tokenizer()
+        .expect("rebuilding the tokenizer from the file");
+    let count = |text: &str| tokenizer.encode(text, false).expect("encoding").len() as u64;
+    let resolved = lightbulb::api::chat_template::resolve_for_serving(&path)
+        .expect("the file's own template resolves");
+    let rendered = resolved
+        .render(&[lightbulb::contracts::validation::RawMessage {
+            role: "user".into(),
+            content: "ab cd".into(),
+        }])
+        .expect("rendering");
+    let expected = count(&rendered);
+    let legacy = count("user: ab cd");
+    assert_ne!(
+        expected, legacy,
+        "the control must tell the template from the join: {rendered:?}"
+    );
+
+    let plain = post_chat_gguf(gguf.clone(), chat_body(2, serde_json::json!({}))).await;
+    let plain: serde_json::Value = serde_json::from_slice(&plain).expect("response was not JSON");
+    assert_eq!(
+        plain["usage"]["prompt_tokens"], expected,
+        "non-streaming: {plain}"
+    );
+
+    let streamed = post_chat_gguf(
+        gguf,
+        chat_body(
+            2,
+            serde_json::json!({"stream": true, "stream_options": {"include_usage": true}}),
+        ),
+    )
+    .await;
+    let text = String::from_utf8(streamed).expect("SSE body is UTF-8");
+    let usage = text
+        .lines()
+        .filter_map(|l| l.strip_prefix("data: "))
+        .filter(|d| *d != "[DONE]")
+        .filter_map(|d| serde_json::from_str::<serde_json::Value>(d).ok())
+        .find_map(|c| c.get("usage").filter(|u| !u.is_null()).cloned())
+        .expect("a usage chunk");
+    assert_eq!(usage["prompt_tokens"], expected, "streaming: {text}");
+}
