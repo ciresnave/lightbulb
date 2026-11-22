@@ -294,4 +294,35 @@ async fn a_q8_1_gguf_is_refused_by_name_not_served() {
         text.contains("Q8_1") && text.contains("GAP-125"),
         "the refusal must name the dtype and the upstream gap: {text}"
     );
+
+/// The same request streamed: each token chunk carries its own entry, from the real driver through the runner and
+/// the SSE handler (not a stub on any hop).
+#[tokio::test]
+async fn a_synthetic_gguf_streams_logprobs_on_each_token_chunk() {
+    let body = chat_body(
+        4,
+        serde_json::json!({"logprobs": true, "top_logprobs": 1, "stream": true}),
+    );
+    let text = String::from_utf8(post_chat(7, body).await).expect("SSE body is UTF-8");
+    let frames: Vec<serde_json::Value> = text
+        .lines()
+        .filter_map(|l| l.strip_prefix("data: "))
+        .filter(|d| *d != "[DONE]")
+        .map(|d| serde_json::from_str(d).expect("each SSE frame carries JSON"))
+        .collect();
+    let with_entry: Vec<&serde_json::Value> = frames
+        .iter()
+        .filter(|f| f["choices"][0].get("logprobs").is_some())
+        .collect();
+    assert_eq!(
+        with_entry.len(),
+        4,
+        "one chunk per generated token carries an entry: {text}"
+    );
+    for f in with_entry {
+        let entry = &f["choices"][0]["logprobs"]["content"][0];
+        assert_eq!(entry["token"], "&", "{f}");
+        assert_eq!(f["choices"][0]["delta"]["content"], "&", "{f}");
+        assert!(entry["logprob"].as_f64().expect("logprob") > -1e-3, "{f}");
+    }
 }
