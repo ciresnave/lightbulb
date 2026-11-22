@@ -158,6 +158,10 @@
 ///
 /// Stated here rather than in prose because a seed described in a comment is not
 /// a corpus: it names a stream nobody else can produce without the generator.
+#[path = "support/gguf.rs"]
+#[allow(dead_code)]
+mod gguf_writer;
+
 const RANDOM_SEED: u64 = 20260902;
 
 /// How many randomised cases accompany the hand-written ones.
@@ -457,7 +461,35 @@ fn an_unverified_pre_tokenizer_is_refused_by_name() {
     let Ok(gguf) = std::env::var("LIGHTBULB_BPE_UNVERIFIED_GGUF") else {
         panic!("set LIGHTBULB_BPE_UNVERIFIED_GGUF to a gpt2 GGUF whose `pre` is not in the table")
     };
-    let content = lightbulb::gguf::Content::read(&gguf).expect("reading the GGUF");
+    assert_unverified_pre_is_refused_by_name(std::path::Path::new(&gguf));
+}
+
+/// The same refusal on a synthetic header-only GGUF (C1): `tokenizer.ggml.model = gpt2` with a `pre` that is in
+/// no table. Only metadata is read, so no weights and no real vocabulary are needed.
+#[test]
+fn an_unverified_pre_tokenizer_is_refused_by_name_on_a_synthetic_gguf() {
+    use gguf_writer::{Kv, gguf_bytes};
+    let dir = tempfile::tempdir().expect("tempdir");
+    let p = dir.path().join("unverified.gguf");
+    std::fs::write(
+        &p,
+        gguf_bytes(
+            &[
+                ("general.architecture", Kv::Str("llama")),
+                ("tokenizer.ggml.model", Kv::Str("gpt2")),
+                ("tokenizer.ggml.pre", Kv::Str("not-a-real-pre-tokenizer")),
+                ("tokenizer.ggml.tokens", Kv::StrArray(vec!["a", "b", "ab"])),
+                ("tokenizer.ggml.merges", Kv::StrArray(vec!["a b"])),
+            ],
+            0,
+        ),
+    )
+    .expect("writing a synthetic gguf");
+    assert_unverified_pre_is_refused_by_name(&p);
+}
+
+fn assert_unverified_pre_is_refused_by_name(gguf: &std::path::Path) {
+    let content = lightbulb::gguf::Content::read(gguf).expect("reading the GGUF");
     let err = content
         .extract_tokenizer()
         .expect_err("an unverified `pre` must be refused, not approximated");
