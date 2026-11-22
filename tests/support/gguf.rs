@@ -150,7 +150,7 @@ fn push_f32_tensor(
     for v in values {
         data.extend_from_slice(&v.to_le_bytes());
     }
-    while data.len() % 32 != 0 {
+    while !data.len().is_multiple_of(32) {
         data.push(0);
     }
 }
@@ -226,7 +226,7 @@ pub fn constant_output_gguf_bytes(token: u32) -> Vec<u8> {
 
     let mut out = gguf_bytes(&kvs, count);
     out.extend_from_slice(&infos);
-    while out.len() % 32 != 0 {
+    while !out.len().is_multiple_of(32) {
         out.push(0);
     }
     out.extend_from_slice(&data);
