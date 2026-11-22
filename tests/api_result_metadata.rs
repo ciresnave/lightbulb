@@ -764,3 +764,43 @@ async fn completions_endpoint_returns_model_output() {
         "total_tokens is not the sum of its parts"
     );
 }
+
+/// The stream's terminal chunk on a capped generation: exactly one chunk carries a `finish_reason`, it is the last,
+/// it is `"length"`, no chunk carries `usage` (not asked for), and the content chunks add up to the cap's six
+/// tokens (token 7 is `tok7`). The synthetic counterpart of `streaming_terminal_chunk_reports_length` (C1).
+#[tokio::test]
+async fn constant_model_a_capped_stream_ends_in_one_length_chunk() {
+    let tmp = constant_model(7);
+    let (status, body) = post_raw_in(
+        tmp.path(),
+        "/v1/chat/completions",
+        serde_json::json!({
+            "model": "lightbulb-default",
+            "messages": [{"role": "user", "content": "tok5 tok6"}],
+            "max_tokens": 6,
+            "temperature": 0.0,
+            "stream": true
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    let chunks = sse_chunks(&body);
+    assert!(!chunks.is_empty(), "the stream produced no data frames");
+    assert!(chunks.iter().all(|c| c["error"].is_null()), "{chunks:?}");
+    assert!(chunks.iter().all(|c| c["usage"].is_null()), "{chunks:?}");
+    let terminal = chunks
+        .iter()
+        .filter(|c| !c["choices"][0]["finish_reason"].is_null())
+        .count();
+    assert_eq!(terminal, 1, "{chunks:?}");
+    assert_eq!(
+        chunks.last().unwrap()["choices"][0]["finish_reason"],
+        "length",
+        "{chunks:?}"
+    );
+    let text: String = chunks
+        .iter()
+        .filter_map(|c| c["choices"][0]["delta"]["content"].as_str())
+        .collect();
+    assert_eq!(text, "tok7".repeat(6), "{chunks:?}");
+}
