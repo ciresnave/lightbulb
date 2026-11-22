@@ -41,7 +41,7 @@ use std::sync::mpsc::Receiver;
 
 use super::model_runner::{
     CompletionResult, ControlMsg, FinishReason, InferenceJob, ResponseMode, SamplingExtras,
-    StreamItem,
+    StreamItem, TokenLogprob,
 };
 
 /// Why a session stopped generating — the information
@@ -54,9 +54,22 @@ pub(crate) enum StopReason {
     Budget,
 }
 
+/// One generated token's logprobs as the driver reports them, by token id (the runner turns ids into text).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct RawLogprob {
+    pub logprob: f32,
+    pub top: Vec<(u32, f32)>,
+}
+
 /// One finished session's outcome.
 pub(crate) enum FinishOutcome {
-    Completed { tokens: Vec<u32>, stop: StopReason },
+    /// `logprobs` is empty unless the session was admitted with `SamplingExtras::logprobs`; otherwise one entry
+    /// per generated token.
+    Completed {
+        tokens: Vec<u32>,
+        stop: StopReason,
+        logprobs: Vec<RawLogprob>,
+    },
     Failed(String),
 }
 
@@ -297,7 +310,11 @@ pub(crate) fn run_scheduled_jobs<D: SchedulerDriver>(
                 continue;
             };
             match outcome {
-                FinishOutcome::Completed { tokens, stop } => {
+                FinishOutcome::Completed {
+                    tokens,
+                    stop,
+                    logprobs,
+                } => {
                     let finish_reason = match stop {
                         StopReason::Eos => FinishReason::Stop,
                         StopReason::Budget => FinishReason::Length,
@@ -311,6 +328,11 @@ pub(crate) fn run_scheduled_jobs<D: SchedulerDriver>(
                                     prompt_tokens: meta.prompt_tokens,
                                     completion_tokens,
                                     finish_reason,
+                                    logprobs: logprobs_with_text(
+                                        &logprobs,
+                                        &tokens[meta.prompt_tokens..],
+                                        &decode,
+                                    ),
                                 }
                             });
                             let _ = resp_tx.send(result);
@@ -330,6 +352,25 @@ pub(crate) fn run_scheduled_jobs<D: SchedulerDriver>(
             }
         }
     }
+}
+
+/// Attach token text to the driver's id-keyed logprobs. `generated` is the session's generated token ids, one per
+/// entry of `raw` (when `raw` is non-empty). A token that fails to decode on its own gets the empty string
+/// rather than failing the request.
+fn logprobs_with_text(
+    raw: &[RawLogprob],
+    generated: &[u32],
+    decode: &impl Fn(&[u32], bool) -> anyhow::Result<String>,
+) -> Vec<TokenLogprob> {
+    let text = |t: u32| decode(&[t], false).unwrap_or_default();
+    raw.iter()
+        .zip(generated)
+        .map(|(lp, &tok)| TokenLogprob {
+            token: text(tok),
+            logprob: lp.logprob,
+            top: lp.top.iter().map(|&(t, p)| (text(t), p)).collect(),
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -371,6 +412,8 @@ mod tests {
         max_new: usize,
         produced: usize,
         plan: FakePlan,
+        /// `Some(n)` when the job asked for logprobs with `n` alternatives.
+        logprobs: Option<usize>,
     }
 
     struct FakeDriver {
@@ -439,6 +482,7 @@ mod tests {
                     max_new,
                     produced: 0,
                     plan,
+                    logprobs: extras.logprobs,
                 },
             );
             Ok(id)
@@ -496,9 +540,24 @@ mod tests {
                             };
                             let prompt_echo = std::iter::repeat_n(0u32, s.prompt_len);
                             let generated = (1..=s.produced as u32).map(|i| 100 + i);
+                            // Mirrors Fuel: one entry per generated token for a session that asked, none else.
+                            let logprobs = s
+                                .logprobs
+                                .map(|n| {
+                                    (1..=s.produced as u32)
+                                        .map(|i| RawLogprob {
+                                            logprob: -(i as f32),
+                                            top: (0..n as u32)
+                                                .map(|k| (100 + i + k, -(k as f32)))
+                                                .collect(),
+                                        })
+                                        .collect()
+                                })
+                                .unwrap_or_default();
                             FinishOutcome::Completed {
                                 tokens: prompt_echo.chain(generated).collect(),
                                 stop,
+                                logprobs,
                             }
                         }
                     };
@@ -597,6 +656,51 @@ mod tests {
             *extras_log.borrow(),
             vec![SamplingExtras::default(), extras],
             "each job's own extras, and only that job's, must reach try_admit"
+        );
+    }
+
+    #[test]
+    fn logprobs_come_back_with_token_text_only_for_a_job_that_asked() {
+        let (tx, rx) = mpsc::channel();
+        let (asked, mut asked_rx) = complete_job("hello", 2);
+        let (plain, mut plain_rx) = complete_job("world", 2);
+        let extras = SamplingExtras {
+            logprobs: Some(1),
+            ..SamplingExtras::default()
+        };
+        tx.send(InferenceJob { extras, ..asked }).unwrap();
+        tx.send(plain).unwrap();
+        drop(tx);
+
+        run_scheduled_jobs(
+            FakeDriver::new(4),
+            rx,
+            no_control(),
+            fake_encode,
+            fake_decode,
+        );
+
+        let asked = asked_rx.try_recv().unwrap().unwrap();
+        // fake_decode maps token 101 -> 'e', 102 -> 'f'; the generated tokens are 101, 102.
+        assert_eq!(
+            asked.logprobs,
+            vec![
+                TokenLogprob {
+                    token: "e".into(),
+                    logprob: -1.0,
+                    top: vec![("e".into(), 0.0)],
+                },
+                TokenLogprob {
+                    token: "f".into(),
+                    logprob: -2.0,
+                    top: vec![("f".into(), 0.0)],
+                },
+            ]
+        );
+        let plain = plain_rx.try_recv().unwrap().unwrap();
+        assert!(
+            plain.logprobs.is_empty(),
+            "a job that did not ask records none"
         );
     }
 

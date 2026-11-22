@@ -357,6 +357,7 @@ mod tests {
             text: text.to_string(),
             prompt_tokens,
             completion_tokens,
+            logprobs: Vec::new(),
             finish_reason,
         }
     }
