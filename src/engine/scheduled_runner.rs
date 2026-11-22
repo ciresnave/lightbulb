@@ -420,6 +420,35 @@ mod tests {
         assert_eq!(lens.iter().sum::<usize>(), "café".len());
     }
 
+    /// The same split character through `logprobs_with_text`: each entry's `text_len` is what it adds to the
+    /// text, though its own `token` string is the lossy U+FFFD.
+    #[test]
+    fn logprob_entries_carry_text_len_for_a_split_character() {
+        let decode = |ids: &[u32], _: bool| {
+            Ok(
+                String::from_utf8_lossy(&ids.iter().map(|&i| i as u8).collect::<Vec<_>>())
+                    .into_owned(),
+            )
+        };
+        let generated = [b'f' as u32, 0xC3, 0xA9];
+        let raw: Vec<RawLogprob> = generated
+            .iter()
+            .map(|_| RawLogprob {
+                logprob: -1.0,
+                top: Vec::new(),
+            })
+            .collect();
+        let got = logprobs_with_text(&raw, &generated, &decode);
+        assert_eq!(
+            got.iter().map(|l| l.text_len).collect::<Vec<_>>(),
+            [1, 0, 2]
+        );
+        assert_eq!(
+            got[1].token, "\u{FFFD}",
+            "the token string itself stays lossy"
+        );
+    }
+
     /// Treats each byte of the prompt as a token (lossy for non-ASCII, fine
     /// for these fixtures) so tests don't need a real tokenizer.
     fn fake_encode(s: &str, _add_special: bool) -> anyhow::Result<Vec<u32>> {
