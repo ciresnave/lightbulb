@@ -200,6 +200,10 @@ fn row_for(root: &Path, path: &Path) -> J {
     })
 }
 
+#[path = "support/gguf.rs"]
+#[allow(dead_code)]
+mod gguf_writer;
+
 fn build_dump(root: &Path) -> J {
     let mut files: Vec<J> = corpus_files(root)
         .iter()
@@ -568,8 +572,43 @@ fn two_runs_over_one_corpus_are_byte_identical() {
     // ⚠️ NAME THE SUBJECT. Figures alone are identical whichever root
     // produced them, and these get quoted far from this run.
     eprintln!("  SUBJECT: LIGHTBULB_GGUF_CORPUS={root:?}");
-    let root = Path::new(&root);
+    assert_two_runs_are_byte_identical(Path::new(&root));
+}
 
+/// The same property over a small synthetic corpus (C1): three header-only GGUFs with different metadata, in
+/// nested directories, so it runs everywhere. Determinism of the dump does not depend on the files being real.
+#[test]
+fn two_runs_over_a_synthetic_corpus_are_byte_identical() {
+    use gguf_writer::{Kv, gguf_bytes};
+    let dir = tempfile::tempdir().expect("tempdir");
+    for (rel, kvs) in [
+        (
+            "a/one.gguf",
+            vec![
+                ("general.architecture", Kv::Str("llama")),
+                ("llama.context_length", Kv::U32(2048)),
+            ],
+        ),
+        (
+            "a/two.gguf",
+            vec![
+                ("general.architecture", Kv::Str("qwen3")),
+                ("tokenizer.ggml.tokens", Kv::StrArray(vec!["a", "b", "c"])),
+            ],
+        ),
+        (
+            "b/three.gguf",
+            vec![("general.architecture", Kv::Str("llama"))],
+        ),
+    ] {
+        let p = dir.path().join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).expect("mkdir");
+        std::fs::write(&p, gguf_bytes(&kvs, 0)).expect("writing a synthetic gguf");
+    }
+    assert_two_runs_are_byte_identical(dir.path());
+}
+
+fn assert_two_runs_are_byte_identical(root: &Path) {
     let a = serde_json::to_string(&build_dump(root)).expect("serialising run A");
     let b = serde_json::to_string(&build_dump(root)).expect("serialising run B");
 
