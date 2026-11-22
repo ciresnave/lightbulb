@@ -152,7 +152,6 @@ impl<'m, M: PagedDecodeModel> FuelPagedSchedulerDriver<'m, M> {
             repetition_penalty: extras.repetition_penalty,
             logprobs: extras.logprobs,
             seed: seed.unwrap_or(counter),
-            ..SamplingParams::default()
         }
     }
 
