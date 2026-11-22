@@ -165,6 +165,7 @@ fn drain(mut s: Submitted) -> Outcome {
                 text.push_str(&t);
             }
             Ok(StreamItem::Done { .. }) => break,
+            Ok(StreamItem::Logprob(_)) => {}
             Err(e) => panic!("request failed: {e:#}"),
         }
     }

@@ -1735,10 +1735,14 @@ fn validate_chat_logprobs(request: &ChatCompletionRequest) -> Result<(), String>
         .lightbulb
         .as_ref()
         .is_some_and(|lb| lb.output_contract.is_some());
-    if request.stream || contract || response_format::active(request).is_some() {
+    // A stream carries them token by token; a `response_format` / contract retry loop, and a streamed tool call
+    // (replayed from a buffered reply), have no per-token stream to carry them.
+    if contract
+        || response_format::active(request).is_some()
+        || (request.stream && request_wants_tools(request))
+    {
         return Err(
-            "`logprobs` is supported on non-streaming requests without `response_format` \
-                    or `lightbulb.output_contract`"
+            "`logprobs` is not supported with `response_format`, `lightbulb.output_contract`, or `tools` on a stream"
                 .to_string(),
         );
     }
@@ -2122,12 +2126,15 @@ fn create_chat_stream(
             max_new_tokens,
             temperature: request.temperature as f64,
             seed: request.seed.map(|s| s as u64),
-            extras: sampling_extras(
-                request.top_p,
-                request.presence_penalty,
-                request.frequency_penalty,
-                &request.extra_sampling,
-            ),
+            extras: crate::engine::model_runner::SamplingExtras {
+                logprobs: requested_logprobs(&request),
+                ..sampling_extras(
+                    request.top_p,
+                    request.presence_penalty,
+                    request.frequency_penalty,
+                    &request.extra_sampling,
+                )
+            },
             // Same value the non-streaming path sends, because it comes from
             // the same `build_prompt` call. The two paths carrying separate
             // answers to this is the shape of the defect this file already has
@@ -2209,6 +2216,8 @@ fn create_chat_stream(
             // The `include_usage` chunk, held back one step so it follows the
             // `finish_reason` chunk.
             pending_usage: Option<serde_json::Value>,
+            // The logprob entry that arrived ahead of its token, attached to that token's chunk.
+            pending_logprob: Option<crate::engine::model_runner::TokenLogprob>,
             // Held only so its `Drop` runs when THIS struct is dropped --
             // i.e. when the stream itself ends, whether that's normal
             // completion or the client disconnecting early -- not when
@@ -2221,6 +2230,7 @@ fn create_chat_stream(
             is_first: true,
             done: false,
             pending_usage: None,
+            pending_logprob: None,
             _queue_depth_guard: queue_depth_guard,
         };
         let token_stream = stream::unfold(state, move |mut st| {
@@ -2237,11 +2247,21 @@ fn create_chat_stream(
                 }
                 let first = st.is_first;
                 st.is_first = false;
-                let received = tokio::time::timeout(
+                let mut received = tokio::time::timeout(
                     std::time::Duration::from_millis(timeout_ms),
                     st.rx.recv(),
                 )
                 .await;
+                // A logprob entry arrives just ahead of the token it describes; it rides on that token's chunk,
+                // so it is held and the token is read next (under the same idle timeout).
+                if let Ok(Some(Ok(StreamItem::Logprob(lp)))) = received {
+                    st.pending_logprob = Some(lp);
+                    received = tokio::time::timeout(
+                        std::time::Duration::from_millis(timeout_ms),
+                        st.rx.recv(),
+                    )
+                    .await;
+                }
                 let event = match received {
                     Err(_elapsed) => {
                         st.done = true;
@@ -2258,25 +2278,37 @@ fn create_chat_stream(
                         )
                     }
                     Ok(None) => return None,
-                    Ok(Some(Ok(StreamItem::Token(token_text)))) => sse_event(
-                        Event::default().data(
-                            serde_json::json!({
-                                "id": chat_id,
-                                "object": "chat.completion.chunk",
-                                "created": created,
-                                "model": model,
-                                "choices": [{
-                                    "index": 0,
-                                    "delta": {
-                                        "role": if first { Some("assistant") } else { None },
-                                        "content": token_text
-                                    },
-                                    "finish_reason": None::<String>
-                                }]
-                            })
-                            .to_string(),
-                        ),
-                    ),
+                    // Handled above, where it is held for the token that follows; a second one in a row cannot
+                    // happen, and its entry is dropped rather than sent as a chunk of its own.
+                    Ok(Some(Ok(StreamItem::Logprob(_)))) => {
+                        st.is_first = first;
+                        return Some((sse_event(Event::default().comment("")), st));
+                    }
+                    Ok(Some(Ok(StreamItem::Token(token_text)))) => {
+                        let mut choice = serde_json::json!({
+                            "index": 0,
+                            "delta": {
+                                "role": if first { Some("assistant") } else { None },
+                                "content": token_text
+                            },
+                            "finish_reason": None::<String>
+                        });
+                        if let Some(lp) = st.pending_logprob.take() {
+                            choice["logprobs"] = super::logprobs::chat_json(&[lp]);
+                        }
+                        sse_event(
+                            Event::default().data(
+                                serde_json::json!({
+                                    "id": chat_id,
+                                    "object": "chat.completion.chunk",
+                                    "created": created,
+                                    "model": model,
+                                    "choices": [choice]
+                                })
+                                .to_string(),
+                            ),
+                        )
+                    }
                     Ok(Some(Ok(StreamItem::Done {
                         finish_reason,
                         prompt_tokens,
@@ -5803,6 +5835,80 @@ mod tests {
         );
     }
 
+    /// A stub runner that streams "Hel", "lo" and, only for a job that asked for logprobs, the entry for each token
+    /// just ahead of it (what the scheduled runner does).
+    fn streaming_logprob_runner() -> std::sync::mpsc::SyncSender<crate::engine::InferenceJob> {
+        use crate::engine::model_runner::{InferenceJob, ResponseMode, StreamItem, TokenLogprob};
+        let (tx, rx) = std::sync::mpsc::sync_channel::<InferenceJob>(32);
+        std::thread::spawn(move || {
+            while let Ok(job) = rx.recv() {
+                let asked = job.extras.logprobs.is_some();
+                if let ResponseMode::Streaming(chunks) = job.response_mode {
+                    for (i, t) in ["Hel", "lo"].into_iter().enumerate() {
+                        if asked {
+                            let _ = chunks.send(Ok(StreamItem::Logprob(TokenLogprob {
+                                token: t.to_string(),
+                                text_len: t.len(),
+                                logprob: -0.5 + 0.25 * i as f32,
+                                top: vec![(t.to_string(), -0.5 + 0.25 * i as f32)],
+                            })));
+                        }
+                        let _ = chunks.send(Ok(StreamItem::Token(t.to_string())));
+                    }
+                    let _ = chunks.send(Ok(StreamItem::Done {
+                        finish_reason: FinishReason::Stop,
+                        prompt_tokens: 1,
+                        completion_tokens: 2,
+                    }));
+                }
+            }
+        });
+        tx
+    }
+
+    async fn stream_frames(extra: serde_json::Value) -> Vec<serde_json::Value> {
+        let state = state_with_runner(None, Some(streaming_logprob_runner()));
+        let mut body = logprob_body(extra);
+        body["stream"] = serde_json::json!(true);
+        let request: ChatCompletionRequest = serde_json::from_value(body).expect("request body");
+        let response = chat_completions(State(state), axum::http::HeaderMap::new(), Json(request))
+            .await
+            .into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+        sse_frames(response).await
+    }
+
+    /// A streamed request that asked for logprobs gets each token's entry on that token's own chunk (the role on
+    /// the first), and the finish chunk carries none; the same request without `logprobs` has no `logprobs` key
+    /// on any chunk.
+    #[tokio::test]
+    async fn chat_stream_carries_logprobs_on_each_token_chunk() {
+        let frames = stream_frames(serde_json::json!({"logprobs": true, "top_logprobs": 1})).await;
+        assert_eq!(frames.len(), 3, "2 token chunks + finish: {frames:?}");
+        assert_eq!(frames[0]["choices"][0]["delta"]["role"], "assistant");
+        for (frame, (token, logprob)) in frames.iter().zip([("Hel", -0.5), ("lo", -0.25)]) {
+            let entry = &frame["choices"][0]["logprobs"]["content"][0];
+            assert_eq!(entry["token"], token, "{frame}");
+            assert_eq!(entry["logprob"], serde_json::json!(logprob), "{frame}");
+            assert_eq!(entry["top_logprobs"][0]["token"], token, "{frame}");
+            assert_eq!(frame["choices"][0]["delta"]["content"], token, "{frame}");
+        }
+        assert!(
+            frames[2]["choices"][0].get("logprobs").is_none(),
+            "the finish chunk carries no logprobs: {}",
+            frames[2]
+        );
+
+        let plain = stream_frames(serde_json::json!({})).await;
+        assert_eq!(plain.len(), 3, "{plain:?}");
+        assert!(
+            plain
+                .iter()
+                .all(|f| f["choices"][0].get("logprobs").is_none()),
+            "no logprobs key unless asked: {plain:?}"
+        );
+    }
+
     /// The shapes that cannot carry logprobs are a 400 each; the control (a valid request) is a 200.
     #[tokio::test]
     async fn chat_logprobs_refusals_are_400_and_the_valid_request_is_not() {
@@ -5820,8 +5926,12 @@ mod tests {
                 400,
             ),
             (
-                "stream",
-                serde_json::json!({"logprobs": true, "stream": true}),
+                "stream with tools",
+                serde_json::json!({
+                    "logprobs": true,
+                    "stream": true,
+                    "tools": [{"type": "function", "function": {"name": "f", "parameters": {"type": "object"}}}]
+                }),
                 400,
             ),
             (

@@ -70,6 +70,9 @@ pub struct TokenLogprob {
 /// is unused.
 #[derive(Debug)]
 pub enum StreamItem {
+    /// The log-probability entry of the token the NEXT `Token` item carries, sent first and only for a request
+    /// that asked for logprobs (`SamplingExtras::logprobs`); a consumer that did not ask never sees one.
+    Logprob(TokenLogprob),
     Token(String),
     /// `prompt_tokens`/`completion_tokens` are the runner's own counts, the
     /// same ones a complete-mode reply reports, so a streaming client can

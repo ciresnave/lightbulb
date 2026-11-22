@@ -124,6 +124,13 @@ pub(crate) trait SchedulerDriver {
     /// preserve it).
     fn reap_finished(&mut self) -> Vec<(Self::Id, FinishOutcome)>;
 
+    /// The logprob entries recorded by the last [`step`](Self::step), one per token it returned for a session
+    /// that asked for logprobs, in token order per session. Drains them. Default: none (a driver that records
+    /// no logprobs).
+    fn take_step_logprobs(&mut self) -> Vec<(Self::Id, RawLogprob)> {
+        Vec::new()
+    }
+
     /// Whether there is any active (admitted, not yet reaped) session. Used
     /// to decide whether the loop can block on new jobs or must keep
     /// stepping.
@@ -277,20 +284,18 @@ pub(crate) fn run_scheduled_jobs<D: SchedulerDriver>(
 
         match driver.step() {
             Ok(advanced) => {
+                let mut fresh: HashMap<D::Id, VecDeque<RawLogprob>> = HashMap::new();
+                for (id, raw) in driver.take_step_logprobs() {
+                    fresh.entry(id).or_default().push_back(raw);
+                }
                 for (id, token) in advanced {
                     if let Some(JobMeta {
                         response_mode: ResponseMode::Streaming(tx),
                         ..
                     }) = active.get(&id)
                     {
-                        match decode(&[token], false) {
-                            Ok(text) => {
-                                let _ = tx.send(Ok(StreamItem::Token(text)));
-                            }
-                            Err(e) => {
-                                let _ = tx.send(Err(e));
-                            }
-                        }
+                        let raw = fresh.get_mut(&id).and_then(VecDeque::pop_front);
+                        send_stream_token(tx, token, raw, &decode);
                     }
                 }
             }
@@ -372,6 +377,37 @@ fn text_len_at(
             .unwrap_or(0)
     };
     settled(i + 1).saturating_sub(settled(i))
+}
+
+/// Send one streamed token, preceded by its logprob entry when the session asked for them. A token that fails to
+/// decode is an error item, not a silent gap.
+fn send_stream_token(
+    tx: &tokio::sync::mpsc::UnboundedSender<anyhow::Result<StreamItem>>,
+    token: u32,
+    raw: Option<RawLogprob>,
+    decode: &impl Fn(&[u32], bool) -> anyhow::Result<String>,
+) {
+    match decode(&[token], false) {
+        Ok(text) => {
+            if let Some(raw) = raw {
+                let alternatives = raw
+                    .top
+                    .iter()
+                    .map(|&(t, p)| (decode(&[t], false).unwrap_or_default(), p))
+                    .collect();
+                let _ = tx.send(Ok(StreamItem::Logprob(TokenLogprob {
+                    text_len: text.len(),
+                    token: text.clone(),
+                    logprob: raw.logprob,
+                    top: alternatives,
+                })));
+            }
+            let _ = tx.send(Ok(StreamItem::Token(text)));
+        }
+        Err(e) => {
+            let _ = tx.send(Err(e));
+        }
+    }
 }
 
 /// Attach token text to the driver's id-keyed logprobs. `generated` is the session's generated token ids, one per
@@ -496,6 +532,8 @@ mod tests {
         seed_log: std::rc::Rc<std::cell::RefCell<Vec<Option<u64>>>>,
         /// The `extras` each admission was offered, in order.
         extras_log: std::rc::Rc<std::cell::RefCell<Vec<SamplingExtras>>>,
+        /// The logprob entries the last `step` recorded, for a session that asked (value: `-(token index)`).
+        fresh: Vec<(u64, RawLogprob)>,
     }
 
     impl FakeDriver {
@@ -507,6 +545,7 @@ mod tests {
                 priority_log: Default::default(),
                 seed_log: Default::default(),
                 extras_log: Default::default(),
+                fresh: Vec::new(),
             }
         }
     }
@@ -553,6 +592,10 @@ mod tests {
             Ok(id)
         }
 
+        fn take_step_logprobs(&mut self) -> Vec<(u64, RawLogprob)> {
+            std::mem::take(&mut self.fresh)
+        }
+
         fn step(&mut self) -> Result<Vec<(u64, u32)>, String> {
             let mut advanced = Vec::new();
             for (&id, s) in self.sessions.iter_mut() {
@@ -568,6 +611,15 @@ mod tests {
                 }
                 s.produced += 1;
                 advanced.push((id, 100 + s.produced as u32));
+                if s.logprobs.is_some() {
+                    self.fresh.push((
+                        id,
+                        RawLogprob {
+                            logprob: -(s.produced as f32),
+                            top: vec![(100 + s.produced as u32, 0.0)],
+                        },
+                    ));
+                }
             }
             Ok(advanced)
         }
@@ -913,6 +965,46 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    /// A streaming job that asked for logprobs gets each entry just ahead of its token (`Logprob`, `Token`, ...,
+    /// `Done`); the same job without the request gets none (the control: an always-sent or never-sent entry
+    /// would pass one arm).
+    #[test]
+    fn a_streaming_job_that_asked_gets_a_logprob_ahead_of_each_token() {
+        let items_for = |asked: bool| {
+            let (tx, rx) = mpsc::channel();
+            let (mut job, mut stream_rx) = streaming_job("hi", 2);
+            job.extras.logprobs = asked.then_some(1);
+            tx.send(job).unwrap();
+            drop(tx);
+            run_scheduled_jobs(
+                FakeDriver::new(4),
+                rx,
+                no_control(),
+                fake_encode,
+                fake_decode,
+            );
+            let mut items = Vec::new();
+            while let Ok(item) = stream_rx.try_recv() {
+                items.push(item.unwrap());
+            }
+            items
+        };
+
+        let items = items_for(true);
+        assert_eq!(items.len(), 5, "2 x (Logprob, Token) + Done, got {items:?}");
+        let StreamItem::Logprob(first) = &items[0] else {
+            panic!("the first item must be a Logprob: {items:?}");
+        };
+        assert_eq!((first.token.as_str(), first.logprob), ("e", -1.0));
+        assert_eq!(first.top, vec![("e".to_string(), 0.0)]);
+        assert!(matches!(&items[1], StreamItem::Token(t) if t == "e"));
+        assert!(matches!(&items[2], StreamItem::Logprob(l) if l.logprob == -2.0));
+        assert!(matches!(&items[3], StreamItem::Token(t) if t == "f"));
+
+        let plain = items_for(false);
+        assert_eq!(plain.len(), 3, "no logprob items unless asked: {plain:?}");
     }
 
     #[test]
