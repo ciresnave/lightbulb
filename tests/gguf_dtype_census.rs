@@ -62,6 +62,10 @@ use lightbulb::gguf::Content;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+#[path = "support/gguf.rs"]
+#[allow(dead_code)]
+mod gguf_writer;
+
 /// The GGML type codes the live reader can represent, read off
 /// `GgmlDType::from_u32` (`fuel-ir/src/quantized.rs`, Fuel 0.20.61). This is a
 /// TABLE, not a range, and the remaining gaps are real (4, 5 are deprecated;
@@ -290,9 +294,37 @@ fn the_iq_dtype_gap_stays_closed() {
         unreadable_dirs.is_empty(),
         "the corpus walk was incomplete: {unreadable_dirs:?}"
     );
+    assert_the_dtype_gap_is_closed(&files);
+}
+
+/// The same guard over synthetic one-tensor files (C1), one per dtype code the table lists as newly accepted
+/// (an IQ type, a TQ type, MXFP4) plus Q4_0: header-only, so it runs everywhere. It proves the guard and the
+/// table are consistent on every run; whether a real corpus still loads stays the ignored test's claim.
+#[test]
+fn the_dtype_gap_guard_holds_over_synthetic_one_tensor_files() {
+    use gguf_writer::{Kv, gguf_bytes_with_tensor};
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut files = Vec::new();
+    for dtype in [2u32, 16, 34, 39] {
+        let p = dir.path().join(format!("dtype{dtype}.gguf"));
+        std::fs::write(
+            &p,
+            gguf_bytes_with_tensor(
+                &[("general.architecture", Kv::Str("llama"))],
+                "blk.0.attn_q.weight",
+                dtype,
+            ),
+        )
+        .expect("writing a synthetic gguf");
+        files.push(p);
+    }
+    assert_the_dtype_gap_is_closed(&files);
+}
+
+fn assert_the_dtype_gap_is_closed(files: &[PathBuf]) {
     assert!(!files.is_empty(), "an empty corpus proves nothing here");
 
-    let c = Census::of(&files);
+    let c = Census::of(files);
     c.report();
 
     // The one claim this test now exists to hold: every weighted file this

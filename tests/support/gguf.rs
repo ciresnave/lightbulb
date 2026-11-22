@@ -74,3 +74,18 @@ pub fn gguf_bytes(kvs: &[(&str, Kv)], tensor_count: u64) -> Vec<u8> {
     }
     b
 }
+
+/// A header with exactly one tensor-info record (name, 1 dim of size 1, GGML dtype code, offset 0). The tensor's
+/// DATA is never written: `Content::read` parses the info table and stops, which is what keeps this a few
+/// hundred bytes. Layout per `fuel-formats/src/gguf.rs:415-434`: u64 name-len + name, u32 n_dims, n_dims x u64
+/// dims, u32 dtype code, u64 offset.
+pub fn gguf_bytes_with_tensor(kvs: &[(&str, Kv)], name: &str, dtype: u32) -> Vec<u8> {
+    let mut body = gguf_bytes(kvs, 1);
+    body.extend_from_slice(&(name.len() as u64).to_le_bytes());
+    body.extend_from_slice(name.as_bytes());
+    body.extend_from_slice(&1u32.to_le_bytes()); // n_dims
+    body.extend_from_slice(&1u64.to_le_bytes()); // dims[0]
+    body.extend_from_slice(&dtype.to_le_bytes());
+    body.extend_from_slice(&0u64.to_le_bytes()); // offset
+    body
+}

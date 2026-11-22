@@ -2603,7 +2603,7 @@ fn probe_binary_refuses_tinyllama_because_all_three_candidates_fire() {
 #[path = "support/gguf.rs"]
 #[allow(dead_code)]
 mod gguf_writer;
-use gguf_writer::{Kv, gguf_bytes};
+use gguf_writer::{Kv, gguf_bytes, gguf_bytes_with_tensor};
 
 /// Write a synthetic `.gguf` into a fresh temp dir and return its path.
 fn gguf_fixture(name: &str, kvs: &[(&str, Kv)]) -> std::path::PathBuf {
@@ -2628,13 +2628,7 @@ fn gguf_fixture_with_tensor(
     tensor: (&str, u32),
 ) -> std::path::PathBuf {
     let (name, dtype) = tensor;
-    let mut body = gguf_bytes(kvs, 1 /* tensor_count */);
-    body.extend_from_slice(&(name.len() as u64).to_le_bytes());
-    body.extend_from_slice(name.as_bytes());
-    body.extend_from_slice(&1u32.to_le_bytes()); // n_dims
-    body.extend_from_slice(&1u64.to_le_bytes()); // dims[0]
-    body.extend_from_slice(&dtype.to_le_bytes());
-    body.extend_from_slice(&0u64.to_le_bytes()); // offset
+    let body = gguf_bytes_with_tensor(kvs, name, dtype);
     let dir = tmp_model_dir(tag);
     let p = dir.join("model.gguf");
     std::fs::write(&p, body).expect("writing synthetic gguf");
