@@ -775,6 +775,15 @@ mod tests {
     /// Every session's generated tokens, by admission order, from one driver run over `prompts` (greedy, 12 new
     /// tokens each, up to 8 sessions per step).
     fn batched_tokens(prompts: &[&[u32]]) -> Vec<Vec<u32>> {
+        batched_tokens_with(prompts, 0.0, |_| None)
+    }
+
+    /// [`batched_tokens`] at `temperature`, session `i` seeded with `seed_for(i)`.
+    fn batched_tokens_with(
+        prompts: &[&[u32]],
+        temperature: f64,
+        seed_for: impl Fn(usize) -> Option<u64>,
+    ) -> Vec<Vec<u32>> {
         let model = tiny_model(5);
         let mut d = FuelPagedSchedulerDriver::new(
             &model,
@@ -788,8 +797,9 @@ mod tests {
         .expect("tiny model must build");
         let ids: Vec<SessionId> = prompts
             .iter()
-            .map(|p| {
-                d.try_admit(p, 12, 0.0, None, Default::default())
+            .enumerate()
+            .map(|(i, p)| {
+                d.try_admit(p, 12, temperature, seed_for(i), Default::default())
                     .expect("generous budget admits")
             })
             .collect();
@@ -829,6 +839,28 @@ mod tests {
         assert_ne!(
             all[0], all[1],
             "two different prompts produced one answer: the equalities above would be vacuous"
+        );
+    }
+
+    /// The sampled counterpart: with a request seed, a session's sampled tokens do not depend on what shares its
+    /// batch (each session owns its RNG stream), a different seed gives different tokens (so the equality is not
+    /// a constant).
+    #[test]
+    fn a_seeded_session_samples_the_same_tokens_alone_and_batched() {
+        let a: &[u32] = &[1, 2, 3];
+        let b: &[u32] = &[4, 5, 6, 7];
+        let seed_a = |i: usize| (i == 0).then_some(7u64);
+
+        let alone = batched_tokens_with(&[a], 1.0, seed_a).remove(0);
+        let with_b = batched_tokens_with(&[a, b], 1.0, seed_a);
+        assert_eq!(with_b[0], alone, "A seeded, batched with an unseeded B");
+        let seeded_b = batched_tokens_with(&[a, b], 1.0, |i| Some(7 + i as u64));
+        assert_eq!(seeded_b[0], alone, "A seeded, batched with a seeded B");
+
+        let other_seed = batched_tokens_with(&[a], 1.0, |_| Some(8)).remove(0);
+        assert_ne!(
+            other_seed, alone,
+            "seeds 7 and 8 sampled the same 12 tokens: the equalities above would be vacuous"
         );
     }
 
