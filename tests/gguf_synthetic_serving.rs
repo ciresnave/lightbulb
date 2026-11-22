@@ -83,10 +83,14 @@ fn chat_body(max_tokens: u32, extra: serde_json::Value) -> serde_json::Value {
 
 /// The response body (200 asserted) of `body` posted to a server over the synthetic GGUF whose output is `token`.
 async fn post_chat(token: u32, body: serde_json::Value) -> Vec<u8> {
+    post_chat_gguf(gguf_writer::constant_output_gguf_bytes(token), body).await
+}
+
+/// [`post_chat`] over the given GGUF file contents.
+async fn post_chat_gguf(gguf: Vec<u8>, body: serde_json::Value) -> Vec<u8> {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("synthetic.gguf");
-    std::fs::write(&path, gguf_writer::constant_output_gguf_bytes(token))
-        .expect("writing the gguf");
+    std::fs::write(&path, gguf).expect("writing the gguf");
     let app = lightbulb::api::openai::routes().with_state(app_state_for(&path));
     let resp = app
         .oneshot(
@@ -166,4 +170,31 @@ async fn a_synthetic_gguf_returns_logprobs() {
         );
         assert_eq!(entry["top_logprobs"][0]["token"], "&", "{v}");
     }
+}
+
+/// The same file with every matrix quantised to Q8_0 (norms F32): the quantised load and matmul path serves it,
+/// and the output is the same fixed token with the same logprob shape (a dominant token, logprob near 0), so the
+/// dequantised weights are close enough that the decision does not move. Fails if the file does not load, or the
+/// quantised path decodes anything but `&`.
+#[tokio::test]
+async fn a_q8_0_synthetic_gguf_is_served_and_decodes_the_same_token() {
+    let body = chat_body(4, serde_json::json!({"logprobs": true, "top_logprobs": 1}));
+    let bytes = post_chat_gguf(gguf_writer::constant_output_gguf_q8_0_bytes(7), body).await;
+    let v: serde_json::Value = serde_json::from_slice(&bytes).expect("response was not JSON");
+    assert_eq!(v["choices"][0]["finish_reason"], "length", "{v}");
+    assert_eq!(v["choices"][0]["message"]["content"], "&&&&", "{v}");
+    let first = &v["choices"][0]["logprobs"]["content"][0];
+    assert!(first["logprob"].as_f64().expect("logprob") > -1e-2, "{v}");
+}
+
+/// The quantiser is not a no-op: the Q8_0 file is smaller than the F32 one (34 bytes per 32 values against 128),
+/// so the test above ran a different file, not the F32 one under another name.
+#[test]
+fn the_q8_0_file_is_smaller_than_the_f32_one() {
+    let f32_len = gguf_writer::constant_output_gguf_bytes(7).len();
+    let q8_len = gguf_writer::constant_output_gguf_q8_0_bytes(7).len();
+    assert!(
+        q8_len * 2 < f32_len,
+        "q8_0 {q8_len} bytes vs f32 {f32_len} bytes"
+    );
 }
