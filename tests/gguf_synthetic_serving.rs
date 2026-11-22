@@ -394,3 +394,26 @@ async fn a_synthetic_gguf_streams_logprobs_on_each_token_chunk() {
         assert!(entry["logprob"].as_f64().expect("logprob") > -1e-3, "{f}");
     }
 }
+
+/// EOS TIMING: a model that emits `&'(` and then the EOS stops after exactly three tokens (`finish_reason: "stop"`,
+/// `completion_tokens: 4` (the EOS counts), the text is the chain), whatever the cap above that; a cap of two cuts it to `&'` with
+/// `"length"`. The constant-output model can only stop at once or never; here the stop arrives mid-generation, so a
+/// stop that is dropped, early or late changes the text or the reason.
+#[tokio::test]
+async fn a_chain_model_stops_exactly_when_its_chain_ends() {
+    let gguf = gguf_writer::chain_output_gguf_bytes(&[7, 8, 9]);
+    let v: serde_json::Value = serde_json::from_slice(
+        &post_chat_gguf(gguf.clone(), chat_body(10, serde_json::json!({}))).await,
+    )
+    .expect("response was not JSON");
+    assert_eq!(v["choices"][0]["message"]["content"], "&'(", "{v}");
+    assert_eq!(v["choices"][0]["finish_reason"], "stop", "{v}");
+    // The EOS is generated, so it is counted: three chain tokens and the stop.
+    assert_eq!(v["usage"]["completion_tokens"], 4, "{v}");
+
+    let cut: serde_json::Value =
+        serde_json::from_slice(&post_chat_gguf(gguf, chat_body(2, serde_json::json!({}))).await)
+            .expect("response was not JSON");
+    assert_eq!(cut["choices"][0]["message"]["content"], "&'", "{cut}");
+    assert_eq!(cut["choices"][0]["finish_reason"], "length", "{cut}");
+}

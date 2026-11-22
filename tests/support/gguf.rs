@@ -480,10 +480,47 @@ pub fn constant_output_gguf_with_template_bytes(token: u32, template: &'static s
 }
 
 fn gguf_bytes_full(token: u32, matrices: Storage, chat_template: Option<&'static str>) -> Vec<u8> {
-    let tokens = synthetic_gguf_tokens();
-    let vocab = tokens.len();
+    let vocab = synthetic_gguf_tokens().len();
     assert!((token as usize) < vocab, "token out of vocabulary");
-    let tensors = synthetic_tensors(token, vocab);
+    assemble(synthetic_tensors(token, vocab), matrices, chat_template)
+}
+
+/// A file whose model emits `chain` in order and then the EOS (id 1), whatever the prompt: the answer's LENGTH is
+/// known, so a stop that arrives after exactly `chain.len()` tokens (and a cap that cuts it short) can be asserted.
+///
+/// How: every projection is zero, so the final hidden state is the (RMS-normalised) embedding of the last token,
+/// and the logits are the output matrix times it. With one-hot embeddings that makes the output matrix a lookup
+/// table, token to next token: `chain[i]` goes to `chain[i + 1]`, the last goes to the EOS, and every other token
+/// (the prompt's) goes to `chain[0]`.
+pub fn chain_output_gguf_bytes(chain: &[u32]) -> Vec<u8> {
+    let vocab = synthetic_gguf_tokens().len();
+    assert!(!chain.is_empty() && chain.iter().all(|&t| (t as usize) < vocab && t > 1));
+    let h = SYN_HIDDEN;
+    assert!(vocab <= h, "one-hot embeddings need hidden >= vocab");
+    let mut next = vec![chain[0]; vocab];
+    for (i, &t) in chain.iter().enumerate() {
+        next[t as usize] = chain.get(i + 1).copied().unwrap_or(1);
+    }
+    let mut tensors = synthetic_tensors(chain[0], vocab);
+    for (name, _, values) in &mut tensors {
+        if name == "token_embd.weight" {
+            values.fill(0.0);
+            (0..vocab).for_each(|t| values[t * h + t] = 1.0);
+        } else if name == "output.weight" {
+            values.fill(0.0);
+            (0..vocab).for_each(|t| values[next[t] as usize * h + t] = 1.0);
+        }
+    }
+    assemble(tensors, Storage::F32, None)
+}
+
+/// The file bytes for `tensors`, each matrix stored as `matrices` (norms F32).
+fn assemble(
+    tensors: Vec<(String, Vec<u64>, Vec<f32>)>,
+    matrices: Storage,
+    chat_template: Option<&'static str>,
+) -> Vec<u8> {
+    let tokens = synthetic_gguf_tokens();
     let (mut infos, mut data) = (Vec::new(), Vec::new());
     for (name, dims, values) in &tensors {
         let is_norm = name.ends_with("norm.weight");
