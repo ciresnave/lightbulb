@@ -84,6 +84,8 @@ pub(crate) struct FuelPagedSchedulerDriver<'m, M: PagedDecodeModel> {
     /// Logprobs gathered per session as it advances (a session is gone from Fuel once reaped). Only sessions
     /// admitted with `SamplingExtras::logprobs` ever get an entry.
     logprobs: HashMap<SessionId, Vec<RawLogprob>>,
+    /// The entries recorded by the last `step`, for streaming; drained by `take_step_logprobs`.
+    fresh_logprobs: Vec<(SessionId, RawLogprob)>,
     /// Sessions `step`/`step_batched` reported in `StepReport::errored` this
     /// tick or an earlier one, not yet reaped. `reap_finished` drains this
     /// instead of guessing `StopReason` from the (irrelevant — a failed
@@ -110,6 +112,7 @@ impl<'m, M: PagedDecodeModel> FuelPagedSchedulerDriver<'m, M> {
             max_batch: max_batch.max(1),
             seen_counts: HashMap::new(),
             logprobs: HashMap::new(),
+            fresh_logprobs: Vec::new(),
             errored: HashMap::new(),
         })
     }
@@ -164,11 +167,17 @@ impl<'m, M: PagedDecodeModel> FuelPagedSchedulerDriver<'m, M> {
         if recorded.is_empty() {
             return;
         }
-        let entry = self.logprobs.entry(id).or_default();
-        entry.extend(recorded.iter().skip(already_seen).map(|lp| RawLogprob {
-            logprob: lp.logprob,
-            top: lp.top.clone(),
-        }));
+        let new: Vec<RawLogprob> = recorded
+            .iter()
+            .skip(already_seen)
+            .map(|lp| RawLogprob {
+                logprob: lp.logprob,
+                top: lp.top.clone(),
+            })
+            .collect();
+        self.fresh_logprobs
+            .extend(new.iter().cloned().map(|raw| (id, raw)));
+        self.logprobs.entry(id).or_default().extend(new);
     }
 
     /// Register donor `id`'s first `blocks` fully-filled blocks as a shared
@@ -272,6 +281,16 @@ impl<'m, M: PagedDecodeModel> SchedulerDriver for FuelPagedSchedulerDriver<'m, M
             self.collect_logprobs(id, already_seen);
         }
         Ok(out)
+    }
+
+    fn take_step_logprobs(&mut self) -> Vec<(SessionId, RawLogprob)> {
+        std::mem::take(&mut self.fresh_logprobs)
+    }
+
+    fn is_eos(&self, token: u32) -> bool {
+        self.eos_ids
+            .as_ref()
+            .is_some_and(|ids| ids.contains(&token))
     }
 
     fn reap_finished(&mut self) -> Vec<(SessionId, FinishOutcome)> {
@@ -488,6 +507,63 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// What streaming reads: after each `step`, `take_step_logprobs` yields one entry per token that step returned
+    /// for a session that asked (the same ones `reap_finished` later reports), in token order, and none for a
+    /// session that did not; a second call right after returns nothing (it drains).
+    #[test]
+    fn take_step_logprobs_yields_one_entry_per_streamed_token_of_the_session_that_asked() {
+        let model = tiny_model(1);
+        let mut d = driver(&model, generous_budget(), None);
+        let asked = SamplingExtras {
+            logprobs: Some(2),
+            ..SamplingExtras::default()
+        };
+        let with = d.try_admit(&[1, 2, 3], 4, 0.0, None, asked).unwrap();
+        let without = d
+            .try_admit(&[1, 2, 3], 4, 0.0, None, SamplingExtras::default())
+            .unwrap();
+
+        let mut streamed: Vec<u32> = Vec::new();
+        let mut entries: Vec<RawLogprob> = Vec::new();
+        while d.has_active_sessions() {
+            let tokens = d.step().expect("healthy sessions");
+            streamed.extend(tokens.iter().filter(|(id, _)| *id == with).map(|(_, t)| *t));
+            let fresh = d.take_step_logprobs();
+            assert!(
+                fresh.iter().all(|(id, _)| *id == with),
+                "an entry for a session that did not ask: {fresh:?}"
+            );
+            entries.extend(fresh.into_iter().map(|(_, lp)| lp));
+            assert!(d.take_step_logprobs().is_empty(), "the first call drains");
+        }
+        assert_eq!(streamed.len(), 4);
+        assert_eq!(
+            entries.len(),
+            streamed.len(),
+            "one entry per streamed token"
+        );
+        for (lp, tok) in entries.iter().zip(&streamed) {
+            assert_eq!(
+                lp.top[0].0, *tok,
+                "greedy: the streamed token is the top alternative"
+            );
+        }
+
+        let reaped = d.reap_finished();
+        let kept = reaped
+            .into_iter()
+            .find_map(|(id, o)| match o {
+                FinishOutcome::Completed { logprobs, .. } if id == with => Some(logprobs),
+                _ => None,
+            })
+            .expect("the asking session completes");
+        assert_eq!(
+            kept, entries,
+            "streaming and the final result see the same entries"
+        );
+        assert_ne!(with, without);
     }
 
     /// A request `seed` reaches the sampler: the same seed reproduces the same tokens, and (positive control,

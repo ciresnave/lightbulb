@@ -206,6 +206,71 @@ async fn a_q4_0_synthetic_gguf_is_served_and_decodes_the_same_token() {
     assert!(first["logprob"].as_f64().expect("logprob") > -5e-2, "{v}");
 }
 
+/// Q6_K, a K-quant (256-value super-blocks, 6-bit values, 8-bit group scales): the loader's K-quant path serves it
+/// and the fixed token survives. The bound is the loosest of the three: the group scales are 8-bit and the weights
+/// are 6-bit.
+#[tokio::test]
+async fn a_q6_k_synthetic_gguf_is_served_and_decodes_the_same_token() {
+    let body = chat_body(4, serde_json::json!({"logprobs": true, "top_logprobs": 1}));
+    let bytes = post_chat_gguf(gguf_writer::constant_output_gguf_q6_k_bytes(7), body).await;
+    let v: serde_json::Value = serde_json::from_slice(&bytes).expect("response was not JSON");
+    assert_eq!(v["choices"][0]["finish_reason"], "length", "{v}");
+    assert_eq!(v["choices"][0]["message"]["content"], "&&&&", "{v}");
+    let first = &v["choices"][0]["logprobs"]["content"][0];
+    assert!(first["logprob"].as_f64().expect("logprob") > -5e-2, "{v}");
+}
+
+/// The Q6_K encoder against an independent reading of llama.cpp's `dequantize_row_q6_K`: varied values (not the
+/// fixture's constants, which any layout slip would still decode) come back within the quantisation step. A wrong
+/// nibble, high-bit or scale placement moves values by far more than the bound.
+#[test]
+fn the_q6_k_encoder_round_trips_through_the_reference_layout() {
+    let values: Vec<f32> = (0..512)
+        .map(|i| ((i * 37 % 101) as f32 - 50.0) / 50.0)
+        .collect();
+    let bytes = gguf_writer::quantize_q6_k(&values);
+    assert_eq!(bytes.len(), 2 * 210);
+    for (b, block) in bytes.chunks(210).zip(values.chunks(256)) {
+        let (ql, rest) = b.split_at(128);
+        let (qh, rest) = rest.split_at(64);
+        let (sc, d) = rest.split_at(16);
+        let d = half_to_f32(u16::from_le_bytes([d[0], d[1]]));
+        for half in 0..2 {
+            for l in 0..32 {
+                let (lo, hi) = (ql[half * 64 + l], ql[half * 64 + l + 32]);
+                let h = qh[half * 32 + l];
+                let q = [
+                    (lo & 0xF) | ((h & 3) << 4),
+                    (hi & 0xF) | (((h >> 2) & 3) << 4),
+                    (lo >> 4) | (((h >> 4) & 3) << 4),
+                    (hi >> 4) | (((h >> 6) & 3) << 4),
+                ];
+                for (k, q) in q.iter().enumerate() {
+                    let scale = f32::from(sc[half * 8 + 2 * k + l / 16] as i8);
+                    let got = d * scale * (f32::from(*q) - 32.0);
+                    let want = block[half * 128 + k * 32 + l];
+                    assert!(
+                        (got - want).abs() < 0.05,
+                        "{got} vs {want} (half {half} k {k} l {l})"
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// An f16 (normal range) to f32.
+fn half_to_f32(bits: u16) -> f32 {
+    let exp = i32::from((bits >> 10) & 0x1f);
+    let mant = f32::from(bits & 0x3ff);
+    let magnitude = (1.0 + mant / 1024.0) * 2f32.powi(exp - 15);
+    if bits & 0x8000 != 0 {
+        -magnitude
+    } else {
+        magnitude
+    }
+}
+
 /// The quantisers are not no-ops: the Q8_0 file is under half the F32 one (34 bytes per 32 values against 128 for
 /// the matrices) and the Q4_0 file smaller still (18), so the tests above ran different files, not the F32 one under
 /// other names.
@@ -216,6 +281,9 @@ fn the_quantised_files_are_smaller_than_the_f32_one() {
     let q4_len = gguf_writer::constant_output_gguf_q4_0_bytes(7).len();
     assert!(q8_len * 2 < f32_len, "q8_0 {q8_len} vs f32 {f32_len} bytes");
     assert!(q4_len < q8_len, "q4_0 {q4_len} vs q8_0 {q8_len} bytes");
+    let q6_len = gguf_writer::constant_output_gguf_q6_k_bytes(7).len();
+    assert!(q6_len < q8_len, "q6_k {q6_len} vs q8_0 {q8_len} bytes");
+    assert!(q4_len < q6_len, "q4_0 {q4_len} vs q6_k {q6_len} bytes");
 }
 
 /// A chat template within the synthetic vocabulary (printable ASCII and spaces): not the legacy `role: content`
@@ -294,4 +362,93 @@ async fn a_q8_1_gguf_is_refused_by_name_not_served() {
         text.contains("Q8_1") && text.contains("GAP-125"),
         "the refusal must name the dtype and the upstream gap: {text}"
     );
+}
+
+/// The same request streamed: each token chunk carries its own entry, from the real driver through the runner and
+/// the SSE handler (not a stub on any hop).
+#[tokio::test]
+async fn a_synthetic_gguf_streams_logprobs_on_each_token_chunk() {
+    let body = chat_body(
+        4,
+        serde_json::json!({"logprobs": true, "top_logprobs": 1, "stream": true}),
+    );
+    let text = String::from_utf8(post_chat(7, body).await).expect("SSE body is UTF-8");
+    let frames: Vec<serde_json::Value> = text
+        .lines()
+        .filter_map(|l| l.strip_prefix("data: "))
+        .filter(|d| *d != "[DONE]")
+        .map(|d| serde_json::from_str(d).expect("each SSE frame carries JSON"))
+        .collect();
+    let with_entry: Vec<&serde_json::Value> = frames
+        .iter()
+        .filter(|f| f["choices"][0].get("logprobs").is_some())
+        .collect();
+    assert_eq!(
+        with_entry.len(),
+        4,
+        "one chunk per generated token carries an entry: {text}"
+    );
+    for f in with_entry {
+        let entry = &f["choices"][0]["logprobs"]["content"][0];
+        assert_eq!(entry["token"], "&", "{f}");
+        assert_eq!(f["choices"][0]["delta"]["content"], "&", "{f}");
+        assert!(entry["logprob"].as_f64().expect("logprob") > -1e-3, "{f}");
+    }
+}
+
+/// EOS TIMING: a model that emits `&'(` and then the EOS stops after exactly three tokens (`finish_reason: "stop"`,
+/// `completion_tokens: 4` (the EOS counts), the text is the chain), whatever the cap above that; a cap of two cuts it to `&'` with
+/// `"length"`. The constant-output model can only stop at once or never; here the stop arrives mid-generation, so a
+/// stop that is dropped, early or late changes the text or the reason.
+#[tokio::test]
+async fn a_chain_model_stops_exactly_when_its_chain_ends() {
+    let gguf = gguf_writer::chain_output_gguf_bytes(&[7, 8, 9]);
+    let v: serde_json::Value = serde_json::from_slice(
+        &post_chat_gguf(gguf.clone(), chat_body(10, serde_json::json!({}))).await,
+    )
+    .expect("response was not JSON");
+    assert_eq!(v["choices"][0]["message"]["content"], "&'(", "{v}");
+    assert_eq!(v["choices"][0]["finish_reason"], "stop", "{v}");
+    // The EOS is generated, so it is counted: three chain tokens and the stop.
+    assert_eq!(v["usage"]["completion_tokens"], 4, "{v}");
+
+    let cut: serde_json::Value =
+        serde_json::from_slice(&post_chat_gguf(gguf, chat_body(2, serde_json::json!({}))).await)
+            .expect("response was not JSON");
+    assert_eq!(cut["choices"][0]["message"]["content"], "&'", "{cut}");
+    assert_eq!(cut["choices"][0]["finish_reason"], "length", "{cut}");
+}
+
+/// The synthetic counterpart of `chat_template_e2e`'s two stop tests: a GGUF WITH a chat template, whose model ends
+/// its answer with the EOS, stops on it on both the non-streaming and the streaming path: `finish_reason: "stop"`,
+/// the text exactly the chain (nothing after the stop, no EOS text in it), one terminal chunk on the stream.
+#[tokio::test]
+async fn a_templated_chat_stops_on_the_eos_on_both_paths() {
+    let gguf = gguf_writer::chain_output_gguf_with_template_bytes(&[7, 8, 9], TEMPLATE);
+    let plain: serde_json::Value = serde_json::from_slice(
+        &post_chat_gguf(gguf.clone(), chat_body(10, serde_json::json!({}))).await,
+    )
+    .expect("response was not JSON");
+    assert_eq!(plain["choices"][0]["message"]["content"], "&'(", "{plain}");
+    assert_eq!(plain["choices"][0]["finish_reason"], "stop", "{plain}");
+
+    let streamed = post_chat_gguf(gguf, chat_body(10, serde_json::json!({"stream": true}))).await;
+    let text = String::from_utf8(streamed).expect("SSE body is UTF-8");
+    let chunks: Vec<serde_json::Value> = text
+        .lines()
+        .filter_map(|l| l.strip_prefix("data: "))
+        .filter(|d| *d != "[DONE]")
+        .filter_map(|d| serde_json::from_str(d).ok())
+        .collect();
+    let content: String = chunks
+        .iter()
+        .filter_map(|c| c["choices"][0]["delta"]["content"].as_str())
+        .collect();
+    assert_eq!(content, "&'(", "{text}");
+    let reasons: Vec<&serde_json::Value> = chunks
+        .iter()
+        .map(|c| &c["choices"][0]["finish_reason"])
+        .filter(|r| !r.is_null())
+        .collect();
+    assert_eq!(reasons, ["stop"], "{text}");
 }

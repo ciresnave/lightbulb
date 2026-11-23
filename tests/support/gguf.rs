@@ -123,9 +123,10 @@ pub fn gguf_bytes_with_tensor(kvs: &[(&str, Kv)], name: &str, dtype: u32) -> Vec
 // every projection is zero, and the output row for `token` is all ones, so that token's logit is the hidden
 // size and every other row's is at most a tenth of it.
 
-// 32 and 64: a multiple of the Q8_0 block size (32), so a quantised row is whole blocks.
-const SYN_HIDDEN: usize = 32;
-const SYN_FFN: usize = 64;
+// 256 and 256: a multiple of the K-quant super-block size (256), so every quantised row (a projection's row is
+// `hidden` or `ffn` long) is whole blocks of every dtype here, Q8_0's 32 and Q4_0's 32 included.
+const SYN_HIDDEN: usize = 256;
+const SYN_FFN: usize = 256;
 const SYN_LAYERS: usize = 3;
 const SYN_HEADS: usize = 4;
 
@@ -146,6 +147,7 @@ const GGML_F32: u32 = 0;
 const GGML_Q4_0: u32 = 2;
 const GGML_Q8_0: u32 = 8;
 const GGML_Q8_1: u32 = 9;
+const GGML_Q6_K: u32 = 14;
 
 /// IEEE half-precision bits of `x`, for the normal-range values a block scale takes here (`0.0` is `0`).
 fn f16_bits(x: f32) -> u16 {
@@ -249,6 +251,73 @@ fn quantize_q8_1(values: &[f32]) -> Vec<u8> {
     out
 }
 
+/// Q6_K: super-blocks of 256 values, 210 bytes each: `ql[128]` (low 4 bits), `qh[64]` (high 2 bits), 16 `i8`
+/// scales (one per 16 values) and an f16 `d`. A value reads back as `d * scale[group] * (q - 32)`, `q` in 0..64.
+/// Within each half (128 values) element `l` (0..32) of the four quarters shares `ql[l]`/`ql[l + 32]` (low and
+/// high nibble) and `qh[l]` (four 2-bit fields); quarter `k` uses scale `8h + 2k + l / 16` (llama.cpp's layout).
+pub fn quantize_q6_k(values: &[f32]) -> Vec<u8> {
+    assert!(
+        values.len().is_multiple_of(256),
+        "Q6_K rows are whole super-blocks of 256"
+    );
+    let mut out = Vec::with_capacity(values.len() / 256 * 210);
+    for block in values.chunks(256) {
+        out.extend(q6_k_block(block));
+    }
+    out
+}
+
+/// One Q6_K super-block (see [`quantize_q6_k`]).
+fn q6_k_block(block: &[f32]) -> Vec<u8> {
+    let group_scale: Vec<f32> = block
+        .chunks(16)
+        .map(|g| {
+            let extreme = g
+                .iter()
+                .fold(0.0f32, |m, &v| if v.abs() > m.abs() { v } else { m });
+            extreme / -32.0
+        })
+        .collect();
+    let d = group_scale.iter().fold(0.0f32, |m, v| m.max(v.abs())) / 127.0;
+    // An f16 scale must be a normal half (>= 2^-14); a smaller one would need a subnormal this writer does not emit.
+    let d = if d > 0.0 { d.max(1e-4) } else { 0.0 };
+    let scales: Vec<i8> = group_scale
+        .iter()
+        .map(|&s| {
+            if d == 0.0 {
+                0
+            } else {
+                (s / d).round().clamp(-127.0, 127.0) as i8
+            }
+        })
+        .collect();
+    let q = |i: usize| -> u8 {
+        let step = d * f32::from(scales[i / 16]);
+        let v = if step == 0.0 {
+            0.0
+        } else {
+            (block[i] / step).round()
+        };
+        (v + 32.0).clamp(0.0, 63.0) as u8
+    };
+    let (mut ql, mut qh) = ([0u8; 128], [0u8; 64]);
+    for half in 0..2 {
+        for l in 0..32 {
+            let at = |k: usize| q(half * 128 + k * 32 + l);
+            ql[half * 64 + l] = (at(0) & 0xF) | ((at(2) & 0xF) << 4);
+            ql[half * 64 + l + 32] = (at(1) & 0xF) | ((at(3) & 0xF) << 4);
+            qh[half * 32 + l] =
+                (at(0) >> 4) | ((at(1) >> 4) << 2) | ((at(2) >> 4) << 4) | ((at(3) >> 4) << 6);
+        }
+    }
+    let mut out = Vec::with_capacity(210);
+    out.extend_from_slice(&ql);
+    out.extend_from_slice(&qh);
+    out.extend(scales.iter().map(|&x| x as u8));
+    out.extend_from_slice(&f16_bits(d).to_le_bytes());
+    out
+}
+
 /// How a tensor is stored in the synthetic file.
 #[derive(Clone, Copy, PartialEq)]
 pub enum Storage {
@@ -256,6 +325,7 @@ pub enum Storage {
     Q8_0,
     Q8_1,
     Q4_0,
+    Q6K,
 }
 
 /// Append one tensor: its info record, and its data padded to the 32-byte alignment, encoded per `storage`.
@@ -274,6 +344,7 @@ fn push_tensor(
         Storage::Q8_0 => (GGML_Q8_0, quantize_q8_0(values)),
         Storage::Q4_0 => (GGML_Q4_0, quantize_q4_0(values)),
         Storage::Q8_1 => (GGML_Q8_1, quantize_q8_1(values)),
+        Storage::Q6K => (GGML_Q6_K, quantize_q6_k(values)),
         Storage::F32 => (
             GGML_F32,
             values.iter().flat_map(|v| v.to_le_bytes()).collect(),
@@ -388,6 +459,11 @@ pub fn constant_output_gguf_q4_0_bytes(token: u32) -> Vec<u8> {
     constant_output_gguf_bytes_with(token, Storage::Q4_0)
 }
 
+/// The same file with every matrix quantised to Q6_K, a K-quant (norms F32).
+pub fn constant_output_gguf_q6_k_bytes(token: u32) -> Vec<u8> {
+    constant_output_gguf_bytes_with(token, Storage::Q6K)
+}
+
 /// The same file with every matrix quantised to Q8_1 (norms F32).
 pub fn constant_output_gguf_q8_1_bytes(token: u32) -> Vec<u8> {
     constant_output_gguf_bytes_with(token, Storage::Q8_1)
@@ -404,10 +480,57 @@ pub fn constant_output_gguf_with_template_bytes(token: u32, template: &'static s
 }
 
 fn gguf_bytes_full(token: u32, matrices: Storage, chat_template: Option<&'static str>) -> Vec<u8> {
-    let tokens = synthetic_gguf_tokens();
-    let vocab = tokens.len();
+    let vocab = synthetic_gguf_tokens().len();
     assert!((token as usize) < vocab, "token out of vocabulary");
-    let tensors = synthetic_tensors(token, vocab);
+    assemble(synthetic_tensors(token, vocab), matrices, chat_template)
+}
+
+/// A file whose model emits `chain` in order and then the EOS (id 1), whatever the prompt: the answer's LENGTH is
+/// known, so a stop that arrives after exactly `chain.len()` tokens (and a cap that cuts it short) can be asserted.
+///
+/// How: every projection is zero, so the final hidden state is the (RMS-normalised) embedding of the last token,
+/// and the logits are the output matrix times it. With one-hot embeddings that makes the output matrix a lookup
+/// table, token to next token: `chain[i]` goes to `chain[i + 1]`, the last goes to the EOS, and every other token
+/// (the prompt's) goes to `chain[0]`.
+pub fn chain_output_gguf_bytes(chain: &[u32]) -> Vec<u8> {
+    chain_gguf(chain, None)
+}
+
+/// [`chain_output_gguf_bytes`] with `tokenizer.chat_template` set (same vocabulary limits as
+/// [`constant_output_gguf_with_template_bytes`]).
+pub fn chain_output_gguf_with_template_bytes(chain: &[u32], template: &'static str) -> Vec<u8> {
+    chain_gguf(chain, Some(template))
+}
+
+fn chain_gguf(chain: &[u32], chat_template: Option<&'static str>) -> Vec<u8> {
+    let vocab = synthetic_gguf_tokens().len();
+    assert!(!chain.is_empty() && chain.iter().all(|&t| (t as usize) < vocab && t > 1));
+    let h = SYN_HIDDEN;
+    assert!(vocab <= h, "one-hot embeddings need hidden >= vocab");
+    let mut next = vec![chain[0]; vocab];
+    for (i, &t) in chain.iter().enumerate() {
+        next[t as usize] = chain.get(i + 1).copied().unwrap_or(1);
+    }
+    let mut tensors = synthetic_tensors(chain[0], vocab);
+    for (name, _, values) in &mut tensors {
+        if name == "token_embd.weight" {
+            values.fill(0.0);
+            (0..vocab).for_each(|t| values[t * h + t] = 1.0);
+        } else if name == "output.weight" {
+            values.fill(0.0);
+            (0..vocab).for_each(|t| values[next[t] as usize * h + t] = 1.0);
+        }
+    }
+    assemble(tensors, Storage::F32, chat_template)
+}
+
+/// The file bytes for `tensors`, each matrix stored as `matrices` (norms F32).
+fn assemble(
+    tensors: Vec<(String, Vec<u64>, Vec<f32>)>,
+    matrices: Storage,
+    chat_template: Option<&'static str>,
+) -> Vec<u8> {
+    let tokens = synthetic_gguf_tokens();
     let (mut infos, mut data) = (Vec::new(), Vec::new());
     for (name, dims, values) in &tensors {
         let is_norm = name.ends_with("norm.weight");

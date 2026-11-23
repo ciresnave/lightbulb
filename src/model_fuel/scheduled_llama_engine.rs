@@ -58,7 +58,7 @@ use crate::engine::model_runner::{
     ControlMsg, SamplingExtras, SharedCacheStats, SharedScheduler, drain_with_error,
 };
 use crate::engine::scheduled_runner::{
-    AdmitError, FinishOutcome, SchedulerDriver, run_scheduled_jobs,
+    AdmitError, FinishOutcome, RawLogprob, SchedulerDriver, run_scheduled_jobs,
 };
 use crate::gguf::{GgufArchitecture, detect_architecture};
 
@@ -436,6 +436,22 @@ impl<'m> SchedulerDriver for ServingDriver<'m> {
             ServingDriverInner::F32(d) => d.step(),
             ServingDriverInner::QuantizedGguf(d) => d.step(),
             ServingDriverInner::QuantizedGgufQwen3(d) => d.step(),
+        }
+    }
+
+    fn take_step_logprobs(&mut self) -> Vec<(Self::Id, RawLogprob)> {
+        match &mut self.inner {
+            ServingDriverInner::F32(d) => d.take_step_logprobs(),
+            ServingDriverInner::QuantizedGguf(d) => d.take_step_logprobs(),
+            ServingDriverInner::QuantizedGgufQwen3(d) => d.take_step_logprobs(),
+        }
+    }
+
+    fn is_eos(&self, token: u32) -> bool {
+        match &self.inner {
+            ServingDriverInner::F32(d) => d.is_eos(token),
+            ServingDriverInner::QuantizedGguf(d) => d.is_eos(token),
+            ServingDriverInner::QuantizedGgufQwen3(d) => d.is_eos(token),
         }
     }
 
