@@ -362,6 +362,7 @@ async fn a_q8_1_gguf_is_refused_by_name_not_served() {
         text.contains("Q8_1") && text.contains("GAP-125"),
         "the refusal must name the dtype and the upstream gap: {text}"
     );
+}
 
 /// The same request streamed: each token chunk carries its own entry, from the real driver through the runner and
 /// the SSE handler (not a stub on any hop).
