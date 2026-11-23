@@ -447,6 +447,14 @@ impl<'m> SchedulerDriver for ServingDriver<'m> {
         }
     }
 
+    fn is_eos(&self, token: u32) -> bool {
+        match &self.inner {
+            ServingDriverInner::F32(d) => d.is_eos(token),
+            ServingDriverInner::QuantizedGguf(d) => d.is_eos(token),
+            ServingDriverInner::QuantizedGgufQwen3(d) => d.is_eos(token),
+        }
+    }
+
     fn reap_finished(&mut self) -> Vec<(Self::Id, FinishOutcome)> {
         let reaped = match &mut self.inner {
             ServingDriverInner::F32(d) => d.reap_finished(),

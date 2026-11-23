@@ -493,6 +493,16 @@ fn gguf_bytes_full(token: u32, matrices: Storage, chat_template: Option<&'static
 /// table, token to next token: `chain[i]` goes to `chain[i + 1]`, the last goes to the EOS, and every other token
 /// (the prompt's) goes to `chain[0]`.
 pub fn chain_output_gguf_bytes(chain: &[u32]) -> Vec<u8> {
+    chain_gguf(chain, None)
+}
+
+/// [`chain_output_gguf_bytes`] with `tokenizer.chat_template` set (same vocabulary limits as
+/// [`constant_output_gguf_with_template_bytes`]).
+pub fn chain_output_gguf_with_template_bytes(chain: &[u32], template: &'static str) -> Vec<u8> {
+    chain_gguf(chain, Some(template))
+}
+
+fn chain_gguf(chain: &[u32], chat_template: Option<&'static str>) -> Vec<u8> {
     let vocab = synthetic_gguf_tokens().len();
     assert!(!chain.is_empty() && chain.iter().all(|&t| (t as usize) < vocab && t > 1));
     let h = SYN_HIDDEN;
@@ -511,7 +521,7 @@ pub fn chain_output_gguf_bytes(chain: &[u32]) -> Vec<u8> {
             (0..vocab).for_each(|t| values[next[t] as usize * h + t] = 1.0);
         }
     }
-    assemble(tensors, Storage::F32, None)
+    assemble(tensors, Storage::F32, chat_template)
 }
 
 /// The file bytes for `tensors`, each matrix stored as `matrices` (norms F32).

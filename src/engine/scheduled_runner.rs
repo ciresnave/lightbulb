@@ -131,6 +131,13 @@ pub(crate) trait SchedulerDriver {
         Vec::new()
     }
 
+    /// Whether `token` is an end-of-sequence token for this driver's model. The EOS ends its session and is
+    /// generated, so [`step`](Self::step) returns it; it is a stop signal, not text, and a stream must not send it
+    /// to the client (the final result already reports `stop`). Default: no token is an EOS.
+    fn is_eos(&self, _token: u32) -> bool {
+        false
+    }
+
     /// Whether there is any active (admitted, not yet reaped) session. Used
     /// to decide whether the loop can block on new jobs or must keep
     /// stepping.
@@ -295,7 +302,9 @@ pub(crate) fn run_scheduled_jobs<D: SchedulerDriver>(
                     }) = active.get(&id)
                     {
                         let raw = fresh.get_mut(&id).and_then(VecDeque::pop_front);
-                        send_stream_token(tx, token, raw, &decode);
+                        if !driver.is_eos(token) {
+                            send_stream_token(tx, token, raw, &decode);
+                        }
                     }
                 }
             }

@@ -287,6 +287,12 @@ impl<'m, M: PagedDecodeModel> SchedulerDriver for FuelPagedSchedulerDriver<'m, M
         std::mem::take(&mut self.fresh_logprobs)
     }
 
+    fn is_eos(&self, token: u32) -> bool {
+        self.eos_ids
+            .as_ref()
+            .is_some_and(|ids| ids.contains(&token))
+    }
+
     fn reap_finished(&mut self) -> Vec<(SessionId, FinishOutcome)> {
         self.scheduler
             .reap_finished()

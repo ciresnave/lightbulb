@@ -417,3 +417,37 @@ async fn a_chain_model_stops_exactly_when_its_chain_ends() {
     assert_eq!(cut["choices"][0]["message"]["content"], "&'", "{cut}");
     assert_eq!(cut["choices"][0]["finish_reason"], "length", "{cut}");
 }
+
+/// The synthetic counterpart of `chat_template_e2e`'s two stop tests: a GGUF WITH a chat template, whose model ends
+/// its answer with the EOS, stops on it on both the non-streaming and the streaming path: `finish_reason: "stop"`,
+/// the text exactly the chain (nothing after the stop, no EOS text in it), one terminal chunk on the stream.
+#[tokio::test]
+async fn a_templated_chat_stops_on_the_eos_on_both_paths() {
+    let gguf = gguf_writer::chain_output_gguf_with_template_bytes(&[7, 8, 9], TEMPLATE);
+    let plain: serde_json::Value = serde_json::from_slice(
+        &post_chat_gguf(gguf.clone(), chat_body(10, serde_json::json!({}))).await,
+    )
+    .expect("response was not JSON");
+    assert_eq!(plain["choices"][0]["message"]["content"], "&'(", "{plain}");
+    assert_eq!(plain["choices"][0]["finish_reason"], "stop", "{plain}");
+
+    let streamed = post_chat_gguf(gguf, chat_body(10, serde_json::json!({"stream": true}))).await;
+    let text = String::from_utf8(streamed).expect("SSE body is UTF-8");
+    let chunks: Vec<serde_json::Value> = text
+        .lines()
+        .filter_map(|l| l.strip_prefix("data: "))
+        .filter(|d| *d != "[DONE]")
+        .filter_map(|d| serde_json::from_str(d).ok())
+        .collect();
+    let content: String = chunks
+        .iter()
+        .filter_map(|c| c["choices"][0]["delta"]["content"].as_str())
+        .collect();
+    assert_eq!(content, "&'(", "{text}");
+    let reasons: Vec<&serde_json::Value> = chunks
+        .iter()
+        .map(|c| &c["choices"][0]["finish_reason"])
+        .filter(|r| !r.is_null())
+        .collect();
+    assert_eq!(reasons, ["stop"], "{text}");
+}
