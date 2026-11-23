@@ -1761,6 +1761,13 @@ pub(crate) fn detect_architecture(metadata: &HashMap<String, Value>) -> Result<G
     }
 }
 
+/// The synthetic GGUF writer the integration tests share (`tests/support/gguf.rs`), for the tests below that
+/// need files without a corpus.
+#[cfg(test)]
+#[path = "../../tests/support/gguf.rs"]
+#[allow(dead_code)]
+mod synthetic_gguf_writer;
+
 /// Proof that our metadata reader agrees with candle's, on every corpus file
 /// both can read.
 ///
@@ -1933,6 +1940,53 @@ mod reader_agreement_tests {
             "the two metadata readers DISAGREE on {} entries:\n  {}",
             mismatches.len(),
             mismatches.join("\n  ")
+        );
+    }
+
+    /// The differential test over SYNTHETIC files, so it runs without a corpus: every dtype the writer emits (F32,
+    /// Q8_0, Q4_0, Q6_K), a file with a chat template and a chain-output file. Unlike the corpus test the count is
+    /// exact: each of these must be readable by BOTH readers and agree key for key, so a file one reader refuses
+    /// is a failure here, not a skip.
+    #[test]
+    fn our_metadata_agrees_with_the_loaders_on_synthetic_files() {
+        use super::synthetic_gguf_writer as w;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let files: Vec<(&str, Vec<u8>)> = vec![
+            ("f32.gguf", w::constant_output_gguf_bytes(7)),
+            ("q8_0.gguf", w::constant_output_gguf_q8_0_bytes(7)),
+            ("q4_0.gguf", w::constant_output_gguf_q4_0_bytes(7)),
+            ("q6_k.gguf", w::constant_output_gguf_q6_k_bytes(7)),
+            (
+                "template.gguf",
+                w::constant_output_gguf_with_template_bytes(7, "{{ messages[0].content }}"),
+            ),
+            ("chain.gguf", w::chain_output_gguf_bytes(&[7, 8, 9])),
+        ];
+        let paths: Vec<std::path::PathBuf> = files
+            .iter()
+            .map(|(name, bytes)| {
+                let path = dir.path().join(name);
+                std::fs::write(&path, bytes).expect("writing a synthetic gguf");
+                path
+            })
+            .collect();
+        let Sweep {
+            compared,
+            skipped,
+            mismatches,
+        } = sweep(&paths);
+        assert_eq!(
+            (compared, skipped),
+            (paths.len(), 0),
+            "every synthetic file is readable by both readers"
+        );
+        assert!(
+            mismatches.is_empty(),
+            "{}",
+            mismatches.join(
+                "
+  "
+            )
         );
     }
 
