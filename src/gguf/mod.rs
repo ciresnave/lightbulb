@@ -2460,6 +2460,31 @@ mod spm_derivation_tests {
     /// comparable to one there.
     const PROMPT: &str = "<|user|>\nName the capital of France.</s>\n<|assistant|>\n";
 
+    /// The two directions the corpus test `the_derivation_over_generates_on_byte_level_bpe` pins on real
+    /// vocabularies, on a vocabulary small enough to check by hand: a BPE that declares `a b`, `b c` and `ab c`
+    /// (so `abc` was built as `ab` + `c`). The derivation never MISSES a declared merge, and it over-generates
+    /// the other valid split `a bc`, which no BPE ever declared. A derivation that stopped over-generating here
+    /// would also be dropping valid splits; one that missed a declared merge would break the tokenizer.
+    #[test]
+    fn the_derivation_never_misses_a_declared_merge_and_over_generates() {
+        let vocab: Vec<String> = ["a", "b", "c", "ab", "bc", "abc"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let pair = |a: &str, b: &str| (a.to_string(), b.to_string());
+        let declared: std::collections::HashSet<_> =
+            [pair("a", "b"), pair("b", "c"), pair("ab", "c")].into();
+        let derived: std::collections::HashSet<_> =
+            Content::derive_merges(&vocab).into_iter().collect();
+        assert_eq!(
+            declared.difference(&derived).count(),
+            0,
+            "a declared merge was missed"
+        );
+        let extra: Vec<_> = derived.difference(&declared).collect();
+        assert_eq!(extra, [&pair("a", "bc")], "the over-generated split");
+    }
+
     /// No corpus needed: the algorithm on a vocabulary small enough to check by
     /// hand. Runs in the ordinary suite, unlike everything else in this module.
     #[test]
