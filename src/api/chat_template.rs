@@ -212,6 +212,23 @@ impl ChatTemplate {
         bos_token: &str,
         eos_token: &str,
     ) -> anyhow::Result<String> {
+        let msgs: Vec<serde_json::Value> = messages
+            .iter()
+            .map(|m| serde_json::json!({ "role": m.role, "content": m.content }))
+            .collect();
+        self.render_json_with_tools(&msgs, tools, bos_token, eos_token)
+    }
+
+    /// [`render_with_tools`](Self::render_with_tools) over messages already in the HF shape, so a message can
+    /// carry more than `role` and `content`: an assistant's `tool_calls`, a tool result's `tool_call_id` and
+    /// `name`, which the checkpoint's own template reads when it renders a conversation that already used tools.
+    pub fn render_json_with_tools(
+        &self,
+        messages: &[serde_json::Value],
+        tools: Option<&[serde_json::Value]>,
+        bos_token: &str,
+        eos_token: &str,
+    ) -> anyhow::Result<String> {
         let mut env = minijinja::Environment::new();
 
         // Match the Jinja2 dialect these templates were authored against.
@@ -290,10 +307,7 @@ impl ChatTemplate {
         env.add_template("chat", &self.source)?;
         let tmpl = env.get_template("chat")?;
 
-        let msgs: Vec<_> = messages
-            .iter()
-            .map(|m| minijinja::context! { role => m.role, content => m.content })
-            .collect();
+        let msgs = minijinja::Value::from_serialize(messages);
 
         // `bos_token` goes into the prompt TEXT. Anything that tokenizes the
         // result must therefore pass `add_special_tokens = false`, or a
@@ -1207,6 +1221,21 @@ impl ResolvedTemplate {
             .render_with_tools(messages, Some(tools), &self.tokens.bos, &self.tokens.eos)
     }
 
+    /// [`render_with_tools`](Self::render_with_tools) over HF-shaped message values; see
+    /// [`ChatTemplate::render_json_with_tools`].
+    pub fn render_json_with_tools(
+        &self,
+        messages: &[serde_json::Value],
+        tools: &[serde_json::Value],
+    ) -> anyhow::Result<String> {
+        self.template.render_json_with_tools(
+            messages,
+            Some(tools),
+            &self.tokens.bos,
+            &self.tokens.eos,
+        )
+    }
+
     /// Which tier produced the template.
     pub fn resolved_by(&self) -> Resolution {
         self.template.resolved_by
@@ -1641,6 +1670,52 @@ pub fn probe_override_check(current: Resolution, force: bool) -> ProbeOverride {
                 .to_string(),
         ),
         Resolution::None => ProbeOverride::Proceed,
+    }
+}
+
+#[cfg(test)]
+mod tool_history_tests {
+    use super::*;
+
+    const SOURCE: &str = "{% for m in messages %}{{ m.role }}:{{ m.content }}{% if m.tool_calls %}[calls:{% for c in m.tool_calls %}{{ c.function.name }}({{ c.function.arguments | tojson }}){% endfor %}]{% endif %}{% if m.tool_call_id %}[id:{{ m.tool_call_id }}]{% endif %}{% if m.name %}[name:{{ m.name }}]{% endif %}|{% endfor %}tools:{{ tools | length }}";
+
+    fn template() -> ChatTemplate {
+        ChatTemplate {
+            source: SOURCE.to_string(),
+            resolved_by: Resolution::Sidecar,
+        }
+    }
+
+    /// Messages in the HF shape reach the template whole: an assistant turn's `tool_calls` and a tool result's
+    /// `tool_call_id` and `name` are visible to it, and the plain `RawMessage` path still renders its `role` and
+    /// `content` exactly as before (the control: the same template, no extra fields).
+    #[test]
+    fn tool_calls_and_tool_results_reach_the_template() {
+        let msgs = vec![
+            serde_json::json!({"role": "user", "content": "weather in Paris?"}),
+            serde_json::json!({"role": "assistant", "content": "", "tool_calls": [
+                {"id": "call_1", "type": "function",
+                 "function": {"name": "get_weather", "arguments": {"city": "Paris"}}}]}),
+            serde_json::json!({"role": "tool", "content": "sunny", "tool_call_id": "call_1", "name": "get_weather"}),
+        ];
+        let tools =
+            vec![serde_json::json!({"type": "function", "function": {"name": "get_weather"}})];
+        let out = template()
+            .render_json_with_tools(&msgs, Some(&tools), "<s>", "</s>")
+            .unwrap();
+        assert_eq!(
+            out,
+            "user:weather in Paris?|assistant:[calls:get_weather({\"city\":\"Paris\"})]|tool:sunny[id:call_1][name:get_weather]|tools:1"
+        );
+
+        let raw = [RawMessage {
+            role: "user".into(),
+            content: "hi".into(),
+        }];
+        let plain = template()
+            .render_with_tools(&raw, Some(&tools), "<s>", "</s>")
+            .unwrap();
+        assert_eq!(plain, "user:hi|tools:1");
     }
 }
 

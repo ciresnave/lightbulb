@@ -44,6 +44,10 @@ use lightbulb::gguf::Content;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
+#[path = "support/gguf.rs"]
+#[allow(dead_code)]
+mod gguf_writer;
+
 /// Every GGUF metadata key lightbulb reads, from string literals under `src/`.
 ///
 /// A literal scan rather than a curated list, because a curated list is a second
@@ -241,22 +245,44 @@ fn the_literal_scanner_handles_escapes() {
 #[test]
 #[ignore = "needs a local GGUF corpus; set LIGHTBULB_GGUF_CORPUS"]
 fn no_key_lightbulb_reads_has_unaccounted_siblings() {
-    let files = corpus_files();
-    assert!(
-        !files.is_empty(),
-        "no .gguf files under LIGHTBULB_GGUF_CORPUS={:?}. An empty corpus makes this \
-         sweep vacuously clean, and vacuously clean is indistinguishable from clean.",
+    let subject = format!(
+        "LIGHTBULB_GGUF_CORPUS={:?}",
         std::env::var("LIGHTBULB_GGUF_CORPUS").unwrap_or_default()
     );
+    sweep_for_unaccounted_siblings(&corpus_files(), &subject);
+}
 
-    // ⚠️ NAME THE SUBJECT. A tool that prints only figures is
-    // indistinguishable from the same tool run against a different root, and
-    // every number below is quoted elsewhere without this line attached.
-    eprintln!(
-        "  SUBJECT: LIGHTBULB_GGUF_CORPUS={:?}  ({} .gguf files)",
-        std::env::var("LIGHTBULB_GGUF_CORPUS").unwrap_or_default(),
-        files.len()
+/// The same sweep over one synthetic header-only GGUF (C1): it proves the plumbing (the literal scan finds keys
+/// under `src/`, the file is read, nothing is vacuous) on every run; it says nothing about real checkpoints, and
+/// `the_detector_finds_the_defect_that_motivated_it` is what shows the detector can fail.
+#[test]
+fn the_sweep_runs_clean_over_a_synthetic_gguf() {
+    use gguf_writer::{Kv, gguf_bytes};
+    let dir = tempfile::tempdir().expect("tempdir");
+    let p = dir.path().join("synthetic.gguf");
+    std::fs::write(
+        &p,
+        gguf_bytes(
+            &[
+                ("general.architecture", Kv::Str("llama")),
+                ("llama.context_length", Kv::U32(2048)),
+            ],
+            0,
+        ),
+    )
+    .expect("writing a synthetic gguf");
+    sweep_for_unaccounted_siblings(&[p], "a synthetic header-only GGUF (tests/support/gguf.rs)");
+}
+
+fn sweep_for_unaccounted_siblings(files: &[PathBuf], subject: &str) {
+    assert!(
+        !files.is_empty(),
+        "no .gguf files in {subject}. An empty corpus makes this sweep vacuously clean, and vacuously          clean is indistinguishable from clean."
     );
+
+    // NAME THE SUBJECT. A tool that prints only figures is indistinguishable from the same tool run against a
+    // different root, and every number below is quoted elsewhere without this line attached.
+    eprintln!("  SUBJECT: {subject}  ({} .gguf files)", files.len());
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let read = keys_lightbulb_reads(&root);
     assert!(
@@ -270,7 +296,7 @@ fn no_key_lightbulb_reads_has_unaccounted_siblings() {
     let mut findings: Vec<(String, Vec<String>)> = Vec::new();
     let mut all_keys = BTreeSet::new();
 
-    for path in &files {
+    for path in files {
         let name = path
             .file_name()
             .unwrap_or_default()

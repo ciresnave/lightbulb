@@ -106,6 +106,11 @@ use tower::ServiceExt;
 use lightbulb::api::{ApiConfig, AppState};
 use lightbulb::engine::{MemoryAwareConfig, MemoryAwareScheduler, ModelRunner};
 
+// The synthetic checkpoint generator (C1): the default-temperature gate asserts the request path, not text.
+#[path = "support/mod.rs"]
+#[allow(dead_code)]
+mod support;
+
 /// Locate the TinyLlama checkpoint.
 ///
 /// `TINYLLAMA_DIR` overrides the built-in default, which is one developer's
@@ -205,7 +210,7 @@ async fn fuel_runner_serves_a_coherent_completion_over_http() {
     // tokens, so the extra 16 are never decoded. The headroom is only spent on
     // the run where something HAS shifted — which is the run where it matters.
     let body = serde_json::json!({
-        "model": "tinyllama",
+        "model": "lightbulb-default",
         "messages": [{"role": "user", "content": "The capital of France is"}],
         "max_tokens": 24,
         "temperature": 0.0,
@@ -300,11 +305,11 @@ async fn fuel_runner_serves_a_coherent_completion_over_http() {
 /// broken router or a dead `inference_tx` — something that stops the request
 /// from reaching the model at all — would fail it.
 #[tokio::test]
-#[ignore = "needs the TinyLlama checkpoint; minutes on CPU"]
 async fn fuel_runner_serves_a_default_temperature_completion() {
-    let dir = tinyllama_dir().expect(
-        "no TinyLlama snapshot — this is an acceptance gate, so it fails rather than skipping",
-    );
+    let tmp = tempfile::tempdir().expect("tempdir");
+    support::write_synthetic_checkpoint(tmp.path(), &support::SyntheticArchitecture::default())
+        .expect("writing the synthetic checkpoint");
+    let dir = tmp.path().to_path_buf();
 
     let scheduler = Arc::new(std::sync::Mutex::new(MemoryAwareScheduler::new(
         MemoryAwareConfig::default(),
@@ -356,7 +361,7 @@ async fn fuel_runner_serves_a_default_temperature_completion() {
     // sends.
     let max_tokens = 24;
     let body = serde_json::json!({
-        "model": "tinyllama",
+        "model": "lightbulb-default",
         "messages": [{"role": "user", "content": "The capital of France is"}],
         "max_tokens": max_tokens,
     });
@@ -373,11 +378,16 @@ async fn fuel_runner_serves_a_default_temperature_completion() {
         .await
         .expect("router returned no response");
 
-    assert_eq!(resp.status(), StatusCode::OK, "completion request failed");
-
+    let status = resp.status();
     let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20)
         .await
         .unwrap();
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "completion request failed: {}",
+        String::from_utf8_lossy(&bytes)
+    );
     let v: serde_json::Value = serde_json::from_slice(&bytes).expect("response was not JSON");
     let text = v["choices"][0]["message"]["content"]
         .as_str()

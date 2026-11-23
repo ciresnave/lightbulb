@@ -45,6 +45,20 @@ pub struct CompletionResult {
     pub prompt_tokens: usize,
     pub completion_tokens: usize,
     pub finish_reason: FinishReason,
+    /// One entry per generated token when the request asked for `logprobs`, else empty.
+    pub logprobs: Vec<TokenLogprob>,
+}
+
+/// One generated token's log-probability under the model's own distribution (before temperature, filters and
+/// penalties), with the `top` most probable alternatives, most probable first.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TokenLogprob {
+    pub token: String,
+    /// Bytes this token adds to the decoded generated text (`0` for a token that only begins a multi-byte
+    /// character, which the token completing it accounts for): `token` is decoded on its own and cannot say.
+    pub text_len: usize,
+    pub logprob: f32,
+    pub top: Vec<(String, f32)>,
 }
 
 /// One item on the streaming channel.
@@ -117,6 +131,8 @@ pub struct SamplingExtras {
     pub min_p: Option<f32>,
     /// Multiplicative penalty on seen tokens; `1.0` is off (so `Default` cannot be derived).
     pub repetition_penalty: f32,
+    /// Record each generated token's logprob and its `n` best alternatives (`Some(0)`: the chosen token only).
+    pub logprobs: Option<usize>,
 }
 
 impl Default for SamplingExtras {
@@ -128,6 +144,7 @@ impl Default for SamplingExtras {
             top_k: None,
             min_p: None,
             repetition_penalty: 1.0,
+            logprobs: None,
         }
     }
 }

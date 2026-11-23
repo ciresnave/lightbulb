@@ -69,6 +69,11 @@ pub struct CompletionRequest {
     /// Echo the prompt in the completion
     #[serde(default)]
     pub echo: bool,
+
+    /// OpenAI `logprobs`: how many alternatives to return with each generated token's log-probability (`0`: the
+    /// chosen token only), `0..=20`. Not combinable with `echo` (400).
+    #[serde(default)]
+    pub logprobs: Option<u32>,
 }
 
 /// Prompt input can be a string or array of strings
@@ -173,6 +178,15 @@ async fn completions_scoped(
 
 /// 400 for `n` / `top_p` / penalty values this server cannot honour.
 fn reject_unsupported(request: &CompletionRequest) -> Option<Response> {
+    if let Err(msg) = validate_completion_logprobs(request) {
+        return Some(
+            (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": msg})),
+            )
+                .into_response(),
+        );
+    }
     if let Err(msg) = crate::api::openai::chat::validate_n(request.n) {
         return Some(
             (
@@ -196,6 +210,19 @@ fn reject_unsupported(request: &CompletionRequest) -> Option<Response> {
         )
             .into_response()
     })
+}
+
+/// 400 text for a `logprobs` this server cannot honour: out of range, or with `echo` (the prompt's own
+/// logprobs are not computed).
+fn validate_completion_logprobs(request: &CompletionRequest) -> Result<(), String> {
+    let wanted = crate::api::openai::logprobs::validate_completions(request.logprobs)?;
+    if wanted.is_some() && request.echo {
+        return Err(
+            "`logprobs` cannot be combined with `echo`: prompt-token logprobs are not computed"
+                .to_string(),
+        );
+    }
+    Ok(())
 }
 
 /// `QueueFullError` (503, safe to retry) and `RequestTimeoutError` (504, not obviously
@@ -268,12 +295,15 @@ async fn create_completion(
         crate::api::openai::chat::Sampling {
             temperature,
             seed: request.seed.map(|s| s as u64),
-            extras: crate::api::openai::chat::sampling_extras(
-                request.top_p,
-                request.presence_penalty,
-                request.frequency_penalty,
-                &request.extra_sampling,
-            ),
+            extras: crate::engine::model_runner::SamplingExtras {
+                logprobs: request.logprobs.map(|n| n as usize),
+                ..crate::api::openai::chat::sampling_extras(
+                    request.top_p,
+                    request.presence_penalty,
+                    request.frequency_penalty,
+                    &request.extra_sampling,
+                )
+            },
         },
         state.config.request_timeout_ms,
         priority,
@@ -303,6 +333,12 @@ async fn create_completion(
     // followed immediately by its continuation, because the two are one
     // continuous text. The placeholder's blank line was an artifact of the
     // prompt and the placeholder being unrelated strings.
+    let logprobs = request.logprobs.map(|_| {
+        crate::api::openai::logprobs::completions_json(crate::api::openai::logprobs::within_text(
+            &result.logprobs,
+            &generated,
+        ))
+    });
     let completion_text = if request.echo {
         format!("{}{}", prompt_text, generated)
     } else {
@@ -317,7 +353,7 @@ async fn create_completion(
         choices: vec![CompletionChoice {
             text: completion_text,
             index: 0,
-            logprobs: None,
+            logprobs,
             finish_reason: finish_reason.as_str().to_string(),
         }],
         usage: Some(Usage {
@@ -404,12 +440,125 @@ mod tests {
                         text: text.clone(),
                         prompt_tokens: 1,
                         completion_tokens: 1,
+                        logprobs: Vec::new(),
                         finish_reason,
                     }));
                 }
             }
         });
         (tx, handle)
+    }
+
+    /// A stub runner that answers every job with "Hello" as two logprob entries (when the job asked) and returns
+    /// the `extras.logprobs` each job carried.
+    fn logprob_runner() -> (
+        std::sync::mpsc::SyncSender<crate::engine::model_runner::InferenceJob>,
+        std::thread::JoinHandle<Vec<Option<usize>>>,
+    ) {
+        use crate::engine::model_runner::{
+            CompletionResult, FinishReason, InferenceJob, ResponseMode, TokenLogprob,
+        };
+        let (tx, rx) = std::sync::mpsc::sync_channel::<InferenceJob>(32);
+        let runner = std::thread::spawn(move || {
+            let mut asked = Vec::new();
+            while let Ok(job) = rx.recv() {
+                asked.push(job.extras.logprobs);
+                let entry = |t: &str, lp: f32| TokenLogprob {
+                    token: t.to_string(),
+                    text_len: t.len(),
+                    logprob: lp,
+                    top: vec![(t.to_string(), lp)],
+                };
+                if let ResponseMode::Complete(resp) = job.response_mode {
+                    let _ = resp.send(Ok(CompletionResult {
+                        text: "Hello".to_string(),
+                        prompt_tokens: 1,
+                        completion_tokens: 2,
+                        finish_reason: FinishReason::Stop,
+                        logprobs: if job.extras.logprobs.is_some() {
+                            vec![entry("Hel", -0.5), entry("lo", -0.25)]
+                        } else {
+                            Vec::new()
+                        },
+                    }));
+                }
+            }
+            asked
+        });
+        (tx, runner)
+    }
+
+    fn ask_completion(extra: serde_json::Value) -> CompletionRequest {
+        let mut b = serde_json::json!({"model": "test-model", "prompt": "hi"});
+        b.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        serde_json::from_value::<CompletionRequest>(b).unwrap()
+    }
+
+    /// `logprobs: N` reaches the job as the alternatives count and comes back in the completions shape
+    /// (parallel arrays, `top_logprobs` as token -> logprob maps, `text_offset` into the generated text); a stop
+    /// sequence cuts the entries with the text; a request that did not ask gets `null`.
+    #[tokio::test]
+    async fn completions_logprobs_round_trip() {
+        let (tx, runner) = logprob_runner();
+        let state = state_with_runner(Some(tx));
+        let priority = crate::engine::Priority::Normal;
+
+        let r = create_completion(
+            state.clone(),
+            ask_completion(serde_json::json!({"logprobs": 1})),
+            priority,
+        )
+        .await
+        .unwrap();
+        let lp = serde_json::to_value(&r.choices[0].logprobs).unwrap();
+        assert_eq!(lp["tokens"], serde_json::json!(["Hel", "lo"]));
+        assert_eq!(lp["token_logprobs"], serde_json::json!([-0.5, -0.25]));
+        assert_eq!(lp["text_offset"], serde_json::json!([0, 3]));
+        assert_eq!(lp["top_logprobs"][1]["lo"], serde_json::json!(-0.25));
+
+        let r = create_completion(
+            state.clone(),
+            ask_completion(serde_json::json!({"logprobs": 0, "stop": "lo"})),
+            priority,
+        )
+        .await
+        .unwrap();
+        assert_eq!(r.choices[0].text, "Hel");
+        let lp = serde_json::to_value(&r.choices[0].logprobs).unwrap();
+        assert_eq!(
+            lp["tokens"],
+            serde_json::json!(["Hel"]),
+            "cut with the stop sequence"
+        );
+
+        let r = create_completion(
+            state.clone(),
+            ask_completion(serde_json::json!({})),
+            priority,
+        )
+        .await
+        .unwrap();
+        assert!(r.choices[0].logprobs.is_none());
+
+        drop(state);
+        assert_eq!(runner.join().unwrap(), [Some(1), Some(0), None]);
+    }
+
+    /// `echo` with `logprobs` and an out-of-range count are a 400; an in-range count is not (the control).
+    #[test]
+    fn completions_logprobs_refusals() {
+        for (why, extra) in [
+            ("echo", serde_json::json!({"logprobs": 1, "echo": true})),
+            ("out of range", serde_json::json!({"logprobs": 21})),
+        ] {
+            assert!(
+                reject_unsupported(&ask_completion(extra)).is_some(),
+                "{why} must be a 400"
+            );
+        }
+        assert!(reject_unsupported(&ask_completion(serde_json::json!({"logprobs": 20}))).is_none());
     }
 
     /// Out-of-range `top_p` / penalties are a 400; in-range ones are not (the control).
@@ -462,6 +611,7 @@ mod tests {
                         text: "ok".to_string(),
                         prompt_tokens: 1,
                         completion_tokens: 1,
+                        logprobs: Vec::new(),
                         finish_reason: FinishReason::Stop,
                     }));
                 }
@@ -556,6 +706,7 @@ mod tests {
                             text: "ok".to_string(),
                             prompt_tokens: 1,
                             completion_tokens: 1,
+                            logprobs: Vec::new(),
                             finish_reason: FinishReason::Stop,
                         }));
                     }

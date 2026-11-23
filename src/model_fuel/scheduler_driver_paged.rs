@@ -24,7 +24,9 @@ use fuel_inference::multi_session::{
 };
 
 use crate::engine::model_runner::SamplingExtras;
-use crate::engine::scheduled_runner::{AdmitError, FinishOutcome, SchedulerDriver, StopReason};
+use crate::engine::scheduled_runner::{
+    AdmitError, FinishOutcome, RawLogprob, SchedulerDriver, StopReason,
+};
 
 /// The scheduling policy the serving path runs with. `Priority` makes the
 /// request's `X-Lightbulb-Priority` header (delivered to
@@ -79,6 +81,9 @@ pub(crate) struct FuelPagedSchedulerDriver<'m, M: PagedDecodeModel> {
     /// prefilled above" structure). See that struct's doc comment for the
     /// full reasoning.
     seen_counts: HashMap<SessionId, usize>,
+    /// Logprobs gathered per session as it advances (a session is gone from Fuel once reaped). Only sessions
+    /// admitted with `SamplingExtras::logprobs` ever get an entry.
+    logprobs: HashMap<SessionId, Vec<RawLogprob>>,
     /// Sessions `step`/`step_batched` reported in `StepReport::errored` this
     /// tick or an earlier one, not yet reaped. `reap_finished` drains this
     /// instead of guessing `StopReason` from the (irrelevant — a failed
@@ -104,6 +109,7 @@ impl<'m, M: PagedDecodeModel> FuelPagedSchedulerDriver<'m, M> {
             next_seed: 0,
             max_batch: max_batch.max(1),
             seen_counts: HashMap::new(),
+            logprobs: HashMap::new(),
             errored: HashMap::new(),
         })
     }
@@ -144,9 +150,25 @@ impl<'m, M: PagedDecodeModel> FuelPagedSchedulerDriver<'m, M> {
             top_k: extras.top_k,
             min_p: extras.min_p,
             repetition_penalty: extras.repetition_penalty,
+            logprobs: extras.logprobs,
             seed: seed.unwrap_or(counter),
-            ..SamplingParams::default()
         }
+    }
+
+    /// Append session `id`'s logprobs from generated-token index `already_seen` on (the ones recorded since the
+    /// last tick). Fuel records nothing for a session that did not ask, so those never get an entry.
+    fn collect_logprobs(&mut self, id: SessionId, already_seen: usize) {
+        let Some(recorded) = self.scheduler.session_logprobs(id) else {
+            return;
+        };
+        if recorded.is_empty() {
+            return;
+        }
+        let entry = self.logprobs.entry(id).or_default();
+        entry.extend(recorded.iter().skip(already_seen).map(|lp| RawLogprob {
+            logprob: lp.logprob,
+            top: lp.top.clone(),
+        }));
     }
 
     /// Register donor `id`'s first `blocks` fully-filled blocks as a shared
@@ -247,6 +269,7 @@ impl<'m, M: PagedDecodeModel> SchedulerDriver for FuelPagedSchedulerDriver<'m, M
             let already_seen = self.seen_counts.get(&id).copied().unwrap_or(0);
             out.extend(new_tokens[already_seen..].iter().map(|&tok| (id, tok)));
             self.seen_counts.insert(id, new_tokens.len());
+            self.collect_logprobs(id, already_seen);
         }
         Ok(out)
     }
@@ -257,6 +280,7 @@ impl<'m, M: PagedDecodeModel> SchedulerDriver for FuelPagedSchedulerDriver<'m, M
             .into_iter()
             .map(|(id, tokens)| {
                 self.seen_counts.remove(&id);
+                let logprobs = self.logprobs.remove(&id).unwrap_or_default();
                 if let Some(msg) = self.errored.remove(&id) {
                     return (id, FinishOutcome::Failed(msg));
                 }
@@ -266,7 +290,14 @@ impl<'m, M: PagedDecodeModel> SchedulerDriver for FuelPagedSchedulerDriver<'m, M
                     }
                     _ => StopReason::Budget,
                 };
-                (id, FinishOutcome::Completed { tokens, stop })
+                (
+                    id,
+                    FinishOutcome::Completed {
+                        tokens,
+                        stop,
+                        logprobs,
+                    },
+                )
             })
             .collect()
     }
@@ -408,6 +439,57 @@ mod tests {
         out
     }
 
+    /// Logprobs requested at admission come back from `reap_finished`, one per generated token, with `n`
+    /// alternatives, and under greedy the chosen token is the top alternative. A session that did not ask gets
+    /// none (the other arm: without it, an always-empty or always-filled implementation passes).
+    #[test]
+    fn logprobs_follow_the_session_that_asked_for_them() {
+        let model = tiny_model(1);
+        let mut d = driver(&model, generous_budget(), None);
+        let asked = SamplingExtras {
+            logprobs: Some(3),
+            ..SamplingExtras::default()
+        };
+        let with = d.try_admit(&[1, 2, 3], 4, 0.0, None, asked).unwrap();
+        let without = d
+            .try_admit(&[1, 2, 3], 4, 0.0, None, SamplingExtras::default())
+            .unwrap();
+        let mut done = Vec::new();
+        while d.has_active_sessions() {
+            d.step().expect("healthy sessions");
+            done.extend(d.reap_finished());
+        }
+        done.extend(d.reap_finished());
+        assert_eq!(done.len(), 2);
+        for (id, outcome) in done {
+            let FinishOutcome::Completed {
+                tokens, logprobs, ..
+            } = outcome
+            else {
+                panic!("session {id:?} must complete");
+            };
+            let generated = &tokens[3..];
+            if id == with {
+                assert_eq!(
+                    logprobs.len(),
+                    generated.len(),
+                    "one entry per generated token"
+                );
+                for (lp, &tok) in logprobs.iter().zip(generated) {
+                    assert_eq!(lp.top.len(), 3, "the requested number of alternatives");
+                    assert_eq!(lp.top[0].0, tok, "greedy picks the most probable token");
+                    assert!(lp.logprob <= 0.0 && (lp.logprob - lp.top[0].1).abs() < 1e-5);
+                }
+            } else {
+                assert_eq!(id, without);
+                assert!(
+                    logprobs.is_empty(),
+                    "a session that did not ask records none"
+                );
+            }
+        }
+    }
+
     /// A request `seed` reaches the sampler: the same seed reproduces the same tokens, and (positive control,
     /// same model, prompt and temperature) other seeds do not all collapse onto it. Without the plumbing both
     /// arms would use the driver's counter and the second assertion fails.
@@ -523,7 +605,7 @@ mod tests {
         let (reaped_id, outcome) = &reaped[0];
         assert_eq!(*reaped_id, id);
         match outcome {
-            FinishOutcome::Completed { tokens, stop } => {
+            FinishOutcome::Completed { tokens, stop, .. } => {
                 assert_eq!(
                     *stop,
                     StopReason::Budget,
@@ -688,6 +770,98 @@ mod tests {
 
         let (who, low, _high) = first_served(PagedSchedulePolicy::AdmissionOrder);
         assert_eq!(who, low, "contrast arm: admission order ignores priority");
+    }
+
+    /// Every session's generated tokens, by admission order, from one driver run over `prompts` (greedy, 12 new
+    /// tokens each, up to 8 sessions per step).
+    fn batched_tokens(prompts: &[&[u32]]) -> Vec<Vec<u32>> {
+        batched_tokens_with(prompts, 0.0, |_| None)
+    }
+
+    /// [`batched_tokens`] at `temperature`, session `i` seeded with `seed_for(i)`.
+    fn batched_tokens_with(
+        prompts: &[&[u32]],
+        temperature: f64,
+        seed_for: impl Fn(usize) -> Option<u64>,
+    ) -> Vec<Vec<u32>> {
+        let model = tiny_model(5);
+        let mut d = FuelPagedSchedulerDriver::new(
+            &model,
+            generous_budget(),
+            fuel::DType::F32,
+            &Device::cpu(),
+            PagedSchedulePolicy::AdmissionOrder,
+            8,
+            None,
+        )
+        .expect("tiny model must build");
+        let ids: Vec<SessionId> = prompts
+            .iter()
+            .enumerate()
+            .map(|(i, p)| {
+                d.try_admit(p, 12, temperature, seed_for(i), Default::default())
+                    .expect("generous budget admits")
+            })
+            .collect();
+        let mut by_id: HashMap<SessionId, Vec<u32>> = HashMap::new();
+        while d.has_active_sessions() {
+            for (id, tok) in d.step().expect("step must not error") {
+                by_id.entry(id).or_default().push(tok);
+            }
+        }
+        ids.iter()
+            .map(|id| by_id.remove(id).unwrap_or_default())
+            .collect()
+    }
+
+    /// Batch isolation and cross-batch-size consistency (re-derived from the deleted
+    /// `enhanced_correctness_tests.rs`, ROADMAP C2): a session's greedy tokens are the same alone, batched with
+    /// one other, and batched with three, and different prompts do not collapse to one answer (the control: a
+    /// driver that returned one session's tokens for all would pass the equalities).
+    #[test]
+    fn a_session_emits_the_same_tokens_alone_and_batched_with_others() {
+        let a: &[u32] = &[1, 2, 3];
+        let b: &[u32] = &[4, 5, 6, 7];
+        let c: &[u32] = &[9, 9];
+        let d: &[u32] = &[3, 1, 4, 1, 5];
+
+        let alone = batched_tokens(&[a]).remove(0);
+        assert_eq!(alone.len(), 12, "the session must generate its budget");
+        assert_eq!(batched_tokens(&[a, b])[0], alone, "A batched with B");
+        assert_eq!(batched_tokens(&[b, a])[1], alone, "A batched after B");
+        assert_eq!(
+            batched_tokens(&[a, b, c, d])[0],
+            alone,
+            "A batched with three others"
+        );
+
+        let all = batched_tokens(&[a, b, c, d]);
+        assert_ne!(
+            all[0], all[1],
+            "two different prompts produced one answer: the equalities above would be vacuous"
+        );
+    }
+
+    /// The sampled counterpart: with a request seed, a session's sampled tokens do not depend on what shares its
+    /// batch (each session owns its RNG stream), a different seed gives different tokens (so the equality is not
+    /// a constant).
+    #[test]
+    fn a_seeded_session_samples_the_same_tokens_alone_and_batched() {
+        let a: &[u32] = &[1, 2, 3];
+        let b: &[u32] = &[4, 5, 6, 7];
+        let seed_a = |i: usize| (i == 0).then_some(7u64);
+
+        let alone = batched_tokens_with(&[a], 1.0, seed_a).remove(0);
+        let with_b = batched_tokens_with(&[a, b], 1.0, seed_a);
+        assert_eq!(with_b[0], alone, "A seeded, batched with an unseeded B");
+        let seeded_b = batched_tokens_with(&[a, b], 1.0, |i| Some(7 + i as u64));
+        assert_eq!(seeded_b[0], alone, "A seeded, batched with a seeded B");
+
+        let other_seed = batched_tokens_with(&[a], 1.0, |_| Some(8)).remove(0);
+        assert_ne!(
+            other_seed, alone,
+            "seeds 7 and 8 sampled the same 12 tokens: the equalities above would be vacuous"
+        );
     }
 
     #[test]

@@ -187,28 +187,27 @@ pub fn load_llama_f32_from_dir(dir: &Path) -> Result<LoadedLlama> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
+    use crate::test_models::synthetic_checkpoint::{
+        SyntheticArchitecture, write_synthetic_checkpoint,
+    };
 
-    fn tinyllama_dir() -> Option<PathBuf> {
-        // one locator, not twelve copies of an absolute path into one home directory
-        crate::test_models::tinyllama_dir()
+    /// A freshly written synthetic checkpoint (C1): these tests assert loader
+    /// plumbing, not trained values, so they need no downloaded model.
+    fn synthetic_dir() -> (tempfile::TempDir, SyntheticArchitecture) {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let arch = SyntheticArchitecture::default();
+        write_synthetic_checkpoint(tmp.path(), &arch).expect("writing synthetic checkpoint");
+        (tmp, arch)
     }
 
     /// Every projection must be f32 — that is the whole point of this loader,
     /// and it is checkable directly rather than inferred from the absence of
     /// promotion warnings.
     #[test]
-    #[ignore = "needs the TinyLlama checkpoint; loads ~4.4 GB as f32"]
     fn every_weight_is_f32() -> Result<()> {
-        let Some(dir) = tinyllama_dir() else {
-            crate::test_notice::skip_unless_required(
-                "LIGHTBULB_REQUIRE_MODEL",
-                "no TinyLlama snapshot",
-            );
-            return Ok(());
-        };
+        let (tmp, _arch) = synthetic_dir();
 
-        let loaded = load_llama_f32_from_dir(&dir)?;
+        let loaded = load_llama_f32_from_dir(tmp.path())?;
         let w = &loaded.model.weights;
 
         assert_eq!(w.layers.len(), loaded.config.n_layers);
@@ -247,29 +246,23 @@ mod tests {
     /// load paths is wrong, and this says which case to investigate rather than
     /// leaving it to be discovered as bad output later.
     #[test]
-    #[ignore = "needs the checkpoint; runs two full generations on CPU"]
     fn f32_and_stock_loaders_agree() -> Result<()> {
-        let Some(dir) = tinyllama_dir() else {
-            crate::test_notice::skip_unless_required(
-                "LIGHTBULB_REQUIRE_MODEL",
-                "no TinyLlama snapshot",
-            );
-            return Ok(());
-        };
+        let (tmp, arch) = synthetic_dir();
+        let dir = tmp.path().to_path_buf();
         let tok = tokenizers::Tokenizer::from_file(dir.join("tokenizer.json"))
             .map_err(|e| anyhow::anyhow!("tokenizer: {e}"))?;
         let ids: Vec<u32> = tok
-            .encode("The capital of France is", true)
+            .encode("tok5 tok6 tok7 tok8", true)
             .map_err(|e| anyhow::anyhow!("encode: {e}"))?
             .get_ids()
             .to_vec();
 
         let stock = super::super::loader::load_llama_from_dir(&dir)?;
-        let a = super::super::generate::generate_greedy(&stock, &ids, 3, Some(2))?;
+        let a = super::super::generate::generate_greedy(&stock, &ids, 3, Some(arch.eos_token_id))?;
         drop(stock);
 
         let f32m = load_llama_f32_from_dir(&dir)?;
-        let b = super::super::generate::generate_greedy(&f32m, &ids, 3, Some(2))?;
+        let b = super::super::generate::generate_greedy(&f32m, &ids, 3, Some(arch.eos_token_id))?;
 
         eprintln!("stock (bf16 proj): {a:?}");
         eprintln!("f32 loader:        {b:?}");
@@ -283,33 +276,37 @@ mod tests {
 
     /// The loader must surface the checkpoint's EOS token.
     ///
-    /// Asserts the CONCRETE value (TinyLlama's `</s>` is 2), not merely that
-    /// the field is `Some`. `Some(garbage)` would pass an is-present check and
+    /// Asserts the CONCRETE value (the fixture's `</s>` is its
+    /// `eos_token_id`), not merely that the field is `Some`. `Some(garbage)` would pass an is-present check and
     /// then never fire during generation, producing exactly the runaway output
     /// this field exists to prevent.
     #[test]
-    #[ignore = "needs the TinyLlama checkpoint"]
     fn loader_surfaces_eos_and_tokenizer() -> Result<()> {
-        let Some(dir) = tinyllama_dir() else {
-            panic!(
-                "no TinyLlama snapshot — this test asserts loader behaviour, so it fails rather than skipping"
-            );
-        };
-        let loaded = load_llama_f32_from_dir(&dir)?;
+        let (tmp, arch) = synthetic_dir();
+        let loaded = load_llama_f32_from_dir(tmp.path())?;
 
         assert!(
-            loaded.is_eos(2),
-            "TinyLlama's </s> is token 2; EOS did not parse"
+            loaded.is_eos(arch.eos_token_id),
+            "the fixture's </s> is token {}; EOS did not parse",
+            arch.eos_token_id
         );
-        assert!(!loaded.is_eos(0), "token 0 is <unk>, not EOS");
+        assert!(
+            !loaded.is_eos(arch.bos_token_id),
+            "the BOS token is not EOS"
+        );
 
         // The tokenizer must round-trip, not merely exist.
         let ids: Vec<u32> = loaded
             .tokenizer
-            .encode("The capital of France is", true)
+            .encode("tok5 tok6", true)
             .map_err(|e| anyhow::anyhow!("encode: {e}"))?
             .get_ids()
             .to_vec();
+        assert_eq!(
+            ids,
+            vec![5, 6],
+            "tokenizer must round-trip the fixture's words"
+        );
         assert!(!ids.is_empty(), "tokenizer produced no ids");
         Ok(())
     }

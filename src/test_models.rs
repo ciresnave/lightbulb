@@ -301,6 +301,31 @@ mod tests {
         assert_eq!(loaded.model.weights.layers.len(), arch.num_hidden_layers);
     }
 
+    /// The constant-output checkpoint decodes `token` at every step whatever the prompt, and a different token
+    /// gives a different output (the control: a model that ignored `token` would pass the first assertion for
+    /// only one of the two).
+    #[test]
+    fn constant_output_checkpoint_always_emits_its_token() {
+        use crate::model_fuel::generate::generate_greedy;
+        use crate::model_fuel::loader_f32::load_llama_f32_from_dir;
+        use synthetic_checkpoint::{SyntheticArchitecture, write_constant_output_checkpoint};
+
+        let arch = SyntheticArchitecture::default();
+        for token in [7u32, 40] {
+            let tmp = tempfile::tempdir().expect("tempdir");
+            write_constant_output_checkpoint(tmp.path(), &arch, token).expect("writing");
+            let loaded = load_llama_f32_from_dir(tmp.path()).expect("loading");
+            for prompt in [&[2u32, 3, 4][..], &[50, 60]] {
+                let out = generate_greedy(&loaded, prompt, 5, None).expect("generating");
+                assert_eq!(out, vec![token; 5], "prompt {prompt:?}");
+            }
+            // The EOS is the favoured token: generation stops on the first token.
+            let out = generate_greedy(&loaded, &[2, 3], 5, Some(token)).expect("generating");
+            assert_eq!(out.last(), Some(&token));
+            assert!(out.len() <= 1, "stops at the EOS: {out:?}");
+        }
+    }
+
     /// Re-split a single-file checkpoint in `dir` into two shards plus a
     /// `model.safetensors.index.json`, and delete the single file.
     fn reshard_into_two(dir: &std::path::Path) {

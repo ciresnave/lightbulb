@@ -52,7 +52,6 @@
 //!
 //! Run: `cargo test --release --test paged_plan_once -- --ignored --nocapture`
 
-use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use fuel::inference_context::PagedDecodePlan;
@@ -61,20 +60,14 @@ use fuel::{DType, Device};
 use fuel_inference::multi_session::{KvBudget, PagedSessionScheduler};
 use lightbulb::model_fuel::loader_f32::load_llama_f32_from_dir;
 
+// The synthetic checkpoint generator (C1): the wiring assertions below need no trained values.
+#[path = "support/mod.rs"]
+#[allow(dead_code)]
+mod support;
+
 const PROMPT_LEN: usize = 8;
 const MAX_NEW: usize = 7;
 const BLOCK_SIZE: usize = 16;
-
-/// Locate the TinyLlama checkpoint.
-///
-/// `TINYLLAMA_DIR` overrides the built-in default, which is one developer's
-/// HuggingFace cache including a specific snapshot hash. A measurement harness
-/// that only runs on one machine cannot be reproduced by whoever is asked to
-/// believe its numbers.
-fn tinyllama_dir() -> Option<PathBuf> {
-    // this test needs only config.json, which is a weaker precondition than the weights
-    lightbulb::test_models::tinyllama_dir_with(lightbulb::test_models::CONFIG_SENTINEL)
-}
 
 fn median(mut v: Vec<Duration>) -> Duration {
     v.sort_unstable();
@@ -109,7 +102,7 @@ fn run_arm(
     assert_eq!(sched.plan(), plan, "set_plan did not take");
 
     let prompt: Vec<u32> = (0..PROMPT_LEN)
-        .map(|t| ((t * 17) % 1000 + 1) as u32)
+        .map(|t| ((t * 17) % 90 + 1) as u32)
         .collect();
     let id = sched
         .add_session(&prompt, SamplingStrategy::Greedy, None, MAX_NEW)
@@ -148,15 +141,16 @@ fn run_arm(
     (warm_up, median(steady), count, tokens, all_steps)
 }
 
+/// Runs on a freshly written synthetic checkpoint (C1): every assertion below is about wiring (both arms
+/// decoded, the control holds no plan, the flag took), none about speed, so no trained values are needed. The
+/// timings it prints are of a toy model and say nothing about TinyLlama; for those, point a copy of
+/// this harness at the real checkpoint.
 #[test]
-#[ignore = "needs the TinyLlama checkpoint; minutes in release"]
 fn plan_once_vs_replan() {
-    // Deliberately NOT the `return` skip other suites use: an early return from
-    // a #[test] is a PASS, so a missing checkpoint would report success having
-    // measured nothing. This is a measurement harness; absent data is a failure.
-    let dir = tinyllama_dir()
-        .expect("no TinyLlama snapshot — this harness measures, so it fails rather than skipping");
-    let loaded = load_llama_f32_from_dir(&dir).expect("load the f32 checkpoint");
+    let tmp = tempfile::tempdir().expect("tempdir");
+    support::write_synthetic_checkpoint(tmp.path(), &support::SyntheticArchitecture::default())
+        .expect("writing the synthetic checkpoint");
+    let loaded = load_llama_f32_from_dir(tmp.path()).expect("load the f32 checkpoint");
 
     // Both arms, one process, one checkpoint load, same commit.
     let (replan_warm, replan_steady, replan_count, replan_tokens, replan_steps) =

@@ -93,6 +93,15 @@ pub struct ChatCompletionRequest {
     #[serde(default)]
     pub stop: Option<StopSequences>,
 
+    /// OpenAI `logprobs`: return each generated token's log-probability. Non-streaming only; refused with
+    /// `stream`, `response_format` and `lightbulb.output_contract` (400).
+    #[serde(default)]
+    pub logprobs: Option<bool>,
+
+    /// OpenAI `top_logprobs`, `0..=20`: how many alternatives per token; requires `logprobs: true`.
+    #[serde(default)]
+    pub top_logprobs: Option<u32>,
+
     /// Tools the model may call. Presence (non-empty, and `tool_choice` not
     /// `"none"`) is what turns on tool-call prompting and parsing at all —
     /// see `create_chat_completion`'s handling of `tools_active`.
@@ -292,6 +301,9 @@ pub struct ChatChoice {
     pub index: usize,
     pub message: ChatMessage,
     pub finish_reason: String,
+    /// `{"content": [...]}` when the request set `logprobs: true`; absent otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub logprobs: Option<serde_json::Value>,
 }
 
 /// The `stream_options` request object.
@@ -450,8 +462,9 @@ async fn chat_completions_scoped(
 
     // `tool_choice` values Lightbulb does not implement get a named 400
     // rather than silently behaving as `"auto"` — see `validate_tool_choice`.
-    if let Err(msg) =
-        validate_tool_choice(&request).and_then(|()| response_format::validate_request(&request))
+    if let Err(msg) = validate_tool_choice(&request)
+        .and_then(|()| response_format::validate_request(&request))
+        .and_then(|()| validate_chat_logprobs(&request))
     {
         return (
             StatusCode::BAD_REQUEST,
@@ -1223,20 +1236,51 @@ fn build_native_tools_prompt(
             &owned
         }
     };
-    let raw: Vec<crate::contracts::validation::RawMessage> = messages
-        .iter()
-        .map(|m| crate::contracts::validation::RawMessage {
-            role: m.role.clone(),
-            content: m.content.clone(),
-        })
-        .collect();
     let text = template
-        .render_with_tools(&raw, &super::tool_parsers::tools_for_template(tools))
+        .render_json_with_tools(
+            &template_messages(messages),
+            &super::tool_parsers::tools_for_template(tools),
+        )
         .ok()?;
     let names_every_tool = tools
         .iter()
         .all(|Tool::Function { function }| text.contains(&function.name));
     names_every_tool.then(|| built_from_rendered(template, text))
+}
+
+/// The conversation in the HF shape the checkpoint's template reads: `role` and `content`, and, where the message
+/// has them, an assistant's `tool_calls` (arguments as an object, as `transformers` passes them, falling back to
+/// the string when it is not JSON) and a tool result's `tool_call_id` and `name`.
+fn template_messages(messages: &[ChatMessage]) -> Vec<serde_json::Value> {
+    messages
+        .iter()
+        .map(|m| {
+            let mut v = serde_json::json!({ "role": m.role, "content": m.content });
+            if let Some(calls) = &m.tool_calls {
+                v["tool_calls"] = calls
+                    .iter()
+                    .map(|c| {
+                        let arguments =
+                            serde_json::from_str(&c.function.arguments).unwrap_or_else(|_| {
+                                serde_json::Value::String(c.function.arguments.clone())
+                            });
+                        serde_json::json!({
+                            "id": c.id,
+                            "type": c.kind,
+                            "function": { "name": c.function.name, "arguments": arguments },
+                        })
+                    })
+                    .collect();
+            }
+            if let Some(id) = &m.tool_call_id {
+                v["tool_call_id"] = serde_json::json!(id);
+            }
+            if let Some(name) = &m.name {
+                v["name"] = serde_json::json!(name);
+            }
+            v
+        })
+        .collect()
 }
 
 /// Tool calls in a reply: Lightbulb's own `<tool_call>{json}</tool_call>` tag always, and, when the tools were
@@ -1466,12 +1510,13 @@ async fn create_chat_completion(
     let max_new_tokens = request.max_tokens.unwrap_or(100);
     let temperature = request.temperature as f64;
     let seed = request.seed.map(|s| s as u64);
-    let extras = sampling_extras(
+    let mut extras = sampling_extras(
         request.top_p,
         request.presence_penalty,
         request.frequency_penalty,
         &request.extra_sampling,
     );
+    extras.logprobs = requested_logprobs(&request);
 
     // If a model runner is available, enqueue the request and wait for generated text.
     let model_entry = state.model();
@@ -1543,6 +1588,10 @@ async fn create_chat_completion(
         } else {
             (text, stopped_reason, None)
         };
+        // Built from the content actually returned: a tool call's markup is not content, nor are its tokens.
+        let logprobs = extras.logprobs.map(|_| {
+            super::logprobs::chat_json(super::logprobs::within_text(&result.logprobs, &content))
+        });
 
         return Ok(ChatCompletionResponse {
             id: format!("chatcmpl-{}", uuid::Uuid::new_v4()),
@@ -1559,6 +1608,7 @@ async fn create_chat_completion(
                     tool_call_id: None,
                 },
                 finish_reason: finish_reason.as_str().to_string(),
+                logprobs,
             }],
             usage: Some(Usage {
                 prompt_tokens: result.prompt_tokens,
@@ -1594,6 +1644,7 @@ async fn create_chat_completion(
                 tool_call_id: None,
             },
             finish_reason: "stop".to_string(),
+            logprobs: None,
         }],
         // `None`, not zeros and not a word count. There is no model here, so
         // there is no tokenizer, so the prompt's token count is genuinely
@@ -1661,7 +1712,37 @@ pub(crate) fn sampling_extras(
         top_k: extra.top_k.filter(|k| *k > 0).map(|k| k as usize),
         min_p: extra.min_p.filter(|p| *p > 0.0),
         repetition_penalty: extra.repetition_penalty.unwrap_or(1.0),
+        logprobs: None,
     }
+}
+
+/// The request's `logprobs` / `top_logprobs` as the alternatives count to record. Call after
+/// [`validate_chat_logprobs`], which has already refused the invalid shapes.
+fn requested_logprobs(request: &ChatCompletionRequest) -> Option<usize> {
+    super::logprobs::validate_chat(request.logprobs, request.top_logprobs)
+        .ok()
+        .flatten()
+}
+
+/// 400 text for `logprobs` shapes this server cannot honour: a bad `top_logprobs`, and the paths that cannot
+/// carry the values (a stream, a `response_format` or output-contract retry loop).
+fn validate_chat_logprobs(request: &ChatCompletionRequest) -> Result<(), String> {
+    let wanted = super::logprobs::validate_chat(request.logprobs, request.top_logprobs)?;
+    if wanted.is_none() {
+        return Ok(());
+    }
+    let contract = request
+        .lightbulb
+        .as_ref()
+        .is_some_and(|lb| lb.output_contract.is_some());
+    if request.stream || contract || response_format::active(request).is_some() {
+        return Err(
+            "`logprobs` is supported on non-streaming requests without `response_format` \
+                    or `lightbulb.output_contract`"
+                .to_string(),
+        );
+    }
+    Ok(())
 }
 
 /// Non-OpenAI sampling knobs accepted on both request types (the names llama.cpp and vLLM use). `top_k` 0 and
@@ -1976,6 +2057,7 @@ fn build_contract_response(
                 tool_call_id: None,
             },
             finish_reason,
+            logprobs: None,
         }],
         usage: Some(Usage {
             prompt_tokens: exec.prompt_tokens,
@@ -2870,6 +2952,7 @@ mod tests {
                             text: UNPARSEABLE_REPLY.to_string(),
                             prompt_tokens: 1,
                             completion_tokens: 1,
+                            logprobs: Vec::new(),
                             finish_reason,
                         }));
                     }
@@ -3074,6 +3157,7 @@ mod tests {
                         text: "not-a-valid-choice".to_string(),
                         prompt_tokens: 1,
                         completion_tokens: 1,
+                        logprobs: Vec::new(),
                         finish_reason: FinishReason::Stop,
                     }));
                 }
@@ -3214,6 +3298,7 @@ mod tests {
                             text: "ok".to_string(),
                             prompt_tokens: 1,
                             completion_tokens: 1,
+                            logprobs: Vec::new(),
                             finish_reason: FinishReason::Stop,
                         }));
                     }
@@ -4617,6 +4702,62 @@ mod tests {
         assert!(!request_wants_tools(&req));
     }
 
+    /// A conversation that already used a tool reaches the checkpoint's own template whole: the assistant's
+    /// `tool_calls` (arguments as an object) and the tool result's `tool_call_id` / `name`, not just their `role`
+    /// and `content`. The control is the same template over a history without tool turns.
+    #[test]
+    fn native_tools_prompt_carries_tool_call_history() {
+        use crate::api::chat_template::{
+            ChatTemplate, Resolution, ResolvedTemplate, SpecialTokens,
+        };
+        let template = ResolvedTemplate {
+            template: ChatTemplate {
+                source: "{% for m in messages %}{{ m.role }}:{{ m.content }}{% if m.tool_calls %}[calls:{% for c in m.tool_calls %}{{ c.function.name }}({{ c.function.arguments | tojson }}){% endfor %}]{% endif %}{% if m.tool_call_id %}[id:{{ m.tool_call_id }}]{% endif %}|{% endfor %}tools:{% for t in tools %}{{ t.function.name }}{% endfor %}"
+                    .to_string(),
+                resolved_by: Resolution::Sidecar,
+            },
+            tokens: SpecialTokens { bos: String::new(), eos: String::new() },
+        };
+        let tools = vec![Tool::Function {
+            function: ToolFunctionDef {
+                name: "get_weather".to_string(),
+                description: None,
+                parameters: None,
+            },
+        }];
+        let message = |role: &str, content: &str| ChatMessage {
+            role: role.to_string(),
+            content: content.to_string(),
+            name: None,
+            tool_calls: None,
+            tool_call_id: None,
+        };
+        let mut assistant = message("assistant", "");
+        assistant.tool_calls = Some(vec![ToolCall {
+            id: "call_1".to_string(),
+            kind: "function".to_string(),
+            function: ToolCallFunction {
+                name: "get_weather".to_string(),
+                arguments: r#"{"city":"Paris"}"#.to_string(),
+            },
+        }]);
+        let mut result = message("tool", "sunny");
+        result.tool_call_id = Some("call_1".to_string());
+
+        let with_history = [message("user", "weather?"), assistant, result];
+        let built = build_native_tools_prompt(&template, &with_history, &tools, &ToolDemand::Free)
+            .expect("renders");
+        assert_eq!(
+            built.text,
+            "user:weather?|assistant:[calls:get_weather({\"city\":\"Paris\"})]|tool:sunny[id:call_1]|tools:get_weather"
+        );
+
+        let plain = [message("user", "hi")];
+        let built = build_native_tools_prompt(&template, &plain, &tools, &ToolDemand::Free)
+            .expect("renders");
+        assert_eq!(built.text, "user:hi|tools:get_weather");
+    }
+
     #[test]
     fn request_wants_tools_is_true_for_default_auto() {
         let mut req = request();
@@ -4820,6 +4961,7 @@ mod tests {
                         text: text.clone(),
                         prompt_tokens: 1,
                         completion_tokens: 1,
+                        logprobs: Vec::new(),
                         finish_reason,
                     }));
                 }
@@ -4895,6 +5037,7 @@ mod tests {
                             text: "no json here".to_string(),
                             prompt_tokens: 1,
                             completion_tokens: 1,
+                            logprobs: Vec::new(),
                             finish_reason: FinishReason::Stop,
                         }))
                         .is_ok(),
@@ -5036,6 +5179,7 @@ mod tests {
                         text: text.clone(),
                         prompt_tokens: 1,
                         completion_tokens: 1,
+                        logprobs: Vec::new(),
                         finish_reason: FinishReason::Stop,
                     }));
                 }
@@ -5197,6 +5341,7 @@ mod tests {
                     tool_call_id: None,
                 },
                 finish_reason: finish.into(),
+                logprobs: None,
             }],
             usage: Some(Usage {
                 prompt_tokens: 5,
@@ -5492,6 +5637,207 @@ mod tests {
         let mut streaming = sent;
         streaming["stream"] = serde_json::json!(true);
         assert_eq!(enqueued(body(streaming), pick).await, [want]);
+    }
+
+    /// A stub runner that answers every job with "Hello" and two logprob entries, and returns the
+    /// `extras.logprobs` each job carried.
+    fn logprob_runner() -> (
+        std::sync::mpsc::SyncSender<crate::engine::InferenceJob>,
+        std::thread::JoinHandle<Vec<Option<usize>>>,
+    ) {
+        logprob_runner_with("Hello", &["Hel", "lo"])
+    }
+
+    /// As [`logprob_runner`], answering with `text` whose logprob entries are `tokens` (one per element).
+    fn logprob_runner_with(
+        text: &'static str,
+        tokens: &'static [&'static str],
+    ) -> (
+        std::sync::mpsc::SyncSender<crate::engine::InferenceJob>,
+        std::thread::JoinHandle<Vec<Option<usize>>>,
+    ) {
+        use crate::engine::model_runner::{
+            CompletionResult, InferenceJob, ResponseMode, TokenLogprob,
+        };
+        let (tx, rx) = std::sync::mpsc::sync_channel::<InferenceJob>(32);
+        let handle = std::thread::spawn(move || {
+            let mut seen = Vec::new();
+            while let Ok(job) = rx.recv() {
+                seen.push(job.extras.logprobs);
+                let asked = job.extras.logprobs.is_some();
+                if let ResponseMode::Complete(resp) = job.response_mode {
+                    let entry = |t: &str, lp: f32| TokenLogprob {
+                        token: t.to_string(),
+                        text_len: t.len(),
+                        logprob: lp,
+                        top: vec![(t.to_string(), lp), ("x".to_string(), lp - 1.0)],
+                    };
+                    let _ = resp.send(Ok(CompletionResult {
+                        text: text.to_string(),
+                        prompt_tokens: 1,
+                        completion_tokens: 2,
+                        finish_reason: FinishReason::Stop,
+                        logprobs: if asked {
+                            tokens
+                                .iter()
+                                .enumerate()
+                                .map(|(i, t)| entry(t, -0.5 + 0.25 * i as f32))
+                                .collect()
+                        } else {
+                            Vec::new()
+                        },
+                    }));
+                }
+            }
+            seen
+        });
+        (tx, handle)
+    }
+
+    async fn post_chat(
+        state: AppState,
+        body: serde_json::Value,
+    ) -> (StatusCode, serde_json::Value) {
+        let request: ChatCompletionRequest = serde_json::from_value(body).expect("request body");
+        let response = chat_completions(State(state), axum::http::HeaderMap::new(), Json(request))
+            .await
+            .into_response();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (status, serde_json::from_slice(&bytes).unwrap_or_default())
+    }
+
+    fn logprob_body(extra: serde_json::Value) -> serde_json::Value {
+        let mut b = serde_json::json!({
+            "model": "lightbulb-default",
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_tokens": 4
+        });
+        b.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        b
+    }
+
+    /// `logprobs: true` reaches the job with `top_logprobs` as the alternatives count, and the choice carries the
+    /// runner's entries; a request that did not ask gets neither the job setting nor a `logprobs` key.
+    #[tokio::test]
+    async fn chat_logprobs_reach_the_job_and_come_back_on_the_choice() {
+        let (tx, runner) = logprob_runner();
+        let state = state_with_runner(None, Some(tx));
+        let (status, v) = post_chat(
+            state.clone(),
+            logprob_body(serde_json::json!({"logprobs": true, "top_logprobs": 2})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let content = &v["choices"][0]["logprobs"]["content"];
+        assert_eq!(content.as_array().unwrap().len(), 2);
+        assert_eq!(content[0]["token"], "Hel");
+        assert_eq!(content[1]["logprob"], serde_json::json!(-0.25));
+        assert_eq!(content[0]["top_logprobs"][1]["token"], "x");
+
+        let (status, v) = post_chat(state, logprob_body(serde_json::json!({}))).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            v["choices"][0].get("logprobs").is_none(),
+            "no logprobs key unless asked: {v}"
+        );
+        assert_eq!(v["choices"][0]["message"]["content"], "Hello");
+        assert_eq!(
+            runner.join().unwrap(),
+            [Some(2), None],
+            "top_logprobs is the alternatives count; absent, the job asks for none"
+        );
+    }
+
+    /// A stop sequence that cuts the text also cuts the logprobs that lie wholly past the cut.
+    #[tokio::test]
+    async fn chat_logprobs_are_cut_with_the_stop_sequence() {
+        let (tx, _runner) = logprob_runner();
+        let state = state_with_runner(None, Some(tx));
+        let (_, v) = post_chat(
+            state,
+            logprob_body(serde_json::json!({"logprobs": true, "stop": "lo"})),
+        )
+        .await;
+        assert_eq!(v["choices"][0]["message"]["content"], "Hel");
+        let content = v["choices"][0]["logprobs"]["content"].as_array().unwrap();
+        assert_eq!(content.len(), 1, "the 'lo' token lies past the cut: {v}");
+    }
+
+    /// With tools offered and a tool call in the reply, the returned `content` is only the text before the call,
+    /// and the logprob tokens are exactly that content, not the call's markup tokens.
+    #[tokio::test]
+    async fn chat_logprobs_describe_the_returned_content_when_a_tool_call_is_extracted() {
+        let (tx, _runner) = logprob_runner_with(
+            r#"Sure.<tool_call>{"name": "f", "arguments": {}}</tool_call>"#,
+            &[
+                "Sure.",
+                r#"<tool_call>{"name": "f", "arguments": {}}</tool_call>"#,
+            ],
+        );
+        let state = state_with_runner(None, Some(tx));
+        let (status, v) = post_chat(
+            state,
+            logprob_body(serde_json::json!({
+                "logprobs": true,
+                "tools": [{"type": "function", "function": {"name": "f", "parameters": {"type": "object"}}}]
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(v["choices"][0]["finish_reason"], "tool_calls", "{v}");
+        let content = v["choices"][0]["message"]["content"].as_str().unwrap();
+        let tokens: String = v["choices"][0]["logprobs"]["content"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["token"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            tokens, content,
+            "logprobs must cover only the returned content: {v}"
+        );
+    }
+
+    /// The shapes that cannot carry logprobs are a 400 each; the control (a valid request) is a 200.
+    #[tokio::test]
+    async fn chat_logprobs_refusals_are_400_and_the_valid_request_is_not() {
+        let (tx, _runner) = logprob_runner();
+        let state = state_with_runner(None, Some(tx));
+        for (why, extra, want) in [
+            (
+                "top_logprobs without logprobs",
+                serde_json::json!({"top_logprobs": 2}),
+                400,
+            ),
+            (
+                "top_logprobs out of range",
+                serde_json::json!({"logprobs": true, "top_logprobs": 21}),
+                400,
+            ),
+            (
+                "stream",
+                serde_json::json!({"logprobs": true, "stream": true}),
+                400,
+            ),
+            (
+                "response_format",
+                serde_json::json!({"logprobs": true, "response_format": {"type": "json_object"}}),
+                400,
+            ),
+            (
+                "valid",
+                serde_json::json!({"logprobs": true, "top_logprobs": 20}),
+                200,
+            ),
+        ] {
+            let (status, _) = post_chat(state.clone(), logprob_body(extra)).await;
+            assert_eq!(status.as_u16(), want, "{why}");
+        }
     }
 
     /// `top_k`, `min_p` and `repetition_penalty`: bad values are a 400, 0 / 0 / 1.0 are off, and good ones reach

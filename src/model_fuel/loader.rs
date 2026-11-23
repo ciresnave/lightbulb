@@ -389,6 +389,30 @@ mod tests {
         crate::test_models::tinyllama_dir()
     }
 
+    /// The same load-and-check-the-config path on a freshly written synthetic checkpoint (C1), so it runs
+    /// without the 2.2 GB download: the parsed config must equal the architecture that was written. The
+    /// fixture gives every dimension a distinct value, so a silently-wrong parse (an axis mixed up, a head
+    /// count taken for a layer count) fails here. The real-value check stays in the ignored test below.
+    #[test]
+    fn loads_a_synthetic_checkpoint_from_a_local_dir() -> Result<()> {
+        use crate::test_models::synthetic_checkpoint::{
+            SyntheticArchitecture, write_synthetic_checkpoint,
+        };
+        let tmp = tempfile::tempdir()?;
+        let arch = SyntheticArchitecture::default();
+        write_synthetic_checkpoint(tmp.path(), &arch)?;
+
+        let loaded = load_llama_from_dir(tmp.path())?;
+        let c = &loaded.config;
+
+        assert_eq!(c.dim, arch.hidden_size, "hidden size");
+        assert_eq!(c.n_layers, arch.num_hidden_layers, "layer count");
+        assert_eq!(c.n_heads, arch.num_attention_heads, "attention heads");
+        assert_eq!(c.n_kv_heads, arch.num_key_value_heads, "KV heads");
+        assert_eq!(c.vocab_size, arch.vocab_size, "vocab");
+        Ok(())
+    }
+
     /// Loads real TinyLlama weights into Fuel from a local directory and checks
     /// the config against the values `llama-lazy` printed on its verified run —
     /// so a silently-wrong parse is caught rather than assumed correct.

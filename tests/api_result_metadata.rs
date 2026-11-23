@@ -24,6 +24,11 @@ use tower::ServiceExt;
 use lightbulb::api::{ApiConfig, AppState};
 use lightbulb::engine::{MemoryAwareConfig, MemoryAwareScheduler, ModelRunner};
 
+// The synthetic checkpoint generator (C1): the `constant_model_*` tests below need no real checkpoint.
+#[path = "support/mod.rs"]
+#[allow(dead_code)]
+mod support;
+
 /// Locate the checkpoint, preferring `TINYLLAMA_DIR`.
 ///
 /// The hardcoded fallback is one developer's HuggingFace cache and exists
@@ -119,47 +124,16 @@ fn rendered_prompt(messages: &[(&str, &str)]) -> String {
 /// `Streaming` arm.
 async fn post_raw(path: &str, body: serde_json::Value) -> (StatusCode, Vec<u8>) {
     let dir = tinyllama_dir().expect(MISSING_CHECKPOINT);
-    let scheduler = Arc::new(std::sync::Mutex::new(MemoryAwareScheduler::new(
-        MemoryAwareConfig::default(),
-    )));
-    let (tx, ctrl_tx) = ModelRunner::start(
-        &dir,
-        1,
-        512,
-        Some("f32".to_string()),
-        8,
-        std::sync::Arc::new(std::sync::Mutex::new(
-            lightbulb::cache::PrefixCacheStats::default(),
-        )),
-        scheduler.clone(),
-    )
-    .expect("starting the model runner");
-    let state = AppState {
-        scheduler,
-        config: ApiConfig::default(),
-        pg_backend: None,
-        manager: None,
-        models: lightbulb::api::ModelRegistry::single(
-            "test-model",
-            lightbulb::api::ModelEntry {
-                inference_tx: Some(tx),
-                cache_control: Some(ctrl_tx),
-                chat_template: chat_template_for(&dir),
-                ..Default::default()
-            },
-        ),
-        // Default window (20): these harnesses make a handful of requests, so
-        // the monitor never fills it and never logs. It is here because
-        // `AppState` requires it, not as anything under test.
-        eos_monitor: Default::default(),
-        security_sinks: Vec::new(),
-        cache_stats: std::sync::Arc::new(std::sync::Mutex::new(
-            lightbulb::cache::PrefixCacheStats::default(),
-        )),
-        live_system: lightbulb::api::new_shared_system_metrics(),
-        queue_depth: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-    };
-    let app = lightbulb::api::openai::routes().with_state(state);
+    post_raw_in(&dir, path, body).await
+}
+
+/// [`post_raw`] against the checkpoint in `dir`.
+async fn post_raw_in(
+    dir: &std::path::Path,
+    path: &str,
+    body: serde_json::Value,
+) -> (StatusCode, Vec<u8>) {
+    let app = lightbulb::api::openai::routes().with_state(app_state_for(dir));
     let resp = app
         .oneshot(
             Request::builder()
@@ -176,6 +150,152 @@ async fn post_raw(path: &str, body: serde_json::Value) -> (StatusCode, Vec<u8>) 
         .await
         .unwrap();
     (status, bytes.to_vec())
+}
+
+/// The application state the server builds, with a real runner over the checkpoint in `dir`.
+fn app_state_for(dir: &std::path::Path) -> AppState {
+    let scheduler = Arc::new(std::sync::Mutex::new(MemoryAwareScheduler::new(
+        MemoryAwareConfig::default(),
+    )));
+    let (tx, ctrl_tx) = ModelRunner::start(
+        dir,
+        1,
+        512,
+        Some("f32".to_string()),
+        8,
+        std::sync::Arc::new(std::sync::Mutex::new(
+            lightbulb::cache::PrefixCacheStats::default(),
+        )),
+        scheduler.clone(),
+    )
+    .expect("starting the model runner");
+    AppState {
+        scheduler,
+        config: ApiConfig::default(),
+        pg_backend: None,
+        manager: None,
+        models: lightbulb::api::ModelRegistry::single(
+            "test-model",
+            lightbulb::api::ModelEntry {
+                inference_tx: Some(tx),
+                cache_control: Some(ctrl_tx),
+                chat_template: chat_template_for(dir),
+                ..Default::default()
+            },
+        ),
+        // Default window (20): these harnesses make a handful of requests, so
+        // the monitor never fills it and never logs. It is here because
+        // `AppState` requires it, not as anything under test.
+        eos_monitor: Default::default(),
+        security_sinks: Vec::new(),
+        cache_stats: std::sync::Arc::new(std::sync::Mutex::new(
+            lightbulb::cache::PrefixCacheStats::default(),
+        )),
+        live_system: lightbulb::api::new_shared_system_metrics(),
+        queue_depth: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+    }
+}
+
+/// A freshly written constant-output checkpoint whose greedy output is always `token` (see
+/// `support::write_constant_output_checkpoint`).
+fn constant_model(token: u32) -> tempfile::TempDir {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    support::write_constant_output_checkpoint(
+        tmp.path(),
+        &support::SyntheticArchitecture::default(),
+        token,
+    )
+    .expect("writing the constant-output checkpoint");
+    tmp
+}
+
+async fn post_json_in(
+    dir: &std::path::Path,
+    path: &str,
+    body: serde_json::Value,
+) -> serde_json::Value {
+    let (status, bytes) = post_raw_in(dir, path, body).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&bytes)
+    );
+    serde_json::from_slice(&bytes).expect("response was not JSON")
+}
+
+/// A generation that never produces the EOS runs to its cap, and says so: `finish_reason: "length"` on both
+/// endpoints, `completion_tokens` exactly the cap, `total_tokens` the sum. A model that emits one fixed non-EOS
+/// token makes this exact where a trained model's text is not (C1); the paired test below is the stop arm.
+#[tokio::test]
+async fn constant_model_a_capped_generation_reports_length_and_its_token_count() {
+    let tmp = constant_model(7);
+    let chat = post_json_in(
+        tmp.path(),
+        "/v1/chat/completions",
+        serde_json::json!({
+            "model": "lightbulb-default",
+            "messages": [{"role": "user", "content": "tok5 tok6"}],
+            "max_tokens": 6,
+            "temperature": 0.0
+        }),
+    )
+    .await;
+    assert_eq!(chat["choices"][0]["finish_reason"], "length", "{chat}");
+    assert_eq!(chat["usage"]["completion_tokens"], 6, "{chat}");
+    let prompt = chat["usage"]["prompt_tokens"]
+        .as_u64()
+        .expect("prompt_tokens");
+    assert!(prompt > 0, "{chat}");
+    assert_eq!(
+        chat["usage"]["total_tokens"].as_u64(),
+        Some(prompt + 6),
+        "{chat}"
+    );
+
+    let completion = post_json_in(
+        tmp.path(),
+        "/v1/completions",
+        serde_json::json!({
+            "model": "lightbulb-default",
+            "prompt": "tok5 tok6",
+            "max_tokens": 6,
+            "temperature": 0.0
+        }),
+    )
+    .await;
+    assert_eq!(
+        completion["choices"][0]["finish_reason"], "length",
+        "{completion}"
+    );
+    assert_eq!(completion["usage"]["completion_tokens"], 6, "{completion}");
+}
+
+/// The stop arm: a model whose every token is the EOS stops on the first one, `finish_reason: "stop"`, and the
+/// reported `completion_tokens` is what it produced (not the 32 it was allowed). With the length test above, a
+/// handler that always said one or the other, or always reported the cap, fails one of the two.
+#[tokio::test]
+async fn constant_model_an_eos_stops_the_generation_and_reports_stop() {
+    let tmp = constant_model(1); // the fixture's EOS id
+    let v = post_json_in(
+        tmp.path(),
+        "/v1/chat/completions",
+        serde_json::json!({
+            "model": "lightbulb-default",
+            "messages": [{"role": "user", "content": "tok5 tok6"}],
+            "max_tokens": 32,
+            "temperature": 0.0
+        }),
+    )
+    .await;
+    assert_eq!(v["choices"][0]["finish_reason"], "stop", "{v}");
+    let completion = v["usage"]["completion_tokens"]
+        .as_u64()
+        .expect("completion_tokens");
+    assert!(
+        (1..32).contains(&completion),
+        "stopped early, not at the cap: {v}"
+    );
 }
 
 async fn post_json(path: &str, body: serde_json::Value) -> (StatusCode, serde_json::Value) {
@@ -643,4 +763,44 @@ async fn completions_endpoint_returns_model_output() {
         prompt + completion,
         "total_tokens is not the sum of its parts"
     );
+}
+
+/// The stream's terminal chunk on a capped generation: exactly one chunk carries a `finish_reason`, it is the last,
+/// it is `"length"`, no chunk carries `usage` (not asked for), and the content chunks add up to the cap's six
+/// tokens (token 7 is `tok7`). The synthetic counterpart of `streaming_terminal_chunk_reports_length` (C1).
+#[tokio::test]
+async fn constant_model_a_capped_stream_ends_in_one_length_chunk() {
+    let tmp = constant_model(7);
+    let (status, body) = post_raw_in(
+        tmp.path(),
+        "/v1/chat/completions",
+        serde_json::json!({
+            "model": "lightbulb-default",
+            "messages": [{"role": "user", "content": "tok5 tok6"}],
+            "max_tokens": 6,
+            "temperature": 0.0,
+            "stream": true
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    let chunks = sse_chunks(&body);
+    assert!(!chunks.is_empty(), "the stream produced no data frames");
+    assert!(chunks.iter().all(|c| c["error"].is_null()), "{chunks:?}");
+    assert!(chunks.iter().all(|c| c["usage"].is_null()), "{chunks:?}");
+    let terminal = chunks
+        .iter()
+        .filter(|c| !c["choices"][0]["finish_reason"].is_null())
+        .count();
+    assert_eq!(terminal, 1, "{chunks:?}");
+    assert_eq!(
+        chunks.last().unwrap()["choices"][0]["finish_reason"],
+        "length",
+        "{chunks:?}"
+    );
+    let text: String = chunks
+        .iter()
+        .filter_map(|c| c["choices"][0]["delta"]["content"].as_str())
+        .collect();
+    assert_eq!(text, "tok7".repeat(6), "{chunks:?}");
 }

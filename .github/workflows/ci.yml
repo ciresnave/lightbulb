@@ -374,6 +374,21 @@ jobs:
           cargo test --features fuel-engine --tests --no-run
           echo featgate >> .gates-ran
 
+      # RUNS (not just compiles) the feature-gated tests that need only the SYNTHETIC checkpoint
+      # (tests/support/mod.rs, ROADMAP C1). `cargo test <filter>` exits 0 when the filter matches
+      # nothing, so the step requires the passed count it expects, by name.
+      - name: feature-gated tests on the synthetic checkpoint
+        shell: bash
+        run: |
+          set -o pipefail
+          out="$(cargo test --features fuel-engine --test fuel_engine_http -- fuel_runner_serves_a_default_temperature_completion 2>&1)"
+          echo "$out"
+          echo "$out" | grep -q "test result: ok. 1 passed; 0 failed" || { echo "::error::the synthetic-checkpoint test did not run and pass exactly once"; exit 1; }
+          out="$(cargo test --features fuel-engine --test api_result_metadata -- constant_model 2>&1)"
+          echo "$out"
+          echo "$out" | grep -q "test result: ok. 3 passed; 0 failed" || { echo "::error::the three constant-output tests did not run and pass"; exit 1; }
+          echo synthetic >> .gates-ran
+
       # NAMED, not ambient. The clippy gate is a Python script, and relying on
       # whatever interpreter the runner image happens to ship is the same defect
       # as relying on an unnamed compiler -- a green whose tooling nobody stated.
@@ -448,7 +463,7 @@ jobs:
       - name: every gate must have run
         shell: bash
         run: |
-          expected="fmt lockfile doc test featgate clippy licence"
+          expected="fmt lockfile doc test featgate synthetic clippy licence"
           test -f .gates-ran || { echo "::error::no gate markers written at all"; exit 1; }
           missing=""
           for g in $expected; do
@@ -463,4 +478,4 @@ jobs:
           # PRINTED ON SUCCESS, DELIBERATELY. A green run is exactly when
           # someone is about to over-read what was checked, so the limits go
           # where the green is, not in a doc they would have to think to open.
-          echo "::warning::CI NEVER RUNS Lightbulb's behavioural acceptance tests. chat_template_e2e (a chat model answers AND stops), fuel_engine_http (the completion is coherent English) and gguf_serving_e2e (a real GGUF served end to end) require a GPU and a ~2.2 GB checkpoint. There is no GPU runner, by decision (2026-08-27, cost). They are COMPILED here so they cannot rot, and executed only by a person on a GPU box. 'Nobody ran it this month' and 'it passes' look identical from this log — see scripts/check.sh for the command."
+          echo "::warning::CI NEVER RUNS Lightbulb's behavioural acceptance tests. chat_template_e2e (a chat model answers AND stops), fuel_engine_http (the completion is coherent English; only its default-temperature test runs, on a synthetic checkpoint; api_result_metadata: only its three constant_model tests) and gguf_serving_e2e (a real GGUF served end to end) require a GPU and a ~2.2 GB checkpoint. There is no GPU runner, by decision (2026-08-27, cost). They are COMPILED here so they cannot rot, and executed only by a person on a GPU box. 'Nobody ran it this month' and 'it passes' look identical from this log — see scripts/check.sh for the command."

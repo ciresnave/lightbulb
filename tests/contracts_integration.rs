@@ -33,6 +33,7 @@ fn canned(text: impl Into<String>) -> CompletionResult {
         text: text.into(),
         prompt_tokens: 0,
         completion_tokens: 0,
+        logprobs: Vec::new(),
         finish_reason: FinishReason::Stop,
     }
 }
