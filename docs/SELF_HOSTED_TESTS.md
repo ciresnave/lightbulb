@@ -1,6 +1,6 @@
 # Real-model tests on the self-hosted runner (design note, ROADMAP C1b)
 
-Status: **design only, nothing built.** Written 2026-11-23 against `origin/main` f1f8f17 plus branch `lane-2026-11-23-c1`.
+Status: **steps 1-2 built, the workflow is written and cannot run** (no runner is registered; registrations are paused, so every runner-dependent test below is UNVERIFIED, not covered). Written 2026-11-23 against `origin/main` f1f8f17 plus branch `lane-2026-11-23-c1`.
 Counts are `git grep '#\[ignore'` over `tests/` and `src/` (111 lines); a count is not a list, so the groups below
 name what each one needs.
 
@@ -61,3 +61,16 @@ re-measurement of every test.
 - The `lightbulb-models` label, the model files on the runner disk, and the three env variables: runner owner.
 - Everything in step 1-2 (helper change, removing `#[ignore]`, counting) can be built now and is testable locally with the
   variables set; step 3 cannot run until the runner exists.
+
+## Built so far (2026-11-23, branch `lane-2026-11-23-c1`)
+
+- **Step 1, partly:** the 12 corpus tests of `spm_derivation_tests` (`src/gguf/mod.rs`) lost their `#[ignore]`: with the corpus
+  absent all 18 tests in the module pass (11 print `SKIP`), and with `LIGHTBULB_REQUIRE_CORPUS=1` the 12 corpus tests fail
+  (measured: 6 passed, 12 failed). One of them (`the_derivation_over_generates_on_byte_level_bpe`) had no skip helper and failed
+  without a corpus; it now routes through `skip_unless_required`. The TinyLlama and GGUF-file tests are NOT converted: most
+  `.expect(MISSING)` or sit in files that need the model's own shapes; converting them without a runner to verify against would
+  be unverified edits.
+- **Step 2:** `scripts/ignore_census.py` (CI step `ignore census`, marker `ignorecount`) fails when the count of `#[ignore]`
+  attributes differs from `docs/ignore-count.txt` (72 now); its own matcher is checked against a synthetic sample first.
+- **Workflow:** `.github/workflows/selfhosted.yml`, dispatch only, `main` only, loud input check, passed-count check. It has
+  never run.
