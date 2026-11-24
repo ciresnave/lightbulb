@@ -318,7 +318,7 @@ fn q6_k_block(block: &[f32]) -> Vec<u8> {
     out
 }
 
-// ---- Q4_K and Q5_K (ROADMAP C1b follow-up) ---------------------------------------------------------------------
+// ---- Q4_K, Q5_K and Q3_K (ROADMAP C1b follow-up) ---------------------------------------------------------------------
 //
 // PROVENANCE. The block LAYOUTS (`block_q4_K`: f16 `d`, f16 `dmin`, 12 packed 6-bit scale/min bytes, 128 nibble
 // bytes = 144 bytes; `block_q5_K`: the same plus 32 high-bit bytes = 176 bytes) and the scale/min packing are
@@ -429,6 +429,77 @@ pub fn quantize_q5_k(values: &[f32]) -> Vec<u8> {
                 out.push((q[c * 64 + l] & 0xF) | ((q[c * 64 + 32 + l] & 0xF) << 4));
             }
         }
+    }
+    out
+}
+
+/// Q3_K: super-blocks of 256 values, 110 bytes each: `hmask[32]`, `qs[64]`, 12 packed 6-bit scale bytes, f16 `d`
+/// (ggml's `block_q3_K`, same provenance as Q4_K above, `dequantize_row_q3_K`). Sixteen 16-value groups, each
+/// `x = d * (sc - 32) * q` with `q` in `-4..=3`. `q + 4` is stored as a 2-bit field in `qs` plus the "not below
+/// zero" bit in `hmask` (SET means `q >= 0`; a clear bit subtracts 4). Element `l` of group `g = 8n + 2j + h`
+/// (`n` the 128-half, `j` the quarter, `h` the 16-lane half) sits at `qs[32n + 16h + l] >> 2j` and
+/// `hmask[16h + l]` bit `4n + j`.
+pub fn quantize_q3_k(values: &[f32]) -> Vec<u8> {
+    assert!(
+        values.len().is_multiple_of(256),
+        "Q3_K rows are whole super-blocks of 256"
+    );
+    let mut out = Vec::with_capacity(values.len() / 256 * 110);
+    for block in values.chunks(256) {
+        // Group scale: the value of largest magnitude maps to q = -4.
+        let group_scale: Vec<f32> = block
+            .chunks(16)
+            .map(|g| {
+                let extreme = g
+                    .iter()
+                    .fold(0.0f32, |m, &v| if v.abs() > m.abs() { v } else { m });
+                extreme / -4.0
+            })
+            .collect();
+        let d = group_scale.iter().fold(0.0f32, |m, v| m.max(v.abs())) / 31.0;
+        let d = if d > 0.0 { d.max(1e-4) } else { 0.0 }; // a normal half (see Q6_K)
+        let ls: Vec<u8> = group_scale
+            .iter()
+            .map(|&s| {
+                let r = if d == 0.0 { 0.0 } else { (s / d).round() };
+                (r.clamp(-32.0, 31.0) + 32.0) as u8
+            })
+            .collect();
+        let q = |i: usize| -> u8 {
+            // q + 4 in 0..=7
+            let step = d * (f32::from(ls[i / 16]) - 32.0);
+            let v = if step == 0.0 {
+                0.0
+            } else {
+                (block[i] / step).round()
+            };
+            (v.clamp(-4.0, 3.0) + 4.0) as u8
+        };
+        let (mut hmask, mut qs, mut sc) = ([0u8; 32], [0u8; 64], [0u8; 12]);
+        for n in 0..2 {
+            for j in 0..4 {
+                for h in 0..2 {
+                    for l in 0..16 {
+                        let v = q(n * 128 + j * 32 + h * 16 + l);
+                        qs[n * 32 + h * 16 + l] |= (v & 3) << (2 * j);
+                        hmask[h * 16 + l] |= (v >> 2) << (4 * n + j);
+                    }
+                }
+            }
+        }
+        for (i, &s) in ls.iter().enumerate() {
+            let (lo, hi) = (s & 0xF, s >> 4);
+            if i < 8 {
+                sc[i] |= lo;
+            } else {
+                sc[i - 8] |= lo << 4;
+            }
+            sc[8 + i % 4] |= hi << (2 * (i / 4));
+        }
+        out.extend_from_slice(&hmask);
+        out.extend_from_slice(&qs);
+        out.extend_from_slice(&sc);
+        out.extend_from_slice(&f16_bits(d).to_le_bytes());
     }
     out
 }

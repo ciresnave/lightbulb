@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! The synthetic Q4_K and Q5_K encoders (`support/gguf.rs`) against an INDEPENDENT decode: a straight port of
-//! ggml's `get_scale_min_k4`, `dequantize_row_q4_K` and `dequantize_row_q5_K` (ggml-org/llama.cpp commit
+//! ggml's `get_scale_min_k4`, `dequantize_row_q4_K`, `_q5_K` and `_q3_K` (ggml-org/llama.cpp commit
 //! 76f186df71a41abb3ee20fffedee31ca5dbc7d9f, `ggml/src/ggml-quants.c`; MIT, Copyright (c) 2023-2026 The ggml
 //! authors, see `docs/THIRD_PARTY_NOTICES.md`). The decoder shares no code with the encoder: a layout slip on
 //! either side shows as an error far above the bound.
@@ -186,5 +186,112 @@ fn the_seeded_bugs_violate_the_bound() {
                 "high-bit drop not caught"
             );
         }
+    }
+}
+
+// ---- Q3_K ------------------------------------------------------------------------------------------------------
+
+/// ggml `dequantize_row_q3_K` (110-byte blocks), including its `aux` scale unpacking, written over u32 words.
+fn dequantize_q3_k(blocks: &[u8]) -> Vec<f32> {
+    assert_eq!(blocks.len() % 110, 0);
+    let (kmask1, kmask2) = (0x0303_0303u32, 0x0f0f_0f0fu32);
+    let mut y = Vec::new();
+    for b in blocks.chunks(110) {
+        let (hm, rest) = b.split_at(32);
+        let (qs, rest) = rest.split_at(64);
+        let (raw, dbits) = rest.split_at(12);
+        let d_all = f16(u16::from_le_bytes([dbits[0], dbits[1]]));
+        let word = |i: usize| {
+            u32::from_le_bytes([raw[4 * i], raw[4 * i + 1], raw[4 * i + 2], raw[4 * i + 3]])
+        };
+        let mut aux = [word(0), word(1), word(2), 0];
+        let tmp = aux[2];
+        aux[2] = ((aux[0] >> 4) & kmask2) | (((tmp >> 4) & kmask1) << 4);
+        aux[3] = ((aux[1] >> 4) & kmask2) | (((tmp >> 6) & kmask1) << 4);
+        aux[0] = (aux[0] & kmask2) | ((tmp & kmask1) << 4);
+        aux[1] = (aux[1] & kmask2) | (((tmp >> 2) & kmask1) << 4);
+        let scales: Vec<u8> = aux.iter().flat_map(|w| w.to_le_bytes()).collect();
+        let (mut is, mut m) = (0usize, 1u8);
+        for n in 0..2 {
+            let q = &qs[n * 32..];
+            let mut shift = 0;
+            for _ in 0..4 {
+                for half in 0..2 {
+                    let dl = d_all * (f32::from(scales[is]) - 32.0);
+                    is += 1;
+                    for l in 0..16 {
+                        let low = i32::from((q[half * 16 + l] >> shift) & 3);
+                        let high = if hm[half * 16 + l] & m != 0 { 0 } else { 4 };
+                        y.push(dl * (low - high) as f32);
+                    }
+                }
+                shift += 2;
+                m <<= 1;
+            }
+        }
+    }
+    y
+}
+
+/// Per-element bound for Q3_K, from the input only: a 3-bit step is `|extreme| / 4`, and the opposite-signed
+/// extreme can clamp at +3 (one step), plus the 6-bit scale rounding against `d` and the f16 `d`.
+fn q3_bounds(vals: &[f32]) -> Vec<f32> {
+    let mut out = Vec::new();
+    for sb in vals.chunks(256) {
+        let ext: Vec<f32> = sb
+            .chunks(16)
+            .map(|g| g.iter().fold(0.0f32, |m, v| m.max(v.abs())))
+            .collect();
+        let d = ext.iter().fold(0.0f32, |m, &e| m.max(e)) / 4.0 / 31.0;
+        let widest = ext.iter().fold(0.0f32, |m, &e| m.max(e));
+        for e in ext {
+            let b = e / 4.0 + 3.0 * d + widest * 2f32.powi(-9);
+            out.extend(std::iter::repeat_n(b * 1.05 + 1e-5, 16));
+        }
+    }
+    out
+}
+
+#[test]
+fn the_q3_k_encoder_round_trips_through_the_ggml_decode() {
+    let vals = values(1024);
+    let bytes = gguf_writer::quantize_q3_k(&vals);
+    assert_eq!(bytes.len(), 4 * 110);
+    let got = dequantize_q3_k(&bytes);
+    assert_eq!(got.len(), vals.len());
+    let excess = worst_excess(&got, &vals, &q3_bounds(&vals));
+    assert!(excess <= 0.0, "worst element exceeds its bound by {excess}");
+}
+
+/// The Q3_K bound discriminates: a valid block with its `hmask` zeroed (the term that carries "q >= 0"), with its
+/// scale bytes' high bits cleared, or with two scale words swapped, must violate it.
+#[test]
+fn the_q3_k_seeded_bugs_violate_the_bound() {
+    let vals = values(1024);
+    let good = gguf_writer::quantize_q3_k(&vals);
+    let bound = q3_bounds(&vals);
+    assert!(
+        worst_excess(&dequantize_q3_k(&good), &vals, &bound) <= 0.0,
+        "control: unmutated blocks pass"
+    );
+    type Bug = (&'static str, fn(&mut [u8]));
+    let bugs: [Bug; 3] = [
+        ("hmask dropped", |b| b[0..32].fill(0)),
+        ("scale high bits dropped", |b| b[104..108].fill(0)), // sc[8..12] (bytes 104..108) carry every scale's top two bits
+        ("scale words swapped", |b| {
+            for j in 0..4 {
+                b.swap(96 + j, 100 + j); // sc[j] <-> sc[j + 4]
+            }
+        }),
+    ];
+    for (name, bug) in bugs {
+        let mut bad = good.clone();
+        for blk in bad.chunks_mut(110) {
+            bug(blk);
+        }
+        assert!(
+            worst_excess(&dequantize_q3_k(&bad), &vals, &bound) > 0.0,
+            "{name}: not caught"
+        );
     }
 }
