@@ -12,7 +12,7 @@ ratchet on the total, not a list.
 not the same output.
 """
 import re
-import subprocess
+import subprocess  # nosec B404 - fixed-argv git call below, no untrusted input
 import sys
 
 ATTR = re.compile(r"^\s*#\[ignore\b")
@@ -32,7 +32,8 @@ def selftest() -> None:
 
 def main() -> None:
     selftest()
-    files = subprocess.run(
+    # nosec B603 B607 - literal argv, `git` resolved from PATH like every other script here; nothing user-supplied
+    files = subprocess.run(  # nosec B603 B607
         ["git", "ls-files", "*.rs"], capture_output=True, text=True, check=True
     ).stdout.split()
     if not files:
