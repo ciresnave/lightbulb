@@ -1,0 +1,3 @@
+kind: Q4_K and Q5_K synthetic GGUF encoders (tests)
+---
+Test support gains `quantize_q4_k` and `quantize_q5_k` (144- and 176-byte ggml blocks from f32), the input a Q4_K/Q5_K differential against Fuel's Vulkan kernels needs. `tests/gguf_kquant_encoders.rs` decodes their output with a line-for-line port of ggml's dequantisers (llama.cpp 76f186d, MIT; credited in `docs/THIRD_PARTY_NOTICES.md`) and asserts a per-sub-block error bound; seeded bugs (scale/min swapped, high-bit plane dropped) must violate it, and three encoder mutations (high-bit plane, scale/min packing, nibble order) each fail the round trip. Q3_K is not done. No library change.

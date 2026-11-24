@@ -318,6 +318,121 @@ fn q6_k_block(block: &[f32]) -> Vec<u8> {
     out
 }
 
+// ---- Q4_K and Q5_K (ROADMAP C1b follow-up) ---------------------------------------------------------------------
+//
+// PROVENANCE. The block LAYOUTS (`block_q4_K`: f16 `d`, f16 `dmin`, 12 packed 6-bit scale/min bytes, 128 nibble
+// bytes = 144 bytes; `block_q5_K`: the same plus 32 high-bit bytes = 176 bytes) and the scale/min packing are
+// ggml's, from `ggml/src/ggml-common.h` and `get_scale_min_k4` / `dequantize_row_q4_K` / `dequantize_row_q5_K` in
+// `ggml/src/ggml-quants.c`, read at ggml-org/llama.cpp commit 76f186df71a41abb3ee20fffedee31ca5dbc7d9f
+// (2026-11-19). ggml is MIT, Copyright (c) 2023-2026 The ggml authors (licence text in
+// `docs/THIRD_PARTY_NOTICES.md`). No ggml code is copied: the ENCODER below is written from the decode arithmetic
+// (`x = d * sc * q - dmin * m`) with a plain min/max quantiser, not ggml's `make_qkx2_quants` search, so its output
+// is a valid block that ggml (or Fuel) reads back, not ggml's byte-identical output.
+
+/// Pack eight 6-bit scales and eight 6-bit mins into ggml's 12 bytes (the inverse of `get_scale_min_k4`).
+fn pack_scale_min_k4(ls: &[u8; 8], lm: &[u8; 8]) -> [u8; 12] {
+    let mut s = [0u8; 12];
+    s[..4].copy_from_slice(&ls[..4]);
+    s[4..8].copy_from_slice(&lm[..4]);
+    for j in 4..8 {
+        s[j + 4] = (ls[j] & 0xF) | ((lm[j] & 0xF) << 4);
+        s[j - 4] |= (ls[j] >> 4) << 6;
+        s[j] |= (lm[j] >> 4) << 6;
+    }
+    s
+}
+
+/// One 256-value "affine K" super-block: eight 32-value sub-blocks, each `x = d * sc * q - dmin * m` with 6-bit `sc`
+/// and `m` and `q` in `0..=qmax`. Returns `(d, dmin, packed scales, q[256])`.
+fn affine_k_block(block: &[f32], qmax: f32) -> (f32, f32, [u8; 12], [u8; 256]) {
+    let mut sub_scale = [0f32; 8];
+    let mut sub_min = [0f32; 8]; // stored positive: the value subtracted
+    for (g, sub) in block.chunks(32).enumerate() {
+        let lo = sub.iter().fold(0.0f32, |m, &v| m.min(v)); // include 0 so the min is never above it
+        let hi = sub.iter().fold(0.0f32, |m, &v| m.max(v));
+        sub_scale[g] = (hi - lo) / qmax;
+        sub_min[g] = -lo;
+    }
+    let max_of = |a: &[f32; 8]| a.iter().fold(0.0f32, |m, &v| m.max(v));
+    // A scale must be a normal half (>= 2^-14); a smaller one would need a subnormal this writer does not emit.
+    let norm = |x: f32| if x > 0.0 { x.max(1e-4) } else { 0.0 };
+    let d = norm(max_of(&sub_scale) / 63.0);
+    let dmin = norm(max_of(&sub_min) / 63.0);
+    let six = |x: f32, unit: f32| {
+        if unit == 0.0 {
+            0u8
+        } else {
+            (x / unit).round().clamp(0.0, 63.0) as u8
+        }
+    };
+    let (mut ls, mut lm) = ([0u8; 8], [0u8; 8]);
+    for g in 0..8 {
+        ls[g] = six(sub_scale[g], d);
+        lm[g] = six(sub_min[g], dmin);
+    }
+    let mut q = [0u8; 256];
+    for (i, &v) in block.iter().enumerate() {
+        let (step, off) = (d * f32::from(ls[i / 32]), dmin * f32::from(lm[i / 32]));
+        q[i] = if step == 0.0 {
+            0
+        } else {
+            ((v + off) / step).round().clamp(0.0, qmax) as u8
+        };
+    }
+    (d, dmin, pack_scale_min_k4(&ls, &lm), q)
+}
+
+/// Q4_K: super-blocks of 256 values, 144 bytes each: f16 `d`, f16 `dmin`, 12 scale/min bytes, `qs[128]`. In each
+/// 64-value chunk `c`, sub-block `2c` is the LOW nibbles of `qs[32c..32c + 32]` and sub-block `2c + 1` the HIGH ones.
+pub fn quantize_q4_k(values: &[f32]) -> Vec<u8> {
+    assert!(
+        values.len().is_multiple_of(256),
+        "Q4_K rows are whole super-blocks of 256"
+    );
+    let mut out = Vec::with_capacity(values.len() / 256 * 144);
+    for block in values.chunks(256) {
+        let (d, dmin, scales, q) = affine_k_block(block, 15.0);
+        out.extend_from_slice(&f16_bits(d).to_le_bytes());
+        out.extend_from_slice(&f16_bits(dmin).to_le_bytes());
+        out.extend_from_slice(&scales);
+        for c in 0..4 {
+            for l in 0..32 {
+                out.push(q[c * 64 + l] | (q[c * 64 + 32 + l] << 4));
+            }
+        }
+    }
+    out
+}
+
+/// Q5_K: super-blocks of 256 values, 176 bytes each: f16 `d`, f16 `dmin`, 12 scale/min bytes, `qh[32]`, `qs[128]`.
+/// As Q4_K, plus the fifth bit of element `l` of sub-block `s` in bit `s` of `qh[l]`.
+pub fn quantize_q5_k(values: &[f32]) -> Vec<u8> {
+    assert!(
+        values.len().is_multiple_of(256),
+        "Q5_K rows are whole super-blocks of 256"
+    );
+    let mut out = Vec::with_capacity(values.len() / 256 * 176);
+    for block in values.chunks(256) {
+        let (d, dmin, scales, q) = affine_k_block(block, 31.0);
+        let mut qh = [0u8; 32];
+        for s in 0..8 {
+            for l in 0..32 {
+                qh[l] |= (q[s * 32 + l] >> 4) << s;
+            }
+        }
+        out.extend_from_slice(&f16_bits(d).to_le_bytes());
+        out.extend_from_slice(&f16_bits(dmin).to_le_bytes());
+        out.extend_from_slice(&scales);
+        out.extend_from_slice(&qh);
+        for c in 0..4 {
+            for l in 0..32 {
+                out.push((q[c * 64 + l] & 0xF) | ((q[c * 64 + 32 + l] & 0xF) << 4));
+            }
+        }
+    }
+    out
+}
+
 /// How a tensor is stored in the synthetic file.
 #[derive(Clone, Copy, PartialEq)]
 pub enum Storage {
