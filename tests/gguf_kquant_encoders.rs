@@ -295,3 +295,56 @@ fn the_q3_k_seeded_bugs_violate_the_bound() {
         );
     }
 }
+
+// ---- The published Fuel reader ----------------------------------------------------------------------------------
+
+/// The differential the encoders exist for: the same bytes decoded by `fuel-quantized` 0.47.32 (crates.io,
+/// `dequant_ggml_bytes` -> `BlockQ{3,4,5}K::to_float`) and by the ggml port above must agree, and Fuel's output must
+/// itself be within the bound of the input. Agreement of two DIFFERENT decoders on bytes written by a third piece
+/// of code is what pins the layout; either decoder alone only pins itself.
+#[test]
+fn fuel_quantized_decodes_the_encoders_output_like_the_ggml_port() {
+    use fuel_quantized::{GgmlDType, dequant_ggml_bytes};
+    let vals = values(1024);
+    type Case = (&'static str, GgmlDType, Vec<u8>, Vec<f32>, Vec<f32>);
+    let cases: [Case; 3] = [
+        (
+            "Q4_K",
+            GgmlDType::Q4K,
+            gguf_writer::quantize_q4_k(&vals),
+            dequantize(&gguf_writer::quantize_q4_k(&vals), false),
+            bounds(&vals, 15.0),
+        ),
+        (
+            "Q5_K",
+            GgmlDType::Q5K,
+            gguf_writer::quantize_q5_k(&vals),
+            dequantize(&gguf_writer::quantize_q5_k(&vals), true),
+            bounds(&vals, 31.0),
+        ),
+        (
+            "Q3_K",
+            GgmlDType::Q3K,
+            gguf_writer::quantize_q3_k(&vals),
+            dequantize_q3_k(&gguf_writer::quantize_q3_k(&vals)),
+            q3_bounds(&vals),
+        ),
+    ];
+    for (name, dtype, bytes, port, bound) in cases {
+        let fuel = dequant_ggml_bytes(&bytes, dtype, name).expect("fuel decode");
+        assert_eq!(fuel.len(), vals.len(), "{name}: length");
+        let disagree = fuel
+            .iter()
+            .zip(&port)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max);
+        assert!(
+            disagree < 1e-5,
+            "{name}: fuel and the ggml port disagree by {disagree}"
+        );
+        assert!(
+            worst_excess(&fuel, &vals, &bound) <= 0.0,
+            "{name}: fuel's decode leaves the bound"
+        );
+    }
+}

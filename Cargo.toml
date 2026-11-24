@@ -248,6 +248,9 @@ name = "lightbulb-probe"
 path = "src/bin/lightbulb-probe.rs"
 
 [dev-dependencies]
+# The published Fuel block reader, the reader the synthetic Q3_K/Q4_K/Q5_K encoders (tests/support/gguf.rs) are built to
+# feed: tests/gguf_kquant_encoders.rs decodes their output through it (crates.io version, no path or git source).
+fuel-quantized = "0.47.32"
 # Dev-only as of PersistAnt adoption Step 5: the app itself no longer uses
 # these (deadpool-postgres/tokio-postgres/refinery are gone from
 # [dependencies]), but tests/persistant_migrate_tests.rs still needs a raw

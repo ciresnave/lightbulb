@@ -3459,6 +3459,7 @@ dependencies = [
  "fuel-ir",
  "fuel-loaders",
  "fuel-model-llama",
+ "fuel-quantized",
  "fuel-transformers",
  "futures",
  "futures-util",
