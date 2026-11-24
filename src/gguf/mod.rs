@@ -1761,6 +1761,13 @@ pub(crate) fn detect_architecture(metadata: &HashMap<String, Value>) -> Result<G
     }
 }
 
+/// The synthetic GGUF writer the integration tests share (`tests/support/gguf.rs`), for the tests below that
+/// need files without a corpus.
+#[cfg(test)]
+#[path = "../../tests/support/gguf.rs"]
+#[allow(dead_code)]
+mod synthetic_gguf_writer;
+
 /// Proof that our metadata reader agrees with candle's, on every corpus file
 /// both can read.
 ///
@@ -1933,6 +1940,53 @@ mod reader_agreement_tests {
             "the two metadata readers DISAGREE on {} entries:\n  {}",
             mismatches.len(),
             mismatches.join("\n  ")
+        );
+    }
+
+    /// The differential test over SYNTHETIC files, so it runs without a corpus: every dtype the writer emits (F32,
+    /// Q8_0, Q4_0, Q6_K), a file with a chat template and a chain-output file. Unlike the corpus test the count is
+    /// exact: each of these must be readable by BOTH readers and agree key for key, so a file one reader refuses
+    /// is a failure here, not a skip.
+    #[test]
+    fn our_metadata_agrees_with_the_loaders_on_synthetic_files() {
+        use super::synthetic_gguf_writer as w;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let files: Vec<(&str, Vec<u8>)> = vec![
+            ("f32.gguf", w::constant_output_gguf_bytes(7)),
+            ("q8_0.gguf", w::constant_output_gguf_q8_0_bytes(7)),
+            ("q4_0.gguf", w::constant_output_gguf_q4_0_bytes(7)),
+            ("q6_k.gguf", w::constant_output_gguf_q6_k_bytes(7)),
+            (
+                "template.gguf",
+                w::constant_output_gguf_with_template_bytes(7, "{{ messages[0].content }}"),
+            ),
+            ("chain.gguf", w::chain_output_gguf_bytes(&[7, 8, 9])),
+        ];
+        let paths: Vec<std::path::PathBuf> = files
+            .iter()
+            .map(|(name, bytes)| {
+                let path = dir.path().join(name);
+                std::fs::write(&path, bytes).expect("writing a synthetic gguf");
+                path
+            })
+            .collect();
+        let Sweep {
+            compared,
+            skipped,
+            mismatches,
+        } = sweep(&paths);
+        assert_eq!(
+            (compared, skipped),
+            (paths.len(), 0),
+            "every synthetic file is readable by both readers"
+        );
+        assert!(
+            mismatches.is_empty(),
+            "{}",
+            mismatches.join(
+                "
+  "
+            )
         );
     }
 
@@ -2406,6 +2460,31 @@ mod spm_derivation_tests {
     /// comparable to one there.
     const PROMPT: &str = "<|user|>\nName the capital of France.</s>\n<|assistant|>\n";
 
+    /// The two directions the corpus test `the_derivation_over_generates_on_byte_level_bpe` pins on real
+    /// vocabularies, on a vocabulary small enough to check by hand: a BPE that declares `a b`, `b c` and `ab c`
+    /// (so `abc` was built as `ab` + `c`). The derivation never MISSES a declared merge, and it over-generates
+    /// the other valid split `a bc`, which no BPE ever declared. A derivation that stopped over-generating here
+    /// would also be dropping valid splits; one that missed a declared merge would break the tokenizer.
+    #[test]
+    fn the_derivation_never_misses_a_declared_merge_and_over_generates() {
+        let vocab: Vec<String> = ["a", "b", "c", "ab", "bc", "abc"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let pair = |a: &str, b: &str| (a.to_string(), b.to_string());
+        let declared: std::collections::HashSet<_> =
+            [pair("a", "b"), pair("b", "c"), pair("ab", "c")].into();
+        let derived: std::collections::HashSet<_> =
+            Content::derive_merges(&vocab).into_iter().collect();
+        assert_eq!(
+            declared.difference(&derived).count(),
+            0,
+            "a declared merge was missed"
+        );
+        let extra: Vec<_> = derived.difference(&declared).collect();
+        assert_eq!(extra, [&pair("a", "bc")], "the over-generated split");
+    }
+
     /// No corpus needed: the algorithm on a vocabulary small enough to check by
     /// hand. Runs in the ordinary suite, unlike everything else in this module.
     #[test]
@@ -2462,7 +2541,6 @@ mod spm_derivation_tests {
 
     /// THE ORACLE. The derived list against a real one, on the same vocabulary.
     #[test]
-    #[ignore = "needs a local GGUF corpus; set LIGHTBULB_GGUF_CORPUS"]
     fn derived_merges_are_set_identical_to_a_real_declared_list() {
         let Some(tiny) = corpus_file("tinyllama-1.1b-chat-v1.0.Q4_0.gguf") else {
             lightbulb_skip();
@@ -2786,7 +2864,6 @@ mod spm_derivation_tests {
     /// could agree with those scores and still tokenize differently, and nothing
     /// measured here would see it. The claim is bounded on purpose.
     #[test]
-    #[ignore = "needs a local GGUF corpus; set LIGHTBULB_GGUF_CORPUS"]
     fn baichuan_derived_order_agrees_with_the_converters_own_scores() {
         let Some(c) = read_corpus("ggml-vocab-baichuan.gguf") else {
             lightbulb_skip();
@@ -2875,7 +2952,6 @@ mod spm_derivation_tests {
     /// MISMEASURED REFERENCE IS EASIER TO CLEAR THAN THE TRUE ONE, AND CLEARING
     /// IT LOOKS LIKE SUCCESS ON BOTH SIDES.
     #[test]
-    #[ignore = "needs a local GGUF corpus; set LIGHTBULB_GGUF_CORPUS"]
     fn every_raw_violation_on_the_validated_file_is_a_sentinel_artefact() {
         let Some(c) = read_corpus("ggml-vocab-llama-spm.gguf") else {
             lightbulb_skip();
@@ -2912,7 +2988,6 @@ mod spm_derivation_tests {
 
     /// Baichuan rebuilds, and the allowlist is what permits it.
     #[test]
-    #[ignore = "needs a local GGUF corpus; set LIGHTBULB_GGUF_CORPUS"]
     fn baichuan_rebuilds_now_and_would_not_without_its_allowlist_entry() {
         let Some(c) = read_corpus("ggml-vocab-baichuan.gguf") else {
             lightbulb_skip();
@@ -2947,7 +3022,6 @@ mod spm_derivation_tests {
     /// digest comparison answers `A == B` and reported them unrelated with its
     /// own positive control passing.
     #[test]
-    #[ignore = "needs a local GGUF corpus; set LIGHTBULB_GGUF_CORPUS"]
     fn phi3_extends_the_llama_vocabulary_and_inherits_its_oracle() {
         let (Some(phi3_c), Some(spm_c), Some(tiny_c)) = (
             read_corpus("ggml-vocab-phi-3.gguf"),
@@ -3006,7 +3080,6 @@ mod spm_derivation_tests {
     /// exactly one token corrupted by this file's own conversion, not a new
     /// vocabulary needing its own independent oracle.
     #[test]
-    #[ignore = "needs a local GGUF corpus; set LIGHTBULB_GGUF_CORPUS"]
     fn stories15m_q4_0_shares_the_llama_vocabulary_minus_one_corrupted_token() {
         let (Some(q4_c), Some(q8_c), Some(spm_c)) = (
             read_corpus("stories15M-q4_0.gguf"),
@@ -3075,7 +3148,6 @@ mod spm_derivation_tests {
 
     /// phi-3 rebuilds, and agrees with the oracle over the shared probe set.
     #[test]
-    #[ignore = "needs a local GGUF corpus; set LIGHTBULB_GGUF_CORPUS"]
     fn phi3_agrees_with_the_oracle_through_the_production_path() {
         let Some((tiny_c, phi3_c, disagreements)) = compare_rebuilt(
             "tinyllama-1.1b-chat-v1.0.Q4_0.gguf",
@@ -3174,7 +3246,6 @@ mod spm_derivation_tests {
     /// and rests on ~334x fewer observations, which is the honest caveat — but
     /// the pairs it does have are cleaner than either large file's.
     #[test]
-    #[ignore = "needs a local GGUF corpus; set LIGHTBULB_GGUF_CORPUS"]
     fn the_v1_toy_order_agrees_over_a_small_but_clean_population() {
         let Some(c) = read_corpus("tinyllamas-stories-260k-f32.gguf") else {
             lightbulb_skip();
@@ -3232,7 +3303,6 @@ mod spm_derivation_tests {
 
     /// The toy rebuilds, and its 512-token vocabulary survives the round trip.
     #[test]
-    #[ignore = "needs a local GGUF corpus; set LIGHTBULB_GGUF_CORPUS"]
     fn the_v1_toy_rebuilds_through_the_production_path() {
         let Some(c) = read_corpus("tinyllamas-stories-260k-f32.gguf") else {
             lightbulb_skip();
@@ -3264,7 +3334,6 @@ mod spm_derivation_tests {
     /// It never MISSES a declared merge — that half does hold across every
     /// vocabulary measured — so the assertions below pin BOTH directions.
     #[test]
-    #[ignore = "needs a local GGUF corpus; set LIGHTBULB_GGUF_CORPUS"]
     fn the_derivation_over_generates_on_byte_level_bpe() {
         let mut checked = 0usize;
         for name in [
@@ -3307,6 +3376,11 @@ mod spm_derivation_tests {
             );
             checked += 1;
         }
+        // No byte-level file at all: no corpus here. A skip where one is not required, a failure where it is.
+        if checked == 0 {
+            lightbulb_skip();
+            return;
+        }
         // ⚠️ POSITIVE CONTROL: without it a corpus missing all three files
         // passes while asserting nothing.
         assert!(
@@ -3317,7 +3391,6 @@ mod spm_derivation_tests {
 
     /// The digest the allowlist names is the one this vocabulary actually has.
     #[test]
-    #[ignore = "needs a local GGUF corpus; set LIGHTBULB_GGUF_CORPUS"]
     fn the_allowlisted_digest_belongs_to_llama_spm() {
         let Some(spm) = corpus_file("ggml-vocab-llama-spm.gguf") else {
             lightbulb_skip();
@@ -3407,7 +3480,6 @@ mod spm_derivation_tests {
     /// post-processor. A partial reimplementation of the subject cannot
     /// distinguish its own gaps from the subject's.
     #[test]
-    #[ignore = "needs a local GGUF corpus; set LIGHTBULB_GGUF_CORPUS"]
     fn llama_spm_agrees_with_the_oracle_through_the_production_path() {
         let Some((tiny_c, spm_c, disagreements)) = compare_rebuilt(
             "tinyllama-1.1b-chat-v1.0.Q4_0.gguf",

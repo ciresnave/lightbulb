@@ -1,0 +1,61 @@
+# Real-model tests on a self-hosted runner (ROADMAP C1b, docs/SELF_HOSTED_TESTS.md).
+#
+# NOT RUNNABLE TODAY: no runner is registered for this repository (CireSnave has paused registrations; the PM holds the
+# request, label `lightbulb-models`). Dispatch only, on purpose: a push or schedule trigger with no runner queues until
+# timeout and leaves noise on a public repo. Until a runner exists every test this job would run is UNVERIFIED, not covered.
+#
+# Conditions (CIRESNAVE-EXPECTATIONS 5.1h): only the reviewed default branch runs here (a dispatch that selects another
+# ref is skipped), no pull_request trigger (a PR would run unreviewed code on the maintainer's machine), no secrets, no
+# third-party actions beyond checkout, no fork code. The model files are PATHS on the runner's disk, never downloaded by this
+# job and never copied into the repository or an artifact.
+name: selfhosted
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # Armed: a missing model or corpus FAILS the test instead of skipping it (src/test_notice.rs).
+  LIGHTBULB_REQUIRE_MODEL: "1"
+  LIGHTBULB_REQUIRE_CORPUS: "1"
+
+jobs:
+  real-model-tests:
+    name: real-model tests (self-hosted, models on disk)
+    if: github.ref == 'refs/heads/main'
+    runs-on: [self-hosted, Windows, X64, lightbulb-models]
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      # Fails loudly and names what is missing; nothing is installed or assumed. The three variables are runner-scoped
+      # (set by the runner's owner), not repository variables.
+      - name: the models are where the runner says they are
+        shell: bash
+        run: |
+          missing=""
+          [ -n "${TINYLLAMA_DIR:-}" ] && [ -f "$TINYLLAMA_DIR/tokenizer.json" ] || missing="$missing TINYLLAMA_DIR(tokenizer.json)"
+          [ -n "${LIGHTBULB_GGUF:-}" ] && [ -f "$LIGHTBULB_GGUF" ] || missing="$missing LIGHTBULB_GGUF(file)"
+          [ -n "${LIGHTBULB_GGUF_CORPUS:-}" ] && [ -d "$LIGHTBULB_GGUF_CORPUS" ] || missing="$missing LIGHTBULB_GGUF_CORPUS(dir)"
+          if [ -n "$missing" ]; then echo "::error::not provisioned on this runner:$missing"; exit 1; fi
+          echo "TINYLLAMA_DIR=$TINYLLAMA_DIR"; echo "LIGHTBULB_GGUF=$LIGHTBULB_GGUF"; echo "LIGHTBULB_GGUF_CORPUS=$LIGHTBULB_GGUF_CORPUS"
+
+      # A skip passes, so the counts are checked, not just the exit code: a filter that matches nothing exits 0.
+      # corpus: the 12 spm_derivation_tests that read the corpus (REQUIRE_CORPUS makes an absent file a failure).
+      - name: corpus tests ran (not skipped)
+        shell: bash
+        run: |
+          out="$(cargo test --release --lib -- spm_derivation_tests --nocapture 2>&1)"; echo "$out" | tail -5
+          echo "$out" | grep -q "test result: ok. 18 passed; 0 failed" || { echo "::error::expected 18 passed in spm_derivation_tests"; exit 1; }
+          if echo "$out" | grep -q "SKIP"; then echo "::error::a corpus test skipped on the runner"; exit 1; fi
+
+      # The `#[ignore]`d real-model tests (GGUF, TinyLlama): run explicitly, one thread (each loads its own copy).
+      - name: ignored real-model tests
+        shell: bash
+        run: |
+          cargo test --release --features fuel-engine --test c1_prefill_vs_decode --test gguf_serving_e2e --test chat_template_e2e -- --ignored --test-threads=1 --nocapture

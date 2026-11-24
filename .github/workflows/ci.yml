@@ -220,7 +220,7 @@ jobs:
   portfolio:
     permissions:
       contents: read
-    uses: ciresnave/coderipper/.github/workflows/portfolio.yml@c72a6e03479d914de8ea8a73609ba73e93a0de92 # coderipper#356, installs coderipper 0.47.5
+    uses: ciresnave/coderipper/.github/workflows/portfolio.yml@dc45e3632ab9f471292458e5ccba5f375084a70a # installs CodeRipper 0.47.15 (CODERIPPER_VERSION at this SHA; coderipper main is 0.47.21)
 
   gates:
     # `gates` is the one required status context on this repo's `main`, so
@@ -433,6 +433,15 @@ jobs:
           python scripts/clippy_gate.py
           echo clippy >> .gates-ran
 
+      # `#[ignore]` is a last resort (EXPECTATIONS 5.1g): the total of `#[ignore]` attributes is recorded in
+      # docs/ignore-count.txt and a change to it must be an edit of that file, so a new one is seen in review.
+      # Ratchet on the total, not a list (scripts/ignore_census.py says what it does not catch).
+      - name: ignore census
+        shell: bash
+        run: |
+          python scripts/ignore_census.py
+          echo ignorecount >> .gates-ran
+
       # A DELETED STEP IS A SILENTLY DISABLED GATE. Without this, removing the
       # `fmt` step does not turn anything red -- the job simply runs three
       # steps instead of four and reports success. An absent gate and a passing
@@ -463,7 +472,7 @@ jobs:
       - name: every gate must have run
         shell: bash
         run: |
-          expected="fmt lockfile doc test featgate synthetic clippy licence"
+          expected="fmt lockfile doc test featgate synthetic clippy ignorecount licence"
           test -f .gates-ran || { echo "::error::no gate markers written at all"; exit 1; }
           missing=""
           for g in $expected; do
