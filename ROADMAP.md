@@ -5673,3 +5673,15 @@ Measured 2026-11-12 at main f01b123 with coderipper 0.43.54 (`coderipper check <
 | G4 | MOD-005 (Info) outliers: `api/mod.rs` names 16 modules (threshold 14); `api/openai/chat.rs` 1279 code lines (1035); `engine/mod.rs` names 19; `model_fuel/scheduled_llama_engine.rs` names 15. Split `chat.rs` first (it also carries most of G1's surface). | open |
 | G5 | MOD-001 (Info): 163 of 1138 public items lack documentation (14%), the first at `src/api/admin_models.rs:16`. | open (ratchet) |
 | G6 | MOD-008 (Info): `ModelMemoryProfile::total_bytes_per_request` (`hardware/batch_sizing.rs:89`) and `device_pool::init` (`model_fuel/device_pool.rs:130`) are pass-through wrappers. MOD-006 (Info): `src/bin/lightbulb-probe.rs` changes in two unrelated commit groups. | open |
+
+### H. Open items from the docs-drift audit (analysant gate-B rows 31-37, answered open 2026-11-25; `git grep` over `src` and the tree at fe73429)
+
+| # | Item | Status |
+|---|---|---|
+| H1 | ROADMAP 4191 (gate-B 31): `VirtualMemoryPool` and `SharedMemoryPool` implementations unticked; no hits in `src` at fe73429. Candle-era plan: decide against the Fuel allocator (section E) before any work. | open |
+| H2 | ROADMAP 4192 (gate-B 32): `ElasticCacheBuilder` unimplemented, no hits in `src`. Same decision as H1. | open |
+| H3 | `docs/CANDLE_CUDA_VMM_SPEC.md:473` (gate-B 33): `VirtualMemoryPool` implemented and tested: not implemented. Resolves with H1. | open |
+| H4 | `docs/CANDLE_CUDA_VMM_SPEC.md:474` (gate-B 34): `SharedMemoryPool` implemented and tested: not implemented. Resolves with H1. | open |
+| H5 | `docs/CHUNK_SIZE_OPTIMIZATION.md:266` (gate-B 35): `benchmark_chunk_sizes.rs` is absent from the tree, so the empirical chunk-size measurement never ran on target hardware. Re-create against the Fuel path or retire the box. | open |
+| H6 | `docs/M3_2_DECODE_LOOP_ANALYSIS.md:284` (gate-B 36): `DecodeState` (tensor reuse across decode steps) absent from `src`. Re-measure on the Fuel decode loop first (Fuel row 124 / #703 owns decode speed). | open |
+| H7 | `docs/NAME_MAPPING_MODEL_LOADING.md:325` (gate-B 37): `ModelComponent` enum absent from `src`. Check against the GGUF loader before building. | open |
