@@ -51,7 +51,7 @@ Omitted deliberately: `contracts_live`, `fused_rmsnorm_perf`, `integration_local
 
 **Record the exact pass/fail counts per suite.** If anything already fails, record it and do **not** fix it here.
 
-- [ ] **Step 2: Delete the `mlp_wrapper.rs` site**
+- [x] **Step 2: Delete the `mlp_wrapper.rs` site**
 
 In `src/model/mlp_wrapper.rs`, inside `MlpWrapper::forward`, delete these four lines:
 
@@ -64,7 +64,7 @@ In `src/model/mlp_wrapper.rs`, inside `MlpWrapper::forward`, delete these four l
 
 Both consumers are unused; nothing downstream reads `input_vec`.
 
-- [ ] **Step 3: Delete the `custom_transformer.rs` sites**
+- [x] **Step 3: Delete the `custom_transformer.rs` sites**
 
 Delete this block (embedding constructor, load-time):
 
@@ -86,7 +86,7 @@ Delete the enclosing `if` too — with the body gone it has no effect.
 
 **Do NOT touch the `agg`/`attn_weights` extractions further down.** Those feed the H2O policy and are load-bearing; they belong to the attention-reduction work.
 
-- [ ] **Step 4: Delete the `custom_attention.rs` site**
+- [x] **Step 4: Delete the `custom_attention.rs` site**
 
 Delete the `if layer_idx == 0 {` block containing:
 

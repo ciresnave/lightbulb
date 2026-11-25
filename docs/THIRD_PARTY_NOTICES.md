@@ -11,6 +11,27 @@ licence come from. Method and evidence: [`PROVENANCE.md`](../PROVENANCE.md). Mea
 |---|---|---|---|
 | `src/backend/marlin_ffi.rs` (compiled only with `feature = "cuda"`) | [`guoqingbao/attention.rs`](https://github.com/guoqingbao/attention.rs), `src/kernels/src/ffi.rs` | MIT (declared in that repo's `Cargo.toml`; the repo has no `LICENSE` file, so GitHub reports none) | `extern "C"` declarations of the Marlin CUDA kernel entry points, including six parameter renames (`A`→`inputs`, `B`→`weight`, `C`→`out`, `prob_m`/`prob_k`/`prob_n`→`m`/`k`/`n`) that match that file. |
 | `tests/fixtures/qwen35_chat_template/chat_template.jinja` (test fixture only) | [`Qwen/Qwen3.5-0.8B`](https://huggingface.co/Qwen/Qwen3.5-0.8B), `chat_template.jinja` (7755 bytes, sha256 `273d8e0e683b885071fb17e08d71e5f2a5ddfb5309756181681de4f5a1822d80`) | Apache-2.0 (that repo's `LICENSE` and model card) | The file verbatim, unmodified; origin and licence also in the fixture directory's `README.md`. |
+| `tests/support/gguf.rs` (Q4_K / Q5_K / Q3_K encoders), `tests/gguf_kquant_encoders.rs` (test only) | [`ggml-org/llama.cpp`](https://github.com/ggml-org/llama.cpp), `ggml/src/ggml-common.h` and `ggml/src/ggml-quants.c` (`get_scale_min_k4`, `dequantize_row_q4_K`, `_q5_K`, `_q3_K`), read at commit `76f186df71a41abb3ee20fffedee31ca5dbc7d9f` (2026-11-19) | MIT, Copyright (c) 2023-2026 The ggml authors (text below) | The block layouts and the scale/min packing; the test's decoder is a line-for-line port of the ggml dequantisers. The encoder is written from the decode arithmetic (plain min/max quantiser), not ggml's quantiser. |
+
+ggml licence (MIT), as at the commit above:
+
+    MIT License
+
+    Copyright (c) 2023-2026 The ggml authors
+
+    Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated
+    documentation files (the "Software"), to deal in the Software without restriction, including without limitation
+    the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and
+    to permit persons to whom the Software is furnished to do so, subject to the following conditions:
+
+    The above copyright notice and this permission notice shall be included in all copies or substantial portions of
+    the Software.
+
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO
+    THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+    AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+    TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+    SOFTWARE.
 
 Status of `marlin_ffi.rs`: CireSnave ruled on 2026-08-20 that the block is **interface, not expression** (its
 types and order are dictated by the CUDA kernel ABI), so no third-party copyright is owed and this crate's

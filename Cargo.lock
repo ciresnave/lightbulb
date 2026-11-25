@@ -3438,7 +3438,7 @@ dependencies = [
 
 [[package]]
 name = "lightbulb"
-version = "0.24.5"
+version = "0.24.6"
 dependencies = [
  "ahash",
  "anyhow",
@@ -3459,6 +3459,7 @@ dependencies = [
  "fuel-ir",
  "fuel-loaders",
  "fuel-model-llama",
+ "fuel-quantized",
  "fuel-transformers",
  "futures",
  "futures-util",
