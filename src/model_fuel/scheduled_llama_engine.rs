@@ -51,7 +51,11 @@ use fuel_inference::multi_session::{KvBudget, PagedSchedulePolicy};
 
 use super::engine_model::effective_generation_budget;
 use super::policies::BlockPrefixIndexFor;
+
+mod serve_loaders;
 use super::scheduler_driver_paged::{FuelPagedSchedulerDriver, SERVING_SCHEDULE_POLICY};
+use serve_loaders::*;
+
 use crate::engine::InferenceJob;
 use crate::engine::SlotPoolRequest as SlotRequest;
 use crate::engine::model_runner::{
@@ -667,134 +671,6 @@ pub(crate) fn run_fuel_engine(
     } else {
         serve_f32(model_path, context_length, config, rx);
     }
-}
-
-/// The `.gguf` branch of [`run_fuel_engine`]: reads the file's own
-/// `general.architecture` declaration FIRST — through a throwaway
-/// `crate::gguf::Content` read, same pattern the loaders' own "up to three
-/// times" safety note already accepts — and picks the loader that actually
-/// matches, instead of hardcoding Llama and discovering a Qwen3 checkpoint's
-/// mismatch as a refusal deep inside `require_llama_architecture`.
-fn serve_gguf(
-    model_path: &Path,
-    context_length: usize,
-    config: BatchedServeConfig,
-    rx: Receiver<InferenceJob>,
-) {
-    let content = match crate::gguf::Content::read(model_path) {
-        Ok(c) => c,
-        Err(e) => return load_failed(model_path, e, rx),
-    };
-    match detect_architecture(content.metadata()) {
-        Ok(GgufArchitecture::Llama) => serve_gguf_llama(model_path, context_length, config, rx),
-        Ok(GgufArchitecture::Qwen3) => serve_gguf_qwen3(model_path, context_length, config, rx),
-        Ok(GgufArchitecture::Qwen35) => {
-            load_failed(model_path, qwen35_unserved(content.metadata()), rx)
-        }
-        Err(e) => load_failed(model_path, e, rx),
-    }
-}
-
-/// The Llama-architecture half of [`serve_gguf`] — split out so that
-/// function stays short; see its own doc for the load/route/batch shape both
-/// architecture branches repeat.
-fn serve_gguf_llama(
-    model_path: &Path,
-    context_length: usize,
-    config: BatchedServeConfig,
-    rx: Receiver<InferenceJob>,
-) {
-    let loaded = match super::loader_gguf::load_quantized_llama_gguf(model_path) {
-        Ok(l) => l,
-        Err(e) => return load_failed(model_path, e, rx),
-    };
-    println!("Fuel model loaded at {}", model_path.display());
-    let eos_ids = eos_ids_from(loaded.eos.as_ref());
-    run_batched(
-        &loaded.model,
-        config,
-        eos_ids,
-        context_length,
-        loaded.tokenizer,
-        rx,
-        ServingDriverInner::QuantizedGguf,
-    );
-}
-
-/// The Qwen3-architecture half of [`serve_gguf`] — see [`serve_gguf_llama`].
-fn serve_gguf_qwen3(
-    model_path: &Path,
-    context_length: usize,
-    config: BatchedServeConfig,
-    rx: Receiver<InferenceJob>,
-) {
-    let loaded = match super::loader_gguf_qwen3::load_quantized_qwen3_gguf(model_path) {
-        Ok(l) => l,
-        Err(e) => return load_failed(model_path, e, rx),
-    };
-    println!("Fuel model loaded at {}", model_path.display());
-    let eos_ids = eos_ids_from(loaded.eos.as_ref());
-    run_batched(
-        &loaded.model,
-        config,
-        eos_ids,
-        context_length,
-        loaded.tokenizer,
-        rx,
-        ServingDriverInner::QuantizedGgufQwen3,
-    );
-}
-
-/// The SafeTensors-directory branch of [`run_fuel_engine`] — see [`serve_gguf`].
-fn serve_f32(
-    model_path: &Path,
-    context_length: usize,
-    config: BatchedServeConfig,
-    rx: Receiver<InferenceJob>,
-) {
-    let loaded = match super::loader_f32::load_llama_f32_from_dir(model_path) {
-        Ok(l) => l,
-        Err(e) => return load_failed(model_path, e, rx),
-    };
-    println!("Fuel model loaded at {}", model_path.display());
-    let eos_ids = eos_ids_from(loaded.eos.as_ref());
-    run_batched(
-        &loaded.model,
-        config,
-        eos_ids,
-        context_length,
-        loaded.tokenizer,
-        rx,
-        ServingDriverInner::F32,
-    );
-}
-
-/// Why a `qwen35` GGUF is recognised but not served: a specific refusal rather
-/// than the generic unsupported-architecture one, so the reader is not sent
-/// looking for a defect in a file that is fine.
-const QWEN35_UNSERVED: &str = "this GGUF declares `general.architecture = \"qwen35\"` \
-    (Qwen3.5/3.8: Gated DeltaNet layers interleaved with full attention). Lightbulb \
-    recognises it and its tokenizer is supported, but serving it needs a hybrid decode \
-    model with per-session recurrent state and K-quants kept quantized, which Fuel does \
-    not provide yet (ROADMAP F10).";
-
-/// [`QWEN35_UNSERVED`] plus the file's own geometry, or why it could not be read.
-fn qwen35_unserved(md: &std::collections::HashMap<String, crate::gguf::Value>) -> anyhow::Error {
-    match super::qwen35_config::Qwen35Config::from_metadata(md) {
-        Ok(c) => anyhow::anyhow!("{QWEN35_UNSERVED} This file: {}.", c.describe()),
-        Err(e) => anyhow::anyhow!("{QWEN35_UNSERVED} Its geometry could not be read: {e:#}."),
-    }
-}
-
-/// Report a load failure the same way both branches of [`run_fuel_engine`]
-/// need to, then drain `rx` so no job is left waiting on a model that will
-/// never load.
-fn load_failed(model_path: &Path, e: anyhow::Error, rx: Receiver<InferenceJob>) {
-    eprintln!(
-        "Failed to load Fuel model at {}: {e:#}",
-        model_path.display()
-    );
-    drain_with_error(rx, &format!("model load failed: {e:#}"));
 }
 
 #[cfg(test)]

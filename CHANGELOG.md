@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.24.7 — maintenance: G4 module splits (MOD-005 outliers cleared), portfolio pin 0.48.1, ROADMAP section H
+
+G4: five verbatim moves with no behaviour change: tool-call handling and the SSE stream builder out of `api/openai/chat.rs`, the `engine/mod.rs` re-exports into two grouped files, `impl ApiServer` into `api/server.rs`, the `serve_*` loaders into `scheduled_llama_engine/serve_loaders.rs`. `coderipper check MOD-005` (0.48.1): four outliers before, none after. CI pin moved to coderipper#375 (installs CodeRipper 0.48.1). ROADMAP gains section H (one row per open docs-drift item) and G4 is marked done.
+
 ## 0.24.6 — Q4_K, Q5_K and Q3_K synthetic GGUF encoders (tests)
 
 Test support gains `quantize_q4_k`, `quantize_q5_k` and `quantize_q3_k` (144-, 176- and 110-byte ggml blocks from f32), the input a Q4_K/Q5_K differential against Fuel's Vulkan kernels needs. `tests/gguf_kquant_encoders.rs` decodes their output with a line-for-line port of ggml's dequantisers incl. `_q3_K`'s scale unpacking (llama.cpp 76f186d, MIT; credited in `docs/THIRD_PARTY_NOTICES.md`) and asserts a per-sub-block error bound; seeded bugs (scale/min swapped, high-bit plane or Q3_K `hmask` dropped) must violate it, and encoder mutations (high-bit plane, scale/min packing, nibble order, Q3_K `hmask`, scale high bits, 2-bit field order) each fail the round trip. No library change. The same bytes are also decoded through the published `fuel-quantized` 0.47.32 (`dequant_ggml_bytes`, new dev-dependency from crates.io) and must agree with the ggml port to 1e-5: that is the check the encoders were built for, and it passes for Q3_K, Q4_K and Q5_K.
