@@ -208,7 +208,11 @@ mod tests {
 
     #[test]
     fn try_argmax_matches_argmax_on_finite_rows() {
-        assert_eq!(try_argmax(&[1.0, 3.0, 3.0, 2.0]).unwrap(), 1, "first index on a tie");
+        assert_eq!(
+            try_argmax(&[1.0, 3.0, 3.0, 2.0]).unwrap(),
+            1,
+            "first index on a tie"
+        );
         assert_eq!(try_argmax(&[f32::NEG_INFINITY; 4]).unwrap(), 0);
         assert_eq!(try_argmax(&[-0.0, 0.0]).unwrap(), 0, "-0.0 == +0.0");
         assert!(try_argmax(&[]).is_err());
