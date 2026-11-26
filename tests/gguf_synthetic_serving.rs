@@ -364,6 +364,38 @@ async fn a_q8_1_gguf_is_refused_by_name_not_served() {
     );
 }
 
+/// ROADMAP H8: a model that produces a NaN logit must fail the request, not answer with a token picked from the
+/// row. Fuel 0.57.0 made `sample_logits` (the path a default-sampling request takes: no top_p, penalties or
+/// logprobs) a typed `Err` on a NaN row; before it the greedy argmax and the temperature draw both returned a token.
+/// Both default paths are exercised, each against the same request on a NaN-free file as the control.
+#[tokio::test]
+async fn a_nan_logit_row_fails_a_default_sampling_request_instead_of_picking_a_token() {
+    for temperature in [0.0, 0.7] {
+        let body = chat_body(3, serde_json::json!({ "temperature": temperature }));
+
+        // Control: the same request over the NaN-free file is served.
+        let ok = post_chat_gguf(gguf_writer::constant_output_gguf_bytes(7), body.clone()).await;
+        let ok: serde_json::Value = serde_json::from_slice(&ok).unwrap();
+        assert_eq!(
+            ok["usage"]["completion_tokens"], 3,
+            "temperature {temperature}"
+        );
+
+        let (status, bytes) =
+            post_chat_gguf_status(gguf_writer::nan_logit_gguf_bytes(7), body).await;
+        let text = String::from_utf8_lossy(&bytes);
+        assert_eq!(
+            status,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "temperature {temperature}: {text}"
+        );
+        assert!(
+            text.to_lowercase().contains("nan") || text.contains("not finite"),
+            "the error must say the logits were NaN or not finite (temperature {temperature}): {text}"
+        );
+    }
+}
+
 /// The same request streamed: each token chunk carries its own entry, from the real driver through the runner and
 /// the SSE handler (not a stub on any hop).
 #[tokio::test]

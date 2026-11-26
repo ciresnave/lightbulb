@@ -655,6 +655,21 @@ pub fn constant_output_gguf_q8_1_bytes(token: u32) -> Vec<u8> {
     constant_output_gguf_bytes_with(token, Storage::Q8_1)
 }
 
+/// The F32 file of [`constant_output_gguf_bytes`] whose output matrix holds one NaN, in the row of `token`: the
+/// model then produces a NaN logit for that token on every step (the hidden state is nonzero), which is what a
+/// default-sampling request must turn into an error, never a token picked from a row containing NaN.
+pub fn nan_logit_gguf_bytes(token: u32) -> Vec<u8> {
+    let vocab = synthetic_gguf_tokens().len();
+    assert!((token as usize) < vocab, "token out of vocabulary");
+    let mut tensors = synthetic_tensors(token, vocab);
+    let out = tensors
+        .iter_mut()
+        .find(|(name, _, _)| name == "output.weight")
+        .expect("the synthetic file has an output matrix");
+    out.2[token as usize * SYN_HIDDEN] = f32::NAN;
+    assemble(tensors, Storage::F32, None)
+}
+
 fn constant_output_gguf_bytes_with(token: u32, matrices: Storage) -> Vec<u8> {
     gguf_bytes_full(token, matrices, None)
 }
