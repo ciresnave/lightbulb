@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.24.12 — **BREAKING**: Fuel 0.56.1 -> 0.57.0 (NaN logit row is a typed error; greedy ties take the first index)
+
+Every `fuel-*` pin moves from 0.56.1 to 0.57.0 (crates.io). Read: the fuel v0.57.0 CHANGELOG. **What broke: nothing compiled differently** (`cargo check --all-targets`, no source change: Lightbulb calls neither `sample_logits` nor `spec_argmax` directly). **What changed in behaviour:** a default-sampling request (no top_p, penalties or logprobs) whose model produces a NaN logit now fails with HTTP 500 instead of being answered with a token picked from the row (Fuel's published `sample_logits` did that from 0.19.1 to 0.56.1), and greedy ties take the FIRST index (was last). Lightbulb's greedy output can differ from the previous release on a row with tied maxima. Verified: the new test `a_nan_logit_row_fails_a_default_sampling_request_instead_of_picking_a_token` (temperature 0 and 0.7, each with a NaN-free control served 200); `cargo test --tests` with the CI skip list: 40 binaries, 1109 passed, 0 failed, 62 ignored; no golden needed regenerating. Not verified: CUDA/Vulkan builds, self-hosted tests, a real checkpoint.
+
 ## 0.24.11 — F3 slice 1: `/v1/embeddings` core (not routed yet)
 
 `src/api/openai/embeddings.rs`: request and response types, input validation (string, string array, token arrays; empty and over-long inputs and a wrong `dimensions` width are errors, never truncation), `encoding_format` float and base64, `dimensions`, usage counts, and a stub embedder behind a trait. The route is NOT wired: it needs an embedding kind in the model registry, which is slice 2 (safetensors nomic-embed-text through Fuel's `lazy_nomic_bert`, design: `docs/F3-EMBEDDINGS-DESIGN.md`). Verified: 9 unit tests (`cargo test --lib api::openai::embeddings`). Not verified: any real model, any HTTP call.
