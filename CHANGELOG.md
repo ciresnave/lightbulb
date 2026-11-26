@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.24.9 — feat: background model pulls with job progress
+
+`POST /v1/lightbulb/admin/models/pull` accepts `"wait": false`: it answers 202 with a job id at once and downloads in the background, and `GET /v1/lightbulb/admin/models/pull/{id}` reports `state`, per-file `downloaded`/`total` bytes and the final result or failing status. Without `wait` the route behaves as before. Tested against the localhost stub Hub (progress, failure status, unknown job 404, 202 and validation order); the real Hub is not run. ROADMAP F1 and F2 rows updated.
+
 ## 0.24.8 — F3 scheduled, F4, F7 and F9 closed (docs only)
 
 Docs only: ROADMAP F3 (`/v1/embeddings`) is scheduled with a design note (`docs/F3-EMBEDDINGS-DESIGN.md`); F4 (per-token streamed tool calls) is closed as decided no and recorded in `docs/API.md`; F9 (Cherry capture) is closed as moot; Ollama-native routes (F7, census row 23) are closed as not now (board 514). Decisions: CireSnave board 505, 2026-11-26. No code changed.
