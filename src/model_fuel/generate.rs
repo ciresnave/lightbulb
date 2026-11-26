@@ -64,6 +64,25 @@ pub fn argmax(logits: &[f32]) -> u32 {
     best as u32
 }
 
+/// Greedy argmax that refuses a NaN row, the contract Fuel's `sample_argmax`
+/// adopted in 0.53 (fuel 0.56.1 CHANGELOG, Breaking): a NaN logit means the
+/// model produced NaN, so no token is picked and the caller gets an `Err` to
+/// report, never a silently chosen token. Ties take the first index; an empty
+/// row is an `Err` too. [`argmax`] stays as the NaN-skipping reference the
+/// goldens pin; the shipped decode loop uses this one.
+pub fn try_argmax(logits: &[f32]) -> Result<u32> {
+    if logits.is_empty() {
+        anyhow::bail!("try_argmax: empty logits row");
+    }
+    if let Some(at) = logits.iter().position(|v| v.is_nan()) {
+        anyhow::bail!(
+            "try_argmax: logit {at} of {} is NaN (the model produced NaN); refusing to pick a token",
+            logits.len()
+        );
+    }
+    Ok(argmax(logits))
+}
+
 /// Prefill `prompt_tokens`, then greedily decode up to `max_new` tokens.
 ///
 /// Stops early on `eos`, if given. Returns only the newly generated tokens.
@@ -151,7 +170,7 @@ pub fn generate_greedy(
     let mut generated = Vec::with_capacity(max_new);
     for _ in 0..max_new {
         // Sampling: Lightbulb's, over realized values.
-        let next = argmax(&logits);
+        let next = try_argmax(&logits)?;
         generated.push(next);
         if Some(next) == eos {
             break;
@@ -169,6 +188,31 @@ pub fn generate_greedy(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn try_argmax_refuses_nan_wherever_it_sits() {
+        for row in [
+            vec![f32::NAN, 1.0, 2.0],
+            vec![1.0, f32::NAN, 2.0],
+            vec![1.0, 2.0, f32::NAN],
+            vec![f32::NAN; 3],
+            vec![1.0, -f32::NAN, 0.5],
+        ] {
+            let e = try_argmax(&row).expect_err("a NaN row must be an Err");
+            assert!(e.to_string().contains("NaN"), "{e}");
+        }
+        // Control: the legacy argmax silently picks from the same rows, which is
+        // what this function exists to stop.
+        assert_eq!(argmax(&[1.0, f32::NAN, 2.0]), 2);
+    }
+
+    #[test]
+    fn try_argmax_matches_argmax_on_finite_rows() {
+        assert_eq!(try_argmax(&[1.0, 3.0, 3.0, 2.0]).unwrap(), 1, "first index on a tie");
+        assert_eq!(try_argmax(&[f32::NEG_INFINITY; 4]).unwrap(), 0);
+        assert_eq!(try_argmax(&[-0.0, 0.0]).unwrap(), 0, "-0.0 == +0.0");
+        assert!(try_argmax(&[]).is_err());
+    }
     use std::path::PathBuf;
 
     fn tinyllama_dir() -> Option<PathBuf> {
