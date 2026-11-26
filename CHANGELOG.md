@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.24.11 — F3 slice 1: `/v1/embeddings` core (not routed yet)
+
+`src/api/openai/embeddings.rs`: request and response types, input validation (string, string array, token arrays; empty and over-long inputs and a wrong `dimensions` width are errors, never truncation), `encoding_format` float and base64, `dimensions`, usage counts, and a stub embedder behind a trait. The route is NOT wired: it needs an embedding kind in the model registry, which is slice 2 (safetensors nomic-embed-text through Fuel's `lazy_nomic_bert`, design: `docs/F3-EMBEDDINGS-DESIGN.md`). Verified: 9 unit tests (`cargo test --lib api::openai::embeddings`). Not verified: any real model, any HTTP call.
+
 ## 0.24.10 — Fuel 0.47.32 -> 0.56.1 (all fuel-* pins, `mlmf-*` 0.11.49)
 
 Every `fuel-*` pin moves from 0.47.32 to 0.56.1 (crates.io; the first release since 0.47.32; `unpopped-vocab` 0.47.0 -> 0.58.5, one copy in `Cargo.lock`). Read: the fuel v0.56.1 CHANGELOG Breaking sections, 0.48 to 0.56. **What broke: nothing compiled differently; `cargo check --all-targets` passes with no source change.** What touches Lightbulb:
