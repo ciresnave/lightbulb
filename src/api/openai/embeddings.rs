@@ -82,17 +82,32 @@ pub struct Validated {
 }
 
 pub fn validate(req: &EmbeddingRequest, spec: &EmbeddingSpec) -> Result<Validated, EmbeddingError> {
-    let format = match req.encoding_format.as_deref() {
-        None | Some("float") => EncodingFormat::Float,
-        Some("base64") => EncodingFormat::Base64,
-        Some(other) => {
-            return Err(bad(
-                "encoding_format",
-                format!("'{other}' is not supported; use 'float' or 'base64'"),
-            ));
-        }
-    };
-    let texts = match &req.input {
+    let format = parse_format(req.encoding_format.as_deref())?;
+    let texts = parse_texts(&req.input, spec)?;
+    let dimensions = parse_dimensions(req.dimensions, spec)?;
+    Ok(Validated {
+        texts,
+        format,
+        dimensions,
+    })
+}
+
+fn parse_format(f: Option<&str>) -> Result<EncodingFormat, EmbeddingError> {
+    match f {
+        None | Some("float") => Ok(EncodingFormat::Float),
+        Some("base64") => Ok(EncodingFormat::Base64),
+        Some(other) => Err(bad(
+            "encoding_format",
+            format!("'{other}' is not supported; use 'float' or 'base64'"),
+        )),
+    }
+}
+
+fn parse_texts(
+    input: &EmbeddingInput,
+    spec: &EmbeddingSpec,
+) -> Result<Vec<String>, EmbeddingError> {
+    let texts = match input {
         EmbeddingInput::One(s) => vec![s.clone()],
         EmbeddingInput::Many(v) => v.clone(),
         EmbeddingInput::Tokens(_) => {
@@ -118,25 +133,27 @@ pub fn validate(req: &EmbeddingRequest, spec: &EmbeddingSpec) -> Result<Validate
     if texts.iter().any(|t| t.is_empty()) {
         return Err(bad("input", "input must not contain an empty string"));
     }
-    let dimensions = match req.dimensions {
-        None => None,
-        Some(d) if d == spec.dim => None,
-        Some(0) => return Err(bad("dimensions", "dimensions must be positive")),
-        Some(d) if spec.matryoshka.contains(&d) => Some(d),
+    Ok(texts)
+}
+
+fn parse_dimensions(
+    requested: Option<usize>,
+    spec: &EmbeddingSpec,
+) -> Result<Option<usize>, EmbeddingError> {
+    match requested {
+        None => Ok(None),
+        Some(d) if d == spec.dim => Ok(None),
+        Some(0) => Err(bad("dimensions", "dimensions must be positive")),
+        Some(d) if spec.matryoshka.contains(&d) => Ok(Some(d)),
         Some(d) => {
             let ok = if spec.matryoshka.is_empty() {
                 format!("this model only produces {}", spec.dim)
             } else {
                 format!("supported: {} or {:?}", spec.dim, spec.matryoshka)
             };
-            return Err(bad("dimensions", format!("{d} is not supported; {ok}")));
+            Err(bad("dimensions", format!("{d} is not supported; {ok}")))
         }
-    };
-    Ok(Validated {
-        texts,
-        format,
-        dimensions,
-    })
+    }
 }
 
 /// What a model-backed encoder returns for one text.
@@ -226,6 +243,30 @@ pub struct EmbeddingResponse {
     pub usage: EmbeddingUsage,
 }
 
+/// The per-text limits a model's output must meet: under the token cap, at the native width.
+fn check_embedded(index: usize, e: &Embedded, spec: &EmbeddingSpec) -> Result<(), EmbeddingError> {
+    if e.tokens > spec.max_tokens {
+        return Err(bad(
+            "input",
+            format!(
+                "input {index} has {} tokens, over the limit of {}",
+                e.tokens, spec.max_tokens
+            ),
+        ));
+    }
+    if e.vector.len() != spec.dim {
+        return Err(bad(
+            "model",
+            format!(
+                "model returned width {}, spec says {}",
+                e.vector.len(),
+                spec.dim
+            ),
+        ));
+    }
+    Ok(())
+}
+
 /// Run a validated request through an embedder, in order, one sequence at a time.
 pub fn build_response(
     model: &str,
@@ -237,25 +278,7 @@ pub fn build_response(
     let mut tokens = 0usize;
     for (index, text) in v.texts.iter().enumerate() {
         let e = embedder.embed(text)?;
-        if e.tokens > spec.max_tokens {
-            return Err(bad(
-                "input",
-                format!(
-                    "input {index} has {} tokens, over the limit of {}",
-                    e.tokens, spec.max_tokens
-                ),
-            ));
-        }
-        if e.vector.len() != spec.dim {
-            return Err(bad(
-                "model",
-                format!(
-                    "model returned width {}, spec says {}",
-                    e.vector.len(),
-                    spec.dim
-                ),
-            ));
-        }
+        check_embedded(index, &e, spec)?;
         tokens += e.tokens;
         let out = finish(e.vector, spec, v.dimensions);
         let embedding = match v.format {
