@@ -60,7 +60,7 @@ Fuel has no padded-batch forward (confirmed), so an input array is a loop of sin
 
 ## `/api/embed` (Ollama-native): decision
 
-Row 23 of the census says no Ollama-native routes exist and PM held "no Ollama-API code without a go". Lightbulb is meant to replace Ollama, but the board decision covers `/v1/embeddings` only. **Recommendation: not in F3.** It is a thin shim over the same core (`{model,input}` -> `{embeddings:[[...]]}`, always normalised, plus `/api/embeddings` legacy), so deferring costs little; ask CireSnave only if a client he names speaks the Ollama protocol. Left as an open question for review, not assumed.
+**Decided (CireSnave board 514, 2026-11-26, verbatim: *"514: A"*; `C:/Projects/CIRESNAVE-DECIDED-ARCHIVE.md` item 514): not in F3, not now; reopen on a named client.** F3 serves `/v1/embeddings` only; census row 23 and ROADMAP F7 are closed on that basis. The core stays route-agnostic (`build_response`), so a later shim over it costs little and nothing here blocks it.
 
 ## Test plan
 
@@ -73,4 +73,4 @@ Row 23 of the census says no Ollama-native routes exist and PM held "no Ollama-A
 
 ## Open questions for review
 
-1. First model order (above). 2. `dimensions` default behaviour on non-Matryoshka models (400 proposed). 3. Idle timeout default. 4. `/api/embed` (not in F3 proposed). 5. Whether to ask Fuel for a GGUF encoder loader (the Ollama-held files) or stay on safetensors for v1 (recommended: safetensors).
+1. First model order (above). 2. `dimensions` default behaviour on non-Matryoshka models (400 proposed). 3. Idle timeout default. 4. (`/api/embed`: decided, board 514.) 5. Whether to ask Fuel for a GGUF encoder loader (the Ollama-held files) or stay on safetensors for v1 (recommended: safetensors).
