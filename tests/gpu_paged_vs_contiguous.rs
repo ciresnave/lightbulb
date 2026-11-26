@@ -823,7 +823,7 @@ fn run_paged(
                 .model
                 .forward_paged_step(tok, &mut pool, handles[i])?;
         }
-        last_tok[i] = sample_logits(&logits, SamplingStrategy::Greedy, &mut rng[i]);
+        last_tok[i] = sample_logits(&logits, SamplingStrategy::Greedy, &mut rng[i])?;
     }
     let prefill = t.elapsed();
 
@@ -839,7 +839,7 @@ fn run_paged(
             plan,
             &mut sessions[i],
         )?;
-        last_tok[i] = sample_logits(&logits, SamplingStrategy::Greedy, &mut rng[i]);
+        last_tok[i] = sample_logits(&logits, SamplingStrategy::Greedy, &mut rng[i])?;
     }
     let first_decode = t.elapsed();
     let opt_after_first = optimize_calls_thread_local();
@@ -859,7 +859,7 @@ fn run_paged(
                 plan,
                 &mut sessions[i],
             )?;
-            last_tok[i] = sample_logits(&logits, SamplingStrategy::Greedy, &mut rng[i]);
+            last_tok[i] = sample_logits(&logits, SamplingStrategy::Greedy, &mut rng[i])?;
         }
         steady.push(t.elapsed());
     }
@@ -1021,7 +1021,7 @@ fn run_contiguous(
             loaded
                 .model
                 .forward_with_kv_context(&prompts[i], &mut caches[i], &mut ctxs[i])?;
-        last_tok[i] = sample_logits(&logits, SamplingStrategy::Greedy, &mut rng[i]);
+        last_tok[i] = sample_logits(&logits, SamplingStrategy::Greedy, &mut rng[i])?;
     }
     let prefill = t.elapsed();
 
@@ -1048,7 +1048,7 @@ fn run_contiguous(
                     .model
                     .forward_decode_step(&toks, &mut caches[i], &mut ctxs[i])?
             };
-            last_tok[i] = sample_logits(&logits, SamplingStrategy::Greedy, &mut rng[i]);
+            last_tok[i] = sample_logits(&logits, SamplingStrategy::Greedy, &mut rng[i])?;
         }};
     }
 
