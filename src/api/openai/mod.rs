@@ -9,6 +9,7 @@ pub mod completions;
 pub mod embeddings;
 pub(crate) mod logprobs;
 pub mod models;
+pub mod nomic_embedder;
 mod tool_parsers;
 
 use axum::{

@@ -45,7 +45,7 @@ pub enum ErrorKind {
     Internal,
 }
 
-fn bad(param: &'static str, message: impl Into<String>) -> EmbeddingError {
+pub(crate) fn bad(param: &'static str, message: impl Into<String>) -> EmbeddingError {
     EmbeddingError {
         kind: ErrorKind::Invalid,
         param,
