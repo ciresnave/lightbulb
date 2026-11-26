@@ -31,13 +31,33 @@ pub struct EmbeddingRequest {
 /// An OpenAI-shaped validation failure: HTTP status, `param`, message.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EmbeddingError {
+    pub kind: ErrorKind,
     pub param: &'static str,
     pub message: String,
 }
 
+/// Who is at fault, so the route can answer 400 for a bad request and 500 for an inference failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ErrorKind {
+    /// The request is wrong (HTTP 400).
+    Invalid,
+    /// The model or engine failed or returned something unusable (HTTP 500).
+    Internal,
+}
+
 fn bad(param: &'static str, message: impl Into<String>) -> EmbeddingError {
     EmbeddingError {
+        kind: ErrorKind::Invalid,
         param,
+        message: message.into(),
+    }
+}
+
+/// A model-side failure: not the caller's fault.
+pub(crate) fn internal(message: impl Into<String>) -> EmbeddingError {
+    EmbeddingError {
+        kind: ErrorKind::Internal,
+        param: "model",
         message: message.into(),
     }
 }
@@ -144,7 +164,7 @@ fn parse_dimensions(
         None => Ok(None),
         Some(d) if d == spec.dim => Ok(None),
         Some(0) => Err(bad("dimensions", "dimensions must be positive")),
-        Some(d) if spec.matryoshka.contains(&d) => Ok(Some(d)),
+        Some(d) if d < spec.dim && spec.matryoshka.contains(&d) => Ok(Some(d)),
         Some(d) => {
             let ok = if spec.matryoshka.is_empty() {
                 format!("this model only produces {}", spec.dim)
@@ -167,15 +187,21 @@ pub struct Embedded {
 
 /// The seam slice 2 fills with a Fuel encoder: one sequence per call (Fuel has no padded batch).
 pub trait Embedder {
+    /// Real tokenizer tokens including special tokens, WITHOUT running the model, so an over-long input
+    /// is refused before any inference is spent on it.
+    fn count_tokens(&self, text: &str) -> Result<usize, EmbeddingError>;
     fn embed(&self, text: &str) -> Result<Embedded, EmbeddingError>;
 }
 
 /// L2-normalise in place. A zero vector is left as zeros (no NaN).
 pub fn l2_normalize(v: &mut [f32]) {
-    let n = v.iter().map(|x| x * x).sum::<f32>().sqrt();
-    if n > 0.0 {
-        v.iter_mut().for_each(|x| *x /= n);
+    // Scale by the largest magnitude first so squaring cannot overflow f32 for large finite values.
+    let m = v.iter().fold(0.0f32, |a, x| a.max(x.abs()));
+    if m == 0.0 || !m.is_finite() {
+        return;
     }
+    let n = m * v.iter().map(|x| (x / m) * (x / m)).sum::<f32>().sqrt();
+    v.iter_mut().for_each(|x| *x /= n);
 }
 
 /// Post-process a pooled vector per the spec: truncate to `dimensions` (Matryoshka), then normalise.
@@ -184,7 +210,9 @@ pub fn finish(mut v: Vec<f32>, spec: &EmbeddingSpec, dimensions: Option<usize>) 
     if let Some(d) = dimensions {
         v.truncate(d);
     }
-    if spec.normalize {
+    // A reduced width is always re-normalised: a truncated vector has the wrong magnitude whatever the
+    // model's native setting.
+    if spec.normalize || dimensions.is_some() {
         l2_normalize(&mut v);
     }
     v
@@ -243,26 +271,32 @@ pub struct EmbeddingResponse {
     pub usage: EmbeddingUsage,
 }
 
-/// The per-text limits a model's output must meet: under the token cap, at the native width.
+fn over_limit(index: usize, tokens: usize, spec: &EmbeddingSpec) -> EmbeddingError {
+    bad(
+        "input",
+        format!(
+            "input {index} has {tokens} tokens, over the limit of {}",
+            spec.max_tokens
+        ),
+    )
+}
+
+/// What a model's output must meet: under the token cap, at the native width, and finite.
 fn check_embedded(index: usize, e: &Embedded, spec: &EmbeddingSpec) -> Result<(), EmbeddingError> {
     if e.tokens > spec.max_tokens {
-        return Err(bad(
-            "input",
-            format!(
-                "input {index} has {} tokens, over the limit of {}",
-                e.tokens, spec.max_tokens
-            ),
-        ));
+        return Err(over_limit(index, e.tokens, spec));
     }
     if e.vector.len() != spec.dim {
-        return Err(bad(
-            "model",
-            format!(
-                "model returned width {}, spec says {}",
-                e.vector.len(),
-                spec.dim
-            ),
-        ));
+        return Err(internal(format!(
+            "model returned width {}, spec says {}",
+            e.vector.len(),
+            spec.dim
+        )));
+    }
+    if let Some(at) = e.vector.iter().position(|x| !x.is_finite()) {
+        return Err(internal(format!(
+            "model returned a non-finite value at component {at} of input {index}"
+        )));
     }
     Ok(())
 }
@@ -277,6 +311,10 @@ pub fn build_response(
     let mut data = Vec::with_capacity(v.texts.len());
     let mut tokens = 0usize;
     for (index, text) in v.texts.iter().enumerate() {
+        let counted = embedder.count_tokens(text)?;
+        if counted > spec.max_tokens {
+            return Err(over_limit(index, counted, spec));
+        }
         let e = embedder.embed(text)?;
         check_embedded(index, &e, spec)?;
         tokens += e.tokens;
@@ -323,6 +361,9 @@ mod tests {
     /// Vector = [len, 1, 2, 3]; tokens = byte length.
     struct Stub;
     impl Embedder for Stub {
+        fn count_tokens(&self, t: &str) -> Result<usize, EmbeddingError> {
+            Ok(t.len())
+        }
         fn embed(&self, t: &str) -> Result<Embedded, EmbeddingError> {
             Ok(Embedded {
                 vector: vec![t.len() as f32, 1.0, 2.0, 3.0],
@@ -415,7 +456,10 @@ mod tests {
         assert_eq!(f.len(), 2);
         assert!(((f.iter().map(|x| x * x).sum::<f32>()) - 1.0).abs() < 1e-6);
         // Truncate-then-normalise differs from normalise-then-truncate: [2,1] -> [.894,.447].
-        assert!((f[0] - 2.0 / 5f32.sqrt()).abs() < 1e-6);
+        let want = [2.0 / 5f32.sqrt(), 1.0 / 5f32.sqrt()];
+        for (g, w) in f.iter().zip(want) {
+            assert!((g - w).abs() < 1e-6, "{f:?} vs {want:?}");
+        }
     }
 
     #[test]
@@ -479,6 +523,9 @@ mod tests {
         );
         struct Wrong;
         impl Embedder for Wrong {
+            fn count_tokens(&self, _: &str) -> Result<usize, EmbeddingError> {
+                Ok(1)
+            }
             fn embed(&self, _: &str) -> Result<Embedded, EmbeddingError> {
                 Ok(Embedded {
                     vector: vec![1.0],
@@ -498,5 +545,116 @@ mod tests {
         let mut z = vec![0.0f32; 3];
         l2_normalize(&mut z);
         assert!(z.iter().all(|x| x.is_finite()));
+    }
+
+    /// Counts `embed` calls and returns whatever vector it was given.
+    struct Probe {
+        vector: Vec<f32>,
+        tokens: usize,
+        calls: std::cell::Cell<usize>,
+    }
+    impl Embedder for Probe {
+        fn count_tokens(&self, _: &str) -> Result<usize, EmbeddingError> {
+            Ok(self.tokens)
+        }
+        fn embed(&self, _: &str) -> Result<Embedded, EmbeddingError> {
+            self.calls.set(self.calls.get() + 1);
+            Ok(Embedded {
+                vector: self.vector.clone(),
+                tokens: self.tokens,
+            })
+        }
+    }
+    fn probe(vector: Vec<f32>, tokens: usize) -> Probe {
+        Probe {
+            vector,
+            tokens,
+            calls: std::cell::Cell::new(0),
+        }
+    }
+
+    #[test]
+    fn an_over_long_input_never_reaches_inference() {
+        let s = spec();
+        let v = validate(&req(serde_json::json!({"model":"m","input":"a"})), &s).unwrap();
+        let p = probe(vec![1.0; 4], s.max_tokens + 1);
+        let e = build_response("m", &v, &s, &p).unwrap_err();
+        assert_eq!((e.param, e.kind), ("input", ErrorKind::Invalid));
+        assert_eq!(p.calls.get(), 0, "embed ran on an input over the cap");
+        // Control: at the cap it does run.
+        let ok = probe(vec![1.0; 4], s.max_tokens);
+        build_response("m", &v, &s, &ok).unwrap();
+        assert_eq!(ok.calls.get(), 1);
+    }
+
+    #[test]
+    fn a_non_finite_vector_is_an_internal_error() {
+        let s = spec();
+        let v = validate(&req(serde_json::json!({"model":"m","input":"a"})), &s).unwrap();
+        for bad_v in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            let e = build_response("m", &v, &s, &probe(vec![1.0, bad_v, 0.0, 0.0], 1)).unwrap_err();
+            assert_eq!(e.kind, ErrorKind::Internal, "{bad_v}");
+        }
+        // Control: the same shape with finite values passes.
+        build_response("m", &v, &s, &probe(vec![1.0, 2.0, 0.0, 0.0], 1)).unwrap();
+    }
+
+    #[test]
+    fn a_wrong_width_is_the_models_fault_not_the_callers() {
+        let s = spec();
+        let v = validate(&req(serde_json::json!({"model":"m","input":"a"})), &s).unwrap();
+        let e = build_response("m", &v, &s, &probe(vec![1.0], 1)).unwrap_err();
+        assert_eq!(e.kind, ErrorKind::Internal);
+    }
+
+    #[test]
+    fn a_matryoshka_width_at_or_above_the_native_width_is_refused() {
+        let mut s = spec();
+        s.matryoshka = vec![2, 8];
+        let r = |d| {
+            validate(
+                &req(serde_json::json!({"model":"m","input":"x","dimensions":d})),
+                &s,
+            )
+        };
+        assert_eq!(r(2).unwrap().dimensions, Some(2), "control: a valid width");
+        assert!(
+            r(8).is_err(),
+            "8 > native 4 would return a shorter vector than asked"
+        );
+    }
+
+    #[test]
+    fn a_reduced_width_is_renormalised_even_when_the_model_does_not_normalise() {
+        let mut s = spec();
+        s.normalize = false;
+        let v = validate(
+            &req(serde_json::json!({"model":"m","input":"ab","dimensions":2})),
+            &s,
+        )
+        .unwrap();
+        let r = build_response("m", &v, &s, &Stub).unwrap();
+        let EmbeddingValue::Float(f) = &r.data[0].embedding else {
+            panic!()
+        };
+        let want = [2.0 / 5f32.sqrt(), 1.0 / 5f32.sqrt()];
+        for (g, w) in f.iter().zip(want) {
+            assert!((g - w).abs() < 1e-6, "{f:?}");
+        }
+    }
+
+    #[test]
+    fn l2_normalize_survives_values_whose_squares_overflow() {
+        let mut big = vec![3.0e30f32, 4.0e30];
+        l2_normalize(&mut big);
+        assert!(
+            (big[0] - 0.6).abs() < 1e-6 && (big[1] - 0.8).abs() < 1e-6,
+            "{big:?}"
+        );
+        // Control: the naive sum of squares of the same input is infinite.
+        assert!((3.0e30f32 * 3.0e30 + 4.0e30 * 4.0e30).is_infinite());
+        let mut zero = vec![0.0f32; 3];
+        l2_normalize(&mut zero);
+        assert_eq!(zero, vec![0.0; 3]);
     }
 }
