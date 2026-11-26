@@ -6,6 +6,7 @@
 
 pub mod chat;
 pub mod completions;
+pub mod embeddings;
 pub(crate) mod logprobs;
 pub mod models;
 mod tool_parsers;
