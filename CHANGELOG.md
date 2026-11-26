@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.24.10 — Fuel 0.47.32 -> 0.56.1 (all fuel-* pins, `mlmf-*` 0.11.49)
+
+Every `fuel-*` pin moves from 0.47.32 to 0.56.1 (crates.io; the first release since 0.47.32; `unpopped-vocab` 0.47.0 -> 0.58.5, one copy in `Cargo.lock`). Read: the fuel v0.56.1 CHANGELOG Breaking sections, 0.48 to 0.56. **What broke: nothing compiled differently; `cargo check --all-targets` passes with no source change.** What touches Lightbulb:
+
+- `fuel-transformers` `sample_argmax` now returns a typed `Err` on a NaN logit. Lightbulb never calls it (serving samples inside `fuel-inference`), but its own `model_fuel::generate::argmax` skipped NaN silently, so the shipped decode loop `generate_greedy` now uses the new `try_argmax` (NaN or empty row = `Err`, first index on ties); `argmax` stays as the NaN-skipping reference the goldens pin. Two unit tests, with the legacy `argmax` as the control.
+- Open, reported to Fuel: a request with default sampling extras takes `fuel::lazy::sample_logits` (`max_by` over `partial_cmp`), which still picks a token from a NaN row; only requests with sampling extras go through `sample_with_params`, which errors on a non-finite logit and reaches the client as a failed session. Not changed here: moving default requests to the params path changes tie-breaking (last index vs first) and would move the goldens.
+- Checked, no effect: argmax/argmin NaN rule (CPU, Metal), FlashAttn masked/NaN-row contract, `Tensor::var` divisor, Metal NaN-propagating max/min, `FusedOpParams` new variants, the `mkl` feature removal (Lightbulb names none), IQ `QuantType` variants (no exhaustive match here), sk6 to sk8 structure keys (telemetry feature, unused).
+
 ## 0.24.9 — feat: background model pulls with job progress
 
 `POST /v1/lightbulb/admin/models/pull` accepts `"wait": false`: it answers 202 with a job id at once and downloads in the background, and `GET /v1/lightbulb/admin/models/pull/{id}` reports `state`, per-file `downloaded`/`total` bytes and the final result or failing status. Without `wait` the route behaves as before. Tested against the localhost stub Hub (progress, failure status, unknown job 404, 202 and validation order); the real Hub is not run. ROADMAP F1 and F2 rows updated.
