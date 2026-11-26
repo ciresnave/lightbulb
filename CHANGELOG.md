@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.24.8 — F3 scheduled, F4, F7 and F9 closed (docs only)
+
+Docs only: ROADMAP F3 (`/v1/embeddings`) is scheduled with a design note (`docs/F3-EMBEDDINGS-DESIGN.md`); F4 (per-token streamed tool calls) is closed as decided no and recorded in `docs/API.md`; F9 (Cherry capture) is closed as moot; Ollama-native routes (F7, census row 23) are closed as not now (board 514). Decisions: CireSnave board 505, 2026-11-26. No code changed.
+
 ## 0.24.7 — maintenance: G4 module splits (MOD-005 outliers cleared), portfolio pin 0.48.1, ROADMAP section H
 
 G4: five verbatim moves with no behaviour change: tool-call handling and the SSE stream builder out of `api/openai/chat.rs`, the `engine/mod.rs` re-exports into two grouped files, `impl ApiServer` into `api/server.rs`, the `serve_*` loaders into `scheduled_llama_engine/serve_loaders.rs`. `coderipper check MOD-005` (0.48.1): four outliers before, none after. CI pin moved to coderipper#375 (installs CodeRipper 0.48.1). ROADMAP gains section H (one row per open docs-drift item) and G4 is marked done.
