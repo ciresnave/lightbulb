@@ -474,6 +474,10 @@ data: {"id":"chatcmpl-123","object":"chat.completion.chunk","created":1234567890
 data: [DONE]
 ```
 
+**Tool calls in a streamed response are a buffered replay (decided, CireSnave 2026-11-26: "No for streaming tool calls.").** With `tools` set and `stream: true`, the model's output is generated and parsed in full, then the finished `tool_calls` are replayed as chunks; there are no per-token argument deltas. Do not reopen this without a named client that needs them (ROADMAP F4, closed).
+
+**Ollama-native routes (`/api/chat`, `/api/embed`, ...) are not served (decided: not now; reopen on a named client; CireSnave 2026-11-26, "514: A").** Lightbulb is OpenAI-compatible only until a client he names needs an Ollama route; then that client's real requests are captured and exactly the routes it sends are added (ROADMAP F7, closed).
+
 ## Database Setup
 
 The API requires PostgreSQL:
