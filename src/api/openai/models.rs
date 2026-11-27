@@ -50,6 +50,11 @@ pub struct ModelInfo {
     /// Not part of the OpenAI schema. Whether the model is in memory now. A request for an
     /// unloaded model loads it (evicting idle ones if the device is full).
     pub lightbulb_loaded: bool,
+    /// Not part of the OpenAI schema. `"embedding"` for a model `/v1/embeddings` serves; absent for a chat
+    /// model (so a chat model's JSON is unchanged). The id is the ground truth: ask `/v1/embeddings` or
+    /// `/v1/chat/completions` by the name you were given.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lightbulb_kind: Option<&'static str>,
 }
 
 /// What lightbulb knows about the loaded model's memory footprint.
@@ -85,6 +90,7 @@ fn model_info(id: String, models_dir: Option<&str>, loaded: bool) -> ModelInfo {
             }),
         lightbulb_device: loaded.then(crate::model_fuel::device::chosen).flatten(),
         lightbulb_loaded: loaded,
+        lightbulb_kind: None,
     }
 }
 
@@ -113,15 +119,26 @@ fn gguf_names(dir: &str) -> Vec<String> {
 fn available_models(state: &AppState) -> Vec<ModelInfo> {
     let dir = state.config.models_dir.as_deref();
     if state.manager.is_none() {
-        if state.model().inference_tx.is_none() {
-            return Vec::new();
+        let mut out = Vec::new();
+        if state.model().inference_tx.is_some() {
+            out.push(model_info(state.config.default_model.clone(), dir, true));
         }
-        return vec![model_info(state.config.default_model.clone(), dir, true)];
+        // Embedding models held directly in the registry (no manager): listed as loaded.
+        for name in state.models.names() {
+            if state
+                .models
+                .get(&name)
+                .is_some_and(|e| e.embedding.is_some())
+            {
+                out.push(embedding_info(name, dir, true));
+            }
+        }
+        return out;
     }
     let Some(dir) = dir else {
         return Vec::new();
     };
-    gguf_names(dir)
+    let mut out: Vec<ModelInfo> = gguf_names(dir)
         .into_iter()
         .map(|name| {
             let loaded = state
@@ -130,7 +147,27 @@ fn available_models(state: &AppState) -> Vec<ModelInfo> {
                 .is_some_and(|e| e.inference_tx.is_some());
             model_info(name, Some(dir), loaded)
         })
-        .collect()
+        .collect();
+    out.extend(
+        crate::api::embedding_models::embedding_dir_names(dir)
+            .into_iter()
+            .map(|name| {
+                let loaded = state
+                    .models
+                    .get(&name)
+                    .is_some_and(|e| e.embedding.is_some());
+                embedding_info(name, Some(dir), loaded)
+            }),
+    );
+    out
+}
+
+/// A list entry for an embedding model: the chat entry's fields, marked `"embedding"`.
+fn embedding_info(id: String, models_dir: Option<&str>, loaded: bool) -> ModelInfo {
+    ModelInfo {
+        lightbulb_kind: Some("embedding"),
+        ..model_info(id, models_dir, loaded)
+    }
 }
 
 /// `GET /v1/models` (and `POST`, kept because it was the registered method

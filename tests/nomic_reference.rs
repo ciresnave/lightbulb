@@ -260,3 +260,161 @@ fn a_set_but_incomplete_env_dir_is_never_a_skip() {
         Located::Found(PathBuf::from("M:/models").join(DIR_NAME))
     );
 }
+
+use axum::body::Body;
+use axum::http::{Request, StatusCode};
+use lightbulb::api::fuel_loader::{FuelLoader, StartParams};
+use lightbulb::api::manager::{FreeBytes, ModelManager};
+use lightbulb::api::{ApiConfig, AppState, ModelRegistry};
+use lightbulb::engine::{MemoryAwareConfig, MemoryAwareScheduler};
+use tower::ServiceExt;
+
+/// An `AppState` whose manager loads from the models directory `parent`, as the server builds it at startup.
+fn managed_state(parent: &Path) -> AppState {
+    let models = ModelRegistry::default();
+    let mut state = AppState {
+        scheduler: std::sync::Arc::new(std::sync::Mutex::new(MemoryAwareScheduler::new(
+            MemoryAwareConfig::default(),
+        ))),
+        config: ApiConfig {
+            models_dir: Some(parent.to_string_lossy().into_owned()),
+            ..ApiConfig::default()
+        },
+        pg_backend: None,
+        manager: None,
+        models: models.clone(),
+        eos_monitor: Default::default(),
+        security_sinks: Vec::new(),
+        cache_stats: std::sync::Arc::new(std::sync::Mutex::new(
+            lightbulb::cache::PrefixCacheStats::default(),
+        )),
+        live_system: lightbulb::api::new_shared_system_metrics(),
+        queue_depth: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+    };
+    let free: FreeBytes = std::sync::Arc::new(|| u64::MAX);
+    state.manager = Some(std::sync::Arc::new(ModelManager::new(
+        models,
+        std::sync::Arc::new(FuelLoader::new(parent, StartParams::from_state(&state))),
+        free,
+        std::time::Duration::from_secs(30),
+    )));
+    state
+}
+
+async fn call(
+    state: &AppState,
+    method: &str,
+    uri: &str,
+    body: serde_json::Value,
+) -> (StatusCode, serde_json::Value) {
+    let resp = lightbulb::api::openai::routes()
+        .with_state(state.clone())
+        .oneshot(
+            Request::builder()
+                .method(method)
+                .uri(uri)
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = resp.status();
+    let bytes = axum::body::to_bytes(resp.into_body(), 1 << 22)
+        .await
+        .unwrap();
+    (status, serde_json::from_slice(&bytes).unwrap_or_default())
+}
+
+fn floats(v: &serde_json::Value) -> Vec<f32> {
+    v["data"][0]["embedding"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|x| x.as_f64().unwrap() as f32)
+        .collect()
+}
+
+async fn listed(state: &AppState, name: &str) -> serde_json::Value {
+    let (s, v) = call(state, "GET", "/v1/models", serde_json::json!({})).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    v["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["id"] == name)
+        .unwrap_or_else(|| panic!("{name} is not listed: {v}"))
+        .clone()
+}
+
+/// The whole server path with the real checkpoint: a models directory holding the embedding model, the
+/// manager loading it on demand through `FuelLoader`, `POST /v1/embeddings` answering, and `GET /v1/models`
+/// marking it. The vectors are held to the same reference as the encoder tests.
+#[tokio::test]
+async fn served_through_the_manager_loader_and_route_matches_the_reference() {
+    let dir = match locate(&|k| std::env::var_os(k), &is_complete) {
+        Located::Found(d) => d,
+        Located::SetButIncomplete(d) => panic!("NOMIC_EMBED_DIR={} is incomplete", d.display()),
+        Located::Absent => {
+            lightbulb::test_notice::skip_unless_required(
+                "LIGHTBULB_REQUIRE_MODEL",
+                "the nomic-embed-text-v1.5 checkpoint; see PROVENANCE.txt",
+            );
+            return;
+        }
+    };
+    let name = dir.file_name().unwrap().to_string_lossy().into_owned();
+    let state = managed_state(dir.parent().expect("the model directory has a parent"));
+    let row = &fixture().rows[1];
+
+    // Listed before it is loaded: marked "embedding", not loaded.
+    let before = listed(&state, &name).await;
+    assert_eq!(before["lightbulb_kind"], "embedding");
+    assert_eq!(before["lightbulb_loaded"], false);
+
+    // The first request loads it on demand through the manager.
+    let body = |extra: serde_json::Value| {
+        let mut b = serde_json::json!({"model": name, "input": row.text});
+        b.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        b
+    };
+    let (s, v) = call(
+        &state,
+        "POST",
+        "/v1/embeddings",
+        body(serde_json::json!({})),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(v["usage"]["prompt_tokens"], row.tokens);
+    let c = cosine(&floats(&v), &row.embedding);
+    eprintln!("served cosine {c:.6}");
+    assert!(c >= 0.999, "cosine {c}");
+
+    // A Matryoshka width over HTTP, against the card-recipe reference.
+    let (s, v) = call(
+        &state,
+        "POST",
+        "/v1/embeddings",
+        body(serde_json::json!({"dimensions": 256})),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(floats(&v).len(), 256);
+    assert!(cosine(&floats(&v), &row.matryoshka["256"]) >= 0.999);
+
+    // A width the model was not trained for is a typed 400 by name, not a wrong vector.
+    let (s, v) = call(
+        &state,
+        "POST",
+        "/v1/embeddings",
+        body(serde_json::json!({"dimensions": 300})),
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "{v}");
+    assert_eq!(v["param"], "dimensions");
+
+    assert_eq!(listed(&state, &name).await["lightbulb_loaded"], true);
+}

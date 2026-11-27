@@ -3,6 +3,8 @@
 //! HTTP; this maps its [`ErrorKind`] to a status (`Invalid` = 400, `Internal` = 500) and runs the encoder off the
 //! async runtime, because a forward pass is blocking CPU/GPU work.
 
+use std::sync::Arc;
+
 use axum::{
     Json,
     extract::State,
@@ -10,8 +12,12 @@ use axum::{
     response::{IntoResponse, Response},
 };
 
-use super::embeddings::{EmbeddingError, EmbeddingRequest, ErrorKind, build_response, validate};
+use super::embeddings::{
+    EmbeddingError, EmbeddingRequest, ErrorKind, LoadedEmbedder, build_response, validate,
+};
 use crate::api::AppState;
+use crate::api::manager::Lease;
+use crate::api::model_select::scope_to_model;
 
 fn error(status: StatusCode, message: String, param: &str) -> Response {
     (
@@ -29,23 +35,45 @@ fn from_embedding_error(e: EmbeddingError) -> Response {
     error(status, e.message, e.param)
 }
 
+/// The encoder for `name` and the lease that pins it. With a manager, `scope_to_model` loads the model on
+/// demand (evicting idle ones) and leases it so it cannot be evicted mid-request; without one the registry is
+/// read directly. A name that is unknown, or a chat model, is a 400 naming which.
+async fn find_embedder(
+    state: &AppState,
+    name: &str,
+) -> Result<(Arc<LoadedEmbedder>, Option<Lease>), Response> {
+    let (lookup, lease) = if state.manager.is_some() {
+        match scope_to_model(state, name).await {
+            Ok(s) => (s.state, s.lease),
+            Err(rejection) => return Err(*rejection),
+        }
+    } else {
+        (state.clone(), None)
+    };
+    let entry = lookup.models.get(name).ok_or_else(|| {
+        error(
+            StatusCode::BAD_REQUEST,
+            format!("model '{name}' is not loaded"),
+            "model",
+        )
+    })?;
+    let loaded = entry.embedding.ok_or_else(|| {
+        error(
+            StatusCode::BAD_REQUEST,
+            format!("model '{name}' is not an embedding model"),
+            "model",
+        )
+    })?;
+    Ok((loaded, lease))
+}
+
 pub async fn create_embeddings(
     State(state): State<AppState>,
     Json(req): Json<EmbeddingRequest>,
 ) -> Response {
-    let Some(entry) = state.models.get(&req.model) else {
-        return error(
-            StatusCode::BAD_REQUEST,
-            format!("model '{}' is not loaded", req.model),
-            "model",
-        );
-    };
-    let Some(loaded) = entry.embedding else {
-        return error(
-            StatusCode::BAD_REQUEST,
-            format!("model '{}' is not an embedding model", req.model),
-            "model",
-        );
+    let (loaded, _lease) = match find_embedder(&state, &req.model).await {
+        Ok(found) => found,
+        Err(response) => return response,
     };
     let name = req.model.clone();
     let done = tokio::task::spawn_blocking(move || {

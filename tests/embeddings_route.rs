@@ -183,3 +183,40 @@ fn an_embedding_entry_never_answers_the_chat_lookup() {
     assert_eq!(st.models.names(), vec!["a-embed", "chat"]);
     assert!(st.models.get("a-embed").unwrap().embedding.is_some());
 }
+
+#[tokio::test]
+async fn the_models_list_marks_an_embedding_model_and_leaves_a_chat_model_unchanged() {
+    let st = state();
+    // Give the chat entry a runner sender so it counts as loaded and is listed.
+    st.models.set(
+        "chat",
+        ModelEntry {
+            inference_tx: Some(std::sync::mpsc::sync_channel(1).0),
+            ..Default::default()
+        },
+    );
+    let mut cfg = ApiConfig::default();
+    cfg.default_model = "chat".to_string();
+    let st = AppState { config: cfg, ..st };
+    let resp = lightbulb::api::openai::routes()
+        .with_state(st)
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/v1/models")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20)
+        .await
+        .unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let data = v["data"].as_array().unwrap();
+    let by = |id: &str| data.iter().find(|m| m["id"] == id).unwrap().clone();
+    assert_eq!(by("a-embed")["lightbulb_kind"], "embedding");
+    assert_eq!(by("a-embed")["lightbulb_loaded"], true);
+    // Control: the chat model is listed and carries no kind field at all.
+    assert!(by("chat").get("lightbulb_kind").is_none());
+}
