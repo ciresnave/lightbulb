@@ -21,6 +21,7 @@ pub struct StartParams {
     pub options: EngineOptions,
     pub cache_stats: SharedCacheStats,
     pub scheduler: SharedScheduler,
+    pub embedding_device: super::embedding_models::EmbeddingDevice,
 }
 
 impl StartParams {
@@ -35,6 +36,7 @@ impl StartParams {
             },
             cache_stats: state.cache_stats.clone(),
             scheduler: state.scheduler.clone(),
+            embedding_device: state.config.embedding_device,
         }
     }
 }
@@ -137,9 +139,13 @@ impl ModelLoader for FuelLoader {
     fn load(&self, registry: &ModelRegistry, name: &str) -> Result<(), LoadError> {
         let path = self.path(name)?;
         if super::embedding_models::is_embedding_dir(&path) {
-            return super::embedding_models::start_embedding_into(registry, name, &path).map_err(
-                |e| LoadError::Failed(format!("loading embedding model '{name}': {e:#}")),
-            );
+            return super::embedding_models::start_embedding_into(
+                registry,
+                name,
+                &path,
+                self.params.embedding_device,
+            )
+            .map_err(|e| LoadError::Failed(format!("loading embedding model '{name}': {e:#}")));
         }
         start_into(registry, name, &path, &self.params)
             .map_err(|e| LoadError::Failed(format!("starting '{name}': {e:#}")))

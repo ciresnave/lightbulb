@@ -136,6 +136,10 @@ pub struct ApiConfig {
     /// Default `false`. `main.rs` sets it from `LIGHTBULB_ALLOW_OVERSIZE_MODEL`.
     pub model_allow_oversize: bool,
 
+    /// Where `/v1/embeddings` runs ([`embedding_models::EmbeddingDevice`]); `main.rs` sets it from
+    /// `LIGHTBULB_EMBEDDING_DEVICE`. Default CPU.
+    pub embedding_device: embedding_models::EmbeddingDevice,
+
     /// How long an inference job may sit between being enqueued and the
     /// model runner thread finishing it, before the HTTP handler gives up
     /// and returns 504 instead of waiting forever. Phase 4 hardening
@@ -251,6 +255,7 @@ impl Default for ApiConfig {
             model_max_queue_depth: 32,
             model_prefix_sharing: false,
             model_allow_oversize: false,
+            embedding_device: embedding_models::EmbeddingDevice::Cpu,
             request_timeout_ms: 300_000,
             tls: crate::tls::TlsConfig::default(),
             no_auth: false,

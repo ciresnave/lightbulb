@@ -170,3 +170,224 @@ fn nomic_one_vs_many_sequences_tokens_per_second() {
         );
     }
 }
+
+// ---- F3 device option: `LIGHTBULB_EMBEDDING_DEVICE` through the real server path --------------------------------
+
+mod served {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+    use axum::body::Body;
+    use axum::http::Request;
+    use lightbulb::api::embedding_models::EmbeddingDevice;
+    use lightbulb::api::fuel_loader::{FuelLoader, StartParams};
+    use lightbulb::api::manager::{FreeBytes, ModelManager};
+    use lightbulb::api::{ApiConfig, AppState, ModelRegistry};
+    use lightbulb::engine::{MemoryAwareConfig, MemoryAwareScheduler};
+    use tower::ServiceExt;
+
+    pub fn state(parent: &std::path::Path, device: EmbeddingDevice) -> AppState {
+        let models = ModelRegistry::default();
+        let mut state = AppState {
+            scheduler: Arc::new(std::sync::Mutex::new(MemoryAwareScheduler::new(
+                MemoryAwareConfig::default(),
+            ))),
+            config: ApiConfig {
+                models_dir: Some(parent.to_string_lossy().into_owned()),
+                embedding_device: device,
+                ..ApiConfig::default()
+            },
+            pg_backend: None,
+            manager: None,
+            models: models.clone(),
+            eos_monitor: Default::default(),
+            security_sinks: Vec::new(),
+            cache_stats: Arc::new(std::sync::Mutex::new(
+                lightbulb::cache::PrefixCacheStats::default(),
+            )),
+            live_system: lightbulb::api::new_shared_system_metrics(),
+            queue_depth: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        };
+        let free: FreeBytes = Arc::new(|| u64::MAX);
+        state.manager = Some(Arc::new(ModelManager::new(
+            models,
+            Arc::new(FuelLoader::new(parent, StartParams::from_state(&state))),
+            free,
+            std::time::Duration::from_secs(30),
+        )));
+        state
+    }
+
+    pub async fn call(
+        state: &AppState,
+        method: &str,
+        uri: &str,
+        body: serde_json::Value,
+    ) -> (u16, serde_json::Value) {
+        let resp = lightbulb::api::openai::routes()
+            .with_state(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(uri)
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status().as_u16();
+        let bytes = axum::body::to_bytes(resp.into_body(), 1 << 24)
+            .await
+            .unwrap();
+        (status, serde_json::from_slice(&bytes).unwrap_or_default())
+    }
+
+    fn gpu_used_mib() -> u64 {
+        std::process::Command::new("nvidia-smi")
+            .args(["--query-gpu=memory.used", "--format=csv,noheader,nounits"])
+            .output()
+            .ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .and_then(|s| s.trim().lines().next().and_then(|l| l.trim().parse().ok()))
+            .expect("nvidia-smi must report memory.used: this gate measures the GPU")
+    }
+
+    /// GPU memory used while `f` runs: (baseline MiB, peak MiB), sampled every 100 ms on another thread.
+    pub async fn watched<F: std::future::Future>(f: F) -> (F::Output, u64, u64) {
+        let base = gpu_used_mib();
+        let peak = Arc::new(AtomicU64::new(base));
+        let stop = Arc::new(AtomicBool::new(false));
+        let (p, s) = (peak.clone(), stop.clone());
+        let t = std::thread::spawn(move || {
+            while !s.load(Ordering::Relaxed) {
+                p.fetch_max(gpu_used_mib(), Ordering::Relaxed);
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+        });
+        let out = f.await;
+        stop.store(true, Ordering::Relaxed);
+        t.join().unwrap();
+        (out, base, peak.load(Ordering::Relaxed))
+    }
+}
+
+fn floats(v: &serde_json::Value) -> Vec<f32> {
+    v["data"][0]["embedding"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|x| x.as_f64().unwrap() as f32)
+        .collect()
+}
+
+async fn listed_device(state: &lightbulb::api::AppState, name: &str) -> String {
+    let (_, v) = served::call(state, "GET", "/v1/models", serde_json::json!({})).await;
+    v["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["id"] == name)
+        .unwrap()["lightbulb_device"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+/// The request really runs on the card, and the same request configured for the CPU does not touch it. Device
+/// evidence is `nvidia-smi` memory sampled across the request (the CUDA run must add the model's weights on
+/// the device, the CPU control must add nothing like that), the encoder's own `device_label` via `/v1/models`,
+/// and the cosine gate on the vector that came back over HTTP. Either arm alone could be satisfied by the wrong device.
+#[tokio::test]
+async fn served_on_cuda_uses_the_card_and_matches_the_reference_and_cpu_does_not() {
+    use lightbulb::api::embedding_models::EmbeddingDevice;
+    let dir = model_dir();
+    let name = dir.file_name().unwrap().to_string_lossy().into_owned();
+    let parent = dir.parent().unwrap().to_path_buf();
+    let fx: Fixture = serde_json::from_slice(
+        &std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/nomic-embed-text-v1.5-reference.json"
+        ))
+        .unwrap(),
+    )
+    .unwrap();
+    let long = {
+        let emb = NomicEmbedder::load(&dir).unwrap();
+        text_of_about(&emb, 300)
+    };
+
+    let mut peaks = Vec::new();
+    for device in [EmbeddingDevice::Cuda(0), EmbeddingDevice::Cpu] {
+        let state = served::state(&parent, device);
+        let ((s_short, v_short, s_long), base, peak) = served::watched(async {
+            let (s1, v1) = served::call(
+                &state,
+                "POST",
+                "/v1/embeddings",
+                serde_json::json!({"model": name, "input": fx.rows[1].text}),
+            )
+            .await;
+            let (s2, _) = served::call(
+                &state,
+                "POST",
+                "/v1/embeddings",
+                serde_json::json!({"model": name, "input": long}),
+            )
+            .await;
+            (s1, v1, s2)
+        })
+        .await;
+        assert_eq!((s_short, s_long), (200, 200), "{v_short}");
+        let c = cosine(&floats(&v_short), &fx.rows[1].embedding);
+        let label = listed_device(&state, &name).await;
+        eprintln!(
+            "DEVICE {device:?}: gpu memory base {base} MiB peak {peak} MiB (+{}), listed {label}, cosine {c:.6}",
+            peak - base
+        );
+        assert_eq!(
+            label,
+            device.label(),
+            "/v1/models must report the device the encoder really holds"
+        );
+        assert!(c >= 0.999, "{device:?}: cosine {c}");
+        peaks.push((device, peak - base));
+    }
+    let (cuda_delta, cpu_delta) = (peaks[0].1, peaks[1].1);
+    assert!(
+        cuda_delta >= 200,
+        "CUDA run added only {cuda_delta} MiB of GPU memory: it did not run on the card"
+    );
+    assert!(
+        cpu_delta < 100,
+        "the CPU control added {cpu_delta} MiB of GPU memory: the control touched the card"
+    );
+}
+
+/// A device that is not there is an error the caller sees, never a CPU answer.
+#[tokio::test]
+async fn an_unavailable_cuda_device_is_a_typed_error_not_a_cpu_run() {
+    use lightbulb::api::embedding_models::EmbeddingDevice;
+    let dir = model_dir();
+    let name = dir.file_name().unwrap().to_string_lossy().into_owned();
+    let state = served::state(dir.parent().unwrap(), EmbeddingDevice::Cuda(99));
+    let (s, v) = served::call(
+        &state,
+        "POST",
+        "/v1/embeddings",
+        serde_json::json!({"model": name, "input": "x"}),
+    )
+    .await;
+    eprintln!("unavailable device -> {s} {v}");
+    assert_ne!(
+        s, 200,
+        "a missing card must not be answered from the CPU: {v}"
+    );
+    assert!(
+        v.to_string().contains("99"),
+        "the error must name the device: {v}"
+    );
+    // Startup-style check, the same refusal.
+    let e = EmbeddingDevice::Cuda(99).check_available().unwrap_err();
+    assert!(e.contains("99"), "{e}");
+}

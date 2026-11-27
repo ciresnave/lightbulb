@@ -124,6 +124,20 @@ async fn run(cli: Cli) -> Result<()> {
         .map(|v| parse_flag(&v))
         .unwrap_or(false);
 
+    // A bad or unusable device stops startup: an embedding server asked for the GPU must not quietly run on the CPU.
+    let embedding_device = match lightbulb::api::embedding_models::EmbeddingDevice::parse(
+        &env::var("LIGHTBULB_EMBEDDING_DEVICE").unwrap_or_default(),
+    ) {
+        Ok(d) => d,
+        Err(e) => anyhow::bail!("LIGHTBULB_EMBEDDING_DEVICE: {e}"),
+    };
+    if let Err(e) = embedding_device.check_available() {
+        anyhow::bail!(
+            "LIGHTBULB_EMBEDDING_DEVICE={}: {e}",
+            embedding_device.label()
+        );
+    }
+
     let cors_allowed_origins: Vec<String> = env::var("LIGHTBULB_CORS_ORIGINS")
         .map(|v| {
             v.split(',')
@@ -166,6 +180,7 @@ async fn run(cli: Cli) -> Result<()> {
         model_max_queue_depth,
         model_prefix_sharing,
         model_allow_oversize,
+        embedding_device,
         request_timeout_ms,
         enable_audit_log: database_url.is_some(), // Disable audit logging without database
         tls: Default::default(),                  // TLS disabled by default

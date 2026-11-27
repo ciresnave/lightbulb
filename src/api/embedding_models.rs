@@ -10,6 +10,53 @@
 use std::path::Path;
 use std::sync::Arc;
 
+/// Where `/v1/embeddings` runs the encoder (`LIGHTBULB_EMBEDDING_DEVICE`). CPU is the default and always
+/// works. An accelerator is NAMED, and one that cannot be used is an error at startup or at load, never a
+/// quiet CPU run: asking for the GPU and measuring the CPU is the failure this type exists to prevent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum EmbeddingDevice {
+    #[default]
+    Cpu,
+    Cuda(u32),
+}
+
+impl EmbeddingDevice {
+    /// `""` or `cpu` is the CPU; `cuda` is `cuda:0`; `cuda:<n>` is that card. `vulkan` is recognised and
+    /// refused by name (Fuel has the backend, this build does not link it); anything else is an error.
+    pub fn parse(raw: &str) -> Result<Self, String> {
+        let s = raw.trim().to_ascii_lowercase();
+        match s.as_str() {
+            "" | "cpu" => Ok(Self::Cpu),
+            "cuda" => Ok(Self::Cuda(0)),
+            "vulkan" => Err(
+                "vulkan embeddings are not built into this binary (only cpu and cuda[:n])".into(),
+            ),
+            _ => match s.strip_prefix("cuda:").map(str::parse::<u32>) {
+                Some(Ok(n)) => Ok(Self::Cuda(n)),
+                _ => Err(format!(
+                    "{raw:?} is not a device: use cpu, cuda or cuda:<n>"
+                )),
+            },
+        }
+    }
+
+    /// `"cpu"` or `"cuda:<n>"`, the spelling `/v1/models` reports.
+    pub fn label(self) -> String {
+        match self {
+            Self::Cpu => "cpu".into(),
+            Self::Cuda(n) => format!("cuda:{n}"),
+        }
+    }
+
+    /// Whether this build and machine can run on the device, so startup can refuse a bad setting.
+    pub fn check_available(self) -> Result<(), String> {
+        match self {
+            Self::Cpu => Ok(()),
+            Self::Cuda(n) => super::openai::nomic_embedder::open_cuda(n).map(|_| ()),
+        }
+    }
+}
+
 use super::openai::embeddings::LoadedEmbedder;
 use super::openai::nomic_embedder::NomicEmbedder;
 use super::registry::{ModelEntry, ModelRegistry};
@@ -55,8 +102,9 @@ pub fn start_embedding_into(
     registry: &ModelRegistry,
     name: &str,
     path: &Path,
+    device: EmbeddingDevice,
 ) -> anyhow::Result<()> {
-    let embedder = NomicEmbedder::load(path)?;
+    let embedder = NomicEmbedder::load_on(path, device)?;
     let spec = embedder.spec().clone();
     registry.set(
         name,
@@ -68,7 +116,11 @@ pub fn start_embedding_into(
             ..ModelEntry::default()
         },
     );
-    tracing::info!("Loaded embedding model {} as {name}", path.display());
+    tracing::info!(
+        "Loaded embedding model {} as {name} on {}",
+        path.display(),
+        device.label()
+    );
     Ok(())
 }
 
@@ -136,5 +188,52 @@ mod tests {
         );
         assert_eq!(weights_bytes(&root.path().join("nomic")), 1);
         assert_eq!(weights_bytes(&root.path().join("missing")), 0);
+    }
+}
+
+#[cfg(test)]
+mod device_tests {
+    use super::EmbeddingDevice;
+
+    #[test]
+    fn the_device_setting_parses_and_refuses_by_name() {
+        assert_eq!(EmbeddingDevice::parse("").unwrap(), EmbeddingDevice::Cpu);
+        assert_eq!(
+            EmbeddingDevice::parse(" CPU ").unwrap(),
+            EmbeddingDevice::Cpu
+        );
+        assert_eq!(
+            EmbeddingDevice::parse("cuda").unwrap(),
+            EmbeddingDevice::Cuda(0)
+        );
+        assert_eq!(
+            EmbeddingDevice::parse("CUDA:3").unwrap(),
+            EmbeddingDevice::Cuda(3)
+        );
+        assert_eq!(EmbeddingDevice::default(), EmbeddingDevice::Cpu);
+        // Refusals: Vulkan by name, and nonsense. Control: each names what it refused.
+        let v = EmbeddingDevice::parse("vulkan").unwrap_err();
+        assert!(v.contains("vulkan"), "{v}");
+        for bad in ["gpu", "cuda:", "cuda:x", "cuda:-1", "cuda0"] {
+            let e = EmbeddingDevice::parse(bad).unwrap_err();
+            assert!(e.contains(bad), "{bad}: {e}");
+        }
+        assert_eq!(EmbeddingDevice::Cuda(2).label(), "cuda:2");
+        assert!(EmbeddingDevice::Cpu.check_available().is_ok());
+    }
+
+    /// Without the `fuel-cuda` feature a CUDA request is an error that says why, from both the startup check and
+    /// the loader, so a binary that cannot run on the GPU never answers an embedding from the CPU.
+    #[cfg(not(feature = "fuel-cuda"))]
+    #[test]
+    fn cuda_without_the_feature_is_refused_not_served_from_the_cpu() {
+        let e = EmbeddingDevice::Cuda(0).check_available().unwrap_err();
+        assert!(e.contains("fuel-cuda"), "{e}");
+        let load = crate::api::openai::nomic_embedder::NomicEmbedder::load_on(
+            std::path::Path::new("."),
+            EmbeddingDevice::Cuda(0),
+        );
+        let msg = format!("{:#}", load.err().expect("must not load"));
+        assert!(msg.contains("fuel-cuda"), "{msg}");
     }
 }
