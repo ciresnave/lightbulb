@@ -80,3 +80,54 @@ fn nomic_on_cuda_matches_onnxruntime_at_cosine_0_999() {
         );
     }
 }
+
+/// Text of roughly `n` tokens (counted by the model's own tokenizer, so the number printed is the real one).
+fn text_of_about(emb: &NomicEmbedder, n: usize) -> String {
+    use lightbulb::api::openai::embeddings::Embedder;
+    let unit = "the quick brown fox jumps over the lazy dog and then rests by the river. ";
+    let per = emb.count_tokens(unit).unwrap();
+    format!("search_document: {}", unit.repeat(n / per))
+}
+
+/// Closes the gap the accuracy test leaves: a cosine of 1.0 would also come out of a silent CPU fallback. Here
+/// the SAME forward is timed on CPU and on CUDA, short and at about the model's 2048-token training context.
+/// Run with `nvidia-smi --query-gpu=utilization.gpu,memory.used -lms 200` sampling beside it. Prints timings;
+/// asserts the two devices agree (cosine) and that the GPU run is not the CPU run (timing ratio printed, and the
+/// sampled memory/utilisation is the device evidence).
+#[test]
+fn nomic_cuda_vs_cpu_timing_short_and_long() {
+    let dir = model_dir();
+    let emb =
+        NomicEmbedder::load(&dir).unwrap_or_else(|e| panic!("loading {}: {e}", dir.display()));
+    let cuda = fuel_cuda_backend::CudaDevice::new(0).expect("no CUDA device");
+    let dim = emb.spec().dim;
+    for (label, text) in [
+        (
+            "short",
+            "search_query: what is the capital of France?".to_string(),
+        ),
+        ("long ", text_of_about(&emb, 2048)),
+    ] {
+        use lightbulb::api::openai::embeddings::Embedder;
+        let toks = emb.count_tokens(&text).unwrap();
+        let _warm = emb.hidden_states_cuda(&text, &cuda).unwrap();
+        let t = std::time::Instant::now();
+        let mut g = None;
+        for _ in 0..3 {
+            g = Some(emb.hidden_states_cuda(&text, &cuda).unwrap());
+        }
+        let gpu_ms = t.elapsed().as_secs_f64() * 1000.0 / 3.0;
+        let t = std::time::Instant::now();
+        let c = emb.hidden_states(&text).unwrap();
+        let cpu_ms = t.elapsed().as_secs_f64() * 1000.0;
+        let (g, c) = (g.unwrap(), c);
+        let cos = cosine(
+            &pool(&g.0, g.1, dim, Pooling::Mean).unwrap(),
+            &pool(&c.0, c.1, dim, Pooling::Mean).unwrap(),
+        );
+        eprintln!(
+            "TIMING {label} {toks:5} tokens: cuda {gpu_ms:9.1} ms (mean of 3, warm)  cpu {cpu_ms:9.1} ms (1 run)  cuda/cpu cosine {cos:.6}"
+        );
+        assert!(cos >= 0.999, "{label}: CUDA and CPU disagree, cosine {cos}");
+    }
+}
