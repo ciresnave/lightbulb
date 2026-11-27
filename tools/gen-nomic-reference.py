@@ -32,6 +32,11 @@ def layer_norm(x, eps=1e-5):
     return (x - x.mean()) / np.sqrt(x.var() + eps)
 
 
+def r5(x):
+    # 4 significant digits: the gate asks cosine >= 0.999, and this keeps the committed fixture small
+    return [float(f"{v:.4g}") for v in x]
+
+
 def l2(x):
     return x / np.linalg.norm(x)
 
@@ -58,8 +63,8 @@ def main(model_dir, out_path):
         mean = hidden.mean(axis=0)
         vec = mean / np.linalg.norm(mean)
         ln = layer_norm(mean)
-        matryoshka = {str(d): [float(x) for x in l2(ln[:d])] for d in MATRYOSHKA}
-        rows.append({"text": text, "tokens": len(ids), "ids": ids, "embedding": [float(x) for x in vec],
+        matryoshka = {str(d): r5(l2(ln[:d])) for d in MATRYOSHKA}
+        rows.append({"text": text, "tokens": len(ids), "embedding": r5(vec),
                      "matryoshka": matryoshka})
     json.dump({
         "model": "nomic-ai/nomic-embed-text-v1.5",
@@ -70,7 +75,7 @@ def main(model_dir, out_path):
         "command": "python tools/gen-nomic-reference.py <model dir> <out.json>",
         "dim": 768,
         "rows": rows,
-    }, open(out_path, "w"), indent=1)
+    }, open(out_path, "w"), separators=(",", ":"))
     print("wrote", out_path, [r["tokens"] for r in rows])
 
 if __name__ == "__main__":
