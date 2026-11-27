@@ -133,3 +133,40 @@ fn nomic_cuda_vs_cpu_timing_short_and_long() {
         assert!(cos >= 0.999, "{label}: CUDA and CPU disagree, cosine {cos}");
     }
 }
+
+/// F3 batching fact: the encoder takes ONE sequence per call (no padded batch in Fuel), so N sequences are N
+/// calls. Measures tokens/s for 1, 8 and 32 short sequences on CUDA and CPU; if a batch were really amortised
+/// the per-sequence time would fall with N, and it does not (printed, read it).
+#[test]
+fn nomic_one_vs_many_sequences_tokens_per_second() {
+    use lightbulb::api::openai::embeddings::Embedder;
+    let dir = model_dir();
+    let emb =
+        NomicEmbedder::load(&dir).unwrap_or_else(|e| panic!("loading {}: {e}", dir.display()));
+    let cuda = fuel_cuda_backend::CudaDevice::new(0).expect("no CUDA device");
+    let texts: Vec<String> = (0..32)
+        .map(|i| format!("search_document: sentence number {i} about the weather in Paris today."))
+        .collect();
+    let toks: usize = texts.iter().map(|t| emb.count_tokens(t).unwrap()).sum();
+    let _warm = emb.hidden_states_cuda(&texts[0], &cuda).unwrap();
+    for n in [1usize, 8, 32] {
+        let tok = toks * n / 32;
+        let t = std::time::Instant::now();
+        for s in &texts[..n] {
+            emb.hidden_states_cuda(s, &cuda).unwrap();
+        }
+        let g = t.elapsed().as_secs_f64();
+        let t = std::time::Instant::now();
+        for s in &texts[..n] {
+            emb.hidden_states(s).unwrap();
+        }
+        let c = t.elapsed().as_secs_f64();
+        eprintln!(
+            "BATCH n={n:2} (~{tok:4} tokens)  cuda {g:7.2} s = {:6.1} tok/s ({:6.0} ms/seq)  cpu {c:7.2} s = {:6.1} tok/s ({:6.0} ms/seq)",
+            tok as f64 / g,
+            g * 1000.0 / n as f64,
+            tok as f64 / c,
+            c * 1000.0 / n as f64
+        );
+    }
+}
