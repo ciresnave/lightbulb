@@ -347,6 +347,19 @@ async fn listed(state: &AppState, name: &str) -> serde_json::Value {
         .clone()
 }
 
+/// A Matryoshka width over HTTP against the card-recipe reference, and a width the model was not trained for as
+/// a typed 400 by name (not a wrong vector).
+async fn dimensions_over_http(state: &AppState, name: &str, row: &Row) {
+    let ask = |d: u32| serde_json::json!({"model": name, "input": row.text, "dimensions": d});
+    let (s, v) = call(state, "POST", "/v1/embeddings", ask(256)).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(floats(&v).len(), 256);
+    assert!(cosine(&floats(&v), &row.matryoshka["256"]) >= 0.999);
+    let (s, v) = call(state, "POST", "/v1/embeddings", ask(300)).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "{v}");
+    assert_eq!(v["param"], "dimensions");
+}
+
 /// The whole server path with the real checkpoint: a models directory holding the embedding model, the
 /// manager loading it on demand through `FuelLoader`, `POST /v1/embeddings` answering, and `GET /v1/models`
 /// marking it. The vectors are held to the same reference as the encoder tests.
@@ -393,28 +406,7 @@ async fn served_through_the_manager_loader_and_route_matches_the_reference() {
     eprintln!("served cosine {c:.6}");
     assert!(c >= 0.999, "cosine {c}");
 
-    // A Matryoshka width over HTTP, against the card-recipe reference.
-    let (s, v) = call(
-        &state,
-        "POST",
-        "/v1/embeddings",
-        body(serde_json::json!({"dimensions": 256})),
-    )
-    .await;
-    assert_eq!(s, StatusCode::OK, "{v}");
-    assert_eq!(floats(&v).len(), 256);
-    assert!(cosine(&floats(&v), &row.matryoshka["256"]) >= 0.999);
-
-    // A width the model was not trained for is a typed 400 by name, not a wrong vector.
-    let (s, v) = call(
-        &state,
-        "POST",
-        "/v1/embeddings",
-        body(serde_json::json!({"dimensions": 300})),
-    )
-    .await;
-    assert_eq!(s, StatusCode::BAD_REQUEST, "{v}");
-    assert_eq!(v["param"], "dimensions");
+    dimensions_over_http(&state, &name, row).await;
 
     assert_eq!(listed(&state, &name).await["lightbulb_loaded"], true);
 }

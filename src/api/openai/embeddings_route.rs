@@ -41,28 +41,28 @@ fn from_embedding_error(e: EmbeddingError) -> Response {
 async fn find_embedder(
     state: &AppState,
     name: &str,
-) -> Result<(Arc<LoadedEmbedder>, Option<Lease>), Response> {
+) -> Result<(Arc<LoadedEmbedder>, Option<Lease>), Box<Response>> {
     let (lookup, lease) = if state.manager.is_some() {
         match scope_to_model(state, name).await {
             Ok(s) => (s.state, s.lease),
-            Err(rejection) => return Err(*rejection),
+            Err(rejection) => return Err(rejection),
         }
     } else {
         (state.clone(), None)
     };
     let entry = lookup.models.get(name).ok_or_else(|| {
-        error(
+        Box::new(error(
             StatusCode::BAD_REQUEST,
             format!("model '{name}' is not loaded"),
             "model",
-        )
+        ))
     })?;
     let loaded = entry.embedding.ok_or_else(|| {
-        error(
+        Box::new(error(
             StatusCode::BAD_REQUEST,
             format!("model '{name}' is not an embedding model"),
             "model",
-        )
+        ))
     })?;
     Ok((loaded, lease))
 }
@@ -73,7 +73,7 @@ pub async fn create_embeddings(
 ) -> Response {
     let (loaded, _lease) = match find_embedder(&state, &req.model).await {
         Ok(found) => found,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     let name = req.model.clone();
     let done = tokio::task::spawn_blocking(move || {

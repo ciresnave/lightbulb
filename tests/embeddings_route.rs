@@ -195,8 +195,10 @@ async fn the_models_list_marks_an_embedding_model_and_leaves_a_chat_model_unchan
             ..Default::default()
         },
     );
-    let mut cfg = ApiConfig::default();
-    cfg.default_model = "chat".to_string();
+    let cfg = ApiConfig {
+        default_model: "chat".to_string(),
+        ..ApiConfig::default()
+    };
     let st = AppState { config: cfg, ..st };
     let resp = lightbulb::api::openai::routes()
         .with_state(st)
