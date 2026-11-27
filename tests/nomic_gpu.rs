@@ -5,6 +5,8 @@
 //! Run under the machine GPU lock, compiling OUTSIDE it:
 //! `cargo test --features fuel-cuda --test nomic_gpu --no-run`, then
 //! `pwsh C:/Projects/tools/gpu-run/gpu-run.ps1 -Project lightbulb -- <the test binary> --nocapture`.
+//! The exe needs `cudnn64_9.dll` (`C:\Program Files\NVIDIA\CUDNN\v9.23\bin\13.3\x64`) and the CUDA toolkit
+//! `bin\x64` on PATH, else it exits 0xC0000135, which gpu-run reports as 53 with no test output.
 //! Like the other GPU harnesses this FAILS, never skips, on a missing device or checkpoint.
 #![cfg(feature = "fuel-cuda")]
 
