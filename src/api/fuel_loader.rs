@@ -93,6 +93,7 @@ pub fn start_into(
             cache_control: Some(ctrl_sender),
             chat_template: template,
             join: Some(Arc::new(Mutex::new(Some(join)))),
+            embedding: None,
         },
     );
     tracing::info!("Started model runner for {}", path.display());

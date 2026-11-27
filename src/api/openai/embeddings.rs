@@ -195,6 +195,13 @@ pub trait Embedder {
     fn embed(&self, text: &str) -> Result<Embedded, EmbeddingError>;
 }
 
+/// A loaded embedding model: its pooling-table row and the encoder that follows it. The model registry
+/// holds one per embedding model; a chat entry has none.
+pub struct LoadedEmbedder {
+    pub spec: EmbeddingSpec,
+    pub embedder: Box<dyn Embedder + Send + Sync>,
+}
+
 /// L2-normalise in place. A zero vector is left as zeros (no NaN).
 pub fn l2_normalize(v: &mut [f32]) {
     // Scale by the largest magnitude first so squaring cannot overflow f32 for large finite values.
