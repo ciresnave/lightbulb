@@ -44,6 +44,7 @@ fn state() -> AppState {
                     normalize: true,
                     dim: NATIVE,
                     matryoshka: vec![2],
+                    matryoshka_layer_norm: false,
                     max_tokens: 8,
                     max_items: 3,
                 },

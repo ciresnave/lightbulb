@@ -28,6 +28,8 @@ pub fn nomic_v1_5_spec() -> EmbeddingSpec {
         normalize: true,
         dim: cfg.n_embd,
         matryoshka: vec![512, 256, 128, 64],
+        // nomic-embed-text-v1.5 card (README.md at e9b6763023c6): layer_norm over the full vector, then slice.
+        matryoshka_layer_norm: true,
         max_tokens: cfg.n_positions,
         max_items: 128,
     }

@@ -12,7 +12,7 @@
 //! What this does NOT test: the tokenizer. The reference ids come from the same `tokenizer.json` through the
 //! `tokenizers` library, so tokenizer agreement shares its method and is only checked by token COUNT here.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use lightbulb::api::openai::embeddings::{
     Embedder, EmbeddingRequest, Pooling, build_response, finish, validate,
@@ -21,28 +21,63 @@ use lightbulb::api::openai::nomic_embedder::{NomicEmbedder, pool};
 
 const DIR_NAME: &str = "nomic-embed-text-v1.5";
 
-fn model_dir() -> Option<PathBuf> {
-    let candidates = [
-        std::env::var_os("NOMIC_EMBED_DIR").map(PathBuf::from),
-        std::env::var_os("LIGHTBULB_MODELS_DIR").map(|d| PathBuf::from(d).join(DIR_NAME)),
-        std::env::var_os("MODELS_DIR").map(|d| PathBuf::from(d).join(DIR_NAME)),
+/// Where the checkpoint is, decided so that a skip can never be mistaken for a pass:
+/// - `NOMIC_EMBED_DIR` SET: that directory is required. Missing files FAIL the run (never a skip), because
+///   whoever set the variable declared the model provisioned.
+/// - UNSET: the models chain and `C:\lightbulb-models`; nothing found is a printed skip (a failure under
+///   `LIGHTBULB_REQUIRE_MODEL=1`).
+#[derive(Debug, PartialEq, Eq)]
+enum Located {
+    Found(PathBuf),
+    SetButIncomplete(PathBuf),
+    Absent,
+}
+
+fn locate(
+    env: &dyn Fn(&str) -> Option<std::ffi::OsString>,
+    complete: &dyn Fn(&Path) -> bool,
+) -> Located {
+    if let Some(dir) = env("NOMIC_EMBED_DIR") {
+        let dir = PathBuf::from(dir);
+        return if complete(&dir) {
+            Located::Found(dir)
+        } else {
+            Located::SetButIncomplete(dir)
+        };
+    }
+    let chain = [
+        env("LIGHTBULB_MODELS_DIR").map(|d| PathBuf::from(d).join(DIR_NAME)),
+        env("MODELS_DIR").map(|d| PathBuf::from(d).join(DIR_NAME)),
         Some(PathBuf::from(r"C:\lightbulb-models").join(DIR_NAME)),
     ];
-    candidates
+    chain
         .into_iter()
         .flatten()
-        .find(|d| d.join("model.safetensors").is_file() && d.join("tokenizer.json").is_file())
+        .find(|d| complete(d))
+        .map_or(Located::Absent, Located::Found)
+}
+
+fn is_complete(d: &Path) -> bool {
+    d.join("model.safetensors").is_file() && d.join("tokenizer.json").is_file()
 }
 
 fn load() -> Option<NomicEmbedder> {
-    let Some(dir) = model_dir() else {
-        lightbulb::test_notice::skip_unless_required(
-            "LIGHTBULB_REQUIRE_MODEL",
-            "the nomic-embed-text-v1.5 checkpoint (model.safetensors + tokenizer.json); see PROVENANCE.txt",
-        );
-        return None;
-    };
-    Some(NomicEmbedder::load(&dir).expect("loading the nomic-embed-text-v1.5 checkpoint"))
+    match locate(&|k| std::env::var_os(k), &is_complete) {
+        Located::Found(dir) => {
+            Some(NomicEmbedder::load(&dir).expect("loading the nomic-embed-text-v1.5 checkpoint"))
+        }
+        Located::SetButIncomplete(dir) => panic!(
+            "NOMIC_EMBED_DIR is set to {} but model.safetensors and tokenizer.json are not both there:              the gate refuses to skip when the model was declared provisioned",
+            dir.display()
+        ),
+        Located::Absent => {
+            lightbulb::test_notice::skip_unless_required(
+                "LIGHTBULB_REQUIRE_MODEL",
+                "the nomic-embed-text-v1.5 checkpoint (model.safetensors + tokenizer.json); see PROVENANCE.txt",
+            );
+            None
+        }
+    }
 }
 
 #[derive(serde::Deserialize)]
@@ -50,6 +85,7 @@ struct Row {
     text: String,
     tokens: usize,
     embedding: Vec<f32>,
+    matryoshka: std::collections::BTreeMap<String, Vec<f32>>,
 }
 
 #[derive(serde::Deserialize)]
@@ -160,4 +196,67 @@ fn a_sentence_alone_and_inside_an_array_give_the_same_vector_and_unit_norm() {
     // Usage is the sum of the real token counts, in order.
     let want: usize = fx.rows.iter().map(|r| r.tokens).sum();
     assert_eq!(together.usage.prompt_tokens, want);
+}
+
+/// Matryoshka widths against the card's recipe (layer_norm over the full vector, slice, L2), computed in the
+/// scratch venv from the ONNX output (`tools/gen-nomic-reference.py`; model card README.md at the pinned
+/// revision, lines 2676-2734).
+///
+/// WHAT THIS CAN AND CANNOT PROVE. Measured: on these five sentences the layer norm moves the vector by only
+/// about 1e-5 in cosine (the pooled vectors have a near-zero per-component mean, and the L2 that follows removes
+/// the scale), so the recipe WITHOUT the layer norm also passes the 0.999 bar. This test therefore shows the
+/// output is right at every width, not that the layer-norm step is present; that step is pinned by the
+/// hand-computed `a_reduced_width_layer_norms_the_full_vector_before_truncating` in `embeddings/tests.rs`, whose
+/// input has a clearly nonzero mean. It only asserts ours is at least as close as the plain recipe.
+#[test]
+fn matryoshka_widths_match_the_cards_layer_norm_then_slice_recipe() {
+    let Some(emb) = load() else { return };
+    let fx = fixture();
+    let spec = emb.spec().clone();
+    let mut plain = spec.clone();
+    plain.matryoshka_layer_norm = false;
+    for r in &fx.rows {
+        let pooled = emb.embed(&r.text).unwrap().vector;
+        for d in [64usize, 128, 256, 512] {
+            assert!(spec.matryoshka.contains(&d), "the spec offers {d}");
+            let want = &r.matryoshka[&d.to_string()];
+            let ours = finish(pooled.clone(), &spec, Some(d));
+            assert_eq!(ours.len(), d);
+            let c = cosine(&ours, want);
+            let c_plain = cosine(&finish(pooled.clone(), &plain, Some(d)), want);
+            eprintln!(
+                "d={d:3} with layer_norm {c:.6}  without {c_plain:.4}  {:?}",
+                r.text
+            );
+            assert!(c >= 0.999, "d={d}: cosine {c} < 0.999 for {:?}", r.text);
+            assert!(
+                c >= c_plain - 1e-6,
+                "d={d}: the plain recipe ({c_plain}) is closer to the reference than ours ({c})"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_set_but_incomplete_env_dir_is_never_a_skip() {
+    let none = |_: &str| None;
+    let set = |k: &str| (k == "NOMIC_EMBED_DIR").then(|| "X:/nowhere".into());
+    // Control: unset and nothing found is the (loud) skip path.
+    assert_eq!(locate(&none, &|_| false), Located::Absent);
+    // Set but incomplete: a failure path, never Absent.
+    assert_eq!(
+        locate(&set, &|_| false),
+        Located::SetButIncomplete(PathBuf::from("X:/nowhere"))
+    );
+    // Set and complete: found, and the models chain is not consulted.
+    assert_eq!(
+        locate(&set, &|_| true),
+        Located::Found(PathBuf::from("X:/nowhere"))
+    );
+    // Unset: the chain finds a complete directory.
+    let chain = |k: &str| (k == "MODELS_DIR").then(|| "M:/models".into());
+    assert_eq!(
+        locate(&chain, &|d| d.starts_with("M:/models")),
+        Located::Found(PathBuf::from("M:/models").join(DIR_NAME))
+    );
 }

@@ -88,6 +88,10 @@ pub struct EmbeddingSpec {
     pub dim: usize,
     /// Smaller widths the model was trained for (Matryoshka); empty = `dimensions` is refused.
     pub matryoshka: Vec<usize>,
+    /// Whether a reduced width is produced by layer-norming the FULL native vector first (no affine,
+    /// eps 1e-5, the `F.layer_norm` default), then truncating, then L2: what nomic-embed-text-v1.5's card
+    /// says for `matryoshka_dim`. The native width never takes this step.
+    pub matryoshka_layer_norm: bool,
     /// Per-request token cap and array-size cap; over either is a 400, never silent truncation.
     pub max_tokens: usize,
     pub max_items: usize,
@@ -213,10 +217,31 @@ pub fn l2_normalize(v: &mut [f32]) {
     v.iter_mut().for_each(|x| *x /= n);
 }
 
-/// Post-process a pooled vector per the spec: truncate to `dimensions` (Matryoshka), then normalise.
-/// Truncate BEFORE normalising, so the result has unit norm at the requested width.
+/// Layer norm without affine over the whole slice (`F.layer_norm`: biased variance, eps 1e-5).
+pub fn layer_norm(v: &mut [f32]) {
+    if v.is_empty() {
+        return;
+    }
+    let n = v.len() as f64;
+    let mean = v.iter().map(|x| f64::from(*x)).sum::<f64>() / n;
+    let var = v
+        .iter()
+        .map(|x| (f64::from(*x) - mean).powi(2))
+        .sum::<f64>()
+        / n;
+    let inv = 1.0 / (var + 1e-5).sqrt();
+    v.iter_mut()
+        .for_each(|x| *x = ((f64::from(*x) - mean) * inv) as f32);
+}
+
+/// Post-process a pooled vector per the spec. For a reduced width (Matryoshka): layer-norm the full vector
+/// if the spec says so, truncate to `dimensions`, then L2. The order is the model card's, and it matters:
+/// truncating before the layer norm gives a different vector.
 pub fn finish(mut v: Vec<f32>, spec: &EmbeddingSpec, dimensions: Option<usize>) -> Vec<f32> {
     if let Some(d) = dimensions {
+        if spec.matryoshka_layer_norm {
+            layer_norm(&mut v);
+        }
         v.truncate(d);
     }
     // A reduced width is always re-normalised: a truncated vector has the wrong magnitude whatever the

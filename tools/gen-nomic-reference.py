@@ -8,6 +8,12 @@ third-party Hub code (pm-kernels condition 3). The model's own sentence-transfor
 mean Pooling (modules.json, 1_Pooling/config.json), so the reference is: masked mean of last_hidden_state, then
 L2 (cosine does not care about the norm; Lightbulb's spec normalises).
 
+Matryoshka widths: the model card (README.md at the pinned revision, lines 2676-2734, "Sentence Transformers" and
+"Transformers" sections) says: mean pooling, then `F.layer_norm(embeddings, normalized_shape=(embeddings.shape[1],))`
+over the FULL 768 vector, then `embeddings[:, :matryoshka_dim]`, then `F.normalize(embeddings, p=2, dim=1)`. The
+full width skips the layer norm (mean pooling then `F.normalize`). torch is not installed here, so the layer norm is
+numpy's biased-variance form with torch's default eps 1e-5, written from that card text.
+
 The token ids come from tokenizer.json via the `tokenizers` library, the same file Lightbulb loads, so tokenizer
 agreement is NOT tested by this fixture (it shares the method); only the encoder and the pooling are.
 
@@ -17,6 +23,17 @@ import json, sys
 import numpy as np
 import onnxruntime as ort
 import tokenizers
+
+MATRYOSHKA = [64, 128, 256, 512]
+
+
+def layer_norm(x, eps=1e-5):
+    # torch F.layer_norm without affine: (x - mean) / sqrt(biased var + eps)
+    return (x - x.mean()) / np.sqrt(x.var() + eps)
+
+
+def l2(x):
+    return x / np.linalg.norm(x)
 
 SENTENCES = [
     "search_document: The quick brown fox jumps over the lazy dog.",
@@ -40,7 +57,10 @@ def main(model_dir, out_path):
         hidden = sess.run(["last_hidden_state"], feed)[0][0]  # [seq, 768]
         mean = hidden.mean(axis=0)
         vec = mean / np.linalg.norm(mean)
-        rows.append({"text": text, "tokens": len(ids), "ids": ids, "embedding": [float(x) for x in vec]})
+        ln = layer_norm(mean)
+        matryoshka = {str(d): [float(x) for x in l2(ln[:d])] for d in MATRYOSHKA}
+        rows.append({"text": text, "tokens": len(ids), "ids": ids, "embedding": [float(x) for x in vec],
+                     "matryoshka": matryoshka})
     json.dump({
         "model": "nomic-ai/nomic-embed-text-v1.5",
         "revision": "e9b6763023c676ca8431644204f50c2b100d9aab",

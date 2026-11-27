@@ -10,6 +10,7 @@ fn spec() -> EmbeddingSpec {
         normalize: true,
         dim: 4,
         matryoshka: vec![2],
+        matryoshka_layer_norm: false,
         max_tokens: 8,
         max_items: 3,
     }
@@ -315,4 +316,38 @@ fn l2_normalize_survives_values_whose_squares_overflow() {
     let mut zero = vec![0.0f32; 3];
     l2_normalize(&mut zero);
     assert_eq!(zero, vec![0.0; 3]);
+}
+
+fn nomic_like() -> EmbeddingSpec {
+    let mut s = spec();
+    s.matryoshka_layer_norm = true;
+    s
+}
+
+#[test]
+fn a_reduced_width_layer_norms_the_full_vector_before_truncating() {
+    // [1,2,3,4]: mean 2.5, biased variance 1.25, so the layer norm is [-1.5,-0.5,0.5,1.5] / sqrt(1.25 + 1e-5).
+    // Slice to 2: [-1.5,-0.5] direction, L2 -> [-0.948683, -0.316228].
+    let out = finish(vec![1.0, 2.0, 3.0, 4.0], &nomic_like(), Some(2));
+    assert!((out[0] + 0.948_683).abs() < 1e-5, "{out:?}");
+    assert!((out[1] + 0.316_228).abs() < 1e-5, "{out:?}");
+    // Control: without the flag the same input gives the plain truncate-then-L2 vector [1,2]/sqrt5.
+    let plain = finish(vec![1.0, 2.0, 3.0, 4.0], &spec(), Some(2));
+    assert!((plain[0] - 0.447_214).abs() < 1e-5, "{plain:?}");
+    // Order matters: layer-norming the truncated vector instead is a different vector ([-1,1] -> [-0.707, 0.707]).
+    let mut wrong = vec![1.0f32, 2.0];
+    layer_norm(&mut wrong);
+    l2_normalize(&mut wrong);
+    assert!(
+        (wrong[0] - out[0]).abs() > 0.1,
+        "truncate-then-layer-norm must differ"
+    );
+}
+
+#[test]
+fn the_native_width_never_takes_the_layer_norm() {
+    let v = vec![1.0, 2.0, 3.0, 4.0];
+    let native = finish(v.clone(), &nomic_like(), None);
+    let want = finish(v, &spec(), None);
+    assert_eq!(native, want, "the full width is mean pooling then L2 only");
 }
