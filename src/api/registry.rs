@@ -131,12 +131,40 @@ impl ModelRegistry {
     }
 }
 
+/// What happened to the entry's runner thread when it was unloaded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunnerOutcome {
+    /// The thread exited within the wait.
+    Joined,
+    /// A request still holds a sender, so the thread lives until that request ends.
+    StillRunning,
+    /// An embedding entry: it never had a runner thread, so there was nothing to join.
+    NoRunnerEmbedding,
+    /// A chat entry with no runner handle (its runner never started).
+    NoRunner,
+}
+
+impl RunnerOutcome {
+    /// The operator-facing wording (admin response and log line).
+    pub fn describe(self) -> &'static str {
+        match self {
+            Self::Joined => "joined",
+            Self::StillRunning => "still running (a request holds it)",
+            Self::NoRunnerEmbedding => "n/a (no runner thread: embedding entry)",
+            Self::NoRunner => "n/a (no runner thread)",
+        }
+    }
+}
+
 /// What [`unload_model`] did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Unloaded {
     /// The runner thread exited within the wait. `false` means a request still holds a
     /// sender, so the thread (and the model's memory) lives until that request ends.
     pub joined: bool,
+    /// Why `joined` is what it is, in words an operator can read: `joined: false` on an embedding entry is
+    /// not a failure (it has no runner thread), and the bare bool cannot say so.
+    pub runner: RunnerOutcome,
     /// What returning the memory to the OS did; `None` when there is no device handle
     /// (CPU) or the thread had not exited yet.
     pub released: Option<crate::model_fuel::device_pool::Released>,
@@ -159,11 +187,17 @@ pub fn unload_model(
         .take(name)
         .ok_or_else(|| anyhow::anyhow!("model '{name}' is not loaded"))?;
     let join = entry.join.clone();
+    let is_embedding = entry.embedding.is_some();
     drop(entry); // drops the registry's senders
     let handle = join.and_then(|slot| slot.lock().ok().and_then(|mut g| g.take()));
     let Some(handle) = handle else {
         return Ok(Unloaded {
             joined: false,
+            runner: if is_embedding {
+                RunnerOutcome::NoRunnerEmbedding
+            } else {
+                RunnerOutcome::NoRunner
+            },
             released: None,
         });
     };
@@ -174,6 +208,7 @@ pub fn unload_model(
             // sender clone does.
             return Ok(Unloaded {
                 joined: false,
+                runner: RunnerOutcome::StillRunning,
                 released: None,
             });
         }
@@ -184,6 +219,7 @@ pub fn unload_model(
         .map_err(|_| anyhow::anyhow!("the runner thread for '{name}' panicked"))?;
     Ok(Unloaded {
         joined: true,
+        runner: RunnerOutcome::Joined,
         released: crate::model_fuel::device_pool::release_unused_device_memory()?,
     })
 }
@@ -261,6 +297,52 @@ mod tests {
     }
 
     const WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+
+    struct Stub;
+    impl crate::api::openai::embeddings::Embedder for Stub {
+        fn count_tokens(
+            &self,
+            _: &str,
+        ) -> Result<usize, crate::api::openai::embeddings::EmbeddingError> {
+            Ok(1)
+        }
+        fn embed(
+            &self,
+            _: &str,
+        ) -> Result<
+            crate::api::openai::embeddings::Embedded,
+            crate::api::openai::embeddings::EmbeddingError,
+        > {
+            unreachable!("never called")
+        }
+    }
+
+    #[test]
+    fn unloading_an_embedding_entry_says_no_runner_not_a_failure() {
+        let entry = ModelEntry {
+            embedding: Some(std::sync::Arc::new(
+                crate::api::openai::embeddings::LoadedEmbedder {
+                    spec: crate::api::openai::nomic_embedder::nomic_v1_5_spec(),
+                    embedder: Box::new(Stub),
+                },
+            )),
+            ..ModelEntry::default()
+        };
+        let reg = ModelRegistry::single("e", entry);
+        let out = unload_model(&reg, "e", WAIT).unwrap();
+        assert!(!out.joined, "{out:?}");
+        assert_eq!(out.runner, RunnerOutcome::NoRunnerEmbedding);
+        assert_eq!(
+            out.runner.describe(),
+            "n/a (no runner thread: embedding entry)"
+        );
+        // Control: a runner that is joined, and one a request still holds, read differently.
+        assert_eq!(RunnerOutcome::Joined.describe(), "joined");
+        assert_ne!(
+            RunnerOutcome::StillRunning.describe(),
+            out.runner.describe()
+        );
+    }
 
     #[test]
     fn unload_removes_the_entry_and_waits_for_the_runner_to_exit() {

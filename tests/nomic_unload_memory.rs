@@ -129,6 +129,10 @@ async fn embedding_entry_unload_memory_return() {
         !out.joined && out.released.is_none(),
         "an embedding entry has no runner to join: {out:?}"
     );
+    assert_eq!(
+        out.runner.describe(),
+        "n/a (no runner thread: embedding entry)"
+    );
     assert!(!models.names().contains(&name), "the entry must be gone");
     phase("after unload");
     // Control: a second load puts the memory back, so the unload's drop is not an artefact of never loading.
