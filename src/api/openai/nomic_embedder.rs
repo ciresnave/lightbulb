@@ -103,6 +103,25 @@ impl NomicEmbedder {
     /// Per-token hidden states of `text`, row-major `[seq, dim]`, and `seq`: the encoder output before pooling
     /// (public so a test can pool it a second way as a control).
     pub fn hidden_states(&self, text: &str) -> Result<(Vec<f32>, usize), EmbeddingError> {
+        self.hidden_states_with(text, |t| t.realize_f32())
+    }
+
+    /// [`Self::hidden_states`] realized on a CUDA device (`Tensor::realize_f32_cuda`), the F3 GPU acceptance path.
+    #[cfg(feature = "fuel-cuda")]
+    pub fn hidden_states_cuda(
+        &self,
+        text: &str,
+        device: &fuel_cuda_backend::CudaDevice,
+    ) -> Result<(Vec<f32>, usize), EmbeddingError> {
+        self.hidden_states_with(text, |t| t.realize_f32_cuda(device))
+    }
+
+    /// One validation and forward, realized by `realize` (the only part that differs between devices).
+    fn hidden_states_with(
+        &self,
+        text: &str,
+        realize: impl FnOnce(&fuel::lazy::Tensor) -> Vec<f32>,
+    ) -> Result<(Vec<f32>, usize), EmbeddingError> {
         let ids = self.token_ids(text)?;
         // `forward` asserts a non-empty sequence and errors past `n_positions`; both are refused here
         // as typed errors (a tokenizer.json that adds no special tokens can yield an empty row).
@@ -119,12 +138,11 @@ impl NomicEmbedder {
                 ),
             ));
         }
-        let hidden = self
+        let out = self
             .model
             .forward(&ids, None, None)
-            .map_err(|e| internal(format!("nomic-bert forward: {e:?}")))?
-            .realize_f32();
-        Ok((hidden, ids.len()))
+            .map_err(|e| internal(format!("nomic-bert forward: {e:?}")))?;
+        Ok((realize(&out), ids.len()))
     }
 
     fn token_ids(&self, text: &str) -> Result<Vec<u32>, EmbeddingError> {
