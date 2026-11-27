@@ -98,21 +98,9 @@ impl NomicEmbedder {
 }
 
 impl NomicEmbedder {
-    fn token_ids(&self, text: &str) -> Result<Vec<u32>, EmbeddingError> {
-        let enc = self
-            .tokenizer
-            .encode(text, true)
-            .map_err(|e| bad("input", format!("tokenizing: {e}")))?;
-        Ok(enc.get_ids().to_vec())
-    }
-}
-
-impl Embedder for NomicEmbedder {
-    fn count_tokens(&self, text: &str) -> Result<usize, EmbeddingError> {
-        Ok(self.token_ids(text)?.len())
-    }
-
-    fn embed(&self, text: &str) -> Result<Embedded, EmbeddingError> {
+    /// Per-token hidden states of `text`, row-major `[seq, dim]`, and `seq`: the encoder output before pooling
+    /// (public so a test can pool it a second way as a control).
+    pub fn hidden_states(&self, text: &str) -> Result<(Vec<f32>, usize), EmbeddingError> {
         let ids = self.token_ids(text)?;
         // `forward` asserts a non-empty sequence and errors past `n_positions`; both are refused here
         // as typed errors (a tokenizer.json that adds no special tokens can yield an empty row).
@@ -134,10 +122,29 @@ impl Embedder for NomicEmbedder {
             .forward(&ids, None, None)
             .map_err(|e| internal(format!("nomic-bert forward: {e:?}")))?
             .realize_f32();
-        let vector = pool(&hidden, ids.len(), self.spec.dim, self.spec.pooling)?;
+        Ok((hidden, ids.len()))
+    }
+
+    fn token_ids(&self, text: &str) -> Result<Vec<u32>, EmbeddingError> {
+        let enc = self
+            .tokenizer
+            .encode(text, true)
+            .map_err(|e| bad("input", format!("tokenizing: {e}")))?;
+        Ok(enc.get_ids().to_vec())
+    }
+}
+
+impl Embedder for NomicEmbedder {
+    fn count_tokens(&self, text: &str) -> Result<usize, EmbeddingError> {
+        Ok(self.token_ids(text)?.len())
+    }
+
+    fn embed(&self, text: &str) -> Result<Embedded, EmbeddingError> {
+        let (hidden, seq) = self.hidden_states(text)?;
+        let vector = pool(&hidden, seq, self.spec.dim, self.spec.pooling)?;
         Ok(Embedded {
             vector,
-            tokens: ids.len(),
+            tokens: seq,
         })
     }
 }
