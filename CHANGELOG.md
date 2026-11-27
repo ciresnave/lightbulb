@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.24.14 — docs: ROADMAP F3 marked done for nomic-embed-text-v1.5, with its limits
+
+ROADMAP row F3 said "scheduled (design note)" after #343 and #345 shipped `/v1/embeddings`. It now says what shipped, where it was verified (local, with the checkpoint; hosted CI skips the gate) and what is not done or not measured. Documentation only; no code or version-bearing file changed.
+
 ## 0.24.13 — F3: `POST /v1/embeddings` serving nomic-embed-text-v1.5 (safetensors), with Matryoshka `dimensions`
 
 `POST /v1/embeddings` is live over the slice-1 core. A models directory may now hold an embedding model as a DIRECTORY of Hugging Face files (`model.safetensors`, `tokenizer.json`, `config.json` with `model_type: nomic_bert`); the manager loads it on demand and evicts it like a chat model, `GET /v1/models` lists it with `lightbulb_kind: "embedding"` (a chat model's JSON is unchanged), and a request naming a chat model, or a chat request naming an embedding model, is a 400 that says so. Only nomic-embed-text-v1.5 is supported (a directory of any other architecture is neither listed nor loaded); Ollama's GGUF embedders are NOT loadable (Fuel has no GGUF encoder path). Errors: 400 for a bad request (unknown model, wrong kind, token-id input, empty or over-long input, a bad `encoding_format`, a `dimensions` the model was not trained for), 500 for a model-side failure (a non-finite vector, a wrong width). Credit: the model is nomic-ai/nomic-embed-text-v1.5 by Nomic AI, Apache-2.0, https://huggingface.co/nomic-ai/nomic-embed-text-v1.5; the weights are never in this repository.
