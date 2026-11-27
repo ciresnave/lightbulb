@@ -93,6 +93,7 @@ pub fn start_into(
             cache_control: Some(ctrl_sender),
             chat_template: template,
             join: Some(Arc::new(Mutex::new(Some(join)))),
+            embedding: None,
         },
     );
     tracing::info!("Started model runner for {}", path.display());
@@ -121,6 +122,9 @@ impl FuelLoader {
 impl ModelLoader for FuelLoader {
     fn needed_bytes(&self, name: &str) -> Result<u64, LoadError> {
         let path = self.path(name)?;
+        if super::embedding_models::is_embedding_dir(&path) {
+            return Ok(super::embedding_models::weights_bytes(&path));
+        }
         // 0 when the file's shape is unknown: the runner's own preflight still decides.
         Ok(crate::model_fuel::preflight::model_load_bytes(
             &path,
@@ -132,6 +136,11 @@ impl ModelLoader for FuelLoader {
 
     fn load(&self, registry: &ModelRegistry, name: &str) -> Result<(), LoadError> {
         let path = self.path(name)?;
+        if super::embedding_models::is_embedding_dir(&path) {
+            return super::embedding_models::start_embedding_into(registry, name, &path).map_err(
+                |e| LoadError::Failed(format!("loading embedding model '{name}': {e:#}")),
+            );
+        }
         start_into(registry, name, &path, &self.params)
             .map_err(|e| LoadError::Failed(format!("starting '{name}': {e:#}")))
     }

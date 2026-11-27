@@ -24,6 +24,7 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, RwLock};
 
 use crate::api::chat_template::ResolvedTemplate;
+use crate::api::openai::embeddings::LoadedEmbedder;
 use crate::engine::InferenceJob;
 use crate::engine::model_runner::ControlSender;
 
@@ -46,6 +47,9 @@ pub struct ModelEntry {
     /// unload can wait for the thread to exit before it returns the model's memory.
     /// Shared and taken once: a `JoinHandle` is not `Clone`.
     pub join: Option<JoinSlot>,
+    /// Set for an EMBEDDING model (`/v1/embeddings`): the encoder and its pooling row. Such an entry has
+    /// no runner, and [`ModelRegistry::entry`] never returns it, so a chat request cannot land on it.
+    pub embedding: Option<Arc<LoadedEmbedder>>,
 }
 
 /// A runner thread's join handle, shared between clones of its entry.
@@ -106,14 +110,15 @@ impl ModelRegistry {
         self.entries.write().ok()?.remove(name)
     }
 
-    /// The one entry this phase holds, or an empty entry when none was ever set
+    /// The one CHAT entry this phase holds, or an empty entry when none was ever set
     /// (no model configured, or its runner failed to start). With several
-    /// entries (not yet reachable) it is the first by name.
+    /// entries (not yet reachable) it is the first by name. An embedding entry is skipped:
+    /// it has no runner, and returning it here would answer a chat request with nothing.
     pub fn entry(&self) -> ModelEntry {
         self.entries
             .read()
             .ok()
-            .and_then(|g| g.values().next().cloned())
+            .and_then(|g| g.values().find(|e| e.embedding.is_none()).cloned())
             .unwrap_or_default()
     }
 

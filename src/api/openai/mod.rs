@@ -7,8 +7,10 @@
 pub mod chat;
 pub mod completions;
 pub mod embeddings;
+pub mod embeddings_route;
 pub(crate) mod logprobs;
 pub mod models;
+pub mod nomic_embedder;
 mod tool_parsers;
 
 use axum::{
@@ -23,6 +25,7 @@ pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/v1/chat/completions", post(chat::chat_completions))
         .route("/v1/completions", post(completions::completions))
+        .route("/v1/embeddings", post(embeddings_route::create_embeddings))
         .route(
             "/v1/models",
             get(models::list_models).post(models::list_models),

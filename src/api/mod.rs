@@ -32,6 +32,7 @@ pub mod admin_pull;
 pub mod audit_retention;
 pub mod auth_middleware;
 pub mod chat_template;
+pub mod embedding_models;
 pub mod fuel_loader;
 pub mod lightbulb;
 pub mod manager;
