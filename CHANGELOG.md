@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.26.0 — **BREAKING**: `ApiConfig.embedding_device` and `Unloaded.runner` added (exhaustive pub structs)
+
+`/v1/embeddings` can run on CUDA: `LIGHTBULB_EMBEDDING_DEVICE=cpu|cuda[:n]` (default cpu; needs a `fuel-cuda` build). An unavailable device stops startup or answers HTTP 500 naming it, never a silent CPU run; `vulkan` is refused by name (not built in). `/v1/models` reports `lightbulb_device`. Unloading an embedding entry now reports "n/a (no runner thread: embedding entry)" (admin `runner`, manager log) instead of reading like a failure; `runner_joined` is kept. Also: GPU nomic gate and measurements, F1 resume proof against a local Range server, `docs/PREFIX-CACHE-DESIGN.md` (design only).
+
+**Migration:** `ApiConfig` literals add `embedding_device: EmbeddingDevice::Cpu` or end with `..ApiConfig::default()`; exhaustive matches or destructures of `registry::Unloaded` add the `runner: RunnerOutcome` field (or `..`). Verified: gpu-run test (cuda +1029 MiB vs cpu +0 MiB, cosine 1.000000 over HTTP both), `Cuda(99)` gives HTTP 500 naming 99, resume served 42,278,585 B vs a restart control's 67,108,864 B. UNMEASURED: per-request weight upload share.
+
 ## 0.25.0 — **BREAKING**: Fuel 0.57.0 -> 0.59.0 (all fuel-* pins); public API carries fuel types
 
 All eleven `fuel-*` pins move to 0.59.0 (`unpopped-vocab` follows in the lock, 0.58.5 -> 0.60.32). Fuel's 0.58.0 and 0.59.0 BREAKING entries are dependency takes (onemkl, baracuda, cuda-seam, unpopped-vocab, fireline) in types that lightbulb's own code does not construct, so no source change was needed; but lightbulb's public API names fuel types, so the take is breaking for lightbulb's consumers. Verified: `cargo check --all-targets` clean; one copy of every `fuel-*` crate (`cargo tree -d`); the CI test command passes 1144 tests; the nomic gate ran against the real checkpoint (cosine 1.000000 on every reference sentence, Matryoshka widths included). Not run: any GPU path.

@@ -1,5 +1,0 @@
-kind: **BREAKING**: `ApiConfig.embedding_device` and `Unloaded.runner` added (exhaustive pub structs)
----
-`/v1/embeddings` can run on CUDA: `LIGHTBULB_EMBEDDING_DEVICE=cpu|cuda[:n]` (default cpu; needs a `fuel-cuda` build). An unavailable device stops startup or answers HTTP 500 naming it, never a silent CPU run; `vulkan` is refused by name (not built in). `/v1/models` reports `lightbulb_device`. Unloading an embedding entry now reports "n/a (no runner thread: embedding entry)" (admin `runner`, manager log) instead of reading like a failure; `runner_joined` is kept. Also: GPU nomic gate and measurements, F1 resume proof against a local Range server, `docs/PREFIX-CACHE-DESIGN.md` (design only).
-
-**Migration:** `ApiConfig` literals add `embedding_device: EmbeddingDevice::Cpu` or end with `..ApiConfig::default()`; exhaustive matches or destructures of `registry::Unloaded` add the `runner: RunnerOutcome` field (or `..`). Verified: gpu-run test (cuda +1029 MiB vs cpu +0 MiB, cosine 1.000000 over HTTP both), `Cuda(99)` gives HTTP 500 naming 99, resume served 42,278,585 B vs a restart control's 67,108,864 B. UNMEASURED: per-request weight upload share.
