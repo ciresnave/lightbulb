@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.25.0 — Fuel 0.57.0 -> 0.59.0 (all fuel-* pins)
+
+All eleven `fuel-*` pins move to 0.59.0 (`unpopped-vocab` follows in the lock, 0.58.5 -> 0.60.32). Fuel's 0.58.0 and 0.59.0 BREAKING entries are dependency takes (onemkl, baracuda, cuda-seam, unpopped-vocab, fireline) in types lightbulb does not use, so no source change was needed. Verified: `cargo check --all-targets` clean; one copy of every `fuel-*` crate (`cargo tree -d`); the CI test command passes 1144 tests; the nomic gate ran against the real checkpoint (cosine 1.000000 on every reference sentence, Matryoshka widths included). Not run: any GPU path.
+
 ## 0.24.14 — docs: ROADMAP F3 marked done for nomic-embed-text-v1.5, with its limits
 
 ROADMAP row F3 said "scheduled (design note)" after #343 and #345 shipped `/v1/embeddings`. It now says what shipped, where it was verified (local, with the checkpoint; hosted CI skips the gate) and what is not done or not measured. Documentation only; no code or version-bearing file changed.
