@@ -131,6 +131,11 @@ pub struct ApiConfig {
     /// `main.rs` sets it from `LIGHTBULB_PREFIX_SHARING`.
     pub model_prefix_sharing: bool,
 
+    /// Blocks of KV a finished prompt's prefix may keep pinned so a later request can splice it
+    /// ([`crate::engine::model_runner::EngineOptions::prefix_retention_blocks`]). 0 = off (the default);
+    /// needs `model_prefix_sharing`. `main.rs` sets it from `LIGHTBULB_PREFIX_RETENTION_BLOCKS`.
+    pub model_prefix_retention_blocks: usize,
+
     /// Load a model even when the serving GPU reports it cannot fit
     /// ([`crate::engine::model_runner::EngineOptions::allow_oversize_model`]).
     /// Default `false`. `main.rs` sets it from `LIGHTBULB_ALLOW_OVERSIZE_MODEL`.
@@ -254,6 +259,7 @@ impl Default for ApiConfig {
             model_context_length: 2048,
             model_max_queue_depth: 32,
             model_prefix_sharing: false,
+            model_prefix_retention_blocks: 0,
             model_allow_oversize: false,
             embedding_device: embedding_models::EmbeddingDevice::Cpu,
             request_timeout_ms: 300_000,

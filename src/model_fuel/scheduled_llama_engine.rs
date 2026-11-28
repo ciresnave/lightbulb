@@ -701,6 +701,8 @@ struct BatchedServeConfig {
     /// `false` from `new`; `run_fuel_engine` sets it from
     /// `EngineOptions::prefix_sharing`.
     prefix_sharing_enabled: bool,
+    /// Retention budget in blocks; `run_fuel_engine` sets it only where sharing is actually on (0 otherwise).
+    prefix_retention_blocks: usize,
 }
 
 impl BatchedServeConfig {
@@ -724,6 +726,7 @@ impl BatchedServeConfig {
             cache_stats,
             ctrl_rx,
             prefix_sharing_enabled: false,
+            prefix_retention_blocks: 0,
         })
     }
 }
@@ -761,7 +764,7 @@ fn run_batched<'m, M: fuel_inference::multi_session::PagedDecodeModel>(
         scheduler: config.scheduler,
         sessions: std::collections::HashMap::new(),
         prefix_index: BlockPrefixIndexFor::new(KV_BLOCK_SIZE),
-        retained: RetainedStore::new(0),
+        retained: RetainedStore::new(config.prefix_retention_blocks),
         pending_retention: std::collections::HashMap::new(),
         cache_stats: config.cache_stats,
         prefix_sharing_enabled: config.prefix_sharing_enabled,
@@ -832,6 +835,11 @@ pub(crate) fn run_fuel_engine(
     };
     config.prefix_sharing_enabled =
         super::memory_shape::resolve_prefix_sharing(options.prefix_sharing, model_path);
+    config.prefix_retention_blocks = if config.prefix_sharing_enabled {
+        options.prefix_retention_blocks
+    } else {
+        0
+    };
     if let Err(e) = super::preflight::enforce(
         model_path,
         &config.device,

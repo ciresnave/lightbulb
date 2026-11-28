@@ -32,6 +32,7 @@ impl StartParams {
             max_queue_depth: state.config.model_max_queue_depth,
             options: EngineOptions {
                 prefix_sharing: state.config.model_prefix_sharing,
+                prefix_retention_blocks: state.config.model_prefix_retention_blocks,
                 allow_oversize_model: state.config.model_allow_oversize,
             },
             cache_stats: state.cache_stats.clone(),
