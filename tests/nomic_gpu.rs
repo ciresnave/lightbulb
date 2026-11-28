@@ -294,10 +294,6 @@ async fn listed_device(state: &lightbulb::api::AppState, name: &str) -> String {
         .to_string()
 }
 
-/// The request really runs on the card, and the same request configured for the CPU does not touch it. Device
-/// evidence is `nvidia-smi` memory sampled across the request (the CUDA run must add the model's weights on
-/// the device, the CPU control must add nothing like that), the encoder's own `device_label` via `/v1/models`,
-/// and the cosine gate on the vector that came back over HTTP. Either arm alone could be satisfied by the wrong device.
 /// One arm: serve a short and a long input on `device`, check status, label and cosine, and return the GPU memory
 /// the requests added (nvidia-smi peak minus baseline).
 async fn served_arm(
@@ -342,6 +338,10 @@ async fn served_arm(
 /// evidence is `nvidia-smi` memory sampled across the request (the CUDA run must add the model's weights on
 /// the device, the CPU control must add nothing like that), the encoder's own `device_label` via `/v1/models`,
 /// and the cosine gate on the vector that came back over HTTP. Either arm alone could be satisfied by the wrong device.
+///
+/// RUN IT ALONE (`-- served`): Fuel's CUDA pool keeps memory a finished test freed, so after another GPU test in the
+/// same process the card's baseline already holds the weights and the +200 MiB bar cannot see this run's upload
+/// (observed: it failed after the residency tests, passed alone at +1125 MiB).
 #[tokio::test]
 async fn served_on_cuda_uses_the_card_and_matches_the_reference_and_cpu_does_not() {
     use lightbulb::api::embedding_models::EmbeddingDevice;
@@ -438,5 +438,31 @@ fn second_request_hits_resident_weights_and_uploads_nothing() {
         h2 - h1,
         u1,
         "the second request must hit every resident weight"
+    );
+}
+
+/// Dropping one encoder must not evict another loaded encoder's resident weights (Sourcery, #349): `B` keeps
+/// its residency and uploads nothing when `A`, on the same card, is dropped.
+#[test]
+fn dropping_one_encoder_leaves_another_encoders_weights_resident() {
+    use lightbulb::api::embedding_models::EmbeddingDevice;
+    let dir = model_dir();
+    let text = "search_query: what is the capital of France?";
+    let a = NomicEmbedder::load_on(&dir, EmbeddingDevice::Cuda(0)).unwrap();
+    let b = NomicEmbedder::load_on(&dir, EmbeddingDevice::Cuda(0)).unwrap();
+    a.hidden_states(text).unwrap();
+    b.hidden_states(text).unwrap();
+    let before = b.weight_residency().unwrap();
+    drop(a);
+    b.hidden_states(text).unwrap();
+    let after = b.weight_residency().unwrap();
+    eprintln!("RESIDENCY B before A dropped {before:?}, after B's next request {after:?}");
+    assert_eq!(
+        after.1, before.1,
+        "B re-uploaded weights after A was dropped"
+    );
+    assert!(
+        after.0 > before.0,
+        "B's next request must hit its resident weights"
     );
 }

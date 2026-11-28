@@ -79,6 +79,12 @@ fn managed(parent: &std::path::Path) -> (AppState, std::sync::Arc<ModelManager>,
         ))),
         config: ApiConfig {
             models_dir: Some(parent.to_string_lossy().into_owned()),
+            embedding_device: std::env::var("LIGHTBULB_EMBEDDING_DEVICE")
+                .ok()
+                .map_or(Ok(Default::default()), |v| {
+                    lightbulb::api::embedding_models::EmbeddingDevice::parse(&v)
+                })
+                .expect("LIGHTBULB_EMBEDDING_DEVICE"),
             ..ApiConfig::default()
         },
         pg_backend: None,

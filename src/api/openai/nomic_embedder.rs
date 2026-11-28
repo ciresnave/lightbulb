@@ -163,13 +163,18 @@ impl NomicEmbedder {
     /// (public so a test can pool it a second way as a control).
     pub fn hidden_states(&self, text: &str) -> Result<(Vec<f32>, usize), EmbeddingError> {
         match &self.run {
-            Run::Cpu => self.hidden_states_with(text, |t| t.realize_f32()),
+            Run::Cpu => self.hidden_states_with(text, |t| Ok(t.realize_f32())),
             #[cfg(feature = "fuel-cuda")]
             Run::Cuda { ctx, gate, .. } => {
                 let _one_at_a_time = gate.lock().unwrap_or_else(|e| e.into_inner());
                 self.hidden_states_with(text, |t| {
-                    ctx.realize_one_as::<f32>(t.graph(), t.node_id())
-                        .expect("realize on the CUDA device")
+                    // A device failure (an `Err`, or a panic inside Fuel such as an allocation failure) is this
+                    // request's 500, never the request thread's death.
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        ctx.realize_one_as::<f32>(t.graph(), t.node_id())
+                            .map_err(|e| format!("{e:?}"))
+                    }))
+                    .unwrap_or_else(|_| Err("panicked while realizing".into()))
                 })
             }
         }
@@ -195,14 +200,15 @@ impl NomicEmbedder {
         text: &str,
         device: &fuel_cuda_backend::CudaDevice,
     ) -> Result<(Vec<f32>, usize), EmbeddingError> {
-        self.hidden_states_with(text, |t| t.realize_f32_cuda(device))
+        self.hidden_states_with(text, |t| Ok(t.realize_f32_cuda(device)))
     }
 
     /// One validation and forward, realized by `realize` (the only part that differs between devices).
-    fn hidden_states_with(
+    #[doc(hidden)]
+    pub fn hidden_states_with(
         &self,
         text: &str,
-        realize: impl FnOnce(&fuel::lazy::Tensor) -> Vec<f32>,
+        realize: impl FnOnce(&fuel::lazy::Tensor) -> Result<Vec<f32>, String>,
     ) -> Result<(Vec<f32>, usize), EmbeddingError> {
         let ids = self.token_ids(text)?;
         // `forward` asserts a non-empty sequence and errors past `n_positions`; both are refused here
@@ -224,7 +230,8 @@ impl NomicEmbedder {
             .model
             .forward(&ids, None, None)
             .map_err(|e| internal(format!("nomic-bert forward: {e:?}")))?;
-        Ok((realize(&out), ids.len()))
+        let hidden = realize(&out).map_err(|e| internal(format!("realizing the encoder: {e}")))?;
+        Ok((hidden, ids.len()))
     }
 
     fn token_ids(&self, text: &str) -> Result<Vec<u32>, EmbeddingError> {
