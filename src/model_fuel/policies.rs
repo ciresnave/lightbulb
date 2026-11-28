@@ -484,6 +484,10 @@ pub struct BlockPrefixIndexFor<D> {
     by_hash: HashMap<[u8; 32], PrefixEntry<D>>,
     donor_refs: HashMap<D, usize>,
     stats: BlockPrefixStats,
+    /// Identity mixed into every chain hash (model, adapter, template). Empty = the historical key, so existing
+    /// hashes are unchanged. Two prompts with the same tokens but different seeds never share a chain: the same
+    /// tokens give different KV under a different adapter or model, and a retained entry outlives its request.
+    seed: Vec<u8>,
 }
 
 /// The `KvBlockPool`-backed instantiation: donors are real pool sessions, so a
@@ -498,7 +502,15 @@ impl<D: Copy + Eq + std::hash::Hash + std::fmt::Debug> BlockPrefixIndexFor<D> {
             by_hash: HashMap::new(),
             donor_refs: HashMap::new(),
             stats: BlockPrefixStats::default(),
+            seed: Vec::new(),
         }
+    }
+
+    /// An index whose chain keys carry `seed` (see the field's doc): the key dimension retention needs.
+    pub fn with_seed(block_size: usize, seed: &[u8]) -> Self {
+        let mut s = Self::new(block_size);
+        s.seed = seed.to_vec();
+        s
     }
 
     pub fn block_size(&self) -> usize {
@@ -528,6 +540,10 @@ impl<D: Copy + Eq + std::hash::Hash + std::fmt::Debug> BlockPrefixIndexFor<D> {
         for b in 0..n_full {
             let mut h = Sha256::new();
             h.update(b"lightbulb.block-prefix.v1");
+            if !self.seed.is_empty() {
+                h.update((self.seed.len() as u64).to_le_bytes());
+                h.update(&self.seed);
+            }
             h.update(prev);
             for &t in &tokens[b * self.block_size..(b + 1) * self.block_size] {
                 h.update(t.to_le_bytes());
@@ -537,6 +553,12 @@ impl<D: Copy + Eq + std::hash::Hash + std::fmt::Debug> BlockPrefixIndexFor<D> {
             prev = digest;
         }
         out
+    }
+
+    /// The chain keys `tokens` would be indexed under (one per whole block). Exposed so the key's dimensions can be
+    /// tested without a second index.
+    pub fn chain_keys(&self, tokens: &[u32]) -> Vec<[u8; 32]> {
+        self.chain_hashes(tokens)
     }
 
     /// Index `donor`'s prompt so later prompts can splice from it.

@@ -1,0 +1,3 @@
+kind: prefix retention slice 1 (bookkeeping only, nothing wired)
+---
+`model_fuel::prefix_retention`: `PrefixSource` (live or retained index entry), `RetainedStore` (bounded, LRU over whole chains, deepest depth evicted first so a chain stays prefix-closed, typed refusals that evict nothing) and `BlockPrefixIndexFor::with_seed`, which mixes model and adapter identity into the chain key (empty seed = the existing key). Not connected to the serving path yet; `docs/PREFIX-CACHE-DESIGN.md` slices 2-5 do that. Verified by 7 unit tests; two mutants (shallow-first eviction, never evicting) each fail two of them.
