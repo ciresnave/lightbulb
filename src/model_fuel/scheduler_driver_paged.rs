@@ -205,6 +205,12 @@ impl<'m, M: PagedDecodeModel> FuelPagedSchedulerDriver<'m, M> {
         self.scheduler.release_prefix(prefix)
     }
 
+    /// Free KV pool blocks right now. Admission here is optimistic (see the struct doc), so this is the only
+    /// pre-check a caller has against pool pressure.
+    pub(crate) fn kv_free_blocks(&self) -> usize {
+        self.scheduler.kv_free_blocks()
+    }
+
     /// Admit a session that reuses `prefix`'s KV instead of a cold prefill —
     /// same sampling-strategy construction as `try_admit` above, the
     /// prefix-sharing counterpart. Every rejection here (empty prompt, zero

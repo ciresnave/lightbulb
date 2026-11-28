@@ -473,9 +473,7 @@ impl<'m> ServingDriver<'m> {
             }),
             Ok((rid, evicted)) => {
                 for e in evicted {
-                    self.prefix_index
-                        .remove_key_owned(&e.payload.key, PrefixSource::Retained(e.chain));
-                    let _ = self.release_prefix_inner(e.payload.prefix);
+                    self.drop_evicted(&e);
                 }
                 for (_, entry) in regs {
                     self.prefix_index
@@ -488,6 +486,38 @@ impl<'m> ServingDriver<'m> {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .entries = entries;
+    }
+
+    /// Undo one eviction the store reported: drop its index entry and release its pool registration.
+    fn drop_evicted(&mut self, e: &super::prefix_retention::Evicted<RetainedEntry>) {
+        self.prefix_index
+            .remove_key_owned(&e.payload.key, PrefixSource::Retained(e.chain));
+        let _ = self.release_prefix_inner(e.payload.prefix);
+        let entries = self.prefix_index.len();
+        let mut stats = self.cache_stats.lock().unwrap_or_else(|e| e.into_inner());
+        stats.evictions += 1;
+        stats.entries = entries;
+    }
+
+    fn free_blocks(&self) -> usize {
+        match &self.inner {
+            ServingDriverInner::F32(d) => d.kv_free_blocks(),
+            ServingDriverInner::QuantizedGguf(d) => d.kv_free_blocks(),
+            ServingDriverInner::QuantizedGgufQwen3(d) => d.kv_free_blocks(),
+        }
+    }
+
+    /// Pressure rule (docs/PREFIX-CACHE-DESIGN.md 3.3): a retained prefix must never be the reason a live
+    /// request fails. Fuel's paged admission is optimistic (pool exhaustion surfaces later as that session's
+    /// `Failed`), so there is no refusal to retry on; the check is up front instead: evict retained chains,
+    /// least recently used first, until the pool has `need` free blocks or nothing retained is left.
+    fn make_room(&mut self, need: usize) {
+        while self.free_blocks() < need {
+            let Some(e) = self.retained.evict_one() else {
+                break;
+            };
+            self.drop_evicted(&e);
+        }
     }
 
     fn release_prefix_inner(&mut self, prefix: fuel::kv_block_pool::PrefixId) -> fuel::Result<()> {
@@ -550,6 +580,14 @@ impl<'m> SchedulerDriver for ServingDriver<'m> {
         // reason the off path stays byte-identical to pre-slice-3 behavior.
         let hit = self.prefix_index.lookup(prompt);
         let hit_blocks = hit.map_or(0, |h| h.blocks);
+        if self.retained.chains() > 0 {
+            // The chain this request is about to splice from must not be the first one evicted for it.
+            if let Some(PrefixSource::Retained(id)) = hit.map(|h| h.donor) {
+                self.retained.touch(id);
+            }
+            let bs = self.prefix_index.block_size();
+            self.make_room((prompt.len() + effective_max_new).div_ceil(bs));
+        }
 
         let admitted = if self.prefix_sharing_enabled {
             self.try_admit_sharing_or_fallback(
@@ -905,11 +943,19 @@ mod tests {
     /// not capacity edge cases (those belong to `scheduler_driver_paged.rs`'s
     /// own tests).
     fn serving_driver(model: &LlamaModel, prefix_sharing_enabled: bool) -> ServingDriver<'_> {
+        serving_driver_with_blocks(model, prefix_sharing_enabled, 4096)
+    }
+
+    fn serving_driver_with_blocks(
+        model: &LlamaModel,
+        prefix_sharing_enabled: bool,
+        num_blocks: usize,
+    ) -> ServingDriver<'_> {
         let fuel_scheduler = FuelPagedSchedulerDriver::new(
             model,
             KvBudget {
                 block_size: 2,
-                num_blocks: 4096,
+                num_blocks,
             },
             fuel::DType::F32,
             &fuel::Device::cpu(),
@@ -1174,6 +1220,95 @@ mod tests {
         d.try_admit(&prompt, 3, 0.0, None, Default::default())
             .expect("second must admit");
         assert_eq!(d.prefix_shared_admissions, 0, "no retention: a cold admit");
+    }
+
+    /// A 6-block pool holding one retained 2-block prefix (4 free): a live request that needs 5 blocks only fits
+    /// if that retained prefix is evicted. The donor generates 3 tokens: one that finishes IN its prefill step
+    /// (`max_new` 1) has released its blocks before retention can register them, so it is never retained (a
+    /// known limit, see the design note).
+    fn driver_with_a_retained_prefix_in_a_tight_pool(model: &LlamaModel) -> ServingDriver<'_> {
+        let mut d = serving_driver_with_blocks(model, true, 6);
+        d.retained = RetainedStore::new(64);
+        let id = d
+            .try_admit(&[1, 2, 3, 4, 5], 3, 0.0, None, Default::default())
+            .expect("donor admits");
+        drive_to_completion(&mut d, id);
+        assert_eq!(
+            d.retained.chains(),
+            1,
+            "setup: the donor's prefix is retained"
+        );
+        assert!(
+            d.free_blocks() < 5,
+            "setup: the pool cannot take the live request as it is"
+        );
+        d
+    }
+
+    /// Tokens stay under the tiny model's 16-entry vocabulary: an out-of-range id fails the request on its own,
+    /// which would make the control below fail for the wrong reason.
+    const LIVE: [u32; 7] = [9, 8, 7, 6, 5, 4, 3];
+
+    fn outcome_of(d: &mut ServingDriver<'_>, id: fuel_inference::multi_session::SessionId) -> bool {
+        loop {
+            let _ = d.step();
+            if let Some((_, o)) = d.reap_finished().into_iter().find(|(i, _)| *i == id) {
+                return matches!(o, FinishOutcome::Completed { .. });
+            }
+        }
+    }
+
+    /// Slice 3: a request that needs the space a retained prefix pins is admitted and completes, and the retained
+    /// chain was released for it. A retained prefix is never the reason a live request fails.
+    #[test]
+    fn a_live_request_evicts_retained_prefixes_instead_of_failing() {
+        let model = tiny_model(1);
+        let mut d = driver_with_a_retained_prefix_in_a_tight_pool(&model);
+        let id = d
+            .try_admit(&LIVE, 3, 0.0, None, Default::default())
+            .expect("live request admits");
+        assert!(
+            d.retained.pinned_blocks() < 2,
+            "eviction is deepest-first and stops once the request fits: {} blocks still pinned",
+            d.retained.pinned_blocks()
+        );
+        assert!(outcome_of(&mut d, id), "the live request must complete");
+    }
+
+    /// The control: the SAME tight pool without the pressure rule (straight to the inner driver) fails the live
+    /// request. So the test above cannot pass for a reason other than the eviction.
+    #[test]
+    fn without_the_pressure_rule_the_same_request_fails_in_the_tight_pool() {
+        let model = tiny_model(1);
+        let mut d = driver_with_a_retained_prefix_in_a_tight_pool(&model);
+        let id = d
+            .plain_admit(&LIVE, 3, 0.0, None, Default::default())
+            .expect("optimistic admission accepts it");
+        assert!(
+            !outcome_of(&mut d, id),
+            "no eviction: the pool is exhausted mid-request"
+        );
+        assert_eq!(
+            d.retained.pinned_blocks(),
+            2,
+            "the retained chain was untouched"
+        );
+    }
+
+    /// A request that fits does not touch the retained prefixes.
+    #[test]
+    fn a_request_that_fits_leaves_the_retained_prefixes_alone() {
+        let model = tiny_model(1);
+        let mut d = driver_with_a_retained_prefix_in_a_tight_pool(&model);
+        let id = d
+            .try_admit(&[12, 13, 14], 1, 0.0, None, Default::default())
+            .expect("admits");
+        assert_eq!(
+            d.retained.pinned_blocks(),
+            2,
+            "2 blocks needed, 4 free: nothing evicted"
+        );
+        assert!(outcome_of(&mut d, id));
     }
 
     /// `cache_clear` releases the retained prefixes and the next identical prompt is cold again.
