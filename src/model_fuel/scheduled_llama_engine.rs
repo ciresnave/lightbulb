@@ -332,14 +332,7 @@ impl<'m> ServingDriver<'m> {
         if blocks == 0 {
             return self.plain_admit(prompt, max_new, temperature, seed, extras);
         }
-        let prefix = match hit.donor {
-            PrefixSource::Live(donor) => self.ensure_prefix_registered(donor, blocks),
-            PrefixSource::Retained(id) => {
-                self.retained.touch(id);
-                self.retained.payload_at(id, blocks).map(|e| e.prefix)
-            }
-        };
-        let Some(prefix) = prefix else {
+        let Some(prefix) = self.prefix_for(hit.donor, blocks) else {
             return self.plain_admit(prompt, max_new, temperature, seed, extras);
         };
         let shared = match &mut self.inner {
@@ -359,6 +352,22 @@ impl<'m> ServingDriver<'m> {
                 Ok(id)
             }
             Err(_) => self.plain_admit(prompt, max_new, temperature, seed, extras),
+        }
+    }
+
+    /// The pool registration that serves a `blocks`-deep hit on `source`: a live donor is registered on demand, a
+    /// retained chain already holds one per depth (and counts as used).
+    fn prefix_for(
+        &mut self,
+        source: PrefixSrc,
+        blocks: usize,
+    ) -> Option<fuel::kv_block_pool::PrefixId> {
+        match source {
+            PrefixSource::Live(donor) => self.ensure_prefix_registered(donor, blocks),
+            PrefixSource::Retained(id) => {
+                self.retained.touch(id);
+                self.retained.payload_at(id, blocks).map(|e| e.prefix)
+            }
         }
     }
 
@@ -438,6 +447,18 @@ impl<'m> ServingDriver<'m> {
         keys: &[[u8; 32]],
         deepest: fuel::kv_block_pool::PrefixId,
     ) {
+        let regs = self.register_owned_depths(id, keys, deepest);
+        self.store_chain(id, regs);
+    }
+
+    /// Register every depth of `keys` that `id` still owns in the index (the deepest one is already registered
+    /// as `deepest`, which is released instead when `id` no longer owns that depth).
+    fn register_owned_depths(
+        &mut self,
+        id: fuel_inference::multi_session::SessionId,
+        keys: &[[u8; 32]],
+        deepest: fuel::kv_block_pool::PrefixId,
+    ) -> Vec<(usize, RetainedEntry)> {
         let live = PrefixSource::Live(id);
         let depth = keys.len();
         let mut regs: Vec<(usize, RetainedEntry)> = Vec::new();
@@ -466,6 +487,17 @@ impl<'m> ServingDriver<'m> {
         } else {
             let _ = self.release_prefix_inner(deepest);
         }
+        regs
+    }
+
+    /// Hand registered depths to the store (evicting to fit; releasing them all if it refuses) and move the
+    /// index entries from `Live(id)` to the new retained chain.
+    fn store_chain(
+        &mut self,
+        id: fuel_inference::multi_session::SessionId,
+        regs: Vec<(usize, RetainedEntry)>,
+    ) {
+        let live = PrefixSource::Live(id);
         let held: Vec<_> = regs.iter().map(|r| r.1.prefix).collect();
         match self.retained.insert(regs.clone()) {
             Err(_) => held.into_iter().for_each(|p| {
@@ -505,6 +537,18 @@ impl<'m> ServingDriver<'m> {
             ServingDriverInner::QuantizedGguf(d) => d.kv_free_blocks(),
             ServingDriverInner::QuantizedGgufQwen3(d) => d.kv_free_blocks(),
         }
+    }
+
+    /// Make room for a request of `tokens` total tokens. The chain the request is about to splice from is
+    /// touched first so it is not the first one evicted for it.
+    fn make_room_for(&mut self, hit_source: Option<PrefixSrc>, tokens: usize) {
+        if self.retained.chains() == 0 {
+            return;
+        }
+        if let Some(PrefixSource::Retained(id)) = hit_source {
+            self.retained.touch(id);
+        }
+        self.make_room(tokens.div_ceil(self.prefix_index.block_size()));
     }
 
     /// Pressure rule (docs/PREFIX-CACHE-DESIGN.md 3.3): a retained prefix must never be the reason a live
@@ -580,14 +624,7 @@ impl<'m> SchedulerDriver for ServingDriver<'m> {
         // reason the off path stays byte-identical to pre-slice-3 behavior.
         let hit = self.prefix_index.lookup(prompt);
         let hit_blocks = hit.map_or(0, |h| h.blocks);
-        if self.retained.chains() > 0 {
-            // The chain this request is about to splice from must not be the first one evicted for it.
-            if let Some(PrefixSource::Retained(id)) = hit.map(|h| h.donor) {
-                self.retained.touch(id);
-            }
-            let bs = self.prefix_index.block_size();
-            self.make_room((prompt.len() + effective_max_new).div_ceil(bs));
-        }
+        self.make_room_for(hit.map(|h| h.donor), prompt.len() + effective_max_new);
 
         let admitted = if self.prefix_sharing_enabled {
             self.try_admit_sharing_or_fallback(
