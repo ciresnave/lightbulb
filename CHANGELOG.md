@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.28.1 — prefix retention chain depth 64 -> 256 blocks; bench knob and CPU measurement (not breaking)
+
+The retained chain registered at most 64 blocks per prompt; measured on a ~1149-token prompt (71 blocks) that left ~125 tokens to prefill and cost 23-40 s to first token against 5-6 s with the whole prefix (SmolLM2-135M Q8_0, CPU, n=1, a loaded shared machine). `RETENTION_MAX_DEPTH` is now 256 blocks. `examples/prefix_sharing_bench` gains `LB_RETENTION_BLOCKS` (use a small `LB_DONOR_NEW` so the donor is gone when the sharers arrive). ROADMAP P0-1 (a) records the numbers and their limits: one repetition, a no-share control that differed 1.125x between arms, no GPU number.
+
 ## 0.28.0 — **BREAKING**: deps: Fuel 0.59.0 -> 0.60.0 (all fuel-* pins)
 
 All `fuel-*` pins move from 0.59.0 to 0.60.0. Fuel's own CHANGELOG calls 0.60.0 a dependency re-pin (baracuda alpha.231, cuda-seam 0.61.0, unpopped-vocab 0.61.10, fireline 0.12, onemkl 0.6.1) that is breaking only because Fuel re-exports types from those crates; it lists no API change and nothing about `InferenceContext` or the weight residency. No lightbulb source changed. Verified on the CPU build: `cargo check --all-targets` clean; `cargo test --lib` 942 passed, `nomic_reference` 7, `pull_resume` 2; clippy_gate exit 0; `cargo tree -d` shows one copy of every fuel-*, unpopped-vocab, fireline, baracuda and onemkl crate (the lock takes unpopped-vocab 0.60.32 -> 0.61.10 and fireline-grammar 0.12.0). NOT verified: the CUDA build and the GPU tests (the residency path through `InferenceContext`, the served-on-CUDA gate), which need a full baracuda alpha.231 rebuild; the full `cargo test --no-fail-fast` result is stated in the PR.
