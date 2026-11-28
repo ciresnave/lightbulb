@@ -51,6 +51,7 @@ use fuel_inference::multi_session::{KvBudget, PagedSchedulePolicy};
 
 use super::engine_model::effective_generation_budget;
 use super::policies::BlockPrefixIndexFor;
+use super::prefix_retention::{PrefixSource, RetainedId, RetainedStore};
 
 mod serve_loaders;
 use super::scheduler_driver_paged::{FuelPagedSchedulerDriver, SERVING_SCHEDULE_POLICY};
@@ -128,12 +129,32 @@ enum ServingDriverInner<'m> {
 /// claims a `total_saved_tokens` figure — `CacheStatsResponse` never reads
 /// that field, and claiming it without an actual skipped prefill would be
 /// exactly the fabricated-number defect this project's conventions forbid.
+/// What a prefix-index entry names: a running session (gone when it finishes) or a retained registration that
+/// outlives it (`docs/PREFIX-CACHE-DESIGN.md`).
+type PrefixSrc = PrefixSource<fuel_inference::multi_session::SessionId, RetainedId>;
+
+/// One retained depth: the pool registration and the index key it serves (so eviction can drop both).
+#[derive(Clone, Copy, Debug)]
+struct RetainedEntry {
+    prefix: fuel::kv_block_pool::PrefixId,
+    key: [u8; 32],
+}
+
+/// Deepest chain registered per prompt (in blocks). Every depth up to here is registered, so the index stays
+/// prefix-closed; a longer prompt shares its first `RETENTION_MAX_DEPTH` blocks.
+const RETENTION_MAX_DEPTH: usize = 64;
+
 struct ServingDriver<'m> {
     inner: ServingDriverInner<'m>,
     context_length: usize,
     scheduler: SharedScheduler,
     sessions: std::collections::HashMap<fuel_inference::multi_session::SessionId, String>,
-    prefix_index: BlockPrefixIndexFor<fuel_inference::multi_session::SessionId>,
+    prefix_index: BlockPrefixIndexFor<PrefixSrc>,
+    /// Prompt prefixes kept past their donor (budget 0 = off, the default). Bounded and LRU; see `prefix_retention`.
+    retained: RetainedStore<RetainedEntry>,
+    /// Sessions whose prompt blocks are not all filled yet: their chain keys, retried after every step.
+    pending_retention:
+        std::collections::HashMap<fuel_inference::multi_session::SessionId, Vec<[u8; 32]>>,
     cache_stats: SharedCacheStats,
     /// ROADMAP research-track item 1, slice 3: off-by-default switch for
     /// actually exploiting a `prefix_index` hit (splice + skip prefill),
@@ -206,7 +227,8 @@ impl<'m> ServingDriver<'m> {
         // a correctness requirement the way it is for `splice_prefix`'s
         // actual pool callers (this index never gates a `KvBlockPool::
         // discard`), just honest bookkeeping for a finished session.
-        if self.prefix_index.forget_donor(id) > 0 {
+        self.pending_retention.remove(&id);
+        if self.prefix_index.forget_donor(PrefixSource::Live(id)) > 0 {
             let entries = self.prefix_index.len();
             let mut stats = self.cache_stats.lock().unwrap_or_else(|e| e.into_inner());
             stats.evictions += 1;
@@ -250,7 +272,7 @@ impl<'m> ServingDriver<'m> {
     /// the record-and-mirror tail, run unconditionally and identically on
     /// both the exploited and detection-only paths.
     fn record_prefix(&mut self, id: fuel_inference::multi_session::SessionId, prompt: &[u32]) {
-        self.prefix_index.record(prompt, id);
+        self.prefix_index.record(prompt, PrefixSource::Live(id));
         let block_stats = self.prefix_index.stats();
         let entries = self.prefix_index.len();
         let mut stats = self.cache_stats.lock().unwrap_or_else(|e| e.into_inner());
@@ -290,7 +312,7 @@ impl<'m> ServingDriver<'m> {
     /// other Fuel-side refusal of the splice.
     fn try_admit_sharing_or_fallback(
         &mut self,
-        hit: Option<super::policies::PrefixMatchFor<fuel_inference::multi_session::SessionId>>,
+        hit: Option<super::policies::PrefixMatchFor<PrefixSrc>>,
         prompt: &[u32],
         max_new: usize,
         temperature: f64,
@@ -310,7 +332,14 @@ impl<'m> ServingDriver<'m> {
         if blocks == 0 {
             return self.plain_admit(prompt, max_new, temperature, seed, extras);
         }
-        let Some(prefix) = self.ensure_prefix_registered(hit.donor, blocks) else {
+        let prefix = match hit.donor {
+            PrefixSource::Live(donor) => self.ensure_prefix_registered(donor, blocks),
+            PrefixSource::Retained(id) => {
+                self.retained.touch(id);
+                self.retained.payload_at(id, blocks).map(|e| e.prefix)
+            }
+        };
+        let Some(prefix) = prefix else {
             return self.plain_admit(prompt, max_new, temperature, seed, extras);
         };
         let shared = match &mut self.inner {
@@ -346,18 +375,119 @@ impl<'m> ServingDriver<'m> {
         if let Some(&prefix) = self.registered_prefixes.get(&(donor, blocks)) {
             return Some(prefix);
         }
-        let registered = match &mut self.inner {
-            ServingDriverInner::F32(d) => d.register_prefix(donor, blocks),
-            ServingDriverInner::QuantizedGguf(d) => d.register_prefix(donor, blocks),
-            ServingDriverInner::QuantizedGgufQwen3(d) => d.register_prefix(donor, blocks),
-        };
-        match registered {
+        match self.register_inner(donor, blocks) {
             Ok(prefix) => {
                 self.registered_prefixes.insert((donor, blocks), prefix);
                 Some(prefix)
             }
             Err(_) => None,
         }
+    }
+
+    fn register_inner(
+        &mut self,
+        donor: fuel_inference::multi_session::SessionId,
+        blocks: usize,
+    ) -> fuel::Result<fuel::kv_block_pool::PrefixId> {
+        match &mut self.inner {
+            ServingDriverInner::F32(d) => d.register_prefix(donor, blocks),
+            ServingDriverInner::QuantizedGguf(d) => d.register_prefix(donor, blocks),
+            ServingDriverInner::QuantizedGgufQwen3(d) => d.register_prefix(donor, blocks),
+        }
+    }
+
+    /// Queue `id`'s prompt chain for retention (no-op when retention is off, or the prompt's whole chain is
+    /// already indexed). The registrations happen in [`Self::retain_ready_prefixes`], once the blocks are filled.
+    fn queue_retention(
+        &mut self,
+        id: fuel_inference::multi_session::SessionId,
+        prompt: &[u32],
+        hit_blocks: usize,
+    ) {
+        if self.retained.budget() == 0 {
+            return;
+        }
+        let keys = self.prefix_index.chain_keys(prompt);
+        let depth = keys.len().min(RETENTION_MAX_DEPTH);
+        if depth > hit_blocks {
+            self.pending_retention.insert(id, keys[..depth].to_vec());
+        }
+    }
+
+    /// Retry every queued chain. Fuel refuses `register_prefix` until the donor holds that many fully filled
+    /// blocks and a refusal leaves the pool untouched, so the DEEPEST registration is the readiness probe: it
+    /// succeeds exactly when the whole prompt prefix is resident.
+    fn retain_ready_prefixes(&mut self) {
+        let ids: Vec<_> = self.pending_retention.keys().copied().collect();
+        for id in ids {
+            let depth = self.pending_retention[&id].len();
+            let Ok(deepest) = self.register_inner(id, depth) else {
+                continue;
+            };
+            if let Some(keys) = self.pending_retention.remove(&id) {
+                self.retain_chain(id, &keys, deepest);
+            }
+        }
+    }
+
+    /// Register the depths `id` still owns in the index, hand them to the store (evicting to fit), and move the
+    /// index entries from `Live(id)` to the new retained chain, so they survive `forget_donor` at departure.
+    fn retain_chain(
+        &mut self,
+        id: fuel_inference::multi_session::SessionId,
+        keys: &[[u8; 32]],
+        deepest: fuel::kv_block_pool::PrefixId,
+    ) {
+        let live = PrefixSource::Live(id);
+        let depth = keys.len();
+        let mut regs: Vec<(usize, RetainedEntry)> = Vec::new();
+        for d in 1..depth {
+            if self.prefix_index.owned_by(&keys[d - 1], live) {
+                match self.register_inner(id, d) {
+                    Ok(prefix) => regs.push((
+                        d,
+                        RetainedEntry {
+                            prefix,
+                            key: keys[d - 1],
+                        },
+                    )),
+                    Err(_) => break,
+                }
+            }
+        }
+        if self.prefix_index.owned_by(&keys[depth - 1], live) {
+            regs.push((
+                depth,
+                RetainedEntry {
+                    prefix: deepest,
+                    key: keys[depth - 1],
+                },
+            ));
+        } else {
+            let _ = self.release_prefix_inner(deepest);
+        }
+        let held: Vec<_> = regs.iter().map(|r| r.1.prefix).collect();
+        match self.retained.insert(regs.clone()) {
+            Err(_) => held.into_iter().for_each(|p| {
+                let _ = self.release_prefix_inner(p);
+            }),
+            Ok((rid, evicted)) => {
+                for e in evicted {
+                    self.prefix_index
+                        .remove_key_owned(&e.payload.key, PrefixSource::Retained(e.chain));
+                    let _ = self.release_prefix_inner(e.payload.prefix);
+                }
+                for (_, entry) in regs {
+                    self.prefix_index
+                        .adopt(&entry.key, live, PrefixSource::Retained(rid));
+                }
+            }
+        }
+        let entries = self.prefix_index.len();
+        self.cache_stats
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .entries = entries;
     }
 
     fn release_prefix_inner(&mut self, prefix: fuel::kv_block_pool::PrefixId) -> fuel::Result<()> {
@@ -378,6 +508,10 @@ impl<'m> ServingDriver<'m> {
     fn clear_prefix_cache(&mut self) {
         let block_size = self.prefix_index.block_size();
         self.prefix_index = BlockPrefixIndexFor::new(block_size);
+        self.pending_retention.clear();
+        for e in self.retained.drain() {
+            let _ = self.release_prefix_inner(e.payload.prefix);
+        }
         let mut stats = self.cache_stats.lock().unwrap_or_else(|e| e.into_inner());
         *stats = crate::cache::PrefixCacheStats::default();
     }
@@ -415,6 +549,7 @@ impl<'m> SchedulerDriver for ServingDriver<'m> {
         // the `false` path simply never looks at `hit`, which is the whole
         // reason the off path stays byte-identical to pre-slice-3 behavior.
         let hit = self.prefix_index.lookup(prompt);
+        let hit_blocks = hit.map_or(0, |h| h.blocks);
 
         let admitted = if self.prefix_sharing_enabled {
             self.try_admit_sharing_or_fallback(
@@ -431,16 +566,19 @@ impl<'m> SchedulerDriver for ServingDriver<'m> {
         if let Ok(id) = admitted {
             self.mirror_admission(id, prompt, effective_max_new, temperature);
             self.record_prefix(id, prompt);
+            self.queue_retention(id, prompt, hit_blocks);
         }
         admitted
     }
 
     fn step(&mut self) -> Result<Vec<(Self::Id, u32)>, String> {
-        match &mut self.inner {
+        let out = match &mut self.inner {
             ServingDriverInner::F32(d) => d.step(),
             ServingDriverInner::QuantizedGguf(d) => d.step(),
             ServingDriverInner::QuantizedGgufQwen3(d) => d.step(),
-        }
+        };
+        self.retain_ready_prefixes();
+        out
     }
 
     fn take_step_logprobs(&mut self) -> Vec<(Self::Id, RawLogprob)> {
@@ -585,6 +723,8 @@ fn run_batched<'m, M: fuel_inference::multi_session::PagedDecodeModel>(
         scheduler: config.scheduler,
         sessions: std::collections::HashMap::new(),
         prefix_index: BlockPrefixIndexFor::new(KV_BLOCK_SIZE),
+        retained: RetainedStore::new(0),
+        pending_retention: std::collections::HashMap::new(),
         cache_stats: config.cache_stats,
         prefix_sharing_enabled: config.prefix_sharing_enabled,
         registered_prefixes: std::collections::HashMap::new(),
@@ -786,6 +926,8 @@ mod tests {
             ))),
             sessions: std::collections::HashMap::new(),
             prefix_index: BlockPrefixIndexFor::new(2),
+            retained: RetainedStore::new(0),
+            pending_retention: std::collections::HashMap::new(),
             cache_stats: Arc::new(Mutex::new(crate::cache::PrefixCacheStats::default())),
             prefix_sharing_enabled,
             registered_prefixes: std::collections::HashMap::new(),
@@ -976,6 +1118,77 @@ mod tests {
         );
     }
 
+    /// Admit `prompt`, run it to completion and let it depart, on a sharing driver whose retention budget is
+    /// `budget` blocks. Returns the driver for a follow-up admission.
+    fn driver_after_donor_finished<'m>(
+        model: &'m LlamaModel,
+        prompt: &[u32],
+        budget: usize,
+    ) -> ServingDriver<'m> {
+        let mut d = serving_driver(model, true);
+        d.retained = RetainedStore::new(budget);
+        let donor = d
+            .try_admit(prompt, 3, 0.0, None, Default::default())
+            .expect("donor must admit");
+        drive_to_completion(&mut d, donor);
+        assert!(
+            !d.sessions.contains_key(&donor),
+            "the donor must have departed"
+        );
+        d
+    }
+
+    /// Slice 2 (docs/PREFIX-CACHE-DESIGN.md 3.2): with retention on, the donor's prompt prefix outlives it, so
+    /// the next identical prompt takes a real splice and its completion is bit-identical to a cold one.
+    #[test]
+    fn a_retained_prefix_serves_a_second_request_after_its_donor_finished() {
+        let model = tiny_model(1);
+        let prompt = [1u32, 2, 3, 4, 5];
+        let mut d = driver_after_donor_finished(&model, &prompt, 64);
+        assert!(
+            d.retained.pinned_blocks() > 0,
+            "the prompt prefix must be retained"
+        );
+        let second = d
+            .try_admit(&prompt, 3, 0.0, None, Default::default())
+            .expect("second must admit");
+        assert_eq!(
+            d.prefix_shared_admissions, 1,
+            "must be a real splice from the retained prefix"
+        );
+        assert_eq!(
+            drive_to_completion(&mut d, second),
+            cold_completion(&model, &prompt, 3),
+            "completion through a retained prefix must be bit-identical to a cold admission"
+        );
+    }
+
+    /// The control: the same sequence with retention 0 (today's behaviour) is a cold admit, so the test above
+    /// cannot pass by the splice path being taken for some other reason.
+    #[test]
+    fn without_retention_the_second_request_after_the_donor_is_cold() {
+        let model = tiny_model(1);
+        let prompt = [1u32, 2, 3, 4, 5];
+        let mut d = driver_after_donor_finished(&model, &prompt, 0);
+        assert_eq!(d.retained.pinned_blocks(), 0);
+        d.try_admit(&prompt, 3, 0.0, None, Default::default())
+            .expect("second must admit");
+        assert_eq!(d.prefix_shared_admissions, 0, "no retention: a cold admit");
+    }
+
+    /// `cache_clear` releases the retained prefixes and the next identical prompt is cold again.
+    #[test]
+    fn clearing_the_prefix_cache_drops_retained_prefixes() {
+        let model = tiny_model(1);
+        let prompt = [1u32, 2, 3, 4, 5];
+        let mut d = driver_after_donor_finished(&model, &prompt, 64);
+        d.clear_prefix_cache();
+        assert_eq!(d.retained.chains(), 0);
+        d.try_admit(&prompt, 3, 0.0, None, Default::default())
+            .expect("must admit");
+        assert_eq!(d.prefix_shared_admissions, 0, "cleared: cold");
+    }
+
     /// A repeat of a prompt that is exactly block-aligned would match ALL
     /// its blocks, which Fuel refuses (no suffix left to sample from). The
     /// driver must share one block fewer rather than fall back cold.
@@ -1014,7 +1227,7 @@ mod tests {
             .ensure_prefix_registered(donor, 3)
             .expect("donor holds 3 whole blocks");
         let hit = super::super::policies::PrefixMatchFor {
-            donor,
+            donor: PrefixSource::Live(donor),
             blocks: 2,
             shared_tokens: 4,
             remainder_tokens: 3,

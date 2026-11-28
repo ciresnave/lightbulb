@@ -126,6 +126,13 @@ impl<P> RetainedStore<P> {
         Ok((id, evicted))
     }
 
+    /// The payload registered at exactly `depth` blocks of chain `id` (a splice must use that depth's
+    /// registration: a deeper one would graft KV of tokens the new prompt does not contain).
+    pub fn payload_at(&self, id: RetainedId, depth: usize) -> Option<&P> {
+        let c = self.chains.get(&id)?;
+        c.depths.iter().find(|d| d.0 == depth).map(|d| &d.1)
+    }
+
     /// A lookup hit this chain: it becomes the most recently used. Unknown ids are ignored.
     pub fn touch(&mut self, id: RetainedId) {
         let t = self.tick();

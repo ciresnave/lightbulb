@@ -637,6 +637,41 @@ impl<D: Copy + Eq + std::hash::Hash + std::fmt::Debug> BlockPrefixIndexFor<D> {
         }
     }
 
+    /// Re-point the entry at `key` from `from` to `to`, only if it currently names `from`. Retention uses this
+    /// to move a finished prompt's chain from its live donor to a retained registration before the donor leaves.
+    /// Returns whether an entry moved.
+    pub fn adopt(&mut self, key: &[u8; 32], from: D, to: D) -> bool {
+        let Some(e) = self.by_hash.get_mut(key) else {
+            return false;
+        };
+        if e.donor != from {
+            return false;
+        }
+        e.donor = to;
+        if let Some(n) = self.donor_refs.get_mut(&from) {
+            *n = n.saturating_sub(1);
+        }
+        *self.donor_refs.entry(to).or_insert(0) += 1;
+        true
+    }
+
+    /// Does the entry at `key` currently name `donor`?
+    pub fn owned_by(&self, key: &[u8; 32], donor: D) -> bool {
+        self.by_hash.get(key).is_some_and(|e| e.donor == donor)
+    }
+
+    /// Remove the entry at `key` if it names `donor` (an eviction must not drop a chain another source now owns).
+    pub fn remove_key_owned(&mut self, key: &[u8; 32], donor: D) -> bool {
+        if !self.owned_by(key, donor) {
+            return false;
+        }
+        self.by_hash.remove(key);
+        if let Some(n) = self.donor_refs.get_mut(&donor) {
+            *n = n.saturating_sub(1);
+        }
+        true
+    }
+
     /// Is this session still referenced as a splice source? While true, the
     /// caller must NOT `KvBlockPool::discard` it.
     pub fn is_donor(&self, s: D) -> bool {
