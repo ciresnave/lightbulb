@@ -142,7 +142,7 @@ struct RetainedEntry {
 
 /// Deepest chain registered per prompt (in blocks). Every depth up to here is registered, so the index stays
 /// prefix-closed; a longer prompt shares its first `RETENTION_MAX_DEPTH` blocks.
-const RETENTION_MAX_DEPTH: usize = 64;
+const RETENTION_MAX_DEPTH: usize = 256;
 
 struct ServingDriver<'m> {
     inner: ServingDriverInner<'m>,
@@ -417,7 +417,12 @@ impl<'m> ServingDriver<'m> {
             return;
         }
         let keys = self.prefix_index.chain_keys(prompt);
-        let depth = keys.len().min(RETENTION_MAX_DEPTH);
+        // Clamp to the budget too: the store refuses a chain deeper than its budget outright, which would
+        // drop a usable shallower prefix.
+        let depth = keys
+            .len()
+            .min(RETENTION_MAX_DEPTH)
+            .min(self.retained.budget());
         if depth > hit_blocks {
             self.pending_retention.insert(id, keys[..depth].to_vec());
         }
@@ -1251,6 +1256,21 @@ mod tests {
             drive_to_completion(&mut d, second),
             cold_completion(&model, &prompt, 3),
             "completion through a retained prefix must be bit-identical to a cold admission"
+        );
+    }
+
+    /// A budget smaller than the prompt's chain must keep the prefix that fits, not drop the whole chain.
+    #[test]
+    fn a_budget_below_the_prompt_depth_retains_the_shallower_prefix() {
+        let model = tiny_model(1);
+        let prompt = [1u32, 2, 3, 4, 5];
+        let mut d = driver_after_donor_finished(&model, &prompt, 1);
+        assert_eq!(d.retained.pinned_blocks(), 1, "one block of two is kept");
+        d.try_admit(&prompt, 3, 0.0, None, Default::default())
+            .expect("second must admit");
+        assert_eq!(
+            d.prefix_shared_admissions, 1,
+            "the shallower prefix is shared"
         );
     }
 

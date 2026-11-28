@@ -50,10 +50,12 @@ use tokio::sync::{mpsc, oneshot};
 type Rx = mpsc::UnboundedReceiver<anyhow::Result<StreamItem>>;
 
 fn env_usize(key: &str, default: usize) -> usize {
-    std::env::var(key)
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(default)
+    match std::env::var(key) {
+        Err(_) => default,
+        Ok(v) => v
+            .parse()
+            .unwrap_or_else(|_| panic!("{key}={v:?} is not a non-negative integer")),
+    }
 }
 
 /// `paras` distinct paragraphs; `seed` shifts every number so two seeds share
@@ -220,6 +222,7 @@ fn start_runner(
         scheduler,
         EngineOptions {
             prefix_sharing: sharing,
+            prefix_retention_blocks: if sharing { cfg.retention_blocks } else { 0 },
             ..EngineOptions::default()
         },
     )
@@ -323,6 +326,9 @@ struct Cfg {
     sharers: usize,
     sharer_new: usize,
     donor_new: usize,
+    /// `LB_RETENTION_BLOCKS` (default 0 = off): the sharing arm keeps finished prompts' prefixes. Use a small
+    /// `LB_DONOR_NEW` so the donor is GONE when the sharers arrive: that is the case retention exists for.
+    retention_blocks: usize,
     reps: usize,
     ctx: usize,
 }
@@ -363,15 +369,16 @@ impl Cfg {
             sharer_new: env_usize("LB_SHARER_NEW", 16),
             donor_new: env_usize("LB_DONOR_NEW", 400),
             reps: env_usize("LB_REPS", 3),
+            retention_blocks: env_usize("LB_RETENTION_BLOCKS", 0),
             ctx: env_usize("LB_CTX", 2048),
         }
     }
 }
 
-fn print_arm(r: &ArmResult) {
+fn print_arm(r: &ArmResult, retention_blocks: usize) {
     println!(
-        "  prefix prompt ~{} tokens; cache_stats.hits = {}",
-        r.prompt_tokens, r.hits
+        "  prefix prompt ~{} tokens; cache_stats.hits = {}; retention budget = {} blocks",
+        r.prompt_tokens, r.hits, retention_blocks
     );
     for (l, live, o) in &r.rows {
         println!(
@@ -384,9 +391,12 @@ fn print_arm(r: &ArmResult) {
     summarise("sharers, donor live", r, |l, live| {
         l.contains("sharer") && live
     });
-    summarise("sharers, donor gone (cold)", r, |l, live| {
-        l.contains("sharer") && !live
-    });
+    let gone = if retention_blocks > 0 {
+        "sharers, donor gone (retained or cold: see hits)"
+    } else {
+        "sharers, donor gone (cold)"
+    };
+    summarise(gone, r, |l, live| l.contains("sharer") && !live);
 }
 
 fn compare_arms(off: &ArmResult, on: &ArmResult) {
@@ -453,7 +463,7 @@ fn main() {
         report_load("arm start");
         let r = run_arm(&path, sharing, &cfg);
         report_load("arm end");
-        print_arm(&r);
+        print_arm(&r, if sharing { cfg.retention_blocks } else { 0 });
         arms.push(r);
     }
     if on_first {

@@ -62,8 +62,8 @@ session is still live. At that point, `register_prefix(donor, d)` for the depths
 of tokens the new prompt does not contain). That rule stands: retention registers a depth per hit we want, not one deep id.
 
 Registering several depths of one prompt costs refcount bumps and bookkeeping, not block memory (the blocks are shared).
-Depth set: every depth up to 64 blocks, then geometric (64, 96, 128, ...) plus the full depth. Cap and stride are
-ASSUMPTIONS to be settled by the measurement in section 5, not facts.
+Depth set: every depth up to the cap (now 256 blocks, `RETENTION_MAX_DEPTH`, and never more than the retention budget).
+The cap was settled by measurement (see "Measured depth cap" below); the first design's 64 then geometric stride was an assumption.
 
 UNVERIFIED: where in the serving step loop "prompt prefill finished" is observable. `try_admit` admits; prefill happens in
 the scheduler's steps. Slice 2 starts by finding that hook and writing down the line.
@@ -79,6 +79,9 @@ Pinned blocks are memory a live request cannot use. So:
   and `lookup`'s stop-at-first-miss stays correct), `release_prefix` each `PrefixId`, drop the chain entries.
 - **Pressure rule:** if an admission is refused for pool space, evict retained chains LRU-first and retry before refusing.
   A retained prefix must never be the reason a live request fails. This gets its own test (3.5).
+- **Measured depth cap (2026-11-28):** the first implementation registered at most 64 blocks per prompt. On a ~1149-token prompt
+  (71 blocks) that shared 1024 tokens and left ~125 to prefill: 23-40 s to first token against ~5 s with the whole prefix (CPU,
+  loaded machine, n=1). The cap is 256 blocks (4096 tokens); registrations are refcount bumps, not block memory.
 - **Implemented (slices 2-3), with two facts the code found:** (1) Fuel's paged admission is optimistic: pool
   exhaustion surfaces later as that session's `Failed`, never as a refusal, so there is nothing to retry on. The
   pressure rule is therefore an up-front check in `try_admit`: if free blocks < `ceil((prompt + max_new) / block)`,
