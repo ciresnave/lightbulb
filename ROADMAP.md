@@ -137,6 +137,12 @@ cache mechanics and OverMind on orchestration policy, with Lightbulb owning the 
      (`policies.rs:524-541`, seed `lightbulb.block-prefix.v1`): no adapter, model or template dimension. (d) whole blocks only; the tail
      (< `KV_BLOCK_SIZE`) is re-prefilled. (e) the doc comment at `scheduled_llama_engine.rs:115-121` still says "detection only": stale, fix
      with the next code change to that file.
+     **(a) built 2026-11-28 (#350, off by default, `LIGHTBULB_PREFIX_RETENTION_BLOCKS`; design `docs/PREFIX-CACHE-DESIGN.md`).**
+     Measured (SmolLM2-135M Q8_0, CPU, ~1149-token prefix, donor `LB_DONOR_NEW=4`, 3 sharers, **n=1 repetition, a heavily loaded
+     shared machine: indicative, not a benchmark**): with retention on, sharers took 6.0 / 5.5 / 4.7 s to first token (one with the donor
+     already gone) against 146-209 s cold in the retention-off arm; the no-share control differed 1.125x between arms (the noise bar);
+     completions bit-identical. A first run with the chain depth capped at 64 blocks (1024 of 1149 tokens) left ~125 tokens to prefill
+     and took 23-40 s: the cap is now 256 blocks. **No GPU number exists**; the default stays off until one does (slice 5).
    - **P0-2 fork admission: possible for whole blocks with Fuel's existing API; needs a fork entry point in Lightbulb.**
      Fuel's `register_prefix` takes the first N fully-filled blocks of a LIVE session, and the pool is token-agnostic, so blocks of tokens the
      parent generated register like prompt blocks; `add_session_sharing_prefix` (and `_with_params`, :2096, unused by Lightbulb) admits a

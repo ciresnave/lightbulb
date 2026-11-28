@@ -142,7 +142,7 @@ struct RetainedEntry {
 
 /// Deepest chain registered per prompt (in blocks). Every depth up to here is registered, so the index stays
 /// prefix-closed; a longer prompt shares its first `RETENTION_MAX_DEPTH` blocks.
-const RETENTION_MAX_DEPTH: usize = 64;
+const RETENTION_MAX_DEPTH: usize = 256;
 
 struct ServingDriver<'m> {
     inner: ServingDriverInner<'m>,

@@ -1,0 +1,3 @@
+kind: prefix retention chain depth 64 -> 256 blocks; bench knob and CPU measurement (not breaking)
+---
+The retained chain registered at most 64 blocks per prompt; measured on a ~1149-token prompt (71 blocks) that left ~125 tokens to prefill and cost 23-40 s to first token against 5-6 s with the whole prefix (SmolLM2-135M Q8_0, CPU, n=1, a loaded shared machine). `RETENTION_MAX_DEPTH` is now 256 blocks. `examples/prefix_sharing_bench` gains `LB_RETENTION_BLOCKS` (use a small `LB_DONOR_NEW` so the donor is gone when the sharers arrive). ROADMAP P0-1 (a) records the numbers and their limits: one repetition, a no-share control that differed 1.125x between arms, no GPU number.

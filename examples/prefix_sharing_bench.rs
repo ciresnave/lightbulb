@@ -220,6 +220,7 @@ fn start_runner(
         scheduler,
         EngineOptions {
             prefix_sharing: sharing,
+            prefix_retention_blocks: if sharing { cfg.retention_blocks } else { 0 },
             ..EngineOptions::default()
         },
     )
@@ -323,6 +324,9 @@ struct Cfg {
     sharers: usize,
     sharer_new: usize,
     donor_new: usize,
+    /// `LB_RETENTION_BLOCKS` (default 0 = off): the sharing arm keeps finished prompts' prefixes. Use a small
+    /// `LB_DONOR_NEW` so the donor is GONE when the sharers arrive: that is the case retention exists for.
+    retention_blocks: usize,
     reps: usize,
     ctx: usize,
 }
@@ -363,6 +367,7 @@ impl Cfg {
             sharer_new: env_usize("LB_SHARER_NEW", 16),
             donor_new: env_usize("LB_DONOR_NEW", 400),
             reps: env_usize("LB_REPS", 3),
+            retention_blocks: env_usize("LB_RETENTION_BLOCKS", 0),
             ctx: env_usize("LB_CTX", 2048),
         }
     }

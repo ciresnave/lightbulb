@@ -79,6 +79,9 @@ Pinned blocks are memory a live request cannot use. So:
   and `lookup`'s stop-at-first-miss stays correct), `release_prefix` each `PrefixId`, drop the chain entries.
 - **Pressure rule:** if an admission is refused for pool space, evict retained chains LRU-first and retry before refusing.
   A retained prefix must never be the reason a live request fails. This gets its own test (3.5).
+- **Measured depth cap (2026-11-28):** the first implementation registered at most 64 blocks per prompt. On a ~1149-token prompt
+  (71 blocks) that shared 1024 tokens and left ~125 to prefill: 23-40 s to first token against ~5 s with the whole prefix (CPU,
+  loaded machine, n=1). The cap is 256 blocks (4096 tokens); registrations are refcount bumps, not block memory.
 - **Implemented (slices 2-3), with two facts the code found:** (1) Fuel's paged admission is optimistic: pool
   exhaustion surfaces later as that session's `Failed`, never as a refusal, so there is nothing to retry on. The
   pressure rule is therefore an up-front check in `try_admit`: if free blocks < `ceil((prompt + max_new) / block)`,
