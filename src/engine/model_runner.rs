@@ -360,6 +360,9 @@ pub struct EngineOptions {
     /// again (ROADMAP research-track item 1, slice 3). Off until a measured
     /// benchmark shows it wins; hit DETECTION (`cache_stats`) runs either way.
     pub prefix_sharing: bool,
+    /// Blocks of KV that finished prompts' prefixes may keep pinned for later requests (needs `prefix_sharing`;
+    /// 0 = off). Bounded and LRU; evicted first when a live request needs the space.
+    pub prefix_retention_blocks: usize,
     /// Proceed with a load the serving device says cannot fit, instead of
     /// refusing it. Without this, a GPU `WontFit` refuses (VRAM is a hard
     /// limit) and a CPU `WontFit` only warns (free RAM is soft: page cache,

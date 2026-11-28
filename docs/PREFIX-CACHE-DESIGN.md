@@ -79,6 +79,14 @@ Pinned blocks are memory a live request cannot use. So:
   and `lookup`'s stop-at-first-miss stays correct), `release_prefix` each `PrefixId`, drop the chain entries.
 - **Pressure rule:** if an admission is refused for pool space, evict retained chains LRU-first and retry before refusing.
   A retained prefix must never be the reason a live request fails. This gets its own test (3.5).
+- **Implemented (slices 2-3), with two facts the code found:** (1) Fuel's paged admission is optimistic: pool
+  exhaustion surfaces later as that session's `Failed`, never as a refusal, so there is nothing to retry on. The
+  pressure rule is therefore an up-front check in `try_admit`: if free blocks < `ceil((prompt + max_new) / block)`,
+  evict retained entries LRU-first, deepest depth first, until it fits or nothing is retained. It stops as soon as
+  the request fits, so a chain can be left shortened (its shallow depths stay). (2) `register_prefix` needs the
+  donor's blocks live, and a session that finishes IN its prefill step (`max_new` 1, or EOS on the first token)
+  has released them before the post-step probe runs, so such a prompt is never retained. Chat requests with a
+  real generation length are unaffected.
 - `cache_clear` (the admin endpoint; its implementation follows `release_prefix_inner` in `scheduled_llama_engine.rs`) releases all retained prefixes.
 
 ### 3.4 Correctness limits that get worse once entries persist

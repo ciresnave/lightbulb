@@ -484,6 +484,10 @@ pub struct BlockPrefixIndexFor<D> {
     by_hash: HashMap<[u8; 32], PrefixEntry<D>>,
     donor_refs: HashMap<D, usize>,
     stats: BlockPrefixStats,
+    /// Identity mixed into every chain hash (model, adapter, template). Empty = the historical key, so existing
+    /// hashes are unchanged. Two prompts with the same tokens but different seeds never share a chain: the same
+    /// tokens give different KV under a different adapter or model, and a retained entry outlives its request.
+    seed: Vec<u8>,
 }
 
 /// The `KvBlockPool`-backed instantiation: donors are real pool sessions, so a
@@ -498,7 +502,15 @@ impl<D: Copy + Eq + std::hash::Hash + std::fmt::Debug> BlockPrefixIndexFor<D> {
             by_hash: HashMap::new(),
             donor_refs: HashMap::new(),
             stats: BlockPrefixStats::default(),
+            seed: Vec::new(),
         }
+    }
+
+    /// An index whose chain keys carry `seed` (see the field's doc): the key dimension retention needs.
+    pub fn with_seed(block_size: usize, seed: &[u8]) -> Self {
+        let mut s = Self::new(block_size);
+        s.seed = seed.to_vec();
+        s
     }
 
     pub fn block_size(&self) -> usize {
@@ -528,6 +540,10 @@ impl<D: Copy + Eq + std::hash::Hash + std::fmt::Debug> BlockPrefixIndexFor<D> {
         for b in 0..n_full {
             let mut h = Sha256::new();
             h.update(b"lightbulb.block-prefix.v1");
+            if !self.seed.is_empty() {
+                h.update((self.seed.len() as u64).to_le_bytes());
+                h.update(&self.seed);
+            }
             h.update(prev);
             for &t in &tokens[b * self.block_size..(b + 1) * self.block_size] {
                 h.update(t.to_le_bytes());
@@ -537,6 +553,12 @@ impl<D: Copy + Eq + std::hash::Hash + std::fmt::Debug> BlockPrefixIndexFor<D> {
             prev = digest;
         }
         out
+    }
+
+    /// The chain keys `tokens` would be indexed under (one per whole block). Exposed so the key's dimensions can be
+    /// tested without a second index.
+    pub fn chain_keys(&self, tokens: &[u32]) -> Vec<[u8; 32]> {
+        self.chain_hashes(tokens)
     }
 
     /// Index `donor`'s prompt so later prompts can splice from it.
@@ -613,6 +635,41 @@ impl<D: Copy + Eq + std::hash::Hash + std::fmt::Debug> BlockPrefixIndexFor<D> {
                 })
             }
         }
+    }
+
+    /// Re-point the entry at `key` from `from` to `to`, only if it currently names `from`. Retention uses this
+    /// to move a finished prompt's chain from its live donor to a retained registration before the donor leaves.
+    /// Returns whether an entry moved.
+    pub fn adopt(&mut self, key: &[u8; 32], from: D, to: D) -> bool {
+        let Some(e) = self.by_hash.get_mut(key) else {
+            return false;
+        };
+        if e.donor != from {
+            return false;
+        }
+        e.donor = to;
+        if let Some(n) = self.donor_refs.get_mut(&from) {
+            *n = n.saturating_sub(1);
+        }
+        *self.donor_refs.entry(to).or_insert(0) += 1;
+        true
+    }
+
+    /// Does the entry at `key` currently name `donor`?
+    pub fn owned_by(&self, key: &[u8; 32], donor: D) -> bool {
+        self.by_hash.get(key).is_some_and(|e| e.donor == donor)
+    }
+
+    /// Remove the entry at `key` if it names `donor` (an eviction must not drop a chain another source now owns).
+    pub fn remove_key_owned(&mut self, key: &[u8; 32], donor: D) -> bool {
+        if !self.owned_by(key, donor) {
+            return false;
+        }
+        self.by_hash.remove(key);
+        if let Some(n) = self.donor_refs.get_mut(&donor) {
+            *n = n.saturating_sub(1);
+        }
+        true
     }
 
     /// Is this session still referenced as a splice source? While true, the

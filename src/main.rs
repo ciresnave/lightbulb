@@ -124,6 +124,15 @@ async fn run(cli: Cli) -> Result<()> {
         .map(|v| parse_flag(&v))
         .unwrap_or(false);
 
+    // Retention keeps a finished prompt's KV blocks for the next request: a bad value, or retention without the
+    // sharing that uses it, stops startup rather than silently doing nothing.
+    let model_prefix_retention_blocks = parse_retention_blocks(
+        env::var("LIGHTBULB_PREFIX_RETENTION_BLOCKS")
+            .ok()
+            .as_deref(),
+        model_prefix_sharing,
+    )
+    .map_err(|e| anyhow::anyhow!("LIGHTBULB_PREFIX_RETENTION_BLOCKS: {e}"))?;
     // A bad or unusable device stops startup: an embedding server asked for the GPU must not quietly run on the CPU.
     let embedding_device = match lightbulb::api::embedding_models::EmbeddingDevice::parse(
         &env::var("LIGHTBULB_EMBEDDING_DEVICE").unwrap_or_default(),
@@ -179,6 +188,7 @@ async fn run(cli: Cli) -> Result<()> {
         model_context_length,
         model_max_queue_depth,
         model_prefix_sharing,
+        model_prefix_retention_blocks,
         model_allow_oversize,
         embedding_device,
         request_timeout_ms,
@@ -268,6 +278,21 @@ fn scheduler_config_from_env() -> MemoryAwareConfig {
 
 /// `1`/`true`/`yes`/`on` (any case, surrounding whitespace ignored) enable a
 /// flag; anything else -- including an empty or misspelt value -- leaves it off.
+/// `LIGHTBULB_PREFIX_RETENTION_BLOCKS`: unset or `0` = off; a block count needs `LIGHTBULB_PREFIX_SHARING` on.
+fn parse_retention_blocks(raw: Option<&str>, sharing: bool) -> Result<usize, String> {
+    let Some(raw) = raw else { return Ok(0) };
+    let n: usize = raw
+        .trim()
+        .parse()
+        .map_err(|_| format!("{raw:?} is not a block count (a non-negative integer; 0 = off)"))?;
+    if n > 0 && !sharing {
+        return Err(
+            "needs LIGHTBULB_PREFIX_SHARING on: retained prefixes are only used by sharing".into(),
+        );
+    }
+    Ok(n)
+}
+
 fn parse_flag(value: &str) -> bool {
     matches!(
         value.trim().to_ascii_lowercase().as_str(),
@@ -277,7 +302,19 @@ fn parse_flag(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_flag;
+    use super::{parse_flag, parse_retention_blocks};
+
+    #[test]
+    fn retention_blocks_parse_and_refuse_by_name() {
+        assert_eq!(parse_retention_blocks(None, false), Ok(0));
+        assert_eq!(parse_retention_blocks(Some("0"), false), Ok(0));
+        assert_eq!(parse_retention_blocks(Some(" 128 "), true), Ok(128));
+        for bad in ["abc", "-1", "1.5", ""] {
+            assert!(parse_retention_blocks(Some(bad), true).is_err(), "{bad:?}");
+        }
+        let e = parse_retention_blocks(Some("64"), false).unwrap_err();
+        assert!(e.contains("LIGHTBULB_PREFIX_SHARING"), "{e}");
+    }
 
     #[test]
     fn parse_flag_enables_only_on_explicit_truthy_values() {

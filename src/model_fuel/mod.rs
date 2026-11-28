@@ -103,6 +103,7 @@ pub mod loader_gguf;
 pub mod loader_gguf_qwen3;
 pub mod memory_shape;
 pub mod policies;
+pub mod prefix_retention;
 pub mod preflight;
 pub mod pull;
 pub(crate) mod qwen35_config;
