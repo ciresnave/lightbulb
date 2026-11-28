@@ -50,10 +50,12 @@ use tokio::sync::{mpsc, oneshot};
 type Rx = mpsc::UnboundedReceiver<anyhow::Result<StreamItem>>;
 
 fn env_usize(key: &str, default: usize) -> usize {
-    std::env::var(key)
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(default)
+    match std::env::var(key) {
+        Err(_) => default,
+        Ok(v) => v
+            .parse()
+            .unwrap_or_else(|_| panic!("{key}={v:?} is not a non-negative integer")),
+    }
 }
 
 /// `paras` distinct paragraphs; `seed` shifts every number so two seeds share
@@ -373,10 +375,10 @@ impl Cfg {
     }
 }
 
-fn print_arm(r: &ArmResult) {
+fn print_arm(r: &ArmResult, retention_blocks: usize) {
     println!(
-        "  prefix prompt ~{} tokens; cache_stats.hits = {}",
-        r.prompt_tokens, r.hits
+        "  prefix prompt ~{} tokens; cache_stats.hits = {}; retention budget = {} blocks",
+        r.prompt_tokens, r.hits, retention_blocks
     );
     for (l, live, o) in &r.rows {
         println!(
@@ -389,9 +391,12 @@ fn print_arm(r: &ArmResult) {
     summarise("sharers, donor live", r, |l, live| {
         l.contains("sharer") && live
     });
-    summarise("sharers, donor gone (cold)", r, |l, live| {
-        l.contains("sharer") && !live
-    });
+    let gone = if retention_blocks > 0 {
+        "sharers, donor gone (retained or cold: see hits)"
+    } else {
+        "sharers, donor gone (cold)"
+    };
+    summarise(gone, r, |l, live| l.contains("sharer") && !live);
 }
 
 fn compare_arms(off: &ArmResult, on: &ArmResult) {
@@ -458,7 +463,7 @@ fn main() {
         report_load("arm start");
         let r = run_arm(&path, sharing, &cfg);
         report_load("arm end");
-        print_arm(&r);
+        print_arm(&r, if sharing { cfg.retention_blocks } else { 0 });
         arms.push(r);
     }
     if on_first {

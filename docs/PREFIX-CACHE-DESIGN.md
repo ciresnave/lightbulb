@@ -62,8 +62,8 @@ session is still live. At that point, `register_prefix(donor, d)` for the depths
 of tokens the new prompt does not contain). That rule stands: retention registers a depth per hit we want, not one deep id.
 
 Registering several depths of one prompt costs refcount bumps and bookkeeping, not block memory (the blocks are shared).
-Depth set: every depth up to 64 blocks, then geometric (64, 96, 128, ...) plus the full depth. Cap and stride are
-ASSUMPTIONS to be settled by the measurement in section 5, not facts.
+Depth set: every depth up to the cap (now 256 blocks, `RETENTION_MAX_DEPTH`, and never more than the retention budget).
+The cap was settled by measurement (see "Measured depth cap" below); the first design's 64 then geometric stride was an assumption.
 
 UNVERIFIED: where in the serving step loop "prompt prefill finished" is observable. `try_admit` admits; prefill happens in
 the scheduler's steps. Slice 2 starts by finding that hook and writing down the line.
