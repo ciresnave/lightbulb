@@ -197,6 +197,10 @@ pub trait Embedder {
     /// is refused before any inference is spent on it.
     fn count_tokens(&self, text: &str) -> Result<usize, EmbeddingError>;
     fn embed(&self, text: &str) -> Result<Embedded, EmbeddingError>;
+    /// Where this encoder runs (`"cpu"`, `"cuda:0"`), reported on `/v1/models`. A stub is the CPU.
+    fn device_label(&self) -> String {
+        "cpu".into()
+    }
 }
 
 /// A loaded embedding model: its pooling-table row and the encoder that follows it. The model registry

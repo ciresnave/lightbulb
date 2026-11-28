@@ -82,6 +82,7 @@ async fn an_admin_unloads_an_idle_model_and_it_is_gone_from_the_registry() {
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["unloaded"], "m.gguf");
     assert_eq!(body["runner_joined"], true);
+    assert_eq!(body["runner"], "joined");
     assert!(state.models.names().is_empty());
 }
 

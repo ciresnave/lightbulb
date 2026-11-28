@@ -18,6 +18,34 @@ use tokenizers::Tokenizer;
 use super::embeddings::{
     Embedded, Embedder, EmbeddingError, EmbeddingSpec, Pooling, bad, internal,
 };
+use crate::api::embedding_models::EmbeddingDevice;
+
+/// Open CUDA card `index`, or say why not. Without the `fuel-cuda` feature there is no card to open, which is
+/// an error here (never a CPU fallback).
+#[cfg(feature = "fuel-cuda")]
+pub fn open_cuda(index: u32) -> Result<fuel_cuda_backend::CudaDevice, String> {
+    fuel_cuda_backend::CudaDevice::new(index as usize)
+        .map_err(|e| format!("CUDA device {index} could not be opened: {e:?}"))
+}
+
+#[cfg(not(feature = "fuel-cuda"))]
+pub fn open_cuda(index: u32) -> Result<(), String> {
+    Err(format!(
+        "cuda:{index} was requested but this binary was built without the `fuel-cuda` feature"
+    ))
+}
+
+/// The device the encoder realizes on. The CUDA arm holds one device and a lock: two requests realizing on
+/// one card at once are serialized here (the embedder is shared across requests).
+enum Run {
+    Cpu,
+    #[cfg(feature = "fuel-cuda")]
+    Cuda {
+        index: u32,
+        device: fuel_cuda_backend::CudaDevice,
+        gate: std::sync::Mutex<()>,
+    },
+}
 
 /// The pooling-table row for `nomic-embed-text-v1.5` (design note: mean, normalised, Matryoshka widths
 /// 768/512/256/128/64). `max_tokens` is the model's `n_positions`; `max_items` is the per-request array cap.
@@ -69,11 +97,30 @@ pub struct NomicEmbedder {
     model: NomicBertModel,
     tokenizer: Tokenizer,
     spec: EmbeddingSpec,
+    run: Run,
 }
 
 impl NomicEmbedder {
     /// Load from a Hugging Face directory holding `model.safetensors` and `tokenizer.json`.
     pub fn load(dir: &Path) -> anyhow::Result<Self> {
+        Self::load_on(dir, EmbeddingDevice::Cpu)
+    }
+
+    /// [`Self::load`] for `device`. A device that cannot be opened is an error, never a CPU load.
+    pub fn load_on(dir: &Path, device: EmbeddingDevice) -> anyhow::Result<Self> {
+        let run = match device {
+            EmbeddingDevice::Cpu => Run::Cpu,
+            #[cfg(feature = "fuel-cuda")]
+            EmbeddingDevice::Cuda(index) => Run::Cuda {
+                index,
+                device: open_cuda(index).map_err(anyhow::Error::msg)?,
+                gate: std::sync::Mutex::new(()),
+            },
+            #[cfg(not(feature = "fuel-cuda"))]
+            EmbeddingDevice::Cuda(index) => {
+                return Err(anyhow::anyhow!(open_cuda(index).unwrap_err()));
+            }
+        };
         let cfg = NomicBertConfig::nomic_embed_text_v1_5();
         let weights_path = dir.join("model.safetensors");
         // SAFETY: the file is opened read-only and is not modified while mapped; the same contract as
@@ -91,6 +138,7 @@ impl NomicEmbedder {
             },
             tokenizer,
             spec: nomic_v1_5_spec(),
+            run,
         })
     }
 
@@ -103,6 +151,32 @@ impl NomicEmbedder {
     /// Per-token hidden states of `text`, row-major `[seq, dim]`, and `seq`: the encoder output before pooling
     /// (public so a test can pool it a second way as a control).
     pub fn hidden_states(&self, text: &str) -> Result<(Vec<f32>, usize), EmbeddingError> {
+        match &self.run {
+            Run::Cpu => self.hidden_states_with(text, |t| t.realize_f32()),
+            #[cfg(feature = "fuel-cuda")]
+            Run::Cuda { device, gate, .. } => {
+                let _one_at_a_time = gate.lock().unwrap_or_else(|e| e.into_inner());
+                self.hidden_states_with(text, |t| t.realize_f32_cuda(device))
+            }
+        }
+    }
+
+    /// [`Self::hidden_states`] realized on a CUDA device (`Tensor::realize_f32_cuda`), the F3 GPU acceptance path.
+    #[cfg(feature = "fuel-cuda")]
+    pub fn hidden_states_cuda(
+        &self,
+        text: &str,
+        device: &fuel_cuda_backend::CudaDevice,
+    ) -> Result<(Vec<f32>, usize), EmbeddingError> {
+        self.hidden_states_with(text, |t| t.realize_f32_cuda(device))
+    }
+
+    /// One validation and forward, realized by `realize` (the only part that differs between devices).
+    fn hidden_states_with(
+        &self,
+        text: &str,
+        realize: impl FnOnce(&fuel::lazy::Tensor) -> Vec<f32>,
+    ) -> Result<(Vec<f32>, usize), EmbeddingError> {
         let ids = self.token_ids(text)?;
         // `forward` asserts a non-empty sequence and errors past `n_positions`; both are refused here
         // as typed errors (a tokenizer.json that adds no special tokens can yield an empty row).
@@ -119,12 +193,11 @@ impl NomicEmbedder {
                 ),
             ));
         }
-        let hidden = self
+        let out = self
             .model
             .forward(&ids, None, None)
-            .map_err(|e| internal(format!("nomic-bert forward: {e:?}")))?
-            .realize_f32();
-        Ok((hidden, ids.len()))
+            .map_err(|e| internal(format!("nomic-bert forward: {e:?}")))?;
+        Ok((realize(&out), ids.len()))
     }
 
     fn token_ids(&self, text: &str) -> Result<Vec<u32>, EmbeddingError> {
@@ -139,6 +212,14 @@ impl NomicEmbedder {
 impl Embedder for NomicEmbedder {
     fn count_tokens(&self, text: &str) -> Result<usize, EmbeddingError> {
         Ok(self.token_ids(text)?.len())
+    }
+
+    fn device_label(&self) -> String {
+        match &self.run {
+            Run::Cpu => "cpu".into(),
+            #[cfg(feature = "fuel-cuda")]
+            Run::Cuda { index, .. } => format!("cuda:{index}"),
+        }
     }
 
     fn embed(&self, text: &str) -> Result<Embedded, EmbeddingError> {

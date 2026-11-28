@@ -239,8 +239,8 @@ impl ModelManager {
         let out = unload_model(&self.registry, name, self.unload_wait)
             .map_err(|e| UnloadError::Failed(format!("unloading '{name}': {e}")))?;
         tracing::info!(
-            "unloaded model '{name}' on request (runner joined: {}, device memory returned: {})",
-            out.joined,
+            "unloaded model '{name}' on request (runner: {}, device memory returned: {})",
+            out.runner.describe(),
             out.released.is_some()
         );
         Ok(out)
@@ -268,8 +268,8 @@ impl ModelManager {
                 let out = unload_model(&self.registry, name, self.unload_wait)
                     .map_err(|e| LoadError::Failed(format!("unloading '{name}': {e}")))?;
                 tracing::info!(
-                    "evicted model '{name}' (runner joined: {}, device memory returned: {})",
-                    out.joined,
+                    "evicted model '{name}' (runner: {}, device memory returned: {})",
+                    out.runner.describe(),
                     out.released.is_some()
                 );
                 return Ok(());

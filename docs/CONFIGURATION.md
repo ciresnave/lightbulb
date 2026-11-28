@@ -44,6 +44,7 @@ device selectors refuse to start.
 | `LIGHTBULB_MODEL_CONTEXT_LENGTH` | `4096` | Context length. |
 | `LIGHTBULB_MODEL_MAX_QUEUE_DEPTH` | `32` | Pending-request queue depth; 0 is refused at startup. |
 | `LIGHTBULB_PREFIX_SHARING` | off | `1`/`true`/`yes`/`on` enables prefix sharing. Off until a measurement shows it wins (ROADMAP research item 1). |
+| `LIGHTBULB_EMBEDDING_DEVICE` | `cpu` | Device for `/v1/embeddings` models: `cpu`, `cuda` (card 0) or `cuda:<n>`. Needs a `fuel-cuda` build; an unavailable device stops startup (or gives HTTP 500 naming it), never a silent CPU run. `vulkan` is refused by name (not built in). |
 | `LIGHTBULB_ALLOW_OVERSIZE_MODEL` | off | Same flag syntax. Lets a model load on a GPU whose preflight says it will not fit. CPU never refuses. |
 | `LIGHTBULB_DEVICE` | `auto` | `auto`, `cpu`, `cuda:<n>`, `vulkan:<n>`, or a case-insensitive substring of a device name. A failed explicit selector refuses to load. |
 | `LIGHTBULB_CUDA_DEVICE_INDEX` | unset | Legacy: `n` means `LIGHTBULB_DEVICE=cuda:n`. Must be a whole number; setting both variables is an error. |

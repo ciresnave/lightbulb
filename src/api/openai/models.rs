@@ -130,7 +130,8 @@ fn available_models(state: &AppState) -> Vec<ModelInfo> {
                 .get(&name)
                 .is_some_and(|e| e.embedding.is_some())
             {
-                out.push(embedding_info(name, dir, true));
+                let device = embedding_device_label(state, &name);
+                out.push(embedding_info(name, dir, true, device));
             }
         }
         return out;
@@ -156,16 +157,28 @@ fn available_models(state: &AppState) -> Vec<ModelInfo> {
                     .models
                     .get(&name)
                     .is_some_and(|e| e.embedding.is_some());
-                embedding_info(name, Some(dir), loaded)
+                let device = embedding_device_label(state, &name);
+                embedding_info(name, Some(dir), loaded, device)
             }),
     );
     out
 }
 
+/// The device a loaded embedding model really runs on, else the one the server is configured to load it on.
+fn embedding_device_label(state: &AppState, name: &str) -> String {
+    state
+        .models
+        .get(name)
+        .and_then(|e| e.embedding.as_ref().map(|l| l.embedder.device_label()))
+        .unwrap_or_else(|| state.config.embedding_device.label())
+}
+
 /// A list entry for an embedding model: the chat entry's fields, marked `"embedding"`.
-fn embedding_info(id: String, models_dir: Option<&str>, loaded: bool) -> ModelInfo {
+fn embedding_info(id: String, models_dir: Option<&str>, loaded: bool, device: String) -> ModelInfo {
     ModelInfo {
         lightbulb_kind: Some("embedding"),
+        // The device the ENCODER runs on, not the chat engine's: the two are chosen separately.
+        lightbulb_device: Some(device),
         ..model_info(id, models_dir, loaded)
     }
 }

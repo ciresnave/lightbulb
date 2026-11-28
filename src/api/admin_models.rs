@@ -43,6 +43,7 @@ async fn unload_model(State(state): State<AppState>, Path(name): Path<String>) -
             Json(serde_json::json!({
                 "unloaded": name,
                 "runner_joined": out.joined,
+                "runner": out.runner.describe(),
                 "device_memory_returned": out.released.is_some(),
             })),
         )
