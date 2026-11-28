@@ -410,3 +410,18 @@ async fn served_through_the_manager_loader_and_route_matches_the_reference() {
 
     assert_eq!(listed(&state, &name).await["lightbulb_loaded"], true);
 }
+
+/// A realize failure (a device error, an out-of-memory) reaches the caller as a 500-kind `EmbeddingError`
+/// carrying the cause, never a panic of the request thread (Sourcery, #349).
+#[test]
+fn a_realize_failure_is_a_typed_internal_error_not_a_panic() {
+    let Some(emb) = load() else { return };
+    let err = emb
+        .hidden_states_with("search_query: hello", |_| Err("device lost".into()))
+        .expect_err("the injected failure must surface");
+    assert_eq!(
+        err.kind,
+        lightbulb::api::openai::embeddings::ErrorKind::Internal
+    );
+    assert!(err.message.contains("device lost"), "{err:?}");
+}

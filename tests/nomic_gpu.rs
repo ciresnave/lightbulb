@@ -294,10 +294,6 @@ async fn listed_device(state: &lightbulb::api::AppState, name: &str) -> String {
         .to_string()
 }
 
-/// The request really runs on the card, and the same request configured for the CPU does not touch it. Device
-/// evidence is `nvidia-smi` memory sampled across the request (the CUDA run must add the model's weights on
-/// the device, the CPU control must add nothing like that), the encoder's own `device_label` via `/v1/models`,
-/// and the cosine gate on the vector that came back over HTTP. Either arm alone could be satisfied by the wrong device.
 /// One arm: serve a short and a long input on `device`, check status, label and cosine, and return the GPU memory
 /// the requests added (nvidia-smi peak minus baseline).
 async fn served_arm(
@@ -342,6 +338,10 @@ async fn served_arm(
 /// evidence is `nvidia-smi` memory sampled across the request (the CUDA run must add the model's weights on
 /// the device, the CPU control must add nothing like that), the encoder's own `device_label` via `/v1/models`,
 /// and the cosine gate on the vector that came back over HTTP. Either arm alone could be satisfied by the wrong device.
+///
+/// RUN IT ALONE (`-- served`): Fuel's CUDA pool keeps memory a finished test freed, so after another GPU test in the
+/// same process the card's baseline already holds the weights and the +200 MiB bar cannot see this run's upload
+/// (observed: it failed after the residency tests, passed alone at +1125 MiB).
 #[tokio::test]
 async fn served_on_cuda_uses_the_card_and_matches_the_reference_and_cpu_does_not() {
     use lightbulb::api::embedding_models::EmbeddingDevice;
@@ -396,4 +396,73 @@ async fn an_unavailable_cuda_device_is_a_typed_error_not_a_cpu_run() {
     // Startup-style check, the same refusal.
     let e = EmbeddingDevice::Cuda(99).check_available().unwrap_err();
     assert!(e.contains("99"), "{e}");
+}
+
+/// Weight residency through the production arm (`hidden_states`, what `Embedder::embed` and so the route call):
+/// after the first request the weights are resident (`uploads` > 0), and a second request uploads nothing new
+/// (`uploads` flat, `hits` up by the same count). The CPU encoder is the control: it reports no residency.
+/// RED before the CUDA arm went through `InferenceContext`: `Tensor::realize_f32_cuda` leaves all counters at 0.
+#[test]
+fn second_request_hits_resident_weights_and_uploads_nothing() {
+    use lightbulb::api::embedding_models::EmbeddingDevice;
+    let dir = model_dir();
+    let text = "search_query: what is the capital of France?";
+    let cpu = NomicEmbedder::load_on(&dir, EmbeddingDevice::Cpu).unwrap();
+    cpu.hidden_states(text).unwrap();
+    assert_eq!(
+        cpu.weight_residency(),
+        None,
+        "control: a CPU encoder has no device residency"
+    );
+
+    let gpu = NomicEmbedder::load_on(&dir, EmbeddingDevice::Cuda(0)).unwrap();
+    let t = std::time::Instant::now();
+    gpu.hidden_states(text).unwrap();
+    let first_ms = t.elapsed().as_secs_f64() * 1e3;
+    let (h1, u1, bytes) = gpu
+        .weight_residency()
+        .expect("cuda encoder reports residency");
+    let t = std::time::Instant::now();
+    gpu.hidden_states(text).unwrap();
+    let second_ms = t.elapsed().as_secs_f64() * 1e3;
+    let (h2, u2, _) = gpu.weight_residency().unwrap();
+    eprintln!(
+        "RESIDENCY after #1 hits {h1} uploads {u1} bytes {bytes} ({first_ms:.0} ms); after #2 hits {h2} uploads {u2} ({second_ms:.0} ms)"
+    );
+    assert!(
+        u1 > 0 && bytes > 0,
+        "the first request must leave the weights resident"
+    );
+    assert_eq!(u2, u1, "the second request re-uploaded weights");
+    assert_eq!(
+        h2 - h1,
+        u1,
+        "the second request must hit every resident weight"
+    );
+}
+
+/// Dropping one encoder must not evict another loaded encoder's resident weights (Sourcery, #349): `B` keeps
+/// its residency and uploads nothing when `A`, on the same card, is dropped.
+#[test]
+fn dropping_one_encoder_leaves_another_encoders_weights_resident() {
+    use lightbulb::api::embedding_models::EmbeddingDevice;
+    let dir = model_dir();
+    let text = "search_query: what is the capital of France?";
+    let a = NomicEmbedder::load_on(&dir, EmbeddingDevice::Cuda(0)).unwrap();
+    let b = NomicEmbedder::load_on(&dir, EmbeddingDevice::Cuda(0)).unwrap();
+    a.hidden_states(text).unwrap();
+    b.hidden_states(text).unwrap();
+    let before = b.weight_residency().unwrap();
+    drop(a);
+    b.hidden_states(text).unwrap();
+    let after = b.weight_residency().unwrap();
+    eprintln!("RESIDENCY B before A dropped {before:?}, after B's next request {after:?}");
+    assert_eq!(
+        after.1, before.1,
+        "B re-uploaded weights after A was dropped"
+    );
+    assert!(
+        after.0 > before.0,
+        "B's next request must hit its resident weights"
+    );
 }

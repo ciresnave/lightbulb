@@ -42,7 +42,13 @@ enum Run {
     #[cfg(feature = "fuel-cuda")]
     Cuda {
         index: u32,
-        device: fuel_cuda_backend::CudaDevice,
+        /// The Fuel device whose weight residency holds this encoder's weights (the context below and the stats
+        /// read share it; a `Device` built twice from one `CudaDevice` has two separate residencies).
+        device: fuel::Device,
+        /// Realizes through Fuel's `InferenceContext`, the only realize path that consults the device's weight
+        /// residency (fuel-tensor `const_residency`): the weights are uploaded once and every later request
+        /// hits them. `Tensor::realize_f32_cuda` never does (measured: `tests/nomic_residency.rs`).
+        ctx: fuel::inference_context::InferenceContext,
         gate: std::sync::Mutex<()>,
     },
 }
@@ -111,11 +117,16 @@ impl NomicEmbedder {
         let run = match device {
             EmbeddingDevice::Cpu => Run::Cpu,
             #[cfg(feature = "fuel-cuda")]
-            EmbeddingDevice::Cuda(index) => Run::Cuda {
-                index,
-                device: open_cuda(index).map_err(anyhow::Error::msg)?,
-                gate: std::sync::Mutex::new(()),
-            },
+            EmbeddingDevice::Cuda(index) => {
+                let device: fuel::Device = open_cuda(index).map_err(anyhow::Error::msg)?.into();
+                let ctx = fuel::inference_context::InferenceContext::new(device.clone());
+                Run::Cuda {
+                    index,
+                    device,
+                    ctx,
+                    gate: std::sync::Mutex::new(()),
+                }
+            }
             #[cfg(not(feature = "fuel-cuda"))]
             EmbeddingDevice::Cuda(index) => {
                 return Err(anyhow::anyhow!(open_cuda(index).unwrap_err()));
@@ -152,11 +163,32 @@ impl NomicEmbedder {
     /// (public so a test can pool it a second way as a control).
     pub fn hidden_states(&self, text: &str) -> Result<(Vec<f32>, usize), EmbeddingError> {
         match &self.run {
-            Run::Cpu => self.hidden_states_with(text, |t| t.realize_f32()),
+            Run::Cpu => self.hidden_states_with(text, |t| Ok(t.realize_f32())),
             #[cfg(feature = "fuel-cuda")]
-            Run::Cuda { device, gate, .. } => {
+            Run::Cuda { ctx, gate, .. } => {
                 let _one_at_a_time = gate.lock().unwrap_or_else(|e| e.into_inner());
-                self.hidden_states_with(text, |t| t.realize_f32_cuda(device))
+                self.hidden_states_with(text, |t| {
+                    // A device failure (an `Err`, or a panic inside Fuel such as an allocation failure) is this
+                    // request's 500, never the request thread's death.
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        ctx.realize_one_as::<f32>(t.graph(), t.node_id())
+                            .map_err(|e| format!("{e:?}"))
+                    }))
+                    .unwrap_or_else(|_| Err("panicked while realizing".into()))
+                })
+            }
+        }
+    }
+
+    /// `(hits, uploads, resident_bytes)` of the CUDA device's weight residency, or `None` for a CPU encoder.
+    /// After the first request `uploads` must stay flat while `hits` grows: the weights live on the card.
+    pub fn weight_residency(&self) -> Option<(u64, u64, u64)> {
+        match &self.run {
+            Run::Cpu => None,
+            #[cfg(feature = "fuel-cuda")]
+            Run::Cuda { device, .. } => {
+                let s = device.weight_residency_stats();
+                Some((s.hits, s.uploads, s.resident_bytes))
             }
         }
     }
@@ -168,14 +200,15 @@ impl NomicEmbedder {
         text: &str,
         device: &fuel_cuda_backend::CudaDevice,
     ) -> Result<(Vec<f32>, usize), EmbeddingError> {
-        self.hidden_states_with(text, |t| t.realize_f32_cuda(device))
+        self.hidden_states_with(text, |t| Ok(t.realize_f32_cuda(device)))
     }
 
     /// One validation and forward, realized by `realize` (the only part that differs between devices).
-    fn hidden_states_with(
+    #[doc(hidden)]
+    pub fn hidden_states_with(
         &self,
         text: &str,
-        realize: impl FnOnce(&fuel::lazy::Tensor) -> Vec<f32>,
+        realize: impl FnOnce(&fuel::lazy::Tensor) -> Result<Vec<f32>, String>,
     ) -> Result<(Vec<f32>, usize), EmbeddingError> {
         let ids = self.token_ids(text)?;
         // `forward` asserts a non-empty sequence and errors past `n_positions`; both are refused here
@@ -197,7 +230,8 @@ impl NomicEmbedder {
             .model
             .forward(&ids, None, None)
             .map_err(|e| internal(format!("nomic-bert forward: {e:?}")))?;
-        Ok((realize(&out), ids.len()))
+        let hidden = realize(&out).map_err(|e| internal(format!("realizing the encoder: {e}")))?;
+        Ok((hidden, ids.len()))
     }
 
     fn token_ids(&self, text: &str) -> Result<Vec<u32>, EmbeddingError> {
@@ -229,6 +263,18 @@ impl Embedder for NomicEmbedder {
             vector,
             tokens: seq,
         })
+    }
+}
+
+/// Unloading the encoder gives the card its weights back at once (fuel's documented unload call) instead of at
+/// some later seeding. It drops every resident weight of the device, so another model on the same device
+/// re-uploads its own on its next realize: a cost in time, never in correctness.
+impl Drop for NomicEmbedder {
+    fn drop(&mut self) {
+        #[cfg(feature = "fuel-cuda")]
+        if let Run::Cuda { device, .. } = &self.run {
+            device.clear_weight_residency();
+        }
     }
 }
 
