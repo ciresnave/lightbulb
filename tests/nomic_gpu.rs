@@ -298,6 +298,50 @@ async fn listed_device(state: &lightbulb::api::AppState, name: &str) -> String {
 /// evidence is `nvidia-smi` memory sampled across the request (the CUDA run must add the model's weights on
 /// the device, the CPU control must add nothing like that), the encoder's own `device_label` via `/v1/models`,
 /// and the cosine gate on the vector that came back over HTTP. Either arm alone could be satisfied by the wrong device.
+/// One arm: serve a short and a long input on `device`, check status, label and cosine, and return the GPU memory
+/// the requests added (nvidia-smi peak minus baseline).
+async fn served_arm(
+    device: lightbulb::api::embedding_models::EmbeddingDevice,
+    parent: &std::path::Path,
+    name: &str,
+    fx: &Fixture,
+    long: &str,
+) -> u64 {
+    let state = served::state(parent, device);
+    let embed = |input: serde_json::Value| {
+        served::call(
+            &state,
+            "POST",
+            "/v1/embeddings",
+            serde_json::json!({"model": name, "input": input}),
+        )
+    };
+    let ((s_short, v_short, s_long), base, peak) = served::watched(async {
+        let (s1, v1) = embed(fx.rows[1].text.clone().into()).await;
+        let (s2, _) = embed(long.into()).await;
+        (s1, v1, s2)
+    })
+    .await;
+    assert_eq!((s_short, s_long), (200, 200), "{v_short}");
+    let c = cosine(&floats(&v_short), &fx.rows[1].embedding);
+    let label = listed_device(&state, name).await;
+    eprintln!(
+        "DEVICE {device:?}: gpu memory base {base} MiB peak {peak} MiB (+{}), listed {label}, cosine {c:.6}",
+        peak - base
+    );
+    assert_eq!(
+        label,
+        device.label(),
+        "/v1/models must report the device the encoder really holds"
+    );
+    assert!(c >= 0.999, "{device:?}: cosine {c}");
+    peak - base
+}
+
+/// The request really runs on the card, and the same request configured for the CPU does not touch it. Device
+/// evidence is `nvidia-smi` memory sampled across the request (the CUDA run must add the model's weights on
+/// the device, the CPU control must add nothing like that), the encoder's own `device_label` via `/v1/models`,
+/// and the cosine gate on the vector that came back over HTTP. Either arm alone could be satisfied by the wrong device.
 #[tokio::test]
 async fn served_on_cuda_uses_the_card_and_matches_the_reference_and_cpu_does_not() {
     use lightbulb::api::embedding_models::EmbeddingDevice;
@@ -312,48 +356,10 @@ async fn served_on_cuda_uses_the_card_and_matches_the_reference_and_cpu_does_not
         .unwrap(),
     )
     .unwrap();
-    let long = {
-        let emb = NomicEmbedder::load(&dir).unwrap();
-        text_of_about(&emb, 300)
-    };
+    let long = text_of_about(&NomicEmbedder::load(&dir).unwrap(), 300);
 
-    let mut peaks = Vec::new();
-    for device in [EmbeddingDevice::Cuda(0), EmbeddingDevice::Cpu] {
-        let state = served::state(&parent, device);
-        let ((s_short, v_short, s_long), base, peak) = served::watched(async {
-            let (s1, v1) = served::call(
-                &state,
-                "POST",
-                "/v1/embeddings",
-                serde_json::json!({"model": name, "input": fx.rows[1].text}),
-            )
-            .await;
-            let (s2, _) = served::call(
-                &state,
-                "POST",
-                "/v1/embeddings",
-                serde_json::json!({"model": name, "input": long}),
-            )
-            .await;
-            (s1, v1, s2)
-        })
-        .await;
-        assert_eq!((s_short, s_long), (200, 200), "{v_short}");
-        let c = cosine(&floats(&v_short), &fx.rows[1].embedding);
-        let label = listed_device(&state, &name).await;
-        eprintln!(
-            "DEVICE {device:?}: gpu memory base {base} MiB peak {peak} MiB (+{}), listed {label}, cosine {c:.6}",
-            peak - base
-        );
-        assert_eq!(
-            label,
-            device.label(),
-            "/v1/models must report the device the encoder really holds"
-        );
-        assert!(c >= 0.999, "{device:?}: cosine {c}");
-        peaks.push((device, peak - base));
-    }
-    let (cuda_delta, cpu_delta) = (peaks[0].1, peaks[1].1);
+    let cuda_delta = served_arm(EmbeddingDevice::Cuda(0), &parent, &name, &fx, &long).await;
+    let cpu_delta = served_arm(EmbeddingDevice::Cpu, &parent, &name, &fx, &long).await;
     assert!(
         cuda_delta >= 200,
         "CUDA run added only {cuda_delta} MiB of GPU memory: it did not run on the card"

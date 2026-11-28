@@ -49,6 +49,117 @@ fn sha(b: &[u8]) -> String {
     format!("{:x}", Sha256::digest(b))
 }
 
+type Ctx = (
+    Arc<Vec<u8>>,
+    Arc<Mutex<Option<usize>>>,
+    Arc<Mutex<Vec<Served>>>,
+    bool,
+);
+
+/// What the stub reads off a request: its first line and its `Range` value, if any.
+fn read_request(s: &mut std::net::TcpStream) -> Option<(String, Option<String>)> {
+    let end = b"\r\n\r\n";
+    let mut req = Vec::new();
+    let mut buf = [0u8; 2048];
+    while !req.windows(4).any(|w| w == end) {
+        match s.read(&mut buf) {
+            Ok(0) | Err(_) => return None,
+            Ok(n) => req.extend_from_slice(&buf[..n]),
+        }
+    }
+    let text = String::from_utf8_lossy(&req).to_string();
+    let line = text.lines().next().unwrap_or("").to_string();
+    let range = text.lines().find_map(|l| {
+        l.to_ascii_lowercase()
+            .strip_prefix("range:")
+            .map(|v| v.trim().to_string())
+    });
+    Some((line, range))
+}
+
+fn send_json(s: &mut std::net::TcpStream, j: String) {
+    let h = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        j.len()
+    );
+    let _ = s.write_all(h.as_bytes());
+    let _ = s.write_all(j.as_bytes());
+}
+
+fn tree_json(oid: &str, n: usize) -> String {
+    format!(
+        r#"[{{"type":"file","oid":"{oid}","size":{n},"lfs":{{"oid":"{oid}","size":{n},"pointerSize":120}},"path":"m-Q8_0.gguf"}}]"#
+    )
+}
+
+/// The `N` of `Range: bytes=N-`, only when the server honours ranges.
+fn range_start(range: &Option<String>, honor: bool) -> Option<usize> {
+    let r = range.as_deref().filter(|_| honor)?;
+    r.strip_prefix("bytes=")?.strip_suffix('-')?.parse().ok()
+}
+
+/// The response head and the offset the body starts at.
+fn file_head(start: Option<usize>, total: usize) -> (String, usize) {
+    match start {
+        Some(n) => (
+            format!(
+                "HTTP/1.1 206 Partial Content\r\nContent-Type: application/octet-stream\r\nContent-Range: bytes {n}-{}/{total}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                total - 1,
+                total - n
+            ),
+            n,
+        ),
+        None => (
+            format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {total}\r\nConnection: close\r\n\r\n"
+            ),
+            0,
+        ),
+    }
+}
+
+/// Serve the file body. The fault: only the first request that asks for the whole file is cut, mid-body.
+fn serve_file(s: &mut std::net::TcpStream, ctx: &Ctx, line: &str, range: Option<String>) {
+    let (body, cut, log, honor) = ctx;
+    let total = body.len();
+    let (head, from) = file_head(range_start(&range, *honor), total);
+    let _ = s.write_all(head.as_bytes());
+    if line.starts_with("HEAD") {
+        return;
+    }
+    let limit = if range.is_none() {
+        cut.lock().unwrap().take()
+    } else {
+        None
+    };
+    let end = limit.map_or(total, |c| (from + c).min(total));
+    let wrote = s
+        .write_all(&body[from..end])
+        .map(|_| end - from)
+        .unwrap_or(0);
+    let _ = s.flush();
+    if limit.is_some() {
+        let _ = s.shutdown(Shutdown::Both); // mid-body, with Content-Length unmet
+    }
+    log.lock().unwrap().push(Served { range, wrote });
+}
+
+fn handle(mut s: std::net::TcpStream, ctx: Ctx, oid: String) {
+    let Some((line, range)) = read_request(&mut s) else {
+        return;
+    };
+    if line.contains("/revision/") {
+        send_json(&mut s, r#"{"sha":"abc123"}"#.into());
+    } else if line.contains("/tree/") {
+        send_json(&mut s, tree_json(&oid, ctx.0.len()));
+    } else if line.contains("/resolve/abc123/m-Q8_0.gguf") {
+        serve_file(&mut s, &ctx, &line, range);
+    } else {
+        let _ = s
+            .write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+    }
+}
+
 /// A one-file Hub. `cut`: the first body request WITHOUT a `Range` is cut after that many bytes. `honor_range`:
 /// whether a `Range: bytes=N-` is answered 206 (true) or ignored with a full 200 (false).
 fn hub(
@@ -60,100 +171,12 @@ fn hub(
     let url = format!("http://{}", listener.local_addr().unwrap());
     let log = Arc::new(Mutex::new(Vec::new()));
     let oid = sha(&body);
-    let log2 = log.clone();
+    let ctx: Ctx = (body, cut, log.clone(), honor_range);
     std::thread::spawn(move || {
         for stream in listener.incoming() {
-            let Ok(mut s) = stream else { break };
-            let (body, cut, log, oid) = (body.clone(), cut.clone(), log2.clone(), oid.clone());
-            std::thread::spawn(move || {
-                let mut req = Vec::new();
-                let mut buf = [0u8; 2048];
-                while !req.windows(4).any(|w| w == b"\r\n\r\n") {
-                    match s.read(&mut buf) {
-                        Ok(0) | Err(_) => return,
-                        Ok(n) => req.extend_from_slice(&buf[..n]),
-                    }
-                }
-                let text = String::from_utf8_lossy(&req).to_string();
-                let line = text.lines().next().unwrap_or("").to_string();
-                let range = text.lines().find_map(|l| {
-                    l.to_ascii_lowercase()
-                        .strip_prefix("range:")
-                        .map(|v| v.trim().to_string())
-                });
-                let is_head = line.starts_with("HEAD");
-                let json = |s: &mut std::net::TcpStream, j: String| {
-                    let h = format!(
-                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                        j.len()
-                    );
-                    let _ = s.write_all(h.as_bytes());
-                    let _ = s.write_all(j.as_bytes());
-                };
-                if line.contains("/revision/") {
-                    return json(&mut s, r#"{"sha":"abc123"}"#.into());
-                }
-                if line.contains("/tree/") {
-                    return json(
-                        &mut s,
-                        format!(
-                            r#"[{{"type":"file","oid":"{o}","size":{n},"lfs":{{"oid":"{o}","size":{n},"pointerSize":120}},"path":"m-Q8_0.gguf"}}]"#,
-                            o = oid,
-                            n = body.len()
-                        ),
-                    );
-                }
-                if !line.contains("/resolve/abc123/m-Q8_0.gguf") {
-                    let _ = s.write_all(
-                        b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-                    );
-                    return;
-                }
-                let total = body.len();
-                let start = match (&range, honor_range) {
-                    (Some(r), true) => r
-                        .strip_prefix("bytes=")
-                        .and_then(|v| v.strip_suffix('-'))
-                        .and_then(|v| v.parse::<usize>().ok()),
-                    _ => None,
-                };
-                let (head, from) = match start {
-                    Some(n) => (
-                        format!(
-                            "HTTP/1.1 206 Partial Content\r\nContent-Type: application/octet-stream\r\nContent-Range: bytes {n}-{}/{total}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                            total - 1,
-                            total - n
-                        ),
-                        n,
-                    ),
-                    None => (
-                        format!(
-                            "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {total}\r\nConnection: close\r\n\r\n"
-                        ),
-                        0,
-                    ),
-                };
-                let _ = s.write_all(head.as_bytes());
-                if is_head {
-                    return;
-                }
-                // The fault: only the first request that asks for the whole file is cut.
-                let limit = if range.is_none() {
-                    cut.lock().unwrap().take()
-                } else {
-                    None
-                };
-                let end = limit.map_or(total, |c| (from + c).min(total));
-                let wrote = s
-                    .write_all(&body[from..end])
-                    .map(|_| end - from)
-                    .unwrap_or(0);
-                let _ = s.flush();
-                if limit.is_some() {
-                    let _ = s.shutdown(Shutdown::Both); // mid-body, with Content-Length unmet
-                }
-                log.lock().unwrap().push(Served { range, wrote });
-            });
+            let Ok(s) = stream else { break };
+            let (ctx, oid) = (ctx.clone(), oid.clone());
+            std::thread::spawn(move || handle(s, ctx, oid));
         }
     });
     (url, log)
